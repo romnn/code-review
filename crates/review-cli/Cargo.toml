@@ -1,0 +1,27 @@
+[package]
+name = "review-cli"
+description = "The cr command-line interface to the review engine"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cr"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+color-eyre.workspace = true
+review-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+color-eyre.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
