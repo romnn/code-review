@@ -1,0 +1,11 @@
+# A workspace of its own, so cargo and rust-analyzer work in a checkout nested in another
+# workspace.
+[workspace]
+
+[package]
+name = "ledger"
+version = "0.1.1"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

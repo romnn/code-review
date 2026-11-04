@@ -1,0 +1,31 @@
+[package]
+name = "review-core"
+description = "Review engine: chunk identity across revisions, format-independent diff, move detection and review state"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+imara-diff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-toml-ng.workspace = true
+tree-sitter-typescript.workspace = true
+
+[dev-dependencies]
+color-eyre.workspace = true
+googletest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,91 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+authors = ["romnn <contact@romnn.com>"]
+repository = "https://github.com/romnn/code-review"
+publish = false
+
+[workspace.dependencies]
+review-core = { path = "crates/review-core" }
+
+# Engine dependencies. tree-sitter and its grammars follow Zed's Cargo.toml and Cargo.lock so
+# review-core links into the Zed fork without a second tree-sitter.
+imara-diff = { version = "0.2", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.144"
+sha2 = "0.10.9"
+thiserror = "2.0.12"
+tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "803c6ebaac27d69e1808b45058482e868d073ceb" }
+tree-sitter-go = { git = "https://github.com/zed-industries/tree-sitter-go", rev = "6862a49e3c5a7567a6c576420e9a8f944e198a85" }
+tree-sitter-json = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24.2"
+# Zed ships no TOML grammar crate (TOML is an extension there), so this one has no Zed pin.
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = { git = "https://github.com/zed-industries/tree-sitter-typescript", rev = "e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899" }
+
+# Desktop app dependencies (review-lite only). gpui-component pins an exact gpui-pre release.
+# Its optional tree-sitter highlighter stays off: it wants crates.io tree-sitter 0.26, which would
+# conflict (`links = "tree-sitter"`) with the Zed tree-sitter review-core links.
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false }
+gpui-component = { version = "=0.8.0", default-features = false }
+parking_lot = "0.12"
+
+# CLI dependencies.
+clap = { version = "4.5", features = ["derive", "env"] }
+color-eyre = "0.6"
+
+# Test dependencies.
+googletest = "0.14"
+tempfile = "3"
+
+[workspace.lints.rust]
+warnings = { level = "warn", priority = -1 }
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+todo = "deny"
+dbg_macro = "deny"
+indexing_slicing = "deny"
+missing_errors_doc = "warn"
+await_holding_lock = "deny"
+self_named_module_files = "deny" # a module with submodules lives in foo/mod.rs, never foo.rs + foo/
+allow_attributes_without_reason = "deny" # every #[allow] must carry reason = "..."
+
+# Allowed
+map_unwrap_or = "allow"
+assigning_clones = "allow"
+struct_excessive_bools = "allow"
+
+[patch.crates-io]
+# Unify `tree_sitter_language::LanguageFn` between the crates.io grammar crates and the git
+# tree-sitter above, exactly as Zed does; two instances would make grammar constants
+# type-incompatible with `tree_sitter::Language`.
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "803c6ebaac27d69e1808b45058482e868d073ceb" }
+
+[workspace.metadata.cargo-fc]
+install_missing_targets = true
+dedupe = true
+aggregate_targets = false
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-gnu",
+  "aarch64-apple-darwin",
+]
+
+[workspace.metadata.cargo-fc.subcommands.udeps]
+maximal_features = true

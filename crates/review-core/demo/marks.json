@@ -1,0 +1,13 @@
+{
+  "comment": "Marks and notes made on revision 1 when the demo is built, so revision 2 shows carried, changed and new units. Units are chosen like in walkthrough.json.",
+  "marks": [
+    { "path": "src/engine.rs", "contains": "LIMIT", "verdict": "accepted" },
+    { "path": "src/lib.rs", "verdict": "seen" },
+    { "path": "src/hash.rs", "verdict": "seen" },
+    { "path": "web/app.ts", "verdict": "seen" },
+    { "path": "tools/stats.py", "verdict": "flagged" }
+  ],
+  "notes": [
+    { "path": "src/engine.rs", "contains": "LIMIT", "text": "Why 250? The batch size was tuned for 100." }
+  ]
+}

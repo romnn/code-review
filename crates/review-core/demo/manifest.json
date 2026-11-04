@@ -1,0 +1,40 @@
+{
+  "comment": "The demo pull request: trees are full snapshots under trees/; special entries cannot be plain files, so they are listed here. Revision N moves main to `target` and feature to `head`.",
+  "trees": [
+    { "name": "main-1", "parent": null, "message": "Initial ledger" },
+    { "name": "feature-1", "parent": "main-1", "message": "Split helpers, add reconciliation" },
+    { "name": "main-2", "parent": "main-1", "message": "Bump version, extend README" },
+    { "name": "feature-2", "parent": "main-2", "message": "Split helpers, add reconciliation (rebased, raise limit)" },
+    { "name": "feature-3", "parent": "main-2", "message": "Split helpers, add reconciliation (restore limit)" }
+  ],
+  "special": {
+    "main-1": {
+      "symlinks": { "docs/current": "v1.md" },
+      "binary": { "assets/logo.bin": { "seed": 1, "len": 512 } }
+    },
+    "main-2": {
+      "symlinks": { "docs/current": "v1.md" },
+      "binary": { "assets/logo.bin": { "seed": 1, "len": 512 } }
+    },
+    "feature-1": {
+      "executable": ["scripts/release.sh"],
+      "symlinks": { "docs/current": "v2.md" },
+      "binary": { "assets/logo.bin": { "seed": 2, "len": 512 } }
+    },
+    "feature-2": {
+      "executable": ["scripts/release.sh"],
+      "symlinks": { "docs/current": "v2.md" },
+      "binary": { "assets/logo.bin": { "seed": 2, "len": 512 } }
+    },
+    "feature-3": {
+      "executable": ["scripts/release.sh"],
+      "symlinks": { "docs/current": "v2.md" },
+      "binary": { "assets/logo.bin": { "seed": 2, "len": 512 } }
+    }
+  },
+  "revisions": [
+    { "target": "main-1", "head": "feature-1" },
+    { "target": "main-2", "head": "feature-2" },
+    { "target": "main-2", "head": "feature-3" }
+  ]
+}

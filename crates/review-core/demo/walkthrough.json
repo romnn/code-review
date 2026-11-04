@@ -1,0 +1,38 @@
+{
+  "comment": "The walkthrough for revision 1. Units are chosen by path and optional text, resolved to unit IDs when the demo is built, so it survives changes in unit numbering.",
+  "title": "Split helpers and add reconciliation",
+  "steps": [
+    {
+      "title": "Ledger engine",
+      "why": "The batch limit and the new reconciliation are the behavior changes; everything else follows from them.",
+      "units": [{ "path": "src/engine.rs" }]
+    },
+    {
+      "title": "Module split",
+      "why": "Helpers move to their own modules; the moves should be byte-for-byte, the formatter change is deliberate.",
+      "units": [
+        { "path": "src/lib.rs" },
+        { "path": "src/util.rs" },
+        { "path": "src/hash.rs" },
+        { "path": "src/report.rs" },
+        { "path": "src/format.rs" },
+        { "path": "src/compat.rs" }
+      ]
+    },
+    {
+      "title": "Front end and tools",
+      "why": "Display gains a currency; the stats script reports the maximum.",
+      "units": [{ "path": "web/app.ts" }, { "path": "tools/stats.py" }]
+    },
+    {
+      "title": "Packaging",
+      "why": "A new dependency, an executable release script, the new docs link and logo.",
+      "units": [
+        { "path": "Cargo.toml" },
+        { "path": "scripts/release.sh" },
+        { "path": "docs/current" },
+        { "path": "assets/logo.bin" }
+      ]
+    }
+  ]
+}
