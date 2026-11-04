@@ -1,0 +1,105 @@
+# Walks the built-in demo: steps, marks, go-to-definition, scrolling, and a force-push.
+# Run with `task qa -- scripts/qa/smoke.qa`; screenshots land in target/qa/.
+
+launch --demo
+expect "revision":"1"
+shot 01-open
+
+# The walkthrough, step by step.
+key ]
+state
+expect "selected_step":0
+expect "badge":"accepted"
+shot 02-step-engine
+
+# Mark the second unit of the step seen, the third flagged, then undo the flag.
+key n
+key s
+key n
+key f
+state
+expect "focused_unit":"u1-0011"
+expect "u1-0010","badge":"seen"
+expect "u1-0011","badge":"flagged"
+key x
+state
+expect "u1-0011","badge":"unseen"
+shot 03-marks
+
+# Moves, the rename and the formatter change.
+key ]
+state
+expect "selected_step":1
+shot 04-module-split
+
+# Language servers run reviewed code, so they need trust. The demo's head is a local branch,
+# which is trusted by default; revoking it turns go-to-definition into a hint.
+state
+expect "trusted":true
+key shift-t
+state
+expect "trusted":false
+key g
+state
+expect "source":null
+expect press T to trust
+shot 05-untrusted
+# Trusting takes two presses; the first one says what will run.
+key shift-t
+state
+expect "trusted":false
+expect press T again
+key shift-t
+state
+expect "trusted":true
+
+# Go to the definition of `format_cents`, called on an added line of the moved table renderer.
+find util::format_cents(
+key l
+key l
+key l
+key l
+state
+expect "token":"format_cents"
+key g
+state
+expect "source":"src/util.rs:[0-9]+ \(read-only\)"
+shot 06-definition
+key escape
+
+# The remaining steps, then every change at once, scrolled.
+key ]
+shot 07-front-end
+key ]
+key ]
+state
+expect "step_title":"Noise"
+shot 08-noise
+key ]
+state
+expect "selected_step":null
+scroll 600
+state
+expect "visible_rows":\[30,
+shot 09-all-scrolled
+
+# Next unreviewed wraps around and skips reviewed units.
+key u
+state
+expect "focused_unit":"u1-0011"
+
+# Revision 2 simulates a force-push: earlier marks carry over and changed units show interdiffs.
+launch --demo-revision 2
+expect "revision":"2"
+# The trust decision is stored with the review.
+expect "trusted":true
+expect \(carried\)
+expect changed since
+shot 10-revision-2
+find interdiff against
+shot 11-interdiff
+
+launch --demo-revision 3
+expect "revision":"3"
+find identical to the reviewed version
+shot 12-revision-3-return
