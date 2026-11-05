@@ -11,6 +11,7 @@ mod info;
 pub use info::{Commit, PullRequest, ReviewInfo};
 pub(crate) use info::{LOG_FORMAT, parse_log};
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -112,6 +113,74 @@ impl ReviewTarget {
         }
     }
 
+    /// Chooses the target for the current branch of `repo` when none is given.
+    ///
+    /// The current branch's open pull request comes first, as `gh pr view` resolves it, keyed
+    /// exactly as when it is opened by number or URL.
+    /// A merged or closed pull request is not used: its review would no longer follow the branch.
+    /// Otherwise the target is the range from the default branch (see [`Repo::default_branch`])
+    /// to the current branch, or to `HEAD` when it is detached.
+    /// A `gh` failure of any kind only skips the pull request; [`Detected::Range`] says why.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NothingToReview`] when there is no open pull request and either no
+    /// default branch or no commit on `HEAD` beyond it, and an error when git fails.
+    pub fn for_current_branch(repo: &Repo) -> Result<(Self, Detected), Error> {
+        let no_pull_request = match github::for_current_branch(repo) {
+            Ok(found) if found.state == "OPEN" => match github::parse_url(&found.url) {
+                Some(parsed) => {
+                    let detected = Detected::PullRequest {
+                        number: parsed.number,
+                        url: found.url,
+                        head_ref: found.head_ref_name,
+                    };
+                    let target = Self::PullRequest {
+                        host: parsed.host,
+                        owner: parsed.owner,
+                        repo: parsed.repo,
+                        number: parsed.number,
+                    };
+                    return Ok((target, detected));
+                }
+                None => format!(
+                    "gh reported pull request #{} at an unrecognized URL {}",
+                    found.number, found.url
+                ),
+            },
+            Ok(found) => format!(
+                "its pull request #{} is {}",
+                found.number,
+                found.state.to_lowercase()
+            ),
+            Err(Error::Spawn { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                "gh is not installed".to_owned()
+            }
+            Err(Error::CommandFailed { stderr, .. }) => format!(
+                "gh found no pull request ({})",
+                stderr.lines().next().unwrap_or("no reason given").trim()
+            ),
+            Err(err) => format!("gh failed: {err}"),
+        };
+        let base = repo.default_branch()?.ok_or_else(|| {
+            Error::NothingToReview(format!(
+                "{no_pull_request}, and there is no default branch to compare with"
+            ))
+        })?;
+        let head = repo.current_branch()?.unwrap_or_else(|| "HEAD".to_owned());
+        if repo.count_commits(&base, &head)? == 0 {
+            return Err(Error::NothingToReview(format!(
+                "{no_pull_request}, and {head} has no commits beyond {base}"
+            )));
+        }
+        let detected = Detected::Range {
+            base: base.clone(),
+            head: head.clone(),
+            no_pull_request,
+        };
+        Ok((Self::Range { base, head }, detected))
+    }
+
     /// Returns the review key for this target in `repo_dir`.
     ///
     /// A pull request review is keyed per clone, `<host>/<owner>/<repo>#<number>@<common-dir>`,
@@ -142,6 +211,53 @@ impl ReviewTarget {
             Self::Worktree { base } => format!("{location}:{base}..WORKTREE"),
         };
         Ok(ReviewKey::parse(&key)?)
+    }
+}
+
+/// Which rule chose the review when no target was given; its [`Display`](fmt::Display) is a
+/// line for the reviewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Detected {
+    /// The review last opened for this repository and branch.
+    Remembered,
+    /// The current branch's open pull request.
+    PullRequest {
+        /// The pull request number.
+        number: u64,
+        /// The pull request's URL.
+        url: String,
+        /// The pull request's head branch.
+        head_ref: String,
+    },
+    /// The default branch against the current branch, because no open pull request was found.
+    Range {
+        /// The default branch.
+        base: String,
+        /// The current branch, or `HEAD` when it is detached.
+        head: String,
+        /// Why the pull request rule did not apply, such as `gh is not installed`.
+        no_pull_request: String,
+    },
+}
+
+impl fmt::Display for Detected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Remembered => write!(f, "reopened the review last opened on this branch"),
+            Self::PullRequest {
+                number,
+                url,
+                head_ref,
+            } => write!(
+                f,
+                "reviewing pull request #{number} from {head_ref} ({url})"
+            ),
+            Self::Range {
+                base,
+                head,
+                no_pull_request,
+            } => write!(f, "reviewing {base}..{head}: {no_pull_request}"),
+        }
     }
 }
 
@@ -223,6 +339,21 @@ impl Review {
             store::write_json_atomic(&dir.meta(), &meta, "review metadata")?;
         }
         Ok(Self { dir, repo, meta })
+    }
+
+    /// Opens the review a front end opens when given no target: the one last opened for `repo`'s
+    /// current branch, or else the target [`ReviewTarget::for_current_branch`] chooses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ReviewTarget::for_current_branch`], [`Self::load`] and
+    /// [`Self::open`].
+    pub fn open_for_current_branch(data_dir: &Path, repo: Repo) -> Result<(Self, Detected), Error> {
+        if let Some(key) = store::remembered_review(data_dir, &repo)? {
+            return Ok((Self::load(data_dir, &key)?, Detected::Remembered));
+        }
+        let (target, detected) = ReviewTarget::for_current_branch(&repo)?;
+        Ok((Self::open(data_dir, repo, target)?, detected))
     }
 
     /// Loads the stored review `key`.

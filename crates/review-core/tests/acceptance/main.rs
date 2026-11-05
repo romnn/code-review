@@ -2,6 +2,7 @@
 
 mod carry;
 mod common;
+mod current_branch;
 mod demo;
 mod fetch;
 mod file_marks;
@@ -11,6 +12,7 @@ mod info;
 mod moves;
 mod perf;
 mod scope;
+mod search;
 mod storage;
 mod trust;
 mod walkthrough;

@@ -18,6 +18,26 @@ pub use diff_tree::{ChangeStatus, EntryType, FileMode, RawChange, RawSide};
 use crate::error::Error;
 use crate::ids::ObjectId;
 
+/// A file of a commit's tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeFile {
+    /// Its path from the root of the tree.
+    pub path: String,
+    /// Its blob.
+    pub oid: ObjectId,
+}
+
+/// A line that `git grep` found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrepLine {
+    /// The file's path from the root of the tree.
+    pub path: String,
+    /// The zero-based line number.
+    pub line: usize,
+    /// The line's text, without its terminator.
+    pub text: String,
+}
+
 /// A git repository, addressed by its working tree or git directory.
 #[derive(Debug, Clone)]
 pub struct Repo {
@@ -371,6 +391,155 @@ impl Repo {
         BlobReader::spawn(self)
     }
 
+    /// Lists every blob of the tree of `commit` (regular files and symlinks) with its object.
+    /// Paths that are not valid UTF-8 are left out, since nothing could name them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git fails or prints output the engine cannot parse.
+    pub fn tree_files(&self, commit: &ObjectId) -> Result<Vec<TreeFile>, Error> {
+        let output = self.run(["ls-tree", "-r", "-z", "--full-tree", commit.as_str()])?;
+        let unexpected = |detail: &str| Error::UnexpectedOutput {
+            program: "git",
+            command: "ls-tree".to_owned(),
+            detail: detail.to_owned(),
+        };
+        let mut files = Vec::new();
+        for entry in output
+            .stdout
+            .split(|&byte| byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            // `<mode> <type> <object>\t<path>`; only the path may be other than ASCII.
+            let tab = entry
+                .iter()
+                .position(|&byte| byte == b'\t')
+                .ok_or_else(|| unexpected(&String::from_utf8_lossy(entry)))?;
+            let (meta, path) = entry.split_at(tab);
+            let meta = std::str::from_utf8(meta).map_err(|err| unexpected(&err.to_string()))?;
+            let Ok(path) = std::str::from_utf8(path.get(1..).unwrap_or_default()) else {
+                continue;
+            };
+            let mut fields = meta.split(' ');
+            let (Some(_mode), Some(kind), Some(oid)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(unexpected(meta));
+            };
+            if kind != "blob" {
+                continue;
+            }
+            files.push(TreeFile {
+                path: path.to_owned(),
+                oid: ObjectId::parse(oid).map_err(|err| unexpected(&err.to_string()))?,
+            });
+        }
+        Ok(files)
+    }
+
+    /// Finds the lines of the tree of `commit` that contain `needle` as a fixed string, in path
+    /// and line order, ignoring case when `ignore_case` is set. Binary files and paths that are
+    /// not valid UTF-8 are skipped. Stops after `limit` lines, and once `cancel` is set, which
+    /// kills git within a few milliseconds even while it prints nothing; a stopped search
+    /// returns what it found so far.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run, or fails other than by finding nothing.
+    pub fn grep(
+        &self,
+        commit: &ObjectId,
+        needle: &str,
+        ignore_case: bool,
+        limit: usize,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<GrepLine>, Error> {
+        use std::io::{BufRead as _, Read as _};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut command = self.command();
+        command.args(["grep", "-n", "-z", "-I", "--no-color", "--fixed-strings"]);
+        if ignore_case {
+            command.arg("--ignore-case");
+        }
+        command
+            .arg("-e")
+            .arg(needle)
+            .arg(commit.as_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let spawn_error = |source| Error::Spawn {
+            program: "git",
+            args: "grep".to_owned(),
+            source,
+        };
+        let mut child = command.spawn().map_err(spawn_error)?;
+        let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(spawn_error(std::io::Error::other("no pipes to git grep")));
+        };
+        let child = Mutex::new(child);
+        let stop = |child: &Mutex<std::process::Child>| {
+            if let Ok(mut child) = child.lock() {
+                child.kill().ok();
+            }
+        };
+        let finished = AtomicBool::new(false);
+        let stopped = AtomicBool::new(false);
+        let prefix = format!("{commit}:");
+        let mut found = Vec::new();
+        let errors = std::thread::scope(|scope| {
+            let errors = scope.spawn(move || {
+                let mut text = String::new();
+                stderr.read_to_string(&mut text).ok();
+                text
+            });
+            // Cancelling kills git even while it is silent, between lines.
+            scope.spawn(|| {
+                while !finished.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) {
+                        stopped.store(true, Ordering::Relaxed);
+                        stop(&child);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+            for line in std::io::BufReader::new(stdout).split(b'\n') {
+                if cancel.load(Ordering::Relaxed) || found.len() >= limit {
+                    stopped.store(true, Ordering::Relaxed);
+                    stop(&child);
+                    break;
+                }
+                let Ok(line) = line else {
+                    break;
+                };
+                if let Some(hit) = grep_line(&line, &prefix) {
+                    found.push(hit);
+                }
+            }
+            finished.store(true, Ordering::Relaxed);
+            errors.join().unwrap_or_default()
+        });
+        let status = child
+            .into_inner()
+            .map_err(|_| spawn_error(std::io::Error::other("git grep's handle was poisoned")))?
+            .wait()
+            .map_err(spawn_error)?;
+        // Exit status 1 means nothing was found; a search stopped on purpose is not a failure.
+        if stopped.load(Ordering::Relaxed) || status.success() || status.code() == Some(1) {
+            return Ok(found);
+        }
+        Err(Error::CommandFailed {
+            program: "git",
+            args: format!("grep {needle}"),
+            stderr: errors.trim().to_owned(),
+        })
+    }
+
     /// Reads `linguist-generated` and `diff` attributes of `paths` from the `.gitattributes`
     /// files at commit `rev`.
     ///
@@ -512,6 +681,59 @@ impl Repo {
         Ok((!name.is_empty()).then_some(name))
     }
 
+    /// Returns the short name of the repository's default branch, such as `origin/main`, or
+    /// `None` when there is none to find.
+    ///
+    /// It is the branch `refs/remotes/origin/HEAD` points to, or else the first of `origin/main`,
+    /// `origin/master`, `main` and `master` that exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run or prints output the engine cannot parse.
+    pub fn default_branch(&self) -> Result<Option<String>, Error> {
+        let origin_head =
+            match self.run_text(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]) {
+                Ok(target) => Some(target),
+                // Not set, or not a symbolic ref.
+                Err(Error::CommandFailed { .. }) => None,
+                Err(err) => return Err(err),
+            };
+        let candidates = origin_head.into_iter().chain(
+            [
+                "refs/remotes/origin/main",
+                "refs/remotes/origin/master",
+                "refs/heads/main",
+                "refs/heads/master",
+            ]
+            .map(str::to_owned),
+        );
+        for name in candidates {
+            // A dangling `origin/HEAD` falls through to the fixed names.
+            if self.ref_target(&format!("{name}^{{commit}}"))?.is_some() {
+                let short = name
+                    .strip_prefix("refs/remotes/")
+                    .or_else(|| name.strip_prefix("refs/heads/"))
+                    .unwrap_or(&name);
+                return Ok(Some(short.to_owned()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Counts the commits reachable from `head` but not from `base`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either does not name a commit or git fails.
+    pub fn count_commits(&self, base: &str, head: &str) -> Result<usize, Error> {
+        let count = self.run_text(["rev-list", "--count", &format!("{base}..{head}"), "--"])?;
+        count.parse().map_err(|_| Error::UnexpectedOutput {
+            program: "git",
+            command: "rev-list --count".to_owned(),
+            detail: count,
+        })
+    }
+
     /// Creates a detached worktree at `path` checked out at `commit`.
     ///
     /// # Errors
@@ -565,4 +787,20 @@ fn parse_generated_attributes(stdout: &[u8]) -> HashMap<String, bool> {
         *generated.entry(path).or_default() |= is_generated;
     }
     generated
+}
+
+/// One line of `git grep -n -z` output, `<commit>:<path>\0<line>\0<text>`, as a hit; `None`
+/// for a line that is not one, or whose path is not valid UTF-8.
+fn grep_line(line: &[u8], prefix: &str) -> Option<GrepLine> {
+    let mut parts = line.splitn(3, |&byte| byte == 0);
+    let (path, number, text) = (parts.next()?, parts.next()?, parts.next()?);
+    let path = std::str::from_utf8(path).ok()?.strip_prefix(prefix)?;
+    let number: usize = std::str::from_utf8(number).ok()?.parse().ok()?;
+    Some(GrepLine {
+        path: path.to_owned(),
+        line: number.saturating_sub(1),
+        text: String::from_utf8_lossy(text)
+            .trim_end_matches('\r')
+            .to_owned(),
+    })
 }

@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::error::Error;
 use crate::git::Repo;
@@ -50,45 +51,44 @@ pub(crate) fn parse_url(url: &str) -> Option<PullRequestUrl> {
 
 /// Runs `gh pr view <spec>` in the repository and returns the pull request's metadata.
 pub(crate) fn view(repo: &Repo, spec: &str) -> Result<PullRequestInfo, Error> {
-    let mut command = Command::new("gh");
-    if let Some(work_tree) = repo.work_tree() {
-        command.current_dir(work_tree);
-    }
-    let args = ["pr", "view", spec, "--json", "url,baseRefName"];
-    let output = command
-        .args(args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| Error::Spawn {
-            program: "gh",
-            args: args.join(" "),
-            source,
-        })?;
-    if !output.status.success() {
-        return Err(Error::CommandFailed {
-            program: "gh",
-            args: args.join(" "),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-    serde_json::from_slice(&output.stdout).map_err(|err| Error::UnexpectedOutput {
-        program: "gh",
-        command: "pr view".to_owned(),
-        detail: err.to_string(),
-    })
+    pr_view(repo, Some(spec), "url,baseRefName")
 }
 
 /// Runs `gh pr view <spec>` for the pull request's title, description, author, labels and
 /// dates.
 pub(crate) fn details(repo: &Repo, spec: &str) -> Result<super::info::GhPullRequest, Error> {
+    pr_view(repo, Some(spec), super::info::GH_FIELDS)
+}
+
+/// What `gh pr view` reports about the current branch's pull request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BranchPullRequest {
+    pub number: u64,
+    pub url: String,
+    /// `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    pub head_ref_name: String,
+}
+
+/// Runs `gh pr view` without a pull request, which `gh` resolves to the current branch's.
+pub(crate) fn for_current_branch(repo: &Repo) -> Result<BranchPullRequest, Error> {
+    pr_view(repo, None, "number,url,state,headRefName")
+}
+
+/// Runs `gh pr view [<spec>] --json <fields>` in the repository's working tree.
+fn pr_view<T: DeserializeOwned>(repo: &Repo, spec: Option<&str>, fields: &str) -> Result<T, Error> {
     let mut command = Command::new("gh");
     if let Some(work_tree) = repo.work_tree() {
         command.current_dir(work_tree);
     }
-    let args = ["pr", "view", spec, "--json", super::info::GH_FIELDS];
+    let args: Vec<&str> = ["pr", "view"]
+        .into_iter()
+        .chain(spec)
+        .chain(["--json", fields])
+        .collect();
     let output = command
-        .args(args)
+        .args(&args)
         .env("GH_PROMPT_DISABLED", "1")
         .stdin(Stdio::null())
         .output()
