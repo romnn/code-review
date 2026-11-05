@@ -4,15 +4,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Context, Entity, Window};
-use gpui_component::input::{InputEvent, InputState};
+use gpui::{Context, Window};
 use gpui_component::scroll::ScrollbarHandle as _;
 
 use super::text::{self, TextPos};
 use super::{
-    BufferBottom, BufferTop, CloseFind, CursorDown, CursorUp, DEFINITION_DEADLINE, Dismiss, Find,
-    FindNext, FindPrevious, GoToDefinition, JumpBack, Mode, NextWord, OpenFind, PreviousWord,
-    ReviewApp, Servers, ToggleBuffer, find, scroll,
+    BufferBottom, BufferTop, CursorDown, CursorUp, DEFINITION_DEADLINE, Dismiss, GoToDefinition,
+    JumpBack, Mode, NextWord, PreviousWord, ReviewApp, Servers, ToggleBuffer, scroll,
 };
 use crate::lsp::{self, LanguageServer};
 use crate::rows::FullText;
@@ -34,6 +32,9 @@ pub enum Origin {
     Review(String),
     /// A file a definition led to, by its path in the worktree.
     Definition(String),
+    /// A file the review did not change, by its path in the head snapshot, opened from a
+    /// picker.
+    Head(String),
 }
 
 /// One file shown in full.
@@ -55,7 +56,7 @@ impl Buffer {
     /// The title the buffer's header shows.
     pub fn title(&self) -> &str {
         match &self.origin {
-            Origin::Review(path) | Origin::Definition(path) => path,
+            Origin::Review(path) | Origin::Definition(path) | Origin::Head(path) => path,
         }
     }
 
@@ -83,9 +84,13 @@ impl Buffer {
 }
 
 impl ReviewApp {
-    /// The display hunk of the line under the buffer cursor, in a review buffer.
+    /// The display hunk of the line under the buffer cursor, only in a review buffer of the
+    /// selected file, whose markers index that file's rows.
     pub(super) fn buffer_hunk(&self) -> Option<usize> {
         let buffer = self.buffer.as_ref()?;
+        if buffer.origin != Origin::Review(self.selected.clone()?) {
+            return None;
+        }
         match buffer.markers.get(buffer.cursor.row).copied().flatten()? {
             Marker::Added(hunk) | Marker::Removed(hunk) => Some(hunk),
         }
@@ -108,6 +113,8 @@ impl ReviewApp {
 
     /// Opens the selected file as a buffer, with the cursor on the selected hunk.
     pub(super) fn enter_buffer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The buffer's markers come from the selected file's hunks, never a preview's header.
+        self.finish_preview();
         let Some(path) = self.selected.clone() else {
             return;
         };
@@ -183,17 +190,15 @@ impl ReviewApp {
     pub(super) fn set_buffer(&mut self, next: Option<Buffer>) {
         self.buffer = next;
         self.selection = None;
-        match (&mut self.find, &self.buffer) {
-            (Some(find), Some(buffer)) => {
-                find.matches = Arc::new(find::matches(
-                    buffer.lines.lines.iter().map(String::as_str),
-                    &find.query,
-                ));
-                find.current = None;
-            }
-            (Some(_), None) => self.find = None,
-            (None, _) => {}
+        if self.buffer.is_none()
+            && self
+                .find
+                .as_ref()
+                .is_some_and(|find| find.target == Mode::Buffer)
+        {
+            self.find = None;
         }
+        self.refresh_find(Mode::Buffer);
     }
 
     /// Back to the diff, at the hunk the cursor is in or the last one before it.
@@ -354,115 +359,6 @@ impl ReviewApp {
         self.move_word(false, cx);
     }
 
-    /// `/`: opens the find bar over the buffer, opening the buffer from the diff first.
-    pub(super) fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != Mode::Buffer {
-            self.enter_buffer(window, cx);
-            if self.mode != Mode::Buffer {
-                return;
-            }
-        }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this file"));
-        let subscription = cx.subscribe_in(&input, window, Self::find_event);
-        input.update(cx, |input, cx| input.focus(window, cx));
-        self.find = Some(Find {
-            input,
-            query: String::new(),
-            matches: Arc::new(Vec::new()),
-            current: None,
-            editing: true,
-            _subscription: subscription,
-        });
-        cx.notify();
-    }
-
-    fn find_event(
-        &mut self,
-        input: &Entity<InputState>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            InputEvent::Change => {
-                let query = input.read(cx).value().to_string();
-                let lines = self.buffer.as_ref().map(|buffer| Arc::clone(&buffer.lines));
-                if let (Some(find), Some(lines)) = (&mut self.find, lines) {
-                    find.matches = Arc::new(find::matches(
-                        lines.lines.iter().map(String::as_str),
-                        &query,
-                    ));
-                    find.query = query;
-                    find.current = None;
-                }
-                self.find_step(true, true, cx);
-            }
-            InputEvent::PressEnter { .. } => {
-                // The search stays for n and N; the keyboard goes back to the buffer.
-                if let Some(find) = &mut self.find {
-                    find.editing = false;
-                }
-                self.focus_mode(window, cx);
-                cx.notify();
-            }
-            InputEvent::Focus | InputEvent::Blur => {}
-        }
-    }
-
-    /// Moves the cursor to the next (or previous) match; `here` lets a match at the cursor
-    /// count, as when the query grows.
-    fn find_step(&mut self, forward: bool, here: bool, cx: &mut Context<Self>) {
-        let Some(cursor) = self.buffer.as_ref().map(|buffer| buffer.cursor) else {
-            return;
-        };
-        let Some(find) = &mut self.find else {
-            return;
-        };
-        let from = if here || !forward {
-            (cursor.row, cursor.col)
-        } else {
-            (cursor.row, cursor.col + 1)
-        };
-        let Some(index) = find::next_from(&find.matches, from, forward) else {
-            if !find.query.is_empty() {
-                self.set_status("No matches in this file.");
-            }
-            cx.notify();
-            return;
-        };
-        find.current = Some(index);
-        let total = find.matches.len();
-        let Some(found) = find.matches.get(index).cloned() else {
-            return;
-        };
-        self.set_status(format!("Match {} of {total}", index + 1));
-        self.set_buffer_cursor(found.row, found.range.start, cx);
-    }
-
-    pub(super) fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
-        self.find_step(true, false, cx);
-    }
-
-    pub(super) fn find_previous(
-        &mut self,
-        _: &FindPrevious,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.find_step(false, false, cx);
-    }
-
-    pub(super) fn close_find(
-        &mut self,
-        _: &CloseFind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.find = None;
-        self.focus_mode(window, cx);
-        cx.notify();
-    }
-
     /// Updates the review buffer's highlights once they are computed.
     pub(super) fn refresh_buffer_syntax(&mut self) {
         let Some(view) = self.view() else {
@@ -509,7 +405,7 @@ impl ReviewApp {
             return;
         };
         let path = match &buffer.origin {
-            Origin::Review(path) | Origin::Definition(path) => path.clone(),
+            Origin::Review(path) | Origin::Definition(path) | Origin::Head(path) => path.clone(),
         };
         let (row, col) = (buffer.cursor.row, buffer.cursor.col);
         if text::identifiers(buffer.line(row))

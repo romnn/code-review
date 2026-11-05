@@ -10,13 +10,28 @@
 //! context = 3       # unchanged lines around each hunk
 //!
 //! [diff]
-//! style = "syntax"  # or "plain", like git's colored diff
+//! style = "bold"    # plain, bold, soft or one of [styles]; `|` cycles them
+//! density = "normal"    # or "compact" or "comfortable": the rows' spacing
+//! layout = "unified"    # or "side-by-side"; `s` toggles it
 //! removed = "#5f1519"   # overrides the theme's line backgrounds
 //! added = "#14471f"
 //! token_emphasis = false
 //!
+//! [styles.calm]     # a diff style beside plain, bold and soft: colors only, never spacing
+//! syntax = true         # syntax colors in the diff
+//! background = "muted"  # changed lines' background: "none", "muted" or "bold"
+//! headers = "chips"     # hunk headers as "bands" across the width or quiet "chips"
+//! change_bar = true     # a colored bar in the gutter of changed lines
+//!
 //! [theme]
-//! name = "carbonfox"  # or tokyonight-night, nightfox, one-dark, …; T cycles them
+//! name = "carbonfox"  # or tokyonight-night, nightfox, one-dark, …; T opens the settings
+//!
+//! [presets.mine]    # a named look the settings list offers beside the built-in ones
+//! theme = "nordfox"     # fields left out take their defaults
+//! style = "soft"
+//! density = "comfortable"
+//! layout = "side-by-side"
+//! token_emphasis = false
 //!
 //! [keys]            # replace an action's keys; `?` in the app lists the actions
 //! NextUnit = ["n", "ctrl-j"]
@@ -27,6 +42,9 @@
 //! source = 600      # the definition pane; absent for 42% of the window
 //! sidebar_visible = true
 //! ```
+//!
+//! Choices made in the app are written back with [`remember`], which edits the file as TOML and
+//! keeps everything else in it: comments, presets, keys and settings it does not change.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -105,6 +123,11 @@ struct File {
     keys: BTreeMap<String, KeyList>,
     #[serde(default)]
     theme: ThemeSection,
+    /// Read table by table, so a mistake in one style or preset leaves the others usable.
+    #[serde(default)]
+    styles: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    presets: BTreeMap<String, toml::Value>,
 }
 
 /// One key or several, as `[keys]` accepts them.
@@ -162,41 +185,171 @@ struct ThemeSection {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct DiffSection {
-    style: Option<DiffStyle>,
+    style: Option<String>,
+    density: Option<Density>,
+    layout: Option<DiffLayout>,
     removed: Option<String>,
     added: Option<String>,
     token_emphasis: Option<bool>,
 }
 
-/// How diff lines are colored.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiffStyle {
-    /// Syntax-highlighted code on tinted line backgrounds.
-    #[default]
-    Syntax,
-    /// A classic colored diff: red and green text, no backgrounds.
-    Plain,
+/// A `[styles.<name>]` table as written; every field is optional.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StyleSection {
+    syntax: Option<bool>,
+    background: Option<Background>,
+    headers: Option<Headers>,
+    change_bar: Option<bool>,
+    /// Read only to say where it belongs now: a style never changes the spacing.
+    density: Option<serde::de::IgnoredAny>,
 }
 
-impl DiffStyle {
-    /// The other style.
+/// A `[presets.<name>]` table as written; every field is optional.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresetSection {
+    theme: Option<String>,
+    style: Option<String>,
+    density: Option<Density>,
+    layout: Option<DiffLayout>,
+    token_emphasis: Option<bool>,
+}
+
+/// How a file's diff is laid out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiffLayout {
+    /// Removed lines above added lines, in one column.
+    #[default]
+    Unified,
+    /// The base on the left and the head on the right, changed lines paired up.
+    SideBySide,
+}
+
+impl DiffLayout {
+    /// The other layout.
     #[must_use]
     pub fn toggled(self) -> Self {
         match self {
-            Self::Syntax => Self::Plain,
-            Self::Plain => Self::Syntax,
+            Self::Unified => Self::SideBySide,
+            Self::SideBySide => Self::Unified,
         }
     }
 
-    /// The style's name as the configuration file spells it.
+    /// The layout's name as the configuration file spells it.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Self::Syntax => "syntax",
-            Self::Plain => "plain",
+            Self::Unified => "unified",
+            Self::SideBySide => "side-by-side",
         }
     }
+}
+
+/// What changed lines are drawn on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Background {
+    /// Nothing: the editor background, with removed and added lines told apart by their
+    /// sign, their text color or the change bar.
+    None,
+    /// The theme's line backgrounds mixed toward the editor background, as Zed draws them.
+    Muted,
+    /// The theme's saturated line backgrounds, as delta draws them.
+    #[default]
+    Bold,
+}
+
+impl Background {
+    /// The background's name as the configuration file spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Muted => "muted",
+            Self::Bold => "bold",
+        }
+    }
+}
+
+/// How much air the diff's rows have; only the density moves rows, never a diff style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    /// A terminal's line height, with each hunk right after the code before it.
+    Compact,
+    /// A little more line height, and a blank row before each hunk.
+    #[default]
+    Normal,
+    /// An editor's spacing, as Zed has it: tall lines, and a blank row before each hunk.
+    Comfortable,
+}
+
+impl Density {
+    /// Every density, from the tightest.
+    pub const ALL: [Self; 3] = [Self::Compact, Self::Normal, Self::Comfortable];
+
+    /// The density's name as the configuration file spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Normal => "normal",
+            Self::Comfortable => "comfortable",
+        }
+    }
+}
+
+/// How hunk headers are drawn; they take one row either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Headers {
+    /// A band across the width, as a terminal draws it.
+    #[default]
+    Bands,
+    /// Quiet chips on the editor background, as an editor draws them.
+    Chips,
+}
+
+impl Headers {
+    /// The header look's name as the configuration file spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bands => "bands",
+            Self::Chips => "chips",
+        }
+    }
+}
+
+/// A user diff style as the configuration file sets it; fields it leaves out take the
+/// defaults, which are the bold style's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StyleConfig {
+    /// Whether the diff shows syntax colors.
+    pub syntax: Option<bool>,
+    /// What changed lines are drawn on.
+    pub background: Option<Background>,
+    /// How hunk headers are drawn.
+    pub headers: Option<Headers>,
+    /// Whether changed lines have a colored bar in the gutter.
+    pub change_bar: Option<bool>,
+}
+
+/// A user preset as the configuration file sets it; fields it leaves out take their defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PresetConfig {
+    /// The theme's name, checked against the themes once they are loaded.
+    pub theme: Option<String>,
+    /// The diff style's name, checked against the styles.
+    pub style: Option<String>,
+    /// How much air the rows have.
+    pub density: Option<Density>,
+    /// How the diff is laid out.
+    pub layout: Option<DiffLayout>,
+    /// Whether changed tokens within a line are emphasized.
+    pub token_emphasis: Option<bool>,
 }
 
 /// Everything the configuration file sets.
@@ -204,11 +357,15 @@ impl DiffStyle {
 pub struct Config {
     /// The code font.
     pub font: FontConfig,
-    /// Whether hunk headers show unit IDs.
     /// Unchanged lines shown around each hunk.
     pub context: usize,
-    /// How diff lines are colored.
-    pub diff_style: DiffStyle,
+    /// The diff style's name, checked against the styles; `None` for the default.
+    pub diff_style: Option<String>,
+    /// How much air the diff's rows have.
+    pub density: Density,
+    /// How the diff is laid out, as the reviewer asked for it; a narrow window may still show
+    /// it unified.
+    pub diff_layout: DiffLayout,
     /// The removed-line background, as `0xRRGGBB`, overriding the theme's.
     pub removed: Option<u32>,
     /// The added-line background, likewise.
@@ -221,6 +378,13 @@ pub struct Config {
     pub layout: LayoutConfig,
     /// Key overrides: an action's name and the keys that replace its defaults.
     pub keys: BTreeMap<String, Vec<String>>,
+    /// User diff styles by name, in name order; one the file gets wrong is left out and
+    /// named in `problems`.
+    pub styles: BTreeMap<String, StyleConfig>,
+    /// User presets by name, in name order, or why one cannot be used.
+    pub presets: BTreeMap<String, Result<PresetConfig, String>>,
+    /// What the file gets wrong that only costs the entries it is in.
+    pub problems: Vec<String>,
 }
 
 impl Default for Config {
@@ -228,72 +392,133 @@ impl Default for Config {
         Self {
             font: FontConfig::default(),
             context: 3,
-            diff_style: DiffStyle::Syntax,
+            diff_style: None,
+            density: Density::default(),
+            diff_layout: DiffLayout::Unified,
             removed: None,
             added: None,
             theme: None,
             token_emphasis: false,
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
+            styles: BTreeMap::new(),
+            presets: BTreeMap::new(),
+            problems: Vec::new(),
         }
     }
 }
 
-/// Remembers settings changed in the app, each a `(table, key, TOML value)`, in the
-/// configuration file at `path`, keeping the rest of the file as it is.
+/// A setting the app remembers in the configuration file: `key` in `[table]`.
+#[derive(Debug, Clone)]
+pub struct Remembered {
+    /// The top-level table, such as `diff`.
+    pub table: &'static str,
+    /// The key within it, such as `style`.
+    pub key: &'static str,
+    /// The value to set.
+    pub value: toml_edit::Value,
+}
+
+/// Why a setting could not be remembered; the file is left as it was.
+#[derive(Debug, thiserror::Error)]
+pub enum RememberError {
+    /// The file exists but cannot be read.
+    #[error("cannot read {path}")]
+    Read {
+        /// The file.
+        path: PathBuf,
+        /// The cause.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The file is not valid TOML, or a table to write into is a plain value; rewriting it
+    /// would lose what the reviewer wrote.
+    #[error("cannot edit {path}: {message}")]
+    Invalid {
+        /// The file.
+        path: PathBuf,
+        /// What is wrong.
+        message: String,
+    },
+    /// The file or its directory cannot be written.
+    #[error("cannot write {path}")]
+    Write {
+        /// The file.
+        path: PathBuf,
+        /// The cause.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Remembers settings changed in the app in the configuration file at `path`, all in one write,
+/// keeping the rest of the file as it is: comments, formatting, presets and other settings.
 ///
 /// # Errors
 ///
-/// Returns an error when the file cannot be read or written.
-pub fn remember(path: &Path, values: &[(&str, &str, String)]) -> std::io::Result<()> {
-    let mut text = match std::fs::read_to_string(path) {
+/// Returns an error, and leaves the file untouched, when it cannot be read, is not valid TOML,
+/// has a plain value where a table should be, or cannot be written.
+pub fn remember(path: &Path, values: &[Remembered]) -> Result<(), RememberError> {
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err),
+        Err(source) => {
+            return Err(RememberError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     };
-    for (table, key, value) in values {
-        text = with_value(&text, table, key, value);
-    }
+    let text = with_values(&text, values).map_err(|message| RememberError::Invalid {
+        path: path.to_path_buf(),
+        message,
+    })?;
+    let write = |source| RememberError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(write)?;
     }
-    std::fs::write(path, text)
+    std::fs::write(path, text).map_err(write)
 }
 
-/// `text` with `key = value` set in `[table]`: replaced in place, added to an existing table,
-/// or appended in a new one.
-fn with_value(text: &str, table: &str, key: &str, value: &str) -> String {
-    let line = format!("{key} = {value}");
-    let header = format!("[{table}]");
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let section = lines.iter().position(|line| line.trim() == header);
-    if let Some(start) = section {
-        let end = lines
-            .iter()
-            .skip(start + 1)
-            .position(|line| line.trim_start().starts_with('['))
-            .map_or(lines.len(), |offset| start + 1 + offset);
-        let existing = (start + 1..end).find(|&index| {
-            lines.get(index).is_some_and(|line| {
-                line.split_once('=')
-                    .is_some_and(|(name, _)| name.trim() == key)
-            })
-        });
-        if let Some(slot) = existing.and_then(|index| lines.get_mut(index)) {
-            *slot = line;
-        } else {
-            lines.insert(start + 1, line);
+/// `text` with each of `values` set: a key replaced in place keeps its comments, a new key goes
+/// to the end of its table, and a missing table is appended.
+///
+/// Tables are found as TOML defines them, so a header with a comment, an inline table or dotted
+/// keys are all the same table.
+fn with_values(text: &str, values: &[Remembered]) -> Result<String, String> {
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|err: toml_edit::TomlError| err.message().to_owned())?;
+    for setting in values {
+        let item = document
+            .as_table_mut()
+            .entry(setting.table)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let table = item
+            .as_table_like_mut()
+            .ok_or_else(|| format!("{} is not a table", setting.table))?;
+        match table.get_mut(setting.key) {
+            Some(toml_edit::Item::Value(existing)) => {
+                // The old value's decor holds the spacing and a trailing comment.
+                let decor = existing.decor().clone();
+                *existing = setting.value.clone();
+                *existing.decor_mut() = decor;
+            }
+            Some(_) => {
+                return Err(format!(
+                    "[{}] {} is a table, not a value",
+                    setting.table, setting.key
+                ));
+            }
+            None => {
+                table.insert(setting.key, toml_edit::Item::Value(setting.value.clone()));
+            }
         }
-    } else {
-        if lines.last().is_some_and(|last| !last.trim().is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push(header);
-        lines.push(line);
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    Ok(document.to_string())
 }
 
 /// Parses a `#rrggbb` color.
@@ -358,6 +583,16 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 pub fn parse(text: &str) -> Result<Config, String> {
     let file: File = toml::from_str(text).map_err(|err| err.message().to_owned())?;
     let defaults = Config::default();
+    let mut problems = Vec::new();
+    let mut styles = BTreeMap::new();
+    for (name, style) in file.styles {
+        match parse_style(style) {
+            Ok(style) => {
+                styles.insert(name, style);
+            }
+            Err(problem) => problems.push(format!("[styles.{name}] cannot be used: {problem}")),
+        }
+    }
     let color = |value: Option<String>| match value {
         None => Ok(None),
         Some(text) => hex_color(&text)
@@ -367,7 +602,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
     Ok(Config {
         font: parse_font(file.font)?,
         context: file.view.context.unwrap_or(defaults.context).min(1000),
-        diff_style: file.diff.style.unwrap_or(defaults.diff_style),
+        diff_style: file.diff.style,
+        density: file.diff.density.unwrap_or(defaults.density),
+        diff_layout: file.diff.layout.unwrap_or(defaults.diff_layout),
         removed: color(file.diff.removed)?,
         added: color(file.diff.added)?,
         theme: file.theme.name,
@@ -392,6 +629,59 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 (action, keys)
             })
             .collect(),
+        styles,
+        presets: file
+            .presets
+            .into_iter()
+            .map(|(name, preset)| (name, parse_preset(preset)))
+            .collect(),
+        problems,
+    })
+}
+
+/// A `[styles.<name>]` table, or what is wrong with it.
+fn parse_style(value: toml::Value) -> Result<StyleConfig, String> {
+    let StyleSection {
+        syntax,
+        background,
+        headers,
+        change_bar,
+        density,
+    } = value
+        .try_into()
+        .map_err(|err: toml::de::Error| err.message().to_owned())?;
+    if density.is_some() {
+        return Err(
+            "it sets density, but a diff style is colors only; set density under \
+                    [diff] or in a preset"
+                .to_owned(),
+        );
+    }
+    Ok(StyleConfig {
+        syntax,
+        background,
+        headers,
+        change_bar,
+    })
+}
+
+/// A `[presets.<name>]` table, or what is wrong with it.
+fn parse_preset(value: toml::Value) -> Result<PresetConfig, String> {
+    let PresetSection {
+        theme,
+        style,
+        density,
+        layout,
+        token_emphasis,
+    } = value
+        .try_into()
+        .map_err(|err: toml::de::Error| err.message().to_owned())?;
+    Ok(PresetConfig {
+        theme,
+        style,
+        density,
+        layout,
+        token_emphasis,
     })
 }
 
@@ -476,38 +766,220 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.context, 5);
-        assert_eq!(config.diff_style, DiffStyle::Plain);
+        assert_eq!(config.diff_style.as_deref(), Some("plain"));
         assert_eq!(config.removed, Some(0x0011_2233));
         assert_eq!(config.added, None);
         assert_eq!(config.theme.as_deref(), Some("nordfox"));
         assert!(parse("[diff]\nadded = \"green\"\n").is_err());
-        assert!(parse("[diff]\nstyle = \"fancy\"\n").is_err());
+        assert!(parse("[diff]\nstyle = 3\n").is_err());
     }
 
-    /// A remembered value is replaced in place, added to an existing table, or appended.
+    fn setting(table: &'static str, key: &'static str, value: &str) -> Remembered {
+        Remembered {
+            table,
+            key,
+            value: value.into(),
+        }
+    }
+
+    /// A remembered value is replaced in place, added to an existing table, or appended in a
+    /// new one.
     #[test]
     fn values_are_remembered_in_place() {
-        let plain = "\"plain\"";
+        let plain = setting("diff", "style", "plain");
         assert_eq!(
-            with_value("[font]\nsize = 14\n", "diff", "style", plain),
+            with_values("[font]\nsize = 14\n", std::slice::from_ref(&plain)).unwrap(),
             "[font]\nsize = 14\n\n[diff]\nstyle = \"plain\"\n"
         );
         assert_eq!(
-            with_value(
+            with_values(
                 "[diff]\nstyle = \"syntax\"\nadded = \"#000000\"\n[view]\n",
-                "diff",
-                "style",
-                plain
-            ),
+                std::slice::from_ref(&plain)
+            )
+            .unwrap(),
             "[diff]\nstyle = \"plain\"\nadded = \"#000000\"\n[view]\n"
         );
-        let added = with_value("[diff]\nadded = \"#000000\"\n", "diff", "style", plain);
-        assert_eq!(parse(&added).unwrap().diff_style, DiffStyle::Plain);
+        let added = with_values(
+            "[diff]\nadded = \"#000000\"\n",
+            std::slice::from_ref(&plain),
+        )
+        .unwrap();
+        assert_eq!(parse(&added).unwrap().diff_style.as_deref(), Some("plain"));
         let keys = parse("[keys]\nNextUnit = \"ctrl-j\"\nToggleOverview = []\n").unwrap();
         assert_eq!(keys.keys["NextUnit"], ["ctrl-j"]);
         assert_eq!(keys.keys["ToggleOverview"], Vec::<String>::new());
-        let widths = with_value(&added, "layout", "sidebar", "320");
+        let width = Remembered {
+            table: "layout",
+            key: "sidebar",
+            value: 320.into(),
+        };
+        let widths = with_values(&added, &[width]).unwrap();
         assert_eq!(parse(&widths).unwrap().layout.sidebar, 320.0);
+    }
+
+    /// A header with a comment is the same table, so remembering a value never appends a
+    /// second `[diff]`, which would make the file invalid; comments, user presets and other
+    /// settings survive, and several values land in one edit.
+    #[test]
+    fn commented_headers_keep_one_table_and_every_comment() {
+        let text = "\
+# My review settings.
+[diff] # colors
+style = \"syntax\"  # delta's look
+token_emphasis = false
+
+[presets.mine]
+theme = \"nordfox\" # a calm one
+
+[keys]
+NextHunk = [\"j\"]
+";
+        let updated = with_values(
+            text,
+            &[
+                setting("diff", "style", "plain"),
+                setting("diff", "layout", "side-by-side"),
+                setting("theme", "name", "nordfox"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(updated.matches("[diff]").count(), 1, "{updated}");
+        for kept in [
+            "# My review settings.",
+            "[diff] # colors",
+            "style = \"plain\"  # delta's look",
+            "theme = \"nordfox\" # a calm one",
+            "NextHunk = [\"j\"]",
+        ] {
+            assert!(updated.contains(kept), "lost {kept:?} in:\n{updated}");
+        }
+        let config = parse(&updated).unwrap();
+        assert_eq!(config.diff_style.as_deref(), Some("plain"));
+        assert_eq!(config.diff_layout, DiffLayout::SideBySide);
+        assert_eq!(config.theme.as_deref(), Some("nordfox"));
+        assert_eq!(
+            config.presets["mine"].as_ref().unwrap().theme.as_deref(),
+            Some("nordfox"),
+            "the user's preset is untouched"
+        );
+        assert!(!config.token_emphasis);
+    }
+
+    /// Inline tables and dotted keys are tables too, and are edited where they are.
+    #[test]
+    fn inline_tables_and_dotted_keys_are_edited_in_place() {
+        let inline = with_values(
+            "diff = { style = \"syntax\" }\n",
+            &[setting("diff", "style", "plain")],
+        )
+        .unwrap();
+        assert_eq!(inline, "diff = { style = \"plain\" }\n");
+        let dotted = with_values(
+            "diff.style = \"syntax\"\n",
+            &[setting("diff", "style", "plain")],
+        )
+        .unwrap();
+        assert_eq!(dotted, "diff.style = \"plain\"\n");
+        assert_eq!(parse(&dotted).unwrap().diff_style.as_deref(), Some("plain"));
+    }
+
+    /// A file that is not valid TOML, or has a value where a table belongs, is never rewritten:
+    /// the reviewer's text would be lost.
+    #[test]
+    fn broken_files_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[diff\nstyle = 1\n").unwrap();
+        let err = remember(&path, &[setting("diff", "style", "plain")]).unwrap_err();
+        assert!(matches!(err, RememberError::Invalid { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[diff\nstyle = 1\n"
+        );
+        assert!(with_values("diff = 3\n", &[setting("diff", "style", "plain")]).is_err());
+
+        // A missing file and its directory are created.
+        let fresh = dir.path().join("new").join("config.toml");
+        remember(&fresh, &[setting("theme", "name", "nordfox")]).unwrap();
+        assert_eq!(
+            parse(&std::fs::read_to_string(&fresh).unwrap())
+                .unwrap()
+                .theme
+                .as_deref(),
+            Some("nordfox")
+        );
+    }
+
+    /// Layouts, styles and presets parse by the names the file uses.
+    #[test]
+    fn looks_styles_and_presets_parse() {
+        let config = parse(
+            "[diff]\nlayout = \"side-by-side\"\nstyle = \"calm\"\ndensity = \"compact\"\n\
+             [styles.calm]\nsyntax = true\nbackground = \"muted\"\nheaders = \"chips\"\n\
+             change_bar = true\n\
+             [presets.calm]\ntheme = \"nordfox\"\nstyle = \"plain\"\ndensity = \"comfortable\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.diff_layout, DiffLayout::SideBySide);
+        assert_eq!(config.diff_style.as_deref(), Some("calm"));
+        assert_eq!(config.density, Density::Compact);
+        assert_eq!(
+            config.styles["calm"],
+            StyleConfig {
+                syntax: Some(true),
+                background: Some(Background::Muted),
+                headers: Some(Headers::Chips),
+                change_bar: Some(true),
+            }
+        );
+        assert_eq!(
+            config.presets["calm"],
+            Ok(PresetConfig {
+                theme: Some("nordfox".to_owned()),
+                style: Some("plain".to_owned()),
+                density: Some(Density::Comfortable),
+                ..PresetConfig::default()
+            })
+        );
+        assert_eq!(
+            parse("").unwrap().density,
+            Density::Normal,
+            "normal by default"
+        );
+        // A style is colors only; density set in one says where it belongs, and costs only
+        // that style.
+        let config = parse(
+            "[diff]\nstyle = \"calm\"\n[styles.calm]\ndensity = \"comfortable\"\n\
+             [styles.fine]\nsyntax = false\n",
+        )
+        .unwrap();
+        assert_eq!(config.diff_style.as_deref(), Some("calm"));
+        assert!(!config.styles.contains_key("calm"));
+        assert!(config.styles.contains_key("fine"));
+        assert_eq!(config.problems.len(), 1);
+        assert!(
+            config.problems[0].contains("[styles.calm] cannot be used: it sets density")
+                && config.problems[0].contains("[diff]"),
+            "{:?}",
+            config.problems
+        );
+        // A mistake in a preset or a style costs only that entry, never the whole file.
+        let config = parse(
+            "[font]\nsize = 15\n[presets.calm]\ncolour = \"red\"\n[presets.fine]\n\
+             theme = \"nordfox\"\n[styles.calm]\nbackground = \"loud\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.font.size_points, Some(15.0));
+        let calm = config.presets["calm"].as_ref().unwrap_err();
+        assert!(calm.contains("colour"), "{calm}");
+        assert!(config.presets["fine"].is_ok());
+        assert!(config.styles.is_empty());
+        assert!(
+            config.problems[0].starts_with("[styles.calm] cannot be used:"),
+            "{:?}",
+            config.problems
+        );
+        assert!(parse("[diff]\nlayout = \"split\"\n").is_err());
     }
 
     /// 13 points is 17.33 logical pixels; gpui applies the display scale on top.

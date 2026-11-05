@@ -35,9 +35,14 @@ gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false }
 gpui-component = { version = "=0.8.0", default-features = false }
 parking_lot = "0.12"
+# Fuzzy matching for the file finder.
+nucleo-matcher = "0.3"
 # The icons gpui-component draws, such as the find bar's clear button.
 gpui-kit-assets = "=0.8.0"
 toml = "1"
+# Writes choices made in the app back into the configuration, keeping its comments; the same
+# TOML 1.1 grammar as `toml`, which reads it.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 # Display widths of code lines, which set how far the views scroll sideways.
 unicode-width = "0.2"
 

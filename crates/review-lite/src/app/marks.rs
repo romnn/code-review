@@ -18,35 +18,58 @@ use super::{
 use crate::rows;
 
 impl ReviewApp {
-    /// The units the current mode's review keys act on, and what to call them.
-    fn review_target(&self) -> Option<(Vec<UnitId>, String)> {
-        let view = self.view()?;
+    /// The units the current mode's review keys act on, and what to call them, resolved from
+    /// what the screen shows, or why nothing there can be marked. Every mark goes through
+    /// here, so a key never acts on something other than what the reviewer sees: the tree's
+    /// file must be the file whose diff shows, the diff's rows must be that file's, and the
+    /// buffer must be that file's.
+    fn review_target(&self) -> Result<(Vec<UnitId>, String), String> {
+        let nothing = || "Nothing here to review.".to_owned();
+        let view = self.view().ok_or_else(nothing)?;
+        let shown = self.rows.files.first().map(|section| section.path.as_str());
+        let selected = self.selected.as_deref();
         match self.mode {
             Mode::Tree => {
-                let index = self.tree_index()?;
-                let node = self.tree.get(index)?;
-                // A folder acts on the files it shows, a file on exactly itself.
-                let units = if node.kind == review_core::tree::NodeKind::Directory {
-                    state::folder_files(&self.tree, index)
+                let index = self.tree_index().ok_or_else(nothing)?;
+                let node = self.tree.get(index).ok_or_else(nothing)?;
+                if node.kind == review_core::tree::NodeKind::Directory {
+                    // A filtered folder shows only some of its files; marking it would mark
+                    // the hidden ones.
+                    if self.filter_query().is_some() {
+                        return Err("The filter hides some of this folder's files: mark files \
+                                    one by one, or clear the filter with Esc to mark the whole \
+                                    folder."
+                            .to_owned());
+                    }
+                    // A folder acts on the files it shows.
+                    let units = state::folder_files(&self.tree, index)
                         .into_iter()
                         .flat_map(|path| view.units_of_file(path))
-                        .collect()
-                } else {
-                    view.units_of_file(&node.path)
-                };
-                Some((units, node.path.clone()))
+                        .collect();
+                    return Ok((units, node.path.clone()));
+                }
+                if selected != Some(node.path.as_str()) || shown != selected {
+                    return Err("The file under the cursor is not the one shown; move the \
+                                cursor to show it first."
+                        .to_owned());
+                }
+                Ok((view.units_of_file(&node.path), node.path.clone()))
             }
+            Mode::Diff | Mode::Buffer if shown.is_none() || shown != selected => Err(nothing()),
             Mode::Diff => {
                 let units = self.hunk_units();
-                Some((
+                if units.is_empty() {
+                    return Err(nothing());
+                }
+                Ok((
                     units,
                     format!("hunk {} of {}", self.hunk + 1, self.rows.hunks.len()),
                 ))
             }
             Mode::Buffer => {
-                let hunk = self.buffer_hunk()?;
-                let units = self.rows.hunks.get(hunk)?.clone();
-                Some((
+                let hunk = self.buffer_hunk().ok_or_else(nothing)?;
+                let units = self.rows.hunks.get(hunk).ok_or_else(nothing)?.clone();
+                Ok((
                     units,
                     format!("hunk {} of {}", hunk + 1, self.rows.hunks.len()),
                 ))
@@ -57,10 +80,26 @@ impl ReviewApp {
     /// Toggles the current target toward `toward`: everything at `toward` goes back to
     /// unreviewed, anything else takes `toward`.
     fn review(&mut self, toward: MarkVerdict, cx: &mut Context<Self>) {
-        let Some((units, what)) = self.review_target() else {
-            self.set_status("Nothing here to review.");
+        // What the keys act on is what the diff shows, so a preview is completed first.
+        self.finish_preview();
+        // The selected hunk must be on screen; one scrolled away is shown first, not marked.
+        if self.mode == Mode::Diff && !self.hunk_in_view() {
+            self.reveal_hunk();
+            self.set_status(format!(
+                "Hunk {} of {} was off screen; it shows now. Press again to mark it.",
+                self.hunk + 1,
+                self.rows.hunks.len()
+            ));
             cx.notify();
             return;
+        }
+        let (units, what) = match self.review_target() {
+            Ok(target) => target,
+            Err(why) => {
+                self.set_status(why);
+                cx.notify();
+                return;
+            }
         };
         let Some(view) = self.view() else {
             return;
@@ -321,7 +360,8 @@ impl ReviewApp {
         self.folds.gaps.clear();
         self.places.clear();
         self.set_buffer(None);
-        self.rows = rows::Layout::default();
+        self.rows = std::sync::Arc::new(rows::Layout::default());
+        self.preview = None;
         self.hunk_rows.clear();
         self.hunk = 0;
         let previous = self.selected.take();

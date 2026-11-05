@@ -101,6 +101,29 @@ pub fn folder_files(tree: &[TreeNode], folder: usize) -> Vec<&str> {
         .collect()
 }
 
+/// The nodes of `tree` a filter `query` keeps, as indices: the files whose path contains it,
+/// ignoring ASCII case, and the folders that hold them. Folds do not apply while filtering.
+#[must_use]
+pub fn filtered(tree: &[TreeNode], query: &str) -> Vec<usize> {
+    let needle = query.to_ascii_lowercase();
+    let mut kept = Vec::new();
+    // Walking backwards, the first node shallower than the last kept one is its folder.
+    let mut wanted_above = 0;
+    for (index, node) in tree.iter().enumerate().rev() {
+        let keep = if node.kind == NodeKind::File {
+            node.path.to_ascii_lowercase().contains(&needle)
+        } else {
+            node.depth < wanted_above
+        };
+        if keep {
+            kept.push(index);
+            wanted_above = node.depth;
+        }
+    }
+    kept.reverse();
+    kept
+}
+
 /// Where in `visible` (indices into `tree`) the node `path` of `kind` is, or, when a fold
 /// hides it, the innermost visible folder that holds it. Only a node of the same kind counts as
 /// the node itself, and only a folder as its holder.
@@ -413,6 +436,41 @@ mod tests {
         assert_eq!(folder_files(&tree, folder), ["foo/bar.rs"]);
         assert_eq!(tree[folder].counts.units, 1, "the counts agree");
         assert!(is_file(&tree, "foo"), "the deleted file is its own node");
+    }
+
+    /// A filter keeps the matching files and exactly the folders above them.
+    #[test]
+    fn a_filter_keeps_matches_and_their_folders() {
+        let file = |path: &str| FileStatus {
+            path: path.to_owned(),
+            counts: Counts {
+                units: 1,
+                new: 1,
+                ..Counts::default()
+            },
+            renamed_from: None,
+            change: review_core::FileChangeSummary::modified(),
+        };
+        let tree = review_core::tree::file_tree(&[
+            file("a/b/needle.rs"),
+            file("a/b/other.rs"),
+            file("a/c/x.rs"),
+            file("d/Needle.md"),
+            file("top.rs"),
+        ]);
+        let shown = |query: &str| -> Vec<String> {
+            filtered(&tree, query)
+                .into_iter()
+                .map(|index| tree[index].path.clone())
+                .collect()
+        };
+        assert_eq!(
+            shown("needle"),
+            ["a", "a/b", "a/b/needle.rs", "d", "d/Needle.md"]
+        );
+        assert_eq!(shown("top"), ["top.rs"]);
+        assert_eq!(shown("a/c"), ["a", "a/c", "a/c/x.rs"]);
+        assert_eq!(shown("absent"), Vec::<String>::new());
     }
 
     /// The cursor keeps a node's kind: with a deleted file `foo` beside a folder `foo/`, the

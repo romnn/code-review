@@ -1,13 +1,14 @@
 # Walks the built-in demo the lazygit way: files, one file's diff, hunks approved and flagged,
-# the whole file as a buffer, overlays, input racing background work, window chrome, themes,
-# and a force-push. Run with `task qa -- scripts/qa/smoke.qa`; screenshots land in target/qa/.
+# the whole file as a buffer, overlays, input racing background work, window chrome, diff
+# styles, the settings list with its previews and presets, side by side, and a force-push. Run
+# with `task qa -- scripts/qa/smoke.qa`; screenshots land in target/qa/.
 
 launch --demo
 expect "revision":"1"
 expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
-expect "token_emphasis":false,"diff_style":"syntax"
+expect "token_emphasis":false,"diff_style":"bold"
 shot 01-open
 
 # Moving through the files previews each one's diff.
@@ -113,12 +114,53 @@ key k
 state
 expect "hunk_badges":\["Accepted"\]
 
-# Plain red and green instead of syntax on tinted rows.
+# `|` cycles the diff styles, which are colors only: soft (Zed's muted look with chips), plain
+# (lazygit's red and green text) and back to bold (delta's). No style moves a row: the rows,
+# their height and their places stay as they were.
+state
+expect "density":"normal"
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+expect "row_height":28.0
+key |
+state
+expect "diff_style":"soft"
+expect "headers":"chips","change_bar":true
+expect "density":"normal"
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+expect "row_height":28.0
+shot 06-soft
 key |
 state
 expect "diff_style":"plain"
+expect "syntax":false,"background":"none"
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
 shot 06-plain
 key |
+state
+expect "diff_style":"bold"
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+
+# Side by side: removed lines beside added ones, each side with its own line numbers; a
+# selection in a half copies that side only, and when the diff gets too narrow it shows
+# unified, dropping the selection rather than letting it copy other text.
+key s
+state
+expect "layout":"side-by-side","effective_layout":"side-by-side"
+expect "kind":"Pair"
+shot 11-side-by-side
+drag 1110 280 1300 360
+state
+expect "column":"Right"
+key ctrl-= ctrl-= ctrl-= ctrl-= ctrl-= ctrl-= ctrl-= ctrl-=
+state
+expect "layout":"side-by-side","effective_layout":"unified"
+expect "selection":null
+key ctrl-0
+state
+expect "effective_layout":"side-by-side"
+key s
+state
+expect "layout":"unified"
 
 # Approving a whole file from the tree, as lazygit stages one.
 key escape
@@ -127,21 +169,190 @@ state
 expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
 shot 07-file-done
 
-# Themes.
+# The settings list: T opens it on the theme in use and j previews the next one; Escape drops
+# the preview and keeps what was applied.
 key shift-t
+state
+expect "overlay":"Settings"
+expect "cursor":"Theme: Carbonfox"
+key j
 state
 expect "theme":"tokyonight-night"
+expect "applied_theme":"carbonfox","previewing":true
 shot 08-tokyonight
-key shift-t
-key shift-t
-key shift-t
-key shift-t
-key shift-t
-key shift-t
-key shift-t
-key shift-t
+key escape
 state
+expect "overlay":null
 expect "theme":"carbonfox"
+
+# Apply, then preview, then Escape: the applied theme stays and only the preview goes.
+key ,
+key j
+key space
+state
+expect "applied_theme":"tokyonight-night","previewing":false
+key j
+state
+expect "theme":"nightfox"
+key escape
+state
+expect "overlay":null
+expect "theme":"tokyonight-night"
+
+# The search field takes every typed key, q, i, ? and space included; Escape goes back to the
+# list, keeping the search, and Escape again closes it.
+key ,
+key tab
+key q i ? space
+state
+expect "overlay":"Settings"
+expect "query":"qi\? ","searching":true
+key escape
+state
+expect "overlay":"Settings"
+expect "searching":false
+key escape
+state
+expect "overlay":null
+
+# Every entry previews while the cursor rests on it: the layout through the same transition as
+# `s`, and token emphasis; Escape drops the preview back to what was applied.
+key ,
+key tab
+key l a y o u t space s i d e
+state
+expect "cursor":"Layout: side by side"
+expect "layout":"side-by-side","effective_layout":"side-by-side"
+expect "previewing":true
+key escape
+key escape
+state
+expect "overlay":null
+expect "layout":"unified","effective_layout":"unified"
+expect "previewing":false
+key ,
+key tab
+key e m p h a s i s space o n
+state
+expect "cursor":"Token emphasis: on"
+expect "token_emphasis":true
+key escape
+key escape
+state
+expect "token_emphasis":false
+expect "previewing":false
+
+# Each density previews, moving the diff's rows, while the panel keeps the text size and row
+# height it opened with: its rows stay where they were. A font size previews the same way.
+key ,
+key tab
+key d e n s i t y
+state
+expect "cursor":"Density: compact"
+expect "density":"compact","effective_density":"compact"
+expect "row_height":26.0
+expect "geometry":\{"width":300.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
+key escape
+key j
+state
+expect "density":"normal"
+expect "row_height":28.0
+expect "geometry":\{"width":300.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":152.0\}
+key j
+state
+expect "density":"comfortable","effective_density":"comfortable"
+expect "previewing":true
+expect "row_height":30.0
+expect "geometry":\{"width":300.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":178.0\}
+shot 09b-density-preview
+key k k
+state
+expect "geometry":\{"width":300.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
+key escape
+state
+expect "overlay":null
+expect "density":"normal","effective_density":"normal"
+expect "previewing":false
+expect "row_height":28.0
+key ,
+key tab
+key f o n t space 2 0
+state
+expect "cursor":"Font size: 20 pt"
+expect "font":\{"family":"[^"]+","size":26.66
+expect "geometry":\{"width":300.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
+key escape
+key escape
+state
+expect "font":\{"family":"[^"]+","size":17.33
+expect "previewing":false
+
+# A preview that has to move a list to fit never moves the place for good: at the end of a
+# short file, a small font fits all of it, and dropping the preview scrolls back.
+file src/engine.rs
+key u
+key 0
+scroll 5000
+state
+expect "scroll_offset":468.0,
+key ,
+key tab
+key f o n t
+state
+expect "cursor":"Font size: 10 pt"
+expect "scroll_offset":132.0,
+key escape
+key escape
+state
+expect "scroll_offset":(468\.0|467\.99[0-9]*),
+
+# Clicking beside the settings list closes it and gives the keys back to the mode; clicking
+# its search field gives the field the keys, as Tab does.
+key ,
+click 1200 700
+state
+expect "overlay":null
+key ?
+state
+expect "overlay":"Help"
+key escape
+key ,
+click 100 84
+key z j q
+state
+expect "query":"zjq","searching":true
+key escape
+key escape
+state
+expect "overlay":null
+key escape
+
+# A file's place is kept by row, not pixels: scrolled in one density, it shows the same line at
+# the top after the zed preset below changes the density.
+file src/parser.rs
+scroll 300
+state
+expect "rows":\[\{"row":10,"source":10,
+file src/engine.rs
+
+# The zed preset, found by name and applied as a whole: One Dark with the soft style and
+# comfortable rows.
+key ,
+key tab
+key z e d
+key enter
+key escape
+key escape
+state
+expect "diff_style":"soft","theme":"one-dark"
+expect "density":"comfortable"
+expect "applied_theme":"one-dark"
+shot 10-zed
+file src/parser.rs
+state
+expect "rows":\[\{"row":[0-9]+,"source":10,
+expect "row_height":30.0
+file src/engine.rs
 
 # Screen modes: the diff across the whole width, and back.
 key 0
@@ -175,6 +386,224 @@ click 402 500 2
 state
 expect "sidebar":300.0
 
+# `/` in the tree filters it as lazygit does: typing narrows it, Enter keeps the filter and
+# returns to the list, Esc clears it.
+key escape
+state
+expect "mode":"Tree"
+key /
+key f o r m
+state
+expect "area":"Find"
+expect "query":"form","editing":true
+expect "selected":"src/format.rs"
+expect "tree":\[\{"path":"src","kind":"Directory".*\{"path":"src/format.rs","kind":"File".*\],"tree_cursor"
+shot 10-tree-filter
+key enter
+state
+expect "area":"Tree"
+expect "query":"form","editing":false
+key escape
+state
+expect "filter":null
+expect "path":"src/engine.rs"
+
+# `/` in the diff searches its code without leaving it; n and N step through the matches and
+# the selected hunk follows. Approved hunks fold, so the file goes back to unreviewed first.
+file src/engine.rs
+key u
+key 0
+key /
+key b a l a n c e
+key enter
+key n
+key n
+state
+expect "mode":"Diff"
+expect "target":"Diff","query":"balance","matches":5,"current":3
+expect "hunk":2,
+expect "status":"Match 4 of 5"
+shot 11-diff-find
+key escape
+
+# Side by side, a move's edits pair too: the source's lines numbered as in src/report.rs on the
+# left, the moved lines numbered as in src/format.rs on the right. Panning moves only code, and
+# another file starts back at the left edge.
+file src/format.rs
+key s
+state
+expect "text":"↙ moved with edits from src/report.rs:9–19
+expect "left":\{"kind":"NestedSame","head":2,"base":9,"text":"/// Renders balances
+expect "left":\{"kind":"NestedOld","head":null,"base":15,"text":"        out.push_str.*"right":\{"kind":"NestedNew","head":8,
+file src/engine.rs
+pan 100
+state
+expect "text_offset":100.0
+file src/parser.rs
+state
+expect "text_offset":0.0
+key s
+file src/engine.rs
+
+# Side by side, `/` finds each half's code apart, the base's half first in each row, and
+# highlights a match only in its own half.
+key 0
+key s
+key /
+key b a l a n c e
+key enter
+state
+expect "effective_layout":"side-by-side"
+expect "target":"Diff","query":"balance","matches":[0-9]+,"current":[0-9]+,"current_column":"Left"
+key n
+state
+expect "current_column":"Right"
+shot 11b-side-by-side-find
+key escape
+key s
+state
+expect "layout":"unified"
+
+# Ctrl+P finds a file by a fuzzy match of its path; Enter opens it in the diff.
+key ctrl-p
+key e n g
+state
+expect "overlay":"Picker"
+expect "area":"Picker"
+expect "kind":"Files","scope":"Changed","query":"eng"
+expect "entries":\[\{"path":"src/engine.rs","line":null,"text":"","changed":true\}
+shot 12-file-finder
+key escape
+state
+expect "area":"PickerList"
+key enter
+state
+expect "overlay":null
+expect "mode":"Diff"
+expect "selected":"src/engine.rs"
+
+# Ctrl+G searches contents with a preview; a hit inside a hunk opens the diff at that hunk, and
+# Tab widens the search to the whole tree, whose unchanged files open read-only.
+key ctrl-g
+key r e c o n c i l e
+state
+expect "kind":"Content","scope":"Changed","query":"reconcile"
+expect "path":"src/engine.rs","line":43
+shot 13-content-search
+key enter
+state
+expect "mode":"Diff"
+expect "hunk":2,
+expect "status":"src/engine.rs:44"
+key ctrl-g
+key tab
+key t i n y
+state
+expect "scope":"Tree"
+expect "path":"README.md","line":2
+key enter
+state
+expect "mode":"Buffer"
+expect "title":"README.md"
+expect "row":2,"col":2
+key escape
+
+# Enter typed before the search answers opens the newest query's first hit, not an older one.
+key ctrl-g
+key r e c o n c i l e enter
+state
+expect "overlay":null
+expect "status":"src/engine.rs:44"
+
+# A hit on an indented line outside every hunk opens the buffer at the match itself.
+key ctrl-g
+key s e l f . a p p l i e d enter
+state
+expect "mode":"Buffer"
+expect "row":20,"col":8
+key escape
+key escape
+file src/engine.rs
+key space
+state
+expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
+
+# Holding j in the tree previews files without building every diff; a space right after the
+# burst approves exactly the file whose diff shows.
+file src/generated/schema.rs
+rapid key j
+rapid key j
+rapid key j
+rapid state
+expect "preview":true
+rapid key space
+state
+expect "selected":"src/format.rs"
+expect "shown":"src/format.rs"
+expect "path":"src/format.rs","kind":"File","change":"A","progress":"Done"
+
+# Going back to a file keeps its syntax colors.
+file src/parser.rs
+key j
+key k
+state
+expect "selected":"src/parser.rs"
+expect "highlighted":true
+
+# However a file comes to show, the tree reveals it, so the tree's keys act on what shows: n
+# from a filtered tree opens the next file to review and clears the filter that hid it.
+key /
+key p a r s e r
+key enter
+key 0
+key n
+state
+expect "filter":null
+expect "selected":"src/report.rs"
+key escape
+key space
+state
+expect "path":"src/report.rs","kind":"File","change":"M","progress":"Done"
+
+# A buffer of one file never marks hunks of another file shown since.
+file src/engine.rs
+key 0
+key =
+file src/util.rs
+key space
+state
+expect "mode":"Buffer"
+expect "status":"Nothing here to review."
+expect "pending":0,"queued":0
+expect "path":"src/util.rs","kind":"File","change":"M","progress":"Open"
+key escape
+
+# A match in unchanged code selects the hunk around it, and a hunk scrolled off screen is
+# shown before it can be marked.
+key escape
+file src/engine.rs
+key u
+key 0
+key /
+key i t e r
+key enter
+state
+expect "hunk":2,
+resize 1600x400
+scroll -5000
+key space
+state
+expect "hunk_badges":\["Unreviewed"\]
+expect "status":"Hunk 3 of 3 was off screen
+key space
+state
+expect "status":"Approved hunk 3 of 3
+resize 1600x1000
+key escape
+key space
+state
+expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
+
 # Revision 2 simulates a force-push: approvals carry over where the code is unchanged, and
 # hunks that changed since they were reviewed say so.
 launch --demo-revision 2
@@ -185,3 +614,22 @@ find changed since
 state
 expect "tag":"changed since revision 1"
 shot 09-revision-2
+
+# A mark that lands while a held key previews a file by its header never builds that file's
+# diff early: it still opens at its first hunk that needs the reviewer once the cursor rests.
+launch --demo
+file src/generated/schema.rs
+rapid key j
+rapid key space
+rapid key j
+rapid state
+expect "selected":"src/engine.rs","shown":"src/engine.rs","preview":true
+state
+expect "selected":"src/engine.rs"
+expect "hunk":1,
+
+# A mistake in one diff style costs only that style, and the window says so where the reviewer
+# looks, not only on stderr.
+launch --demo --config scripts/qa/broken-style.toml
+expect "status":"Configuration: \[styles.calm\] cannot be used: it sets density
+expect "diff_style":"soft"

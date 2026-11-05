@@ -20,14 +20,18 @@
 //! - `file <path>` shows a file's diff and puts the tree cursor on it, as moving there does.
 //! - `find <text>` selects the hunk of the next diff row containing `text`, wrapping around.
 //! - `scroll <pixels>` scrolls the hunk list by `pixels`, down when positive.
+//! - `pan <pixels>` moves the side-by-side diff's text sideways, left when positive.
 //! - `clipboard` prints the clipboard's text as a JSON string.
 //! - `latency` prints input-to-frame latency percentiles as JSON.
+//! - `repeat <count> <milliseconds> <keystroke>` types a keystroke `count` times, one every
+//!   `milliseconds`, as a held key repeats, and prints how long each keystroke's handling took
+//!   and the input-to-frame latency over the burst as JSON.
 //! - `sample` prints the hunk list's scroll offset at once, without waiting for animations,
 //!   to observe a scroll animation in flight.
 //! - `state` prints the observable UI state as one line of JSON.
 //! - `quit` exits.
 //! - `rapid <command>` runs a command without waiting for the work it starts, to interleave
-//!   input with background work as fast typing does.
+//!   input with background work as fast typing does; `rapid state` prints the state at once.
 //!
 //! Each command (except `sample`) answers with one line on standard output (`ok`,
 //! `error: ...`, or the state) only once background work it started (marks, lookups, file
@@ -49,6 +53,20 @@ use serde_json::{Value, json};
 
 use super::state::Progress;
 use super::{Phase, ReviewApp, scroll};
+use crate::rows::Body;
+
+/// A side of a pair as `state` reports it: its kind, both positions and its text, or `null`
+/// for padding.
+fn qa_cell(cell: Option<&crate::rows::Cell>) -> Value {
+    cell.map_or(Value::Null, |cell| {
+        json!({
+            "kind": format!("{:?}", cell.kind),
+            "head": cell.head.as_ref().map(|head| head.line),
+            "base": cell.base,
+            "text": cell.text.chars().take(60).collect::<String>(),
+        })
+    })
+}
 
 /// How often QA mode checks whether background work or the next frame is done.
 const POLL: Duration = Duration::from_millis(4);
@@ -59,6 +77,11 @@ const TOOLTIP_DELAY: Duration = Duration::from_millis(650);
 /// A parsed QA command.
 enum Command {
     Key(Vec<String>),
+    Repeat {
+        count: usize,
+        interval: Duration,
+        keystroke: String,
+    },
     Action(String),
     Click {
         x: f32,
@@ -78,6 +101,7 @@ enum Command {
     Find(String),
     File(String),
     Scroll(f32),
+    Pan(f32),
     Clipboard,
     Latency,
     Sample,
@@ -100,6 +124,22 @@ impl Command {
                 argument.split_whitespace().map(str::to_owned).collect(),
             )),
             "action" if !argument.is_empty() => Ok(Self::Action(argument.to_owned())),
+            "repeat" => {
+                let count = number(words.next(), "a count")?;
+                let interval = number(words.next(), "an interval in milliseconds")?;
+                let keystroke = words.next().ok_or("expected a keystroke")?.to_owned();
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a small, non-negative count from a QA script"
+                )]
+                let count = count.max(0.0) as usize;
+                Ok(Self::Repeat {
+                    count,
+                    interval: Duration::from_secs_f32(interval.max(0.0) / 1000.0),
+                    keystroke,
+                })
+            }
             "click" => {
                 let x = number(words.next(), "x")?;
                 let y = number(words.next(), "y")?;
@@ -151,6 +191,7 @@ impl Command {
             "find" if !argument.is_empty() => Ok(Self::Find(argument.to_owned())),
             "file" if !argument.is_empty() => Ok(Self::File(argument.to_owned())),
             "scroll" => Ok(Self::Scroll(number(words.next(), "a number of pixels")?)),
+            "pan" => Ok(Self::Pan(number(words.next(), "a number of pixels")?)),
             "clipboard" => Ok(Self::Clipboard),
             "latency" => Ok(Self::Latency),
             "sample" => Ok(Self::Sample),
@@ -268,6 +309,16 @@ async fn run(
             .update(cx, |this, _| {
                 json!({ "scroll_offset": scroll::offset_of(&this.list) }).to_string()
             })
+            .unwrap_or_else(|err| format!("error: {err}"));
+    }
+    if let Command::Repeat {
+        count,
+        interval,
+        keystroke,
+    } = &command
+    {
+        return repeat(*count, *interval, keystroke, this, cx)
+            .await
             .unwrap_or_else(|err| format!("error: {err}"));
     }
     let done: Result<(), String> = match &command {
@@ -412,8 +463,15 @@ async fn run(
                 cx.notify();
             })
             .map_err(|err| err.to_string()),
+        Command::Pan(pixels) => this
+            .update(cx, |this, cx| {
+                this.text_scroll.pan(*pixels);
+                cx.notify();
+            })
+            .map_err(|err| err.to_string()),
         Command::Clipboard
         | Command::Hit(..)
+        | Command::Repeat { .. }
         | Command::Latency
         | Command::State
         | Command::Quit
@@ -423,6 +481,12 @@ async fn run(
         return format!("error: {err}");
     }
     if !wait {
+        // `rapid state` shows the state at once, mid-burst.
+        if matches!(command, Command::State) {
+            return this
+                .update(cx, |this, _| this.qa_state().to_string())
+                .unwrap_or_else(|err| format!("error: {err}"));
+        }
         return "ok".to_owned();
     }
     if let Err(err) = settle(this, cx).await {
@@ -447,6 +511,66 @@ async fn run(
     reply.unwrap_or_else(|err| format!("error: {err}"))
 }
 
+/// Types `keystroke` `count` times, one every `interval`, as a held key repeats, then waits for
+/// the window to settle and reports the handling time of each keystroke and the input-to-frame
+/// latency over the burst.
+async fn repeat(
+    count: usize,
+    interval: Duration,
+    keystroke: &str,
+    this: &WeakEntity<ReviewApp>,
+    cx: &mut AsyncWindowContext,
+) -> Result<String, String> {
+    let keystroke = Keystroke::parse(keystroke).map_err(|err| err.to_string())?;
+    this.update(cx, |this, _| this.latency.samples.clear())
+        .map_err(|err| err.to_string())?;
+    let started = std::time::Instant::now();
+    let mut handling = Vec::with_capacity(count);
+    for index in 0..count {
+        let due = started + interval.mul_f64(f64::from(u32::try_from(index).unwrap_or(u32::MAX)));
+        let now = std::time::Instant::now();
+        if due > now {
+            cx.background_executor().timer(due - now).await;
+        }
+        let begun = std::time::Instant::now();
+        let keystroke = keystroke.clone();
+        // The input-to-frame clock starts at the keystroke, as a real key press starts it.
+        this.update(cx, |this, _| this.latency.pending = Some(begun))
+            .map_err(|err| err.to_string())?;
+        cx.update(|window, cx| window.dispatch_keystroke(keystroke, cx))
+            .map_err(|err| err.to_string())?;
+        handling.push(begun.elapsed());
+    }
+    let typed = started.elapsed();
+    settle(this, cx).await?;
+    let settled = started.elapsed();
+    let latency = this
+        .update(cx, |this, _| this.qa_latency())
+        .map_err(|err| err.to_string())?;
+    Ok(json!({
+        "keys": count,
+        "typed_ms": typed.as_secs_f64() * 1000.0,
+        "settled_ms": settled.as_secs_f64() * 1000.0,
+        "handling": percentiles(&handling),
+        "latency": latency,
+    })
+    .to_string())
+}
+
+/// Nearest-rank percentiles of `samples` in milliseconds.
+fn percentiles(samples: &[Duration]) -> Value {
+    let mut samples: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.as_secs_f64() * 1000.0)
+        .collect();
+    samples.sort_by(f64::total_cmp);
+    let at = |percent: usize| {
+        let last = samples.len().saturating_sub(1);
+        samples.get((last * percent + 50) / 100).copied()
+    };
+    json!({ "p50_ms": at(50), "p99_ms": at(99), "max_ms": samples.last() })
+}
+
 /// Waits until no background work or animation is pending and a frame has been rendered after
 /// it.
 async fn settle(this: &WeakEntity<ReviewApp>, cx: &mut AsyncWindowContext) -> Result<(), String> {
@@ -457,6 +581,11 @@ async fn settle(this: &WeakEntity<ReviewApp>, cx: &mut AsyncWindowContext) -> Re
                     || !this.marks.is_empty()
                     || this.looking_up
                     || this.highlighting > 0
+                    || this.preview.is_some()
+                    || this
+                        .picker
+                        .as_ref()
+                        .is_some_and(super::picker::Picker::busy)
                     || this.refreshing
                     || this.list_animation.is_some()
                     || this.buffer_animation.is_some()
@@ -491,8 +620,11 @@ impl ReviewApp {
             .map(|step| (from + step) % count.max(1))
             .find(|&index| {
                 self.rows.rows.get(index).is_some_and(|row| {
-                    row.text.contains(text)
-                        || row.tag.as_deref().is_some_and(|tag| tag.contains(text))
+                    row.cells().any(|cell| cell.text.contains(text))
+                        || row.note().is_some_and(|note| {
+                            note.text.contains(text)
+                                || note.tag.as_deref().is_some_and(|tag| tag.contains(text))
+                        })
                 })
             })
             .ok_or_else(|| format!("no row contains {text:?}"))?;
@@ -554,14 +686,28 @@ impl ReviewApp {
         let rows: Vec<Value> = (first..end)
             .filter_map(|index| {
                 let row = self.rows.rows.get(index)?;
+                // Where a row's code is in each file: one line across the width, or both sides.
+                let code = match &row.body {
+                    Body::Code(cell) => json!({
+                        "head": cell.head.as_ref().map(|head| head.line),
+                        "base": cell.base,
+                    }),
+                    Body::Pair(pair) => json!({
+                        "left": qa_cell(pair.left.as_ref()),
+                        "right": qa_cell(pair.right.as_ref()),
+                    }),
+                    Body::Note(_) => Value::Null,
+                };
                 Some(json!({
                     "row": index,
-                    "kind": format!("{:?}", row.kind),
+                    "source": row.source,
+                    "kind": format!("{:?}", row.kind()),
                     "hunk": row.hunk,
                     "y": f32::from(viewport.top()) + (scroll::float(index) + 0.5) * row_height - offset,
-                    "text": row.text.chars().take(80).collect::<String>(),
-                    "tag": row.tag,
-                    "scope": row.scope,
+                    "text": row.text().chars().take(80).collect::<String>(),
+                    "tag": row.note().and_then(|note| note.tag.clone()),
+                    "scope": row.note().and_then(|note| note.scope.clone()),
+                    "code": code,
                 }))
             })
             .collect();
@@ -593,15 +739,81 @@ impl ReviewApp {
                 "back": buffer.previous.is_some(),
             })
         });
+        let look = self.look();
         let view_state = json!({
             "overlay": self.overlay.map(|overlay| format!("{overlay:?}")),
-            "token_emphasis": self.settings.token_emphasis,
-            "diff_style": self.settings.diff_style.name(),
-            "theme": self.settings.theme.name,
+            "token_emphasis": look.token_emphasis,
+            "diff_style": look.style.name,
+            "theme": look.theme.name,
+            "layout": look.layout.name(),
+            "effective_layout": self.rows.presentation.layout.name(),
+            "density": look.density.name(),
+            "effective_density": self.rows.presentation.density.name(),
+            "style": {
+                "syntax": look.style.syntax,
+                "background": look.style.background.name(),
+                "headers": look.style.headers.name(),
+                "change_bar": look.style.change_bar,
+            },
+            "applied_theme": self.settings.appearance.applied.theme.name,
+            "previewing": self.previewing(),
+            "settings": self.qa_settings(),
+        });
+        let picker = self.picker.as_ref().map(|picker| {
+            let entries: Vec<Value> = picker
+                .entries
+                .iter()
+                .take(8)
+                .map(|entry| {
+                    json!({
+                        "path": entry.path,
+                        "line": entry.line,
+                        "text": entry.text.chars().take(80).collect::<String>(),
+                        "changed": entry.change.is_some(),
+                    })
+                })
+                .collect();
+            json!({
+                "kind": format!("{:?}", picker.kind),
+                "scope": format!("{:?}", picker.scope),
+                "query": picker.query,
+                "editing": picker.editing,
+                "searching": picker.searching,
+                "count": picker.entries.len(),
+                "truncated": picker.truncated,
+                "selected": picker.selected,
+                "entries": entries,
+            })
+        });
+        let find = self.find.as_ref().map(|find| {
+            let current = find.current.and_then(|index| find.matches.get(index));
+            json!({
+                "target": format!("{:?}", find.target),
+                "query": find.query,
+                "matches": find.matches.len(),
+                "current": find.current,
+                "current_column": current.map(|found| format!("{:?}", found.column)),
+                "editing": find.editing,
+            })
+        });
+        let filter = self.filter.as_ref().map(|filter| {
+            json!({
+                "query": filter.query,
+                "editing": filter.editing,
+            })
+        });
+        let metrics = json!({
+            "row_height": row_height,
+            "line_height": self.fonts.line_height,
+            "diff_width": self.diff_width,
+            "text_offset": self.text_scroll.offset(),
+            "text_extent": self.text_scroll.extent(),
+            "widest_half": self.rows.widest_half,
         });
         let selection = self.selection.map(|selection| {
             json!({
                 "pane": format!("{:?}", selection.pane),
+                "column": format!("{:?}", selection.column),
                 "anchor": [selection.anchor.row, selection.anchor.col],
                 "head": [selection.head.row, selection.head.col],
             })
@@ -618,6 +830,14 @@ impl ReviewApp {
             "area": format!("{:?}", self.area()),
             "screen": format!("{:?}", self.screen),
             "selected": self.selected,
+            "shown": self.rows.files.first().map(|section| section.path.clone()),
+            "preview": self.preview.is_some(),
+            "highlighted": self
+                .rows
+                .files
+                .first()
+                .and_then(|section| self.folds.syntax.get(&section.path))
+                .is_some_and(|syntax| syntax.head.is_some() || syntax.base.is_some()),
             "hunk": self.hunk,
             "hunks": self.rows.hunks.len(),
             "hunk_units": hunk_units.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -634,12 +854,9 @@ impl ReviewApp {
             "tree": tree,
             "tree_cursor": self.tree_cursor,
             "buffer": buffer,
-            "find": self.find.as_ref().map(|find| json!({
-                "query": find.query,
-                "matches": find.matches.len(),
-                "current": find.current,
-                "editing": find.editing,
-            })),
+            "find": find,
+            "filter": filter,
+            "picker": picker,
             "selection": selection,
             "selected_text": self.selected_text(),
             "trusted": self.trusted,
@@ -654,6 +871,7 @@ impl ReviewApp {
                 "size": self.fonts.code_size,
                 "weight": self.fonts.code.weight.0,
             },
+            "metrics": metrics,
             "first_hunk_ms": self.first_hunk.map(|elapsed| elapsed.as_secs_f64() * 1000.0),
             "status": self.status.to_string(),
         })

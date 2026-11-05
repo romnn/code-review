@@ -23,10 +23,11 @@ use review_core::tree::NodeKind;
 use super::buffer::Marker;
 use super::keymap::Area;
 use super::state::{self, Progress};
-use super::text::Pane;
+use super::text::{Column, Pane};
 use super::{Mode, Overlay, Phase, ReviewApp, scroll};
-use crate::config::DiffStyle;
-use crate::rows::{Badge, Row, RowKind};
+use crate::config::{Background, Headers};
+use crate::look::{self, Look};
+use crate::rows::{Badge, Body, Cell, Note, Row, RowKind};
 use crate::syntax::Span;
 use crate::theme::Theme;
 
@@ -37,7 +38,7 @@ pub const FLASH: Duration = Duration::from_millis(450);
 pub const GRID: f32 = 4.0;
 
 /// The height of the pane headers and the bars.
-const BAR: f32 = GRID * 8.0;
+pub const BAR: f32 = GRID * 8.0;
 
 /// The colors of the window, by role, from the theme and the configured diff colors.
 #[derive(Clone, Copy)]
@@ -77,9 +78,25 @@ pub struct Palette {
 
 impl Palette {
     /// The palette of `theme`, with the configured line backgrounds when there are any.
-    pub fn new(theme: &Theme, removed: Option<u32>, added: Option<u32>) -> Self {
-        let line =
-            |hex: Option<u32>, fallback: Hsla| hex.map_or(fallback, |hex| gpui::rgb(hex).into());
+    ///
+    /// Muted line backgrounds are mixed toward the editor background here.
+    /// Everything that tints a line reads these final backgrounds, so lifting syntax colors to
+    /// stay legible measures against them.
+    pub fn new(
+        theme: &Theme,
+        removed: Option<u32>,
+        added: Option<u32>,
+        background: Background,
+    ) -> Self {
+        let line = |hex: Option<u32>, fallback: Hsla| {
+            let color = hex.map_or(fallback, |hex| gpui::rgb(hex).into());
+            match background {
+                Background::None | Background::Bold => color,
+                Background::Muted => {
+                    crate::theme::mix(color, theme.ui.background, look::MUTED_SHARE)
+                }
+            }
+        };
         Self {
             background: theme.ui.background,
             surface: theme.ui.panel,
@@ -156,7 +173,7 @@ impl Palette {
 }
 
 /// The glyph of a review progress: one per file or folder.
-fn progress_glyph(progress: Progress) -> &'static str {
+pub(super) fn progress_glyph(progress: Progress) -> &'static str {
     match progress {
         // Only state that needs action or confirms done carries ink.
         Progress::Open => "",
@@ -180,6 +197,17 @@ fn badges_glyph(badges: &[Badge]) -> (Badge, &'static str) {
         (Badge::Unreviewed, "◐")
     } else {
         (Badge::Unreviewed, "○")
+    }
+}
+
+/// A hunk's state in a word, for the chips of a comfortable header.
+fn badge_word(badges: &[Badge]) -> &'static str {
+    match badges_glyph(badges) {
+        (Badge::Flagged, _) => "flagged",
+        (Badge::Changed, _) => "changed",
+        (Badge::Accepted, _) => "approved",
+        (_, "◐") => "partly approved",
+        _ => "new",
     }
 }
 
@@ -274,15 +302,102 @@ fn syntax_spans(theme: &Theme, spans: &[Span], len: usize) -> Vec<(Range<usize>,
         .collect()
 }
 
+/// The parts of a line of code, which a row across the width and a half of a pair arrange.
+pub(super) struct CellParts {
+    /// The line number.
+    pub gutter: Div,
+    /// The `+`, `−` or blank sign.
+    pub sign: Div,
+    /// The code with its highlights.
+    pub text: StyledText,
+    /// The quiet `⏎` that stands for a blank changed line, so it never reads as an empty bar.
+    pub blank: Option<Div>,
+    /// The line's background, for changed lines in a style with line backgrounds.
+    pub background: Option<Hsla>,
+    /// The text color, for changed lines in a style without syntax colors.
+    pub text_color: Option<Hsla>,
+}
+
+/// How the diff style inks a line of code.
+struct CellInk {
+    /// `−`, `+` or blank.
+    sign: &'static str,
+    sign_color: Hsla,
+    /// The line's background, when the style draws one.
+    background: Option<Hsla>,
+    /// The text color, for a changed line in a style without syntax colors.
+    text_color: Option<Hsla>,
+    /// The change bar's color, for a changed line in a style with one.
+    bar: Option<Hsla>,
+}
+
+/// A line's number in its file, with the change bar along the gutter's edge when there is one.
+fn gutter(cell: &Cell, column: Column, bar: Option<Hsla>, colors: &Palette) -> Div {
+    let nested = matches!(
+        cell.kind,
+        RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
+    );
+    // Each half of a pair numbers its own side: the left the base (or a nested diff's old
+    // side), the right the head. Across the width, a nested line has no single number.
+    let line = match column {
+        Column::Left => cell.base,
+        Column::Right => cell.head.as_ref().map(|head| head.line),
+        Column::Whole if nested => None,
+        Column::Whole => cell.head.as_ref().map(|head| head.line).or(cell.base),
+    };
+    let number = match line {
+        Some(line) => format!("{}", line + 1),
+        None if nested => "┆".to_owned(),
+        None => String::new(),
+    };
+    div()
+        .w(px(super::present::GUTTER))
+        .h_full()
+        .flex_none()
+        .relative()
+        .flex()
+        .items_center()
+        .justify_end()
+        .pr(px(GRID * 2.0))
+        .children(bar.map(|color| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(GRID * 0.5))
+                .w(px(2.0))
+                .bg(color)
+        }))
+        .text_color(if cell.kind == RowKind::Removed {
+            Hsla {
+                a: 0.6,
+                ..colors.faint
+            }
+        } else {
+            colors.faint
+        })
+        .child(number)
+}
+
 impl ReviewApp {
+    /// The look on screen: the preview of the settings list, or the applied look.
+    pub(super) fn look(&self) -> &Look {
+        self.settings.appearance.shown()
+    }
+
     /// The current theme.
     pub(super) fn theme(&self) -> &Theme {
-        self.settings.theme.as_ref()
+        self.look().theme.as_ref()
     }
 
     /// The palette of the current theme.
     pub(super) fn palette(&self) -> Palette {
-        Palette::new(self.theme(), self.settings.removed, self.settings.added)
+        Palette::new(
+            self.theme(),
+            self.settings.removed,
+            self.settings.added,
+            self.look().style.background,
+        )
     }
 
     /// The diff row to measure for the list's width: the widest code row or the widest
@@ -323,17 +438,16 @@ impl ReviewApp {
             .filter_map(|index| {
                 let row = self.rows.rows.get(index)?;
                 let in_frame = framed.as_ref().is_some_and(|frame| frame.contains(&index));
-                let element = if row.kind.is_code() {
-                    let layers = self.code_layers(index, row);
-                    let (element, layout) = self.code_row(row, in_frame, &layers, &colors);
-                    self.painted
-                        .borrow_mut()
-                        .insert((Pane::Diff, index), layout);
-                    element.h(px(row_height)).into_any_element()
-                } else {
-                    self.annotation_row(index, row, in_frame, &colors, cx)
+                let element = match &row.body {
+                    Body::Code(cell) => self
+                        .code_row(index, row.file, cell, in_frame, &colors)
                         .h(px(row_height))
-                        .into_any_element()
+                        .into_any_element(),
+                    Body::Pair(pair) => self.pair_row(index, row.file, pair, in_frame, &colors),
+                    Body::Note(note) => self
+                        .annotation_row(index, row, note, in_frame, &colors, cx)
+                        .h(px(row_height))
+                        .into_any_element(),
                 };
                 Some(element)
             })
@@ -345,55 +459,84 @@ impl ReviewApp {
         rows
     }
 
-    /// The highlight layers of a code row: syntax colors, then the selection.
-    fn code_layers(&self, index: usize, row: &Row) -> Vec<Vec<(Range<usize>, HighlightStyle)>> {
-        let mut layers = vec![self.syntax_layer(row)];
+    /// The highlight layers of a line of code painted in `column`: syntax colors, the diff
+    /// search's matches in that column, then the selection when the line takes part in it.
+    fn code_layers(
+        &self,
+        index: usize,
+        file: usize,
+        cell: &Cell,
+        column: Column,
+    ) -> Vec<Vec<(Range<usize>, HighlightStyle)>> {
+        let mut layers = vec![self.syntax_layer(file, cell)];
+        if let Some(find) = self.search_of(Mode::Diff) {
+            let colors = self.palette();
+            let current = find.current.and_then(|current| find.matches.get(current));
+            let start = find.matches.partition_point(|found| found.row < index);
+            layers.push(
+                find.matches
+                    .get(start..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take_while(|found| found.row == index)
+                    .filter(|found| found.column == column)
+                    .map(|found| {
+                        let style = if current == Some(found) {
+                            block(colors.accent, colors.background)
+                        } else {
+                            background(colors.find)
+                        };
+                        (found.range.clone(), style)
+                    })
+                    .collect(),
+            );
+        }
         if let Some(range) = self
             .selection
-            .filter(|selection| selection.pane == Pane::Diff)
-            .and_then(|selection| selection.range_in_row(index, row.content_len))
+            .filter(|selection| selection.pane == Pane::Diff && selection.covers(column))
+            .and_then(|selection| selection.range_in_row(index, cell.content_len))
         {
             layers.push(vec![(range, background(self.palette().selection))]);
         }
         layers
     }
 
-    /// The syntax colors of a code row: always for unchanged code, and for changed code in the
-    /// syntax style; the plain style colors changed lines as a whole instead.
-    fn syntax_layer(&self, row: &Row) -> Vec<(Range<usize>, HighlightStyle)> {
-        let changed = matches!(
-            row.kind,
-            RowKind::Removed | RowKind::Added | RowKind::NestedOld | RowKind::NestedNew
-        );
-        if changed && self.settings.diff_style == DiffStyle::Plain && !row.quiet {
+    /// The syntax colors of a line of code, in a style with syntax colors.
+    ///
+    /// A style without them, as lazygit draws a diff, has none anywhere, only red and green
+    /// changed lines.
+    /// A line of the head takes the head's colors, any other line of the base the base's.
+    fn syntax_layer(&self, file: usize, cell: &Cell) -> Vec<(Range<usize>, HighlightStyle)> {
+        let style = &self.look().style;
+        if !style.syntax {
             return Vec::new();
         }
         let Some(syntax) = self
             .rows
             .files
-            .get(row.file)
+            .get(file)
             .and_then(|section| self.folds.syntax.get(&section.path))
         else {
             return Vec::new();
         };
-        let spans = match row.kind {
-            RowKind::Removed => row
-                .base
-                .zip(syntax.base.as_ref())
-                .map(|(line, side)| side.line(line)),
-            RowKind::Added | RowKind::Context | RowKind::NestedNew | RowKind::NestedSame => row
-                .head
-                .as_ref()
-                .zip(syntax.head.as_ref())
-                .map(|(head, side)| side.line(head.line)),
-            _ => None,
+        // A nested line's old side comes from another file or version than this file's base,
+        // whose colors it never takes.
+        let nested = matches!(
+            cell.kind,
+            RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
+        );
+        let spans = match (&cell.head, cell.base) {
+            (Some(head), _) => syntax.head.as_ref().map(|side| side.line(head.line)),
+            (None, Some(base)) if !nested => syntax.base.as_ref().map(|side| side.line(base)),
+            (None, _) => None,
         };
-        let mut layer = syntax_spans(self.theme(), spans.unwrap_or_default(), row.content_len);
+        let mut layer = syntax_spans(self.theme(), spans.unwrap_or_default(), cell.content_len);
         // On a tinted line, dim colors such as comments lift toward the text color until they
-        // stay readable.
+        // stay readable against the line's final background.
         let colors = self.palette();
-        let tint = match row.kind {
-            _ if row.quiet => Some(colors.quiet_line),
+        let tint = match cell.kind {
+            _ if style.background == Background::None => None,
+            _ if cell.quiet => Some(colors.quiet_line),
             RowKind::Removed | RowKind::NestedOld => Some(colors.removed_line),
             RowKind::Added | RowKind::NestedNew => Some(colors.added_line),
             _ => None,
@@ -408,110 +551,134 @@ impl ReviewApp {
         layer
     }
 
-    /// A line of code: the gutter, the sign and the text, on the line's background.
+    /// How the diff style inks a line of code: its sign, background, text color and change
+    /// bar.
+    ///
+    /// A formatting-only line is shown, but never as a removal or an addition.
+    fn cell_ink(&self, cell: &Cell, colors: &Palette) -> CellInk {
+        let style = &self.look().style;
+        let line = |color: Hsla| (style.background != Background::None).then_some(color);
+        let text = |color: Hsla| (!style.syntax).then_some(color);
+        let bar = |color: Hsla| style.change_bar.then_some(color);
+        match cell.kind {
+            RowKind::Removed | RowKind::NestedOld | RowKind::Added | RowKind::NestedNew
+                if cell.quiet =>
+            {
+                CellInk {
+                    sign: if matches!(cell.kind, RowKind::Removed | RowKind::NestedOld) {
+                        "−"
+                    } else {
+                        "+"
+                    },
+                    sign_color: colors.faint,
+                    background: line(colors.quiet_line),
+                    text_color: None,
+                    bar: bar(colors.faint),
+                }
+            }
+            RowKind::Removed | RowKind::NestedOld => CellInk {
+                sign: "−",
+                sign_color: colors.removed_sign,
+                background: line(colors.removed_line),
+                text_color: text(colors.removed_text),
+                bar: bar(colors.removed_sign),
+            },
+            RowKind::Added | RowKind::NestedNew => CellInk {
+                sign: "+",
+                sign_color: colors.added_sign,
+                background: line(colors.added_line),
+                text_color: text(colors.added_text),
+                bar: bar(colors.added_sign),
+            },
+            _ => CellInk {
+                sign: " ",
+                sign_color: colors.faint,
+                background: None,
+                text_color: None,
+                bar: None,
+            },
+        }
+    }
+
+    /// The underlines of the tokens a line really changed, when the look emphasizes them.
+    fn emphasis_layer(&self, cell: &Cell, colors: &Palette) -> Vec<(Range<usize>, HighlightStyle)> {
+        if !self.look().token_emphasis || cell.quiet {
+            return Vec::new();
+        }
+        let underline = HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(Hsla {
+                    a: 0.5,
+                    ..colors.text
+                }),
+                wavy: false,
+            }),
+            ..HighlightStyle::default()
+        };
+        cell.highlights
+            .iter()
+            .map(|range| (range.clone(), underline))
+            .collect()
+    }
+
+    /// A line of code's parts, painted in `column`: the gutter, the sign, the highlighted text
+    /// and the line's colors; and the text's layout, for mapping the mouse to it.
+    pub(super) fn code_cell(
+        &self,
+        index: usize,
+        file: usize,
+        cell: &Cell,
+        column: Column,
+        colors: &Palette,
+    ) -> (CellParts, gpui::TextLayout) {
+        let ink = self.cell_ink(cell, colors);
+        let mut layers = self.code_layers(index, file, cell, column);
+        layers.push(self.emphasis_layer(cell, colors));
+        let highlights = merge_highlights(cell.text.len(), &layers);
+        let text = StyledText::new(cell.text.clone()).with_highlights(highlights);
+        let layout = text.layout().clone();
+        let blank = (cell.text.is_empty()
+            && matches!(cell.kind, RowKind::Removed | RowKind::Added))
+        .then(|| div().text_color(colors.faint).child("⏎"));
+        let parts = CellParts {
+            gutter: gutter(cell, column, ink.bar, colors),
+            sign: div()
+                .w(px(super::present::SIGN))
+                .flex_none()
+                .text_color(ink.sign_color)
+                .child(ink.sign),
+            text,
+            blank,
+            background: ink.background,
+            text_color: ink.text_color,
+        };
+        (parts, layout)
+    }
+
+    /// A line of code across the width: the gutter, the sign and the text, on the line's
+    /// background.
     fn code_row(
         &self,
-        row: &Row,
+        index: usize,
+        file: usize,
+        cell: &Cell,
         in_frame: bool,
-        layers: &[Vec<(Range<usize>, HighlightStyle)>],
         colors: &Palette,
-    ) -> (Div, gpui::TextLayout) {
-        let plain = self.settings.diff_style == DiffStyle::Plain;
-        let (sign, sign_color, line_bg, text_color) = match row.kind {
-            RowKind::Removed | RowKind::NestedOld if row.quiet => {
-                ("−", colors.faint, Some(colors.quiet_line), None)
-            }
-            RowKind::Added | RowKind::NestedNew if row.quiet => {
-                ("+", colors.faint, Some(colors.quiet_line), None)
-            }
-            RowKind::Removed | RowKind::NestedOld if plain => {
-                ("−", colors.removed_sign, None, Some(colors.removed_text))
-            }
-            RowKind::Added | RowKind::NestedNew if plain => {
-                ("+", colors.added_sign, None, Some(colors.added_text))
-            }
-            RowKind::Removed | RowKind::NestedOld => {
-                ("−", colors.removed_sign, Some(colors.removed_line), None)
-            }
-            RowKind::Added | RowKind::NestedNew => {
-                ("+", colors.added_sign, Some(colors.added_line), None)
-            }
-            _ => (" ", colors.faint, None, None),
-        };
-        let emphasis = self.settings.token_emphasis && !row.quiet;
-        let mut layers = layers.to_vec();
-        if emphasis {
-            layers.push(
-                row.highlights
-                    .iter()
-                    .map(|range| {
-                        (
-                            range.clone(),
-                            HighlightStyle {
-                                underline: Some(UnderlineStyle {
-                                    thickness: px(1.0),
-                                    color: Some(Hsla {
-                                        a: 0.5,
-                                        ..colors.text
-                                    }),
-                                    wavy: false,
-                                }),
-                                ..HighlightStyle::default()
-                            },
-                        )
-                    })
-                    .collect(),
-            );
-        }
-        let highlights = merge_highlights(row.text.len(), &layers);
-        let nested = matches!(
-            row.kind,
-            RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
-        );
-        let gutter = match (&row.head, row.base, nested) {
-            (_, _, true) => "┆".to_owned(),
-            (Some(head), ..) => format!("{}", head.line + 1),
-            (None, Some(base), _) => format!("{}", base + 1),
-            (None, None, false) => String::new(),
-        };
-        let text = StyledText::new(row.text.clone()).with_highlights(highlights);
-        let layout = text.layout().clone();
-        let element = h_flex()
+    ) -> Div {
+        let (parts, layout) = self.code_cell(index, file, cell, Column::Whole, colors);
+        self.painted
+            .borrow_mut()
+            .insert((Pane::Diff, Column::Whole, index), layout);
+        h_flex()
             .min_w_full()
             .whitespace_nowrap()
-            .when_some(line_bg, gpui::Styled::bg)
-            .when_some(text_color, gpui::Styled::text_color)
+            .when_some(parts.background, gpui::Styled::bg)
+            .when_some(parts.text_color, gpui::Styled::text_color)
             .child(frame_bar(in_frame, colors))
-            .child(
-                div()
-                    .w(px(GRID * 13.0))
-                    .flex_none()
-                    .pr(px(GRID * 2.0))
-                    .text_right()
-                    .text_color(if row.kind == RowKind::Removed {
-                        Hsla {
-                            a: 0.6,
-                            ..colors.faint
-                        }
-                    } else {
-                        colors.faint
-                    })
-                    .child(gutter),
-            )
-            .child(
-                div()
-                    .w(px(GRID * 4.0))
-                    .flex_none()
-                    .text_color(sign_color)
-                    .child(sign),
-            )
-            .child(text)
-            // A blank changed line shows quietly instead of as an empty colored bar.
-            .when(
-                row.text.is_empty() && matches!(row.kind, RowKind::Removed | RowKind::Added),
-                |row| row.child(div().text_color(colors.faint).child("⏎")),
-            );
-        (element, layout)
+            .child(parts.gutter)
+            .child(parts.sign)
+            .child(self.shifted(h_flex().child(parts.text).children(parts.blank)))
     }
 
     /// One of our own rows: a hunk header, a gap, a note, a move or a description, on the
@@ -520,6 +687,7 @@ impl ReviewApp {
         &self,
         index: usize,
         row: &Row,
+        note: &Note,
         in_frame: bool,
         colors: &Palette,
         cx: &mut Context<Self>,
@@ -532,69 +700,86 @@ impl ReviewApp {
             .text_size(px(small))
             .flex()
             .items_center();
-        match row.kind {
+        match note.kind {
             RowKind::Spacer => base,
             RowKind::Gap => base
                 .cursor_pointer()
                 .child(frame_bar(in_frame, colors))
                 .child(div().w(px(GRID * 17.0)).flex_none())
-                .child(div().w(px(GRID * 6.0)).h(px(1.0)).bg(colors.hairline))
                 .child(
-                    div()
-                        .px(px(GRID * 2.0))
-                        .text_color(colors.faint)
-                        .child(row.text.clone()),
+                    self.clipped(
+                        h_flex()
+                            .flex_1()
+                            .child(div().w(px(GRID * 6.0)).h(px(1.0)).bg(colors.hairline))
+                            .child(
+                                div()
+                                    .px(px(GRID * 2.0))
+                                    .text_color(colors.faint)
+                                    .child(note.text.clone()),
+                            )
+                            .child(div().flex_1().h(px(1.0)).bg(colors.hairline)),
+                    ),
                 )
-                .child(div().flex_1().h(px(1.0)).bg(colors.hairline))
                 .hover(|row| row.bg(colors.band))
                 .on_click(cx.listener(move |this, _, _, cx| this.expand_gap(index, cx))),
-            RowKind::Header => self.hunk_header(index, row, in_frame, base, colors),
+            RowKind::Header => self.hunk_header(row, note, in_frame, base, colors),
             RowKind::Note => base
                 .bg(colors.band)
                 .child(frame_bar(in_frame, colors))
                 .child(div().w(px(GRID * 13.0)).flex_none())
                 .child(div().w(px(3.0)).h_full().flex_none().bg(colors.accent))
                 .child(
-                    div()
-                        .pl(px(GRID * 3.0))
-                        .text_color(colors.text)
-                        .child(row.text.clone()),
-                )
-                .children(
-                    row.tag
-                        .clone()
-                        .map(|tag| div().pl(px(GRID * 3.0)).text_color(colors.faint).child(tag)),
+                    self.clipped(
+                        h_flex()
+                            .child(
+                                div()
+                                    .pl(px(GRID * 3.0))
+                                    .text_color(colors.text)
+                                    .child(note.text.clone()),
+                            )
+                            .children(note.tag.clone().map(|tag| {
+                                div().pl(px(GRID * 3.0)).text_color(colors.faint).child(tag)
+                            })),
+                    ),
                 ),
             _ => {
-                let color = match row.kind {
+                let color = match note.kind {
                     RowKind::Moved => colors.moved,
                     _ => colors.dim,
                 };
-                let hint = match row.kind {
-                    RowKind::Moved if row.link.is_some() => Some("⏎ follow"),
+                let hint = match note.kind {
+                    RowKind::Moved if note.link.is_some() => Some("⏎ follow"),
                     RowKind::Collapsed => Some("⏎ shows the code"),
                     _ => None,
                 };
                 base.bg(colors.band)
                     .child(frame_bar(in_frame, colors))
                     .child(div().w(px(GRID * 17.0)).flex_none())
-                    .child(div().text_color(color).child(row.text.clone()))
-                    .children(hint.map(|hint| {
-                        div()
-                            .pl(px(GRID * 3.0))
-                            .text_color(colors.faint)
-                            .child(hint)
-                    }))
+                    .child(
+                        self.clipped(
+                            h_flex()
+                                .child(div().text_color(color).child(note.text.clone()))
+                                .children(hint.map(|hint| {
+                                    div()
+                                        .pl(px(GRID * 3.0))
+                                        .text_color(colors.faint)
+                                        .child(hint)
+                                })),
+                        ),
+                    )
             }
         }
     }
 
     /// A hunk's header: one quiet line with its state glyph, where it is, what kind of change
     /// it is and the scopes around it.
+    ///
+    /// Compact, it is a band; comfortable, it sits on the background with its parts as small
+    /// muted chips, set apart by the air around it.
     fn hunk_header(
         &self,
-        index: usize,
         row: &Row,
+        note: &Note,
         in_frame: bool,
         base: Stateful<Div>,
         colors: &Palette,
@@ -618,8 +803,65 @@ impl ReviewApp {
         } else {
             colors.dim
         };
-        let _ = index;
-        base.bg(if selected { colors.raised } else { colors.band })
+        let chips = self.look().style.headers == Headers::Chips;
+        let background = match (chips, selected) {
+            (_, true) => colors.raised,
+            (false, false) => colors.band,
+            (true, false) => colors.background,
+        };
+        let content = if chips {
+            let chip = |text: String, color: Hsla| {
+                div()
+                    .flex_none()
+                    .px(px(GRID * 1.5))
+                    .line_height(px(self.fonts.ui_size() * 1.45))
+                    .bg(if selected {
+                        colors.band
+                    } else {
+                        colors.surface
+                    })
+                    .text_color(color)
+                    .child(text)
+            };
+            let first = units.first().map(ToString::to_string).unwrap_or_default();
+            let unit = match units.len() {
+                0 | 1 => first,
+                more => format!("{first} +{}", more - 1),
+            };
+            h_flex()
+                .min_w_0()
+                .gap(px(GRID * 2.0))
+                .child(chip(badge_word(&badges).to_owned(), colors.badge(badge)))
+                .child(chip(unit, colors.faint))
+                .child(chip(note.text.clone(), label))
+                .children(note.tag.clone().map(|tag| chip(tag, colors.kind_quiet)))
+                .children(note.scope.clone().map(|scope| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(colors.faint)
+                        .child(scope)
+                }))
+        } else {
+            h_flex()
+                .min_w_0()
+                .child(div().text_color(label).child(note.text.clone()))
+                .children(note.tag.clone().map(|tag| {
+                    div()
+                        .ml(px(GRID * 2.0))
+                        .text_color(colors.kind_quiet)
+                        .child(format!("· {tag}"))
+                }))
+                .children(note.scope.clone().map(|scope| {
+                    div()
+                        .ml(px(GRID * 2.0))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(colors.faint)
+                        .child(format!("· {scope}"))
+                }))
+        };
+        base.bg(background)
             .child(frame_bar(in_frame, colors))
             .child(
                 div()
@@ -637,21 +879,7 @@ impl ReviewApp {
                     .text_color(colors.badge(badge))
                     .child(glyph),
             )
-            .child(div().text_color(label).child(row.text.clone()))
-            .children(row.tag.clone().map(|tag| {
-                div()
-                    .ml(px(GRID * 2.0))
-                    .text_color(colors.kind_quiet)
-                    .child(format!("· {tag}"))
-            }))
-            .children(row.scope.clone().map(|scope| {
-                div()
-                    .ml(px(GRID * 2.0))
-                    .min_w_0()
-                    .truncate()
-                    .text_color(colors.faint)
-                    .child(format!("· {scope}"))
-            }))
+            .child(self.clipped(content))
     }
 
     /// The files pane: a header with the totals, and the tree.
@@ -666,6 +894,21 @@ impl ReviewApp {
             .count();
         let visible = self.visible_tree();
         let count = visible.len();
+        let filter = self.filter_query().map(|query| {
+            let shown = visible
+                .iter()
+                .filter(|&&index| {
+                    self.tree
+                        .get(index)
+                        .is_some_and(|node| node.kind == NodeKind::File)
+                })
+                .count();
+            (format!("/{query}"), shown)
+        });
+        let title = match &filter {
+            Some((_, shown)) => format!("Files {shown}/{files}"),
+            None => format!("Files {files}"),
+        };
         v_flex()
             .w(px(width))
             .h_full()
@@ -681,10 +924,18 @@ impl ReviewApp {
                     .border_color(colors.hairline)
                     .child(
                         div()
-                            .flex_1()
+                            .flex_none()
                             .text_color(if focused { colors.text } else { colors.dim })
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("Files {files}")),
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(colors.accent)
+                            .children(filter.map(|(query, _)| query)),
                     )
                     .child(progress_meter(reviewed, total, &colors)),
             )
@@ -904,6 +1155,9 @@ impl ReviewApp {
                 details.push("moved code".to_owned());
             }
         }
+        if self.look().layout == crate::config::DiffLayout::SideBySide && !self.side_by_side() {
+            details.push("unified · too narrow for side by side".to_owned());
+        }
         let units: Vec<_> = self.rows.hunks.concat();
         let approved = self
             .view()
@@ -963,17 +1217,28 @@ impl ReviewApp {
     }
 
     /// The diff list of the selected file, with its scrollbars, or a loading or empty state.
-    fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_diff(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let colors = self.palette();
         let row_height = self.fonts.row_height();
+        let side_by_side = self.side_by_side();
         let list = uniform_list(
             "rows",
             self.rows.rows.len(),
             cx.processor(|this, range, _, cx| this.render_rows(range, cx)),
         )
-        .track_scroll(&self.list)
-        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-        .with_width_from_item(self.widest_row())
+        .track_scroll(&self.list);
+        // Side by side, the halves move their text by the shared offset instead; see `pairs`.
+        let list = if side_by_side {
+            let viewport = gpui_component::scroll::ScrollbarHandle::viewport_bounds(&self.list);
+            self.text_scroll.update(
+                self.text_extent(window, f32::from(viewport.size.width)),
+                viewport,
+            );
+            list.with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
+        } else {
+            list.with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .with_width_from_item(self.widest_row())
+        }
         .size_full();
         let empty = match &self.phase {
             Phase::Loading(started) => Some(state_card(
@@ -988,6 +1253,8 @@ impl ReviewApp {
                 colors.error,
                 &colors,
             )),
+            // A previewed file's diff follows once the tree cursor rests.
+            Phase::Ready if self.preview.is_some() => None,
             Phase::Ready if self.rows.rows.is_empty() => Some(state_card(
                 "Nothing to show",
                 "Pick a file on the left.",
@@ -1012,9 +1279,16 @@ impl ReviewApp {
                     this.mouse_down(Pane::Diff, event, window, cx);
                 }),
             )
+            .on_scroll_wheel(cx.listener(Self::text_wheel))
             .child(list)
             .child(Scrollbar::vertical(&self.list_bar).mode(ScrollbarMode::Always))
-            .child(Scrollbar::horizontal(&self.list_bar))
+            .map(|area| {
+                if side_by_side {
+                    area.child(Scrollbar::horizontal(&self.text_scroll))
+                } else {
+                    area.child(Scrollbar::horizontal(&self.list_bar))
+                }
+            })
             .children(empty.map(|card| {
                 div()
                     .absolute()
@@ -1038,19 +1312,17 @@ impl ReviewApp {
         let Some(buffer) = self.buffer.as_ref() else {
             return div().into_any_element();
         };
-        let theme = Arc::clone(&self.settings.theme);
+        let theme = Arc::clone(&self.look().theme);
         let lines = Arc::clone(&buffer.lines);
         let selection = self
             .selection
             .filter(|selection| selection.pane == Pane::Source);
         let matches: Arc<Vec<super::find::Match>> = self
-            .find
-            .as_ref()
+            .search_of(Mode::Buffer)
             .map(|find| Arc::clone(&find.matches))
             .unwrap_or_default();
         let current = self
-            .find
-            .as_ref()
+            .search_of(Mode::Buffer)
             .and_then(|find| find.current)
             .and_then(|index| matches.get(index).cloned());
         let painted = Rc::clone(&self.painted);
@@ -1094,6 +1366,9 @@ impl ReviewApp {
                         super::buffer::Origin::Review(_) => "whole file, read-only".to_owned(),
                         super::buffer::Origin::Definition(_) => {
                             "definition, read-only · Ctrl+O back".to_owned()
+                        }
+                        super::buffer::Origin::Head(_) => {
+                            "not changed in this review, read-only".to_owned()
                         }
                     }),
             )
@@ -1151,7 +1426,7 @@ impl ReviewApp {
                         .with_highlights(merge_highlights(line.len(), &layers));
                     painted
                         .borrow_mut()
-                        .insert((Pane::Source, index), text.layout().clone());
+                        .insert((Pane::Source, Column::Whole, index), text.layout().clone());
                     let marker = markers.get(index).copied().flatten();
                     Some(
                         h_flex()
@@ -1222,11 +1497,35 @@ impl ReviewApp {
             .into_any_element()
     }
 
-    /// The buffer's find bar, outside the buffer's key context so typing never triggers the
-    /// buffer's keys.
+    /// The `/` bar of the current mode, outside the modes' key context so typing never
+    /// triggers their keys: the tree's filter, or the diff's or the buffer's find.
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let colors = self.palette();
-        self.find.as_ref().filter(|find| find.editing).map(|find| {
+        if !self.typing() {
+            return None;
+        }
+        let (input, count) = if self.mode == Mode::Tree {
+            let filter = self.filter.as_ref()?;
+            let files = self
+                .visible_tree()
+                .iter()
+                .filter(|&&index| {
+                    self.tree
+                        .get(index)
+                        .is_some_and(|node| node.kind == NodeKind::File)
+                })
+                .count();
+            (filter.input.clone(), super::plural(files, "file"))
+        } else {
+            let find = self.search_of(self.mode)?;
+            let count = match find.current {
+                Some(current) => format!("{}/{}", current + 1, find.matches.len()),
+                None if find.matches.len() == 1 => "1 match".to_owned(),
+                None => format!("{} matches", find.matches.len()),
+            };
+            (find.input.clone(), count)
+        };
+        Some({
             h_flex()
                 .key_context(Area::Find.context())
                 .on_action(cx.listener(Self::close_find))
@@ -1238,16 +1537,8 @@ impl ReviewApp {
                 .border_b_1()
                 .border_color(colors.hairline)
                 .child(div().text_color(colors.accent).child("/"))
-                .child(
-                    div()
-                        .flex_1()
-                        .child(Input::new(&find.input).appearance(false)),
-                )
-                .child(
-                    div()
-                        .text_color(colors.dim)
-                        .child(format!("{} matches", find.matches.len())),
-                )
+                .child(div().flex_1().child(Input::new(&input).appearance(false)))
+                .child(div().text_color(colors.dim).child(count))
         })
     }
 
@@ -1292,17 +1583,66 @@ impl ReviewApp {
                 Mode::Tree => true,
             },
             "Dismiss" => self.mode == Mode::Buffer,
+            "ToggleDiffStyle" => self.mode != Mode::Buffer,
             _ => true,
         }
     }
 
-    /// The bottom bars: what the keys act on and the keys of this mode, then the status.
-    fn render_bars(&self) -> impl IntoElement + use<> {
-        let colors = self.palette();
+    /// The hints of the bottom bar that fit the window, in rank order, each with the label it
+    /// shows. When the window is narrow, the highest-ranked hints make way whole; which hints
+    /// show depends only on the mode, the diff style's name and the width, so nothing moves
+    /// as the selection changes.
+    fn bar_hints(&self, window: &Window) -> Vec<(super::keymap::Hint, String)> {
         let area = self.area();
-        let hints = super::keymap::hints(&self.settings.keymap, area, |action| {
+        let mut hints = super::keymap::hints(&self.settings.keymap, area, |action| {
             self.hint_available(action)
         });
+        // While a search is in the diff, `n` steps through its matches.
+        if area == Area::Diff && self.diff_search_active() {
+            for hint in hints.iter_mut().filter(|hint| hint.action == "NextFile") {
+                hint.label = "next match";
+                hint.available = true;
+            }
+        }
+        // `|` says which diff style shows, the one it moves on from.
+        let style = self.look().style.name.clone();
+        let label = |hint: &super::keymap::Hint| match hint.action {
+            "ToggleDiffStyle" => style.clone(),
+            _ => hint.label.to_owned(),
+        };
+        let small = self.fonts.ui_size();
+        let text_system = window.text_system();
+        let cell = text_system
+            .em_advance(text_system.resolve_font(&self.fonts.code), px(small))
+            .map_or(small * 0.6, f32::from);
+        let cells = |text: &str| scroll::float(crate::rows::display_width(text)) * cell;
+        // The padding, the target's reserved width and the divider; a little slack covers
+        // glyphs a fallback font draws wider.
+        let reserved = GRID * 6.0 + GRID * 4.0 * 2.0 + 1.0 + (cell * 28.0).min(GRID * 120.0);
+        let budget = (f32::from(window.viewport_size().width) - reserved) * 0.97;
+        let kept = super::keymap::fit(
+            &hints,
+            budget,
+            |hint| cells(&hint.keys) + GRID * 1.5 + cells(&label(hint)),
+            GRID * 4.0,
+        );
+        hints
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| kept.contains(index))
+            .map(|(_, hint)| {
+                let label = label(&hint);
+                (hint, label)
+            })
+            .collect()
+    }
+
+    /// The bottom bars: the status, then what the keys act on at the left and the keys of
+    /// this mode at the right, `? keys` last at the edge.
+    fn render_bars(&self, window: &mut Window) -> impl IntoElement + use<> {
+        let colors = self.palette();
+        let small = self.fonts.ui_size();
+        let hints = self.bar_hints(window);
         let failing = self
             .failed_at
             .map(|at| 1.0 - scroll::ease_out(at.elapsed().as_secs_f32() / FLASH.as_secs_f32()));
@@ -1310,7 +1650,6 @@ impl ReviewApp {
             .snapshot
             .as_ref()
             .and_then(super::state::Snapshot::newer);
-        let small = self.fonts.ui_size();
         v_flex()
             .flex_none()
             .text_size(px(small))
@@ -1356,19 +1695,24 @@ impl ReviewApp {
                     .bg(colors.surface)
                     .child(
                         div()
-                            .flex_none()
-                            .max_w(px(GRID * 120.0))
+                            .flex_1()
+                            .min_w_0()
                             .truncate()
                             .text_color(colors.text)
                             .child(self.target_label()),
                     )
                     .child(div().w(px(1.0)).h(px(GRID * 4.0)).bg(colors.hairline))
-                    .children(hints.into_iter().take(7).map(|(keys, label)| {
+                    .children(hints.into_iter().map(|(hint, label)| {
+                        let (key_color, label_color) = if hint.available {
+                            (colors.accent, colors.dim)
+                        } else {
+                            (colors.faint, colors.faint)
+                        };
                         h_flex()
                             .flex_none()
                             .gap(px(GRID * 1.5))
-                            .child(div().text_color(colors.accent).child(keys))
-                            .child(div().text_color(colors.dim).child(label))
+                            .child(div().text_color(key_color).child(hint.keys))
+                            .child(div().text_color(label_color).child(label))
                     })),
             )
     }
@@ -1463,7 +1807,7 @@ impl ReviewApp {
 use std::rc::Rc;
 
 /// The accent bar along the left edge of the selected hunk's rows.
-fn frame_bar(on: bool, colors: &Palette) -> Div {
+pub(super) fn frame_bar(on: bool, colors: &Palette) -> Div {
     div()
         .w(px(3.0))
         .h_full()
@@ -1547,6 +1891,7 @@ impl Render for ReviewApp {
         }
         self.painted.borrow_mut().clear();
         self.regions.begin_frame();
+        self.follow_width(window);
         if self.step_animations()
             || matches!(self.phase, Phase::Loading(_))
             || self.failed_at.is_some_and(|at| at.elapsed() < FLASH)
@@ -1572,15 +1917,11 @@ impl Render for ReviewApp {
                 .min_w_0()
                 .h_full()
                 .child(self.render_file_header())
-                .child(self.render_diff(cx))
+                .child(self.render_diff(window, cx))
                 .into_any_element()
         };
-        let bars = self.render_bars();
-        let find_bar = if self.mode == Mode::Buffer {
-            self.render_find_bar(cx)
-        } else {
-            None
-        };
+        let bars = self.render_bars(window);
+        let find_bar = self.render_find_bar(cx);
         let overlay = match self.overlay {
             Some(Overlay::Help) => Some(self.render_help().into_any_element()),
             Some(Overlay::Overview) => Some(
@@ -1591,7 +1932,8 @@ impl Render for ReviewApp {
                     .child(self.render_overview(cx))
                     .into_any_element(),
             ),
-            None => None,
+            // The picker and the settings list draw apart, in their own key contexts.
+            Some(Overlay::Picker | Overlay::Settings) | None => None,
         };
         let mode_context = match self.mode {
             Mode::Tree => Area::Tree,
@@ -1677,6 +2019,9 @@ impl Render for ReviewApp {
                     .on_action(cx.listener(Self::buffer_top))
                     .on_action(cx.listener(Self::buffer_bottom))
                     .on_action(cx.listener(Self::open_find))
+                    .on_action(cx.listener(Self::clear_filter))
+                    .on_action(cx.listener(Self::find_files))
+                    .on_action(cx.listener(Self::search_content))
                     .on_action(cx.listener(Self::find_next))
                     .on_action(cx.listener(Self::find_previous))
                     .on_action(cx.listener(Self::go_to_definition))
@@ -1684,7 +2029,8 @@ impl Render for ReviewApp {
                     .on_action(cx.listener(Self::buffer_dismiss))
                     .on_action(cx.listener(Self::toggle_overview))
                     .on_action(cx.listener(Self::toggle_diff_style))
-                    .on_action(cx.listener(Self::cycle_theme))
+                    .on_action(cx.listener(Self::open_settings))
+                    .on_action(cx.listener(Self::toggle_layout))
                     .on_action(cx.listener(Self::screen_next))
                     .on_action(cx.listener(Self::screen_previous))
                     .on_action(cx.listener(Self::toggle_help))
@@ -1706,7 +2052,27 @@ impl Render for ReviewApp {
                     .track_focus(&self.overlay_focus)
                     .on_action(cx.listener(Self::close_overlay))
                     .child(overlay)
-            }));
+            }))
+            .children(self.render_picker(cx).map(|picker| {
+                // The picker owns the pointer and the keyboard too; its query or its list
+                // takes the keys, each in its own context.
+                let area = self.area();
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .key_context(area.context())
+                    .track_focus(&self.overlay_focus)
+                    .on_action(cx.listener(Self::picker_next))
+                    .on_action(cx.listener(Self::picker_previous))
+                    .on_action(cx.listener(Self::picker_open))
+                    .on_action(cx.listener(Self::picker_scope))
+                    .on_action(cx.listener(Self::picker_browse))
+                    .on_action(cx.listener(Self::picker_edit))
+                    .on_action(cx.listener(Self::picker_close))
+                    .child(picker)
+            }))
+            .children(self.render_settings(window, cx));
         window_border().child(content)
     }
 }

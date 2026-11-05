@@ -216,23 +216,28 @@ const LEGIBLE: f32 = 3.0;
 /// against `background`.
 #[must_use]
 pub fn legible(color: Hsla, background: Hsla, text: Hsla) -> Hsla {
-    let (from, to) = (color.to_rgb(), text.to_rgb());
     let mut shown = color;
     for step in 1..=4_u8 {
         if contrast(shown, background) >= LEGIBLE {
             break;
         }
-        let share = f32::from(step) / 4.0;
-        let mix = |a: f32, b: f32| a + (b - a) * share;
-        shown = gpui::Rgba {
-            r: mix(from.r, to.r),
-            g: mix(from.g, to.g),
-            b: mix(from.b, to.b),
-            a: from.a,
-        }
-        .into();
+        shown = mix(color, text, f32::from(step) / 4.0);
     }
     shown
+}
+
+/// `from` moved `share` of the way to `to`, channel by channel in sRGB, keeping `from`'s alpha.
+#[must_use]
+pub fn mix(from: Hsla, to: Hsla, share: f32) -> Hsla {
+    let (from, to) = (from.to_rgb(), to.to_rgb());
+    let channel = |a: f32, b: f32| a + (b - a) * share;
+    gpui::Rgba {
+        r: channel(from.r, to.r),
+        g: channel(from.g, to.g),
+        b: channel(from.b, to.b),
+        a: from.a,
+    }
+    .into()
 }
 
 /// The WCAG contrast ratio of two colors, from 1 to 21.
@@ -327,7 +332,7 @@ mod tests {
     }
 
     /// Every built-in theme's syntax colors, lifted where needed, stay readable on its
-    /// removed and added lines, and its text on its background.
+    /// removed and added lines, bold or muted, and its text on its background.
     #[test]
     fn syntax_stays_readable_on_tinted_lines() {
         for text in BUILT_IN {
@@ -346,7 +351,14 @@ mod tests {
                     contrast(theme.ui.dim, surface)
                 );
             }
-            for tint in [theme.diff.removed_line, theme.diff.added_line] {
+            // Bold lines, and muted ones as the palette mixes them.
+            let muted = |line| mix(line, theme.ui.background, crate::look::MUTED_SHARE);
+            for tint in [
+                theme.diff.removed_line,
+                theme.diff.added_line,
+                muted(theme.diff.removed_line),
+                muted(theme.diff.added_line),
+            ] {
                 for color in theme.syntax.values() {
                     let shown = legible(*color, tint, theme.ui.text);
                     assert!(

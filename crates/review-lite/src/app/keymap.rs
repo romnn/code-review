@@ -24,6 +24,14 @@ pub enum Area {
     Find,
     /// The cheat sheet or the pull request overview.
     Overlay,
+    /// A picker (the file finder or the content search) while its query takes typing.
+    Picker,
+    /// A picker while its list takes the keys, as vim's normal mode.
+    PickerList,
+    /// The settings list while its entries take the keys.
+    SettingsList,
+    /// The settings list while its search field takes typing; only keys that type nothing.
+    SettingsSearch,
     /// Anywhere in the window; only keys with modifiers, so typing never triggers them.
     Window,
 }
@@ -38,6 +46,10 @@ impl Area {
             Self::Buffer => "Buffer",
             Self::Find => "FindBar",
             Self::Overlay => "Overlay",
+            Self::Picker => "Picker",
+            Self::PickerList => "PickerList",
+            Self::SettingsList => "SettingsList",
+            Self::SettingsSearch => "SettingsSearch",
             Self::Window => "ReviewWindow",
         }
     }
@@ -79,6 +91,11 @@ const DIFF: &[Area] = &[Area::Diff];
 const BUFFER: &[Area] = &[Area::Buffer];
 const REVIEW: &[Area] = &[Area::Diff, Area::Buffer];
 const WINDOW: &[Area] = &[Area::Window];
+const PICKER: &[Area] = &[Area::Picker];
+const PICKER_LIST: &[Area] = &[Area::PickerList];
+const PICKERS: &[Area] = &[Area::Picker, Area::PickerList];
+const SETTINGS_LIST: &[Area] = &[Area::SettingsList];
+const SETTINGS_SEARCH: &[Area] = &[Area::SettingsSearch];
 
 /// The default bindings, in cheat-sheet order.
 const DEFAULTS: &[Default] = &[
@@ -135,6 +152,15 @@ const DEFAULTS: &[Default] = &[
         "Files",
         "focus the diff",
         Some((4, "diff")),
+        None,
+    ),
+    (
+        "ClearFilter",
+        &["escape"],
+        TREE,
+        "Files",
+        "clear the filter",
+        None,
         None,
     ),
     (
@@ -368,20 +394,46 @@ const DEFAULTS: &[Default] = &[
     (
         "OpenFind",
         &["/"],
-        REVIEW,
-        "File",
-        "find",
+        MODES,
+        "Search",
+        "filter files · find in the diff or file",
         Some((3, "find")),
         None,
     ),
-    ("FindNext", &["n"], BUFFER, "File", "next match", None, None),
+    (
+        "FindNext",
+        &["n"],
+        BUFFER,
+        "Search",
+        "next match",
+        None,
+        None,
+    ),
     (
         "FindPrevious",
         &["shift-n"],
-        BUFFER,
-        "File",
+        REVIEW,
+        "Search",
         "previous match",
         None,
+        None,
+    ),
+    (
+        "FindFiles",
+        &["ctrl-p"],
+        MODES,
+        "Search",
+        "find a file by name",
+        Some((10, "files")),
+        None,
+    ),
+    (
+        "SearchContent",
+        &["ctrl-g"],
+        MODES,
+        "Search",
+        "search file contents",
+        Some((11, "grep")),
         None,
     ),
     (
@@ -417,7 +469,7 @@ const DEFAULTS: &[Default] = &[
         &[Area::Find],
         "File",
         "",
-        None,
+        Some((2, "cancel")),
         None,
     ),
     // Views and the window.
@@ -435,17 +487,27 @@ const DEFAULTS: &[Default] = &[
         &["|"],
         MODES,
         "View",
-        "plain or syntax diff colors",
-        None,
+        "next diff style: plain, bold, soft, then yours",
+        // The bar names the style in use instead, such as `| soft`.
+        Some((12, "style")),
         None,
     ),
     (
-        "CycleTheme",
-        &["shift-t"],
+        "ToggleLayout",
+        &["s"],
+        &[Area::Tree, Area::Diff],
+        "View",
+        "side by side or unified",
+        Some((13, "split")),
+        None,
+    ),
+    (
+        "OpenSettings",
+        &["shift-t", ","],
         MODES,
         "View",
-        "next theme",
-        None,
+        "settings: presets, themes, diff styles, density, layout, font size",
+        Some((14, "settings")),
         None,
     ),
     (
@@ -481,7 +543,7 @@ const DEFAULTS: &[Default] = &[
         MODES,
         "View",
         "all keys",
-        Some((9, "keys")),
+        Some((u8::MAX, "keys")),
         None,
     ),
     (
@@ -491,6 +553,170 @@ const DEFAULTS: &[Default] = &[
         "View",
         "",
         Some((1, "close")),
+        None,
+    ),
+    // The pickers: the file finder and the content search.
+    (
+        "PickerNext",
+        &["ctrl-n", "down"],
+        PICKER,
+        "Pickers",
+        "next entry",
+        Some((1, "move")),
+        Some("PickerPrevious"),
+    ),
+    (
+        "PickerPrevious",
+        &["ctrl-p", "up"],
+        PICKER,
+        "Pickers",
+        "previous entry",
+        None,
+        None,
+    ),
+    (
+        "PickerNext",
+        &["j", "down", "ctrl-n"],
+        PICKER_LIST,
+        "Pickers",
+        "",
+        Some((1, "move")),
+        Some("PickerPrevious"),
+    ),
+    (
+        "PickerPrevious",
+        &["k", "up", "ctrl-p"],
+        PICKER_LIST,
+        "Pickers",
+        "",
+        None,
+        None,
+    ),
+    (
+        "PickerOpen",
+        &["enter"],
+        PICKERS,
+        "Pickers",
+        "open the entry",
+        Some((2, "open")),
+        None,
+    ),
+    (
+        "PickerScope",
+        &["tab"],
+        PICKERS,
+        "Pickers",
+        "changed files · whole tree",
+        Some((3, "scope")),
+        None,
+    ),
+    (
+        "PickerBrowse",
+        &["escape"],
+        PICKER,
+        "Pickers",
+        "leave the query for the list",
+        Some((4, "list")),
+        None,
+    ),
+    (
+        "PickerEdit",
+        &["i", "/"],
+        PICKER_LIST,
+        "Pickers",
+        "back to the query",
+        Some((4, "type")),
+        None,
+    ),
+    (
+        "PickerClose",
+        &["escape", "q"],
+        PICKER_LIST,
+        "Pickers",
+        "close the picker",
+        Some((5, "close")),
+        None,
+    ),
+    // The settings list, whose entries and search field take the keys apart.
+    (
+        "SettingsNext",
+        &["j", "down", "ctrl-n"],
+        SETTINGS_LIST,
+        "Settings",
+        "next entry, previewing themes and presets",
+        Some((1, "move")),
+        Some("SettingsPrevious"),
+    ),
+    (
+        "SettingsPrevious",
+        &["k", "up", "ctrl-p"],
+        SETTINGS_LIST,
+        "Settings",
+        "previous entry",
+        None,
+        None,
+    ),
+    (
+        "SettingsNext",
+        &["ctrl-n", "down", "ctrl-j"],
+        SETTINGS_SEARCH,
+        "Settings",
+        "",
+        Some((1, "move")),
+        Some("SettingsPrevious"),
+    ),
+    (
+        "SettingsPrevious",
+        &["ctrl-p", "up", "ctrl-k"],
+        SETTINGS_SEARCH,
+        "Settings",
+        "",
+        None,
+        None,
+    ),
+    (
+        "SettingsApply",
+        &["space", "enter"],
+        SETTINGS_LIST,
+        "Settings",
+        "apply and remember the entry",
+        Some((2, "apply")),
+        None,
+    ),
+    (
+        "SettingsApply",
+        &["enter"],
+        SETTINGS_SEARCH,
+        "Settings",
+        "",
+        Some((2, "apply")),
+        None,
+    ),
+    (
+        "SettingsSearch",
+        &["/", "tab"],
+        SETTINGS_LIST,
+        "Settings",
+        "search the settings",
+        Some((3, "search")),
+        None,
+    ),
+    (
+        "SettingsBrowse",
+        &["escape", "tab"],
+        SETTINGS_SEARCH,
+        "Settings",
+        "back to the list, keeping the search",
+        Some((3, "list")),
+        None,
+    ),
+    (
+        "SettingsClose",
+        &["escape", "q"],
+        SETTINGS_LIST,
+        "Settings",
+        "close, keeping what was applied",
+        Some((4, "close")),
         None,
     ),
     (
@@ -642,14 +868,24 @@ pub fn bind(bindings: &[Binding], cx: &mut App) {
     cx.bind_keys(built);
 }
 
-/// The bottom bar's hints for `area`: each shown action's keys and label, in rank order, for the
-/// actions `available` allows.
+/// One hint of the bottom bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    /// The action it names.
+    pub action: &'static str,
+    /// The keys, as the bar shows them, such as `j/k`.
+    pub keys: String,
+    pub label: &'static str,
+    /// Lower ranks come first and are the last to make way when the bar is narrow.
+    pub rank: u8,
+    /// Whether the action can do something now; the bar dims it otherwise, keeping its place.
+    pub available: bool,
+}
+
+/// The bottom bar's hints for `area`: every action with a hint, its keys and label, in rank
+/// order, each noting whether `available` allows it now.
 #[must_use]
-pub fn hints(
-    bindings: &[Binding],
-    area: Area,
-    available: impl Fn(&str) -> bool,
-) -> Vec<(String, &'static str)> {
+pub fn hints(bindings: &[Binding], area: Area, available: impl Fn(&str) -> bool) -> Vec<Hint> {
     let first_key = |action: &str| {
         bindings
             .iter()
@@ -657,23 +893,58 @@ pub fn hints(
             .and_then(|binding| binding.keys.first())
             .map(|key| display(key))
     };
-    let mut shown: Vec<(u8, String, &'static str)> = bindings
+    let mut shown: Vec<Hint> = bindings
         .iter()
-        .filter(|binding| binding.area == area && available(binding.action))
+        .filter(|binding| binding.area == area)
         .filter_map(|binding| {
             let (rank, label) = binding.hint?;
             let mut keys = display(binding.keys.first()?);
             if let Some(other) = binding.pair.and_then(first_key) {
                 keys = format!("{keys}/{other}");
             }
-            Some((rank, keys, label))
+            Some(Hint {
+                action: binding.action,
+                keys,
+                label,
+                rank,
+                available: available(binding.action),
+            })
         })
         .collect();
-    shown.sort_by_key(|(rank, ..)| *rank);
+    shown.sort_by_key(|hint| hint.rank);
     shown
-        .into_iter()
-        .map(|(_, keys, label)| (keys, label))
-        .collect()
+}
+
+/// The hints that fit in `budget` when each takes `width` and `gap` separates them: the
+/// highest ranks make way first, except the cheat sheet's, which always stays. Returns their
+/// indices in rank order.
+#[must_use]
+pub fn fit(hints: &[Hint], budget: f32, width: impl Fn(&Hint) -> f32, gap: f32) -> Vec<usize> {
+    let mut kept: Vec<usize> = (0..hints.len()).collect();
+    let total = |kept: &[usize]| -> f32 {
+        let widths: f32 = kept
+            .iter()
+            .filter_map(|&index| hints.get(index))
+            .map(&width)
+            .sum();
+        widths + gap * super::scroll::float(kept.len().saturating_sub(1))
+    };
+    while total(&kept) > budget {
+        // The latest of the highest ranks, never the cheat sheet's.
+        let Some(position) = kept
+            .iter()
+            .enumerate()
+            .filter(|&(_, &index)| hints.get(index).is_some_and(|hint| hint.rank != u8::MAX))
+            .max_by_key(|&(position, &index)| {
+                (hints.get(index).map_or(0, |hint| hint.rank), position)
+            })
+            .map(|(position, _)| position)
+        else {
+            break;
+        };
+        kept.remove(position);
+    }
+    kept
 }
 
 /// How a keystroke sequence reads in the cheat sheet: `g g`, `Ctrl+D`, `Shift+G`.
@@ -822,10 +1093,54 @@ mod tests {
         let first: Vec<(&str, &str)> = shown
             .iter()
             .take(3)
-            .map(|(keys, label)| (keys.as_str(), *label))
+            .map(|hint| (hint.keys.as_str(), hint.label))
             .collect();
         assert_eq!(first, [("j/k", "hunk"), ("a", "approve"), ("/", "find")]);
-        assert!(!shown.iter().any(|(_, label)| *label == "next file"));
+        assert_eq!(
+            shown.last().map(|hint| (hint.keys.as_str(), hint.label)),
+            Some(("?", "keys")),
+            "the keys sheet comes last"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|hint| hint.label == "next file" && !hint.available),
+            "an unavailable action keeps its place, dimmed"
+        );
+        for label in ["files", "grep", "style", "split", "settings"] {
+            assert!(
+                shown.iter().any(|hint| hint.label == label),
+                "{label} is hinted"
+            );
+        }
+    }
+
+    /// A narrow bar drops the highest ranks first, keeps the cheat sheet's hint last, and
+    /// never splits a hint.
+    #[test]
+    fn hints_fit_by_rank() {
+        let hint = |rank: u8, label: &'static str| Hint {
+            action: label,
+            keys: "x".to_owned(),
+            label,
+            rank,
+            available: true,
+        };
+        let hints = [
+            hint(1, "a"),
+            hint(2, "b"),
+            hint(9, "c"),
+            hint(u8::MAX, "keys"),
+        ];
+        let width = |_: &Hint| 10.0;
+        assert_eq!(fit(&hints, 100.0, width, 2.0), [0, 1, 2, 3]);
+        assert_eq!(fit(&hints, 35.0, width, 2.0), [0, 1, 3]);
+        assert_eq!(fit(&hints, 22.0, width, 2.0), [0, 3]);
+        assert_eq!(
+            fit(&hints, 5.0, width, 2.0),
+            [3],
+            "the cheat sheet's hint always stays"
+        );
     }
 
     /// Every default keystroke parses, and every default action exists.

@@ -84,6 +84,18 @@ impl Animation {
     }
 }
 
+/// Whether any of `rows` lies in a viewport `height` tall scrolled to `offset`, with rows
+/// `row_height` tall. A viewport not laid out yet shows everything.
+#[must_use]
+pub fn shows(rows: &std::ops::Range<usize>, offset: f32, height: f32, row_height: f32) -> bool {
+    if height <= 0.0 || row_height <= 0.0 || rows.is_empty() {
+        return height <= 0.0 || row_height <= 0.0;
+    }
+    let top = float(rows.start) * row_height;
+    let bottom = float(rows.end) * row_height;
+    top < offset + height && bottom > offset
+}
+
 /// The offset that brings `top..bottom` into a viewport of `height` at offset `current`,
 /// keeping `margin` around it where it fits, or `None` when it is already comfortably visible.
 #[must_use]
@@ -122,6 +134,11 @@ impl PagedScroll {
     #[must_use]
     pub fn take_page_request(&self) -> Option<f32> {
         self.page_request.take()
+    }
+
+    /// Drops a track click's page that has not started yet, as when the rows change under it.
+    pub fn cancel_page_request(&self) {
+        self.page_request.set(None);
     }
 }
 
@@ -173,6 +190,11 @@ pub fn offset_of(list: &UniformListScrollHandle) -> f32 {
     -f32::from(ScrollbarHandle::offset(list).y)
 }
 
+/// Sets the vertical offset of a list and puts it back at its left edge.
+pub fn reset_offset_of(list: &UniformListScrollHandle, offset: f32) {
+    ScrollbarHandle::set_offset(list, point(px(0.0), px(-offset)));
+}
+
 /// Sets the vertical offset of a list, keeping its horizontal offset.
 pub fn set_offset_of(list: &UniformListScrollHandle, offset: f32) {
     let current = ScrollbarHandle::offset(list);
@@ -203,6 +225,20 @@ mod tests {
         assert!(!animation.done(mid));
         assert!((animation.value_at(mid + DURATION) - 300.0).abs() < 0.001);
         assert!(animation.done(mid + DURATION));
+    }
+
+    /// A hunk counts as shown when any of its rows is in the viewport, and only then.
+    #[test]
+    fn rows_show_when_any_is_in_the_viewport() {
+        assert!(!shows(&(10..12), 0.0, 100.0, 10.0));
+        assert!(shows(&(9..12), 0.0, 100.0, 10.0));
+        assert!(shows(&(0..3), 25.0, 100.0, 10.0));
+        assert!(!shows(&(0..2), 25.0, 100.0, 10.0));
+        assert!(shows(&(50..60), 0.0, 0.0, 10.0), "not laid out yet");
+        assert!(
+            !shows(&(5..5), 0.0, 100.0, 10.0),
+            "an empty hunk never shows"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 mod app;
 mod config;
+mod look;
 mod lsp;
 mod rows;
 mod syntax;
@@ -22,14 +23,16 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, TitleBar};
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir};
-use review_core::{Repo, Review, ReviewTarget, RevisionNumber};
+use review_core::{Detected, Repo, Review, ReviewTarget, RevisionNumber};
 
 /// Review a pull request, a range or the working tree.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "review-lite", version)]
 struct Options {
-    /// A pull request number or URL, or a `base..head` range; defaults to the review last opened
-    /// for this repository and branch.
+    /// A pull request number or URL, or a `base..head` range.
+    ///
+    /// Without one (and without --worktree), reopens the review last opened on this branch, or
+    /// else reviews the branch's open pull request, or else `<default branch>..<branch>`.
     target: Option<String>,
     /// Review the working tree, including uncommitted and untracked files, against a ref.
     #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "target")]
@@ -93,8 +96,9 @@ enum DecorationsArg {
     Client,
 }
 
-/// Opens the review the options name and records its current revision.
-fn open_review(options: &Options) -> eyre::Result<Review> {
+/// Opens the review the options name and records its current revision; with neither a target
+/// nor a worktree, also how it was found for the current branch.
+fn open_review(options: &Options) -> eyre::Result<(Review, Option<Detected>)> {
     let demo = match (options.demo, options.demo_revision) {
         (true, _) => Some(DemoRequest::Fresh),
         (false, Some(revision)) => Some(DemoRequest::UpTo(
@@ -103,14 +107,15 @@ fn open_review(options: &Options) -> eyre::Result<Review> {
         (false, None) => None,
     };
     if let Some(request) = demo {
-        return Ok(review_core::demo::prepare(
+        let review = review_core::demo::prepare(
             &options
                 .demo_dir
                 .as_deref()
                 .map_or_else(DemoPaths::in_project, DemoPaths::under),
             &fixture_dir(),
             request,
-        )?);
+        )?;
+        return Ok((review, None));
     }
     let data_dir = match &options.data_dir {
         Some(data_dir) => data_dir.clone(),
@@ -121,21 +126,21 @@ fn open_review(options: &Options) -> eyre::Result<Review> {
         .ok_or_eyre("cannot find a data directory; pass --data-dir")?,
     };
     let repo = Repo::discover(&options.repo)?;
-    let review = if options.target.is_none() && options.worktree.is_none() {
-        let key = review_core::store::remembered_review(&data_dir, &repo)?
-            .ok_or_eyre("no review opened for this repository and branch; pass a target")?;
-        Review::load(&data_dir, &key)?
+    let (review, detected) = if options.target.is_none() && options.worktree.is_none() {
+        let (review, detected) = Review::open_for_current_branch(&data_dir, repo)?;
+        eprintln!("review-lite: {detected}");
+        (review, Some(detected))
     } else {
         let target = ReviewTarget::from_arguments(
             options.target.as_deref(),
             options.worktree.as_deref(),
             &repo,
         )?;
-        Review::open(&data_dir, repo, target)?
+        (Review::open(&data_dir, repo, target)?, None)
     };
     review.refresh()?;
     review_core::store::remember_review(&data_dir, review.repo(), review.key())?;
-    Ok(review)
+    Ok((review, detected))
 }
 
 /// The code font: the configured family, then `SFMono Nerd Font`, then `SF Mono`, then the theme's
@@ -166,6 +171,8 @@ fn code_font(config: &config::FontConfig, cx: &App) -> app::Fonts {
         },
         code_size: size,
         default_code_size: size,
+        // The window sets it from the look's density when it opens.
+        line_height: look::line_height(config::Density::default()),
     }
 }
 
@@ -174,28 +181,86 @@ fn code_font(config: &config::FontConfig, cx: &App) -> app::Fonts {
 fn choose_theme(
     config_path: Option<&std::path::Path>,
     wanted: Option<&str>,
+    problems: &mut Vec<String>,
 ) -> eyre::Result<(std::sync::Arc<theme::Theme>, Vec<theme::Theme>)> {
     let themes_dir = config_path
         .and_then(std::path::Path::parent)
         .map(|dir| dir.join("themes"));
-    let (themes, problems) = theme::all(themes_dir.as_deref());
-    for problem in &problems {
-        eprintln!("review-lite: {problem}");
-    }
+    let (themes, theme_problems) = theme::all(themes_dir.as_deref());
+    problems.extend(theme_problems.iter().map(ToString::to_string));
     let wanted = wanted.unwrap_or(theme::DEFAULT);
     let chosen = themes
         .iter()
         .find(|theme| theme.name == wanted)
         .or_else(|| {
-            eprintln!(
-                "review-lite: there is no theme {wanted:?}; using {}",
+            problems.push(format!(
+                "there is no theme {wanted:?}; using {}",
                 theme::DEFAULT
-            );
+            ));
             themes.first()
         })
         .cloned()
         .ok_or_eyre("no theme is available")?;
     Ok((std::sync::Arc::new(chosen), themes))
+}
+
+/// The window's settings from `config`: its themes, diff styles and presets, and the look it
+/// opens with. `problems` are the configuration's problems found so far; the ones found here
+/// join them, and all of them are printed and kept for the window to show.
+fn settings(
+    config: &config::Config,
+    config_path: Option<PathBuf>,
+    keymap: Vec<app::keymap::Binding>,
+    mut problems: Vec<String>,
+) -> eyre::Result<app::Settings> {
+    problems.extend(config.problems.iter().cloned());
+    let (chosen, themes) = choose_theme(
+        config_path.as_deref(),
+        config.theme.as_deref(),
+        &mut problems,
+    )?;
+    let styles = look::styles(&config.styles);
+    let wanted = config.diff_style.as_deref().unwrap_or(look::DEFAULT_STYLE);
+    let style = look::find_style(&styles, wanted)
+        .or_else(|problem| {
+            problems.push(format!("{problem}; using {}", look::DEFAULT_STYLE));
+            look::find_style(&styles, look::DEFAULT_STYLE)
+        })
+        .map_err(|problem| eyre::eyre!(problem))?;
+    let presets = look::presets(&config.presets, &themes, &styles);
+    for preset in &presets {
+        if let Err(problem) = &preset.look {
+            problems.push(format!(
+                "preset {:?} cannot be used: {problem}",
+                preset.name
+            ));
+        }
+    }
+    for problem in &problems {
+        eprintln!("review-lite: {problem}");
+    }
+    Ok(app::Settings {
+        config_path,
+        appearance: look::Appearance {
+            applied: look::Look {
+                theme: chosen,
+                style,
+                density: config.density,
+                layout: config.diff_layout,
+                token_emphasis: config.token_emphasis,
+            },
+            preview: None,
+        },
+        themes,
+        styles,
+        presets,
+        context: config.context,
+        removed: config.removed,
+        added: config.added,
+        layout: config.layout,
+        keymap,
+        problems,
+    })
 }
 
 fn main() -> eyre::Result<()> {
@@ -206,9 +271,10 @@ fn main() -> eyre::Result<()> {
         .config
         .clone()
         .or_else(|| config::path(options.xdg_config_home.as_deref(), options.home.as_deref()));
+    let mut problems = Vec::new();
     let mut config = match &config_path {
         Some(path) => config::load(path).unwrap_or_else(|err| {
-            eprintln!("review-lite: {err}; using the defaults");
+            problems.push(format!("{err}; using the defaults"));
             config::Config::default()
         }),
         None => config::Config::default(),
@@ -220,23 +286,9 @@ fn main() -> eyre::Result<()> {
         config.font.size_points = Some(size);
     }
     let font = config.font.clone();
-    let (keymap, problems) = app::keymap::keymap(&config.keys);
-    for problem in &problems {
-        eprintln!("review-lite: {problem}");
-    }
-    let (chosen, themes) = choose_theme(config_path.as_deref(), config.theme.as_deref())?;
-    let settings = app::Settings {
-        config_path,
-        theme: chosen,
-        themes,
-        context: config.context,
-        diff_style: config.diff_style,
-        removed: config.removed,
-        added: config.added,
-        token_emphasis: config.token_emphasis,
-        layout: config.layout,
-        keymap: keymap.clone(),
-    };
+    let (keymap, key_problems) = app::keymap::keymap(&config.keys);
+    problems.extend(key_problems.iter().map(ToString::to_string));
+    let settings = settings(&config, config_path, keymap.clone(), problems)?;
     let startup = app::Startup {
         process_started,
         bench_scroll: options.bench_scroll.map(|mode| match mode {
@@ -274,9 +326,13 @@ fn main() -> eyre::Result<()> {
             let fonts = code_font(&font, cx);
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
             let opener: app::Opener = Box::new(move || {
-                let review = open_review(&options).map_err(|err| format!("{err:#}"))?;
+                let (review, detected) = open_review(&options).map_err(|err| format!("{err:#}"))?;
                 let history = review.history().map_err(|err| err.to_string())?;
-                Ok((review, history))
+                Ok(app::Loaded {
+                    review,
+                    history,
+                    found: detected.map(|detected| detected.to_string()),
+                })
             });
             let window = cx.open_window(
                 WindowOptions {

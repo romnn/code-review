@@ -44,11 +44,16 @@ pub mod keymap;
 mod markdown;
 mod marks;
 mod overview;
+mod pairs;
 mod panes;
+mod picker;
+mod present;
 mod qa;
 mod render;
 mod scroll;
+mod search;
 mod select;
+mod settings;
 mod state;
 mod text;
 mod tree;
@@ -100,13 +105,22 @@ actions!(
         CloseFind,
         ToggleOverview,
         ToggleDiffStyle,
-        CycleTheme,
         ScreenNext,
         ScreenPrevious,
         ToggleSidebar,
         ToggleHelp,
         CloseOverlay,
         Copy,
+        ClearFilter,
+        FindFiles,
+        SearchContent,
+        PickerNext,
+        PickerPrevious,
+        PickerOpen,
+        PickerScope,
+        PickerBrowse,
+        PickerEdit,
+        PickerClose,
         ZoomIn,
         ZoomOut,
         ZoomReset,
@@ -164,6 +178,9 @@ pub struct Fonts {
     pub code_size: f32,
     /// The code size the window started with, for resetting zoom.
     pub default_code_size: f32,
+    /// The line height as a multiple of the code size, which the shown look's density sets;
+    /// only [`ReviewApp::transition`] changes it, so the lists keep their place.
+    pub line_height: f32,
 }
 
 impl Fonts {
@@ -174,41 +191,54 @@ impl Fonts {
 
     /// The height of every row; the lists are uniform so they lay out only visible rows.
     fn row_height(&self) -> f32 {
-        (self.code_size * 1.5).round()
+        (self.code_size * self.line_height).round()
     }
 }
 
-/// View settings from the configuration file.
+/// View settings from the configuration file, and the look as the reviewer changes it.
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// Where the configuration file is, for remembering choices made in the app.
     pub config_path: Option<PathBuf>,
     /// Unchanged lines shown around each hunk.
     pub context: usize,
-    /// How changed lines are colored.
-    pub diff_style: crate::config::DiffStyle,
     /// The removed-line background, as `0xRRGGBB`, when the configuration overrides the
     /// theme's.
     pub removed: Option<u32>,
     /// The added-line background, likewise.
     pub added: Option<u32>,
-    /// The theme in use.
-    pub theme: Arc<crate::theme::Theme>,
-    /// Every theme `T` cycles through.
+    /// The look applied, and the one previewed over it while the settings list is open.
+    pub appearance: crate::look::Appearance,
+    /// Every theme the settings list offers.
     pub themes: Vec<crate::theme::Theme>,
-    /// Whether changed tokens within a line are emphasized.
-    pub token_emphasis: bool,
+    /// Every diff style, in the order `|` cycles them.
+    pub styles: Vec<crate::look::DiffStyle>,
+    /// The built-in and user presets, resolved against the themes.
+    pub presets: Vec<crate::look::Preset>,
     /// The pane widths remembered from the last session.
     pub layout: PaneLayout,
     /// The keymap, after the configuration's overrides.
     pub keymap: Vec<keymap::Binding>,
+    /// What the configuration got wrong, which the status line names once the review opens.
+    pub problems: Vec<String>,
 }
 
 /// The pane widths and whether the sidebar shows.
 pub type PaneLayout = crate::config::LayoutConfig;
 
+/// An opened review with its history.
+pub struct Loaded {
+    /// The review.
+    pub review: Review,
+    /// Its revisions.
+    pub history: History,
+    /// How the review was found, such as the pull request of the current branch, which the
+    /// status line says when the review opens.
+    pub found: Option<String>,
+}
+
 /// Opens the review and loads its history, off the UI thread.
-pub type Opener = Box<dyn FnOnce() -> Result<(Review, History), String> + Send>;
+pub type Opener = Box<dyn FnOnce() -> Result<Loaded, String> + Send>;
 
 /// Which part of the window owns the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +267,10 @@ pub enum Overlay {
     Help,
     /// The pull request overview.
     Overview,
+    /// The file finder or the content search; see [`ReviewApp::picker`].
+    Picker,
+    /// The settings list; see the `settings` module.
+    Settings,
 }
 
 /// Whether the review is ready to show.
@@ -249,21 +283,40 @@ enum Phase {
     Failed(String),
 }
 
-/// Where the reviewer was in a file, kept while other files show.
+/// Where the reviewer was in a file, kept while other files show: the selected hunk, and the
+/// unified row at the top, which survives any change of layout, density or font.
 #[derive(Debug, Clone, Copy, Default)]
 struct Place {
     hunk: usize,
-    offset: f32,
+    top: present::Anchor,
 }
 
-/// The find bar of the buffer.
+/// A `/` search in the diff or the buffer.
 struct Find {
+    /// The mode it searches, [`Mode::Diff`] or [`Mode::Buffer`]; leaving that mode ends it.
+    target: Mode,
     input: Entity<InputState>,
     query: String,
     /// Shared with each frame's rows rather than copied.
     matches: Arc<Vec<find::Match>>,
     current: Option<usize>,
+    /// Where the search started, so the matches of a query being typed are found from there,
+    /// as vim's incremental search does.
+    origin: find::Spot,
+    /// In the diff, the hunk the current match selected; once another hunk is selected, `n`
+    /// and `N` search from there instead.
+    hunk: Option<usize>,
     /// Whether the bar takes typing; after Enter, the matches stay for `n` and `N`.
+    editing: bool,
+    _subscription: Subscription,
+}
+
+/// The `/` filter of the file tree, which narrows the tree to the files whose path contains its
+/// query and stays until cleared.
+struct Filter {
+    input: Entity<InputState>,
+    query: String,
+    /// Whether the bar takes typing; after Enter, the filter stays and the tree takes the keys.
     editing: bool,
     _subscription: Subscription,
 }
@@ -293,8 +346,9 @@ struct Latency {
 /// Running language servers by program and worktree.
 type Servers = Arc<Mutex<HashMap<(&'static str, PathBuf), LanguageServer>>>;
 
-/// The text layouts of the rows painted in the last frame, for mapping the mouse to text.
-type PaintedRows = Rc<RefCell<HashMap<(Pane, usize), TextLayout>>>;
+/// The text layouts of the lines painted in the last frame, by pane, column and row, for
+/// mapping the mouse to text.
+type PaintedRows = Rc<RefCell<HashMap<(Pane, text::Column, usize), TextLayout>>>;
 
 /// File text and highlights by blob, filled in the background; content never changes under an
 /// object ID, so these never go stale.
@@ -321,6 +375,10 @@ impl Blobs {
     }
 }
 
+/// How long the tree cursor rests before a previewed file's diff is built; a held key repeats
+/// faster than this.
+const PREVIEW_REST: Duration = Duration::from_millis(120);
+
 /// The review window.
 pub struct ReviewApp {
     phase: Phase,
@@ -346,7 +404,23 @@ pub struct ReviewApp {
     screen: Screen,
     overlay: Option<Overlay>,
     /// The selected file's diff.
-    rows: Layout,
+    rows: Arc<Layout>,
+    /// A file previewed while the tree cursor moves fast: only its header shows until the
+    /// cursor rests, then its diff is built. Holds the preview's number, so a later move
+    /// supersedes an earlier one.
+    preview: Option<u64>,
+    previews: u64,
+    /// When the tree cursor last moved, to tell a held key from a single press.
+    last_move: Option<Instant>,
+    /// The presentation [`Self::build_selected`] projects the rows for; only
+    /// [`Self::transition`] changes it.
+    presented: rows::Presentation,
+    /// The diff pane's width, which decides whether side by side fits.
+    diff_width: f32,
+    /// The side-by-side diff's text offset; see the `pairs` module.
+    text_scroll: pairs::TextScroll,
+    /// The settings list, while it is open.
+    settings_panel: Option<settings::Panel>,
     /// The rows of each display hunk of [`Self::rows`].
     hunk_rows: Vec<Range<usize>>,
     /// The selected hunk, by index into the layout's hunks.
@@ -363,6 +437,10 @@ pub struct ReviewApp {
     buffer_bar: PagedScroll,
     buffer_animation: Option<Animation>,
     find: Option<Find>,
+    filter: Option<Filter>,
+    picker: Option<picker::Picker>,
+    /// Pickers opened and searches run, one count for both, so every answer names its search.
+    picker_runs: u64,
     marks: VecDeque<MarkJob>,
     marking: bool,
     /// Verdicts asked for but not yet recorded, shown at once.
@@ -405,6 +483,10 @@ pub struct ReviewApp {
 
 impl ReviewApp {
     /// Opens the review with `opener` in the background and shows it when it is ready.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one struct literal that starts every part of the window's state"
+    )]
     pub fn new(
         opener: Opener,
         fonts: Fonts,
@@ -417,6 +499,12 @@ impl ReviewApp {
         window.focus(&tree_focus, cx);
         let list = UniformListScrollHandle::new();
         let buffer_list = UniformListScrollHandle::new();
+        let mut fonts = fonts;
+        let (presented, diff_width) = present::opening(
+            &settings,
+            &mut fonts,
+            f32::from(window.viewport_size().width),
+        );
         let app = Self {
             phase: Phase::Loading(Instant::now()),
             review: None,
@@ -434,7 +522,14 @@ impl ReviewApp {
             mode: Mode::Tree,
             screen: Screen::Split,
             overlay: None,
-            rows: Layout::default(),
+            rows: Arc::new(Layout::default()),
+            preview: None,
+            previews: 0,
+            last_move: None,
+            presented,
+            diff_width,
+            text_scroll: pairs::TextScroll::default(),
+            settings_panel: None,
             hunk_rows: Vec::new(),
             hunk: 0,
             folds: Folds {
@@ -452,6 +547,9 @@ impl ReviewApp {
             buffer_list,
             buffer_animation: None,
             find: None,
+            filter: None,
+            picker: None,
+            picker_runs: 0,
             marks: VecDeque::new(),
             marking: false,
             pending: HashMap::new(),
@@ -483,7 +581,11 @@ impl ReviewApp {
             first_hunk: None,
         };
         let work = cx.background_executor().spawn(async move {
-            let (review, history) = opener()?;
+            let Loaded {
+                review,
+                history,
+                found,
+            } = opener()?;
             let trust = review.trust().map_err(|err| err.to_string())?;
             let info = review.info().ok().flatten();
             let revision = history.current().ok_or("the review has no revision yet")?;
@@ -491,6 +593,7 @@ impl ReviewApp {
             let texts = read_texts(&review, &history, revision);
             Ok::<_, String>(Opened {
                 review,
+                found,
                 trusted: trust.trusted,
                 info,
                 snapshot: Snapshot { history, revision },
@@ -528,7 +631,16 @@ impl ReviewApp {
                 self.phase = Phase::Ready;
                 self.refresh_tree();
                 self.select_first_file();
-                self.status = self.summary().into();
+                let (status, failed) = opening_status(
+                    &self.summary(),
+                    opened.found.as_deref(),
+                    &self.settings.problems,
+                );
+                if failed {
+                    self.fail(status);
+                } else {
+                    self.set_status(status);
+                }
                 self.request_syntax(cx);
             }
             Err(err) => {
@@ -611,18 +723,46 @@ impl ReviewApp {
 
     /// The area whose keys apply now.
     fn area(&self) -> Area {
-        let editing = self.find.as_ref().is_some_and(|find| find.editing);
+        let editing = self.typing();
         match (self.overlay, editing, self.mode) {
+            (Some(Overlay::Picker), ..) => {
+                if self.picker.as_ref().is_some_and(|picker| picker.editing) {
+                    Area::Picker
+                } else {
+                    Area::PickerList
+                }
+            }
+            (Some(Overlay::Settings), ..) => self.settings_area(),
             (Some(_), ..) => Area::Overlay,
-            (None, true, Mode::Buffer) => Area::Find,
+            (None, true, _) => Area::Find,
             (None, _, Mode::Tree) => Area::Tree,
             (None, _, Mode::Diff) => Area::Diff,
             (None, _, Mode::Buffer) => Area::Buffer,
         }
     }
 
+    /// Whether the current mode's `/` bar takes typing.
+    fn typing(&self) -> bool {
+        match self.mode {
+            Mode::Tree => self.filter.as_ref().is_some_and(|filter| filter.editing),
+            mode => self
+                .find
+                .as_ref()
+                .is_some_and(|find| find.editing && find.target == mode),
+        }
+    }
+
     /// Gives the keyboard to the current mode or overlay.
     fn focus_mode(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay == Some(Overlay::Settings) && self.focus_settings(window, cx) {
+            return;
+        }
+        if self.overlay == Some(Overlay::Picker)
+            && let Some(picker) = self.picker.as_ref().filter(|picker| picker.editing)
+        {
+            picker.input.update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
         let handle = match (self.overlay, self.mode) {
             (Some(_), _) => &self.overlay_focus,
             (None, Mode::Tree) => &self.tree_focus,
@@ -634,6 +774,12 @@ impl ReviewApp {
 
     /// Switches to `mode` and gives it the keyboard.
     fn enter_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        // A mode works on the diff of the selected file, never on a preview's header alone.
+        self.finish_preview();
+        // A search belongs to the mode it searches.
+        if self.find.as_ref().is_some_and(|find| find.target != mode) {
+            self.find = None;
+        }
         self.mode = mode;
         self.selection = None;
         self.focus_mode(window, cx);
@@ -652,8 +798,21 @@ impl ReviewApp {
         self.restore_cursor(cursor);
     }
 
-    /// Lays out the selected file's diff from the current state, keeping the selected hunk.
+    /// Lays out the selected file's diff after something it shows changed (marks, folds, text
+    /// or highlights arriving, a new revision), keeping the selected hunk.
     fn rebuild(&mut self) {
+        // A file previewed by its header keeps showing only its header: its diff is built at
+        // the file's place once the cursor rests.
+        if self.preview.is_some() {
+            self.show_header();
+            return;
+        }
+        self.build_selected();
+    }
+
+    /// Lays out the selected file's diff.
+    fn build_selected(&mut self) {
+        self.preview = None;
         let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
@@ -661,10 +820,30 @@ impl ReviewApp {
             return;
         };
         let Some(path) = self.selected.clone() else {
-            self.rows = Layout::default();
+            self.rows = Arc::new(Layout::default());
             self.hunk_rows.clear();
             return;
         };
+        // The selection is the selected hunk's units; its index follows them into the new rows.
+        let selected = self
+            .rows
+            .hunks
+            .get(self.hunk)
+            .and_then(|hunk| hunk.first().copied());
+        self.rows = Arc::new(self.lay_out(&view, &path));
+        self.hunk_rows = hunk_rows(&self.rows);
+        if let Some(found) =
+            selected.and_then(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)))
+        {
+            self.hunk = found;
+        }
+        self.hunk = self.hunk.min(self.hunk_rows.len().saturating_sub(1));
+        self.refresh_find(Mode::Diff);
+    }
+
+    /// Builds the layout of `path`'s diff, with its text and highlights from the caches.
+    fn lay_out(&mut self, view: &review_core::RevisionView<'_>, path: &str) -> Layout {
+        let path = path.to_owned();
         let units = view.units_of_file(&path);
         let file = units.first().and_then(|&unit| view.file(unit).ok());
         // Text and highlights come from the caches by the blobs of this revision's file, so
@@ -689,20 +868,7 @@ impl ReviewApp {
             };
             self.folds.syntax.insert(path.clone(), Arc::new(syntax));
         }
-        // The selection is the selected hunk's units; its index follows them into the new rows.
-        let selected = self
-            .rows
-            .hunks
-            .get(self.hunk)
-            .and_then(|hunk| hunk.first().copied());
-        self.rows = rows::build(&view, &units, &self.folds);
-        self.hunk_rows = hunk_rows(&self.rows);
-        if let Some(found) =
-            selected.and_then(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)))
-        {
-            self.hunk = found;
-        }
-        self.hunk = self.hunk.min(self.hunk_rows.len().saturating_sub(1));
+        rows::present(rows::build(view, &units, &self.folds), self.presented)
     }
 
     /// The units of the selected hunk.
@@ -728,49 +894,18 @@ impl ReviewApp {
     }
 
     fn close_overlay(&mut self, _: &CloseOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay == Some(Overlay::Settings) {
+            self.close_settings(window, cx);
+            return;
+        }
         self.overlay = None;
         self.focus_mode(window, cx);
         cx.notify();
     }
 
-    /// `|`: switches between syntax and plain diff colors and remembers the choice.
+    /// `|`: the next diff style, remembered.
     fn toggle_diff_style(&mut self, _: &ToggleDiffStyle, _: &mut Window, cx: &mut Context<Self>) {
-        let style = self.settings.diff_style.toggled();
-        self.settings.diff_style = style;
-        let saved = self.settings.config_path.as_deref().map(|path| {
-            crate::config::remember(path, &[("diff", "style", format!("{:?}", style.name()))])
-        });
-        match saved {
-            Some(Err(err)) => self.fail(format!(
-                "Showing {} diffs; could not remember it: {err}",
-                style.name()
-            )),
-            _ => self.set_status(format!("Showing {} diffs.", style.name())),
-        }
-        cx.notify();
-    }
-
-    /// `T`: the next theme, remembered in the configuration.
-    fn cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
-        let themes = &self.settings.themes;
-        let next = themes
-            .iter()
-            .position(|theme| theme.name == self.settings.theme.name)
-            .map_or(0, |position| (position + 1) % themes.len().max(1));
-        let Some(theme) = themes.get(next).cloned() else {
-            return;
-        };
-        let title = theme.title.clone();
-        let name = theme.name.clone();
-        self.settings.theme = Arc::new(theme);
-        let saved =
-            self.settings.config_path.as_deref().map(|path| {
-                crate::config::remember(path, &[("theme", "name", format!("{name:?}"))])
-            });
-        match saved {
-            Some(Err(err)) => self.fail(format!("Theme {title}; could not remember it: {err}")),
-            _ => self.set_status(format!("Theme {title}.")),
-        }
+        self.next_diff_style();
         cx.notify();
     }
 
@@ -823,13 +958,22 @@ impl ReviewApp {
             return;
         };
         let layout = self.layout;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a pane width in logical pixels, clamped far below i64's range"
+        )]
+        let sidebar = layout.sidebar.round() as i64;
         let values = [
-            ("layout", "sidebar", format!("{}", layout.sidebar.round())),
-            (
-                "layout",
-                "sidebar_visible",
-                layout.sidebar_visible.to_string(),
-            ),
+            crate::config::Remembered {
+                table: "layout",
+                key: "sidebar",
+                value: sidebar.into(),
+            },
+            crate::config::Remembered {
+                table: "layout",
+                key: "sidebar_visible",
+                value: layout.sidebar_visible.into(),
+            },
         ];
         if let Err(err) = crate::config::remember(&path, &values) {
             self.fail(format!("Could not remember the pane width: {err}"));
@@ -837,10 +981,7 @@ impl ReviewApp {
     }
 
     fn zoom(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
-        let size = size.unwrap_or(self.fonts.default_code_size);
-        self.fonts.code_size = size.clamp(ZOOM_RANGE.start, ZOOM_RANGE.end);
-        self.set_status(format!("Code size {:.1} px.", self.fonts.code_size));
-        cx.notify();
+        self.set_code_size(size.unwrap_or(self.fonts.default_code_size), cx);
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -1047,10 +1188,35 @@ impl ReviewApp {
 /// What opening a review produced.
 struct Opened {
     review: Review,
+    found: Option<String>,
     trusted: bool,
     info: Option<review_core::ReviewInfo>,
     snapshot: Snapshot,
     texts: HashMap<ObjectId, Arc<rows::FullText>>,
+}
+
+/// The status line when a review opens, and whether it reports a failure: a configuration
+/// problem first, where the reviewer looks rather than only on stderr; then how the review was
+/// found, as for the current branch's pull request; then the review's progress.
+fn opening_status(summary: &str, found: Option<&str>, problems: &[String]) -> (String, bool) {
+    let mut parts = Vec::new();
+    if let Some(problem) = problems.first() {
+        let more = match problems.len() - 1 {
+            0 => String::new(),
+            more => format!(" ({} on stderr)", plural(more, "more problem")),
+        };
+        parts.push(format!("Configuration: {problem}{more}"));
+    }
+    if let Some(found) = found {
+        let mut letters = found.chars();
+        parts.extend(
+            letters
+                .next()
+                .map(|first| first.to_uppercase().chain(letters).collect::<String>()),
+        );
+    }
+    parts.push(summary.to_owned());
+    (parts.join(" · "), !problems.is_empty())
 }
 
 /// Reads the head text of every changed text file of `revision`, by blob, for context lines.
@@ -1167,4 +1333,42 @@ fn distribution(mut values: Vec<Duration>) -> String {
         over(Duration::from_micros(8_300)),
         over(Duration::from_micros(16_700)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The opening status names a configuration problem first, as a failure, then how the
+    /// review was found, then its progress.
+    #[test]
+    fn the_opening_status_says_what_matters_first() {
+        let summary = "Revision 1 · 7 of 27 hunks reviewed";
+        assert_eq!(
+            opening_status(summary, None, &[]),
+            (summary.to_owned(), false)
+        );
+        let found = "reviewing pull request #12 from feature (https://example.com/pull/12)";
+        assert_eq!(
+            opening_status(summary, Some(found), &[]),
+            (
+                format!(
+                    "Reviewing pull request #12 from feature (https://example.com/pull/12) · \
+                     {summary}"
+                ),
+                false
+            )
+        );
+        let problems = ["there is no theme \"x\"".to_owned(), "another".to_owned()];
+        let (status, failed) = opening_status(summary, Some(found), &problems);
+        assert!(failed);
+        assert!(
+            status.starts_with(
+                "Configuration: there is no theme \"x\" (1 more problem on stderr) · \
+                 Reviewing pull request #12"
+            ),
+            "{status}"
+        );
+        assert!(status.ends_with(summary), "{status}");
+    }
 }

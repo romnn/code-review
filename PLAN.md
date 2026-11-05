@@ -633,7 +633,7 @@ with grammar versions matching Zed's).
 
 | Command | Purpose |
 |---|---|
-| `cr open <pr-number \| pr-url \| base..head \| --worktree [ref]>` | Start or refresh a review; records a revision if anything changed and prints a summary. |
+| `cr open [pr-number \| pr-url \| base..head \| --worktree [ref]]` | Start or refresh a review; records a revision if anything changed and prints a summary. Without a target, see below. |
 | `cr status` | Counts per file and in total: new, changed since reviewed, reviewed, accepted, flagged, noise. |
 | `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts. |
 | `cr mark <unit>... seen \| accepted \| flagged \| unseen` | Set review state. |
@@ -644,6 +644,26 @@ with grammar versions matching Zed's).
 
 Every command accepts `--review <key>`, defaulting to the review for the current repository and
 branch, and `--json`.
+
+`cr open` and `review-lite` without a target and without `--worktree` choose one in
+`review-core` (`Review::open_for_current_branch`), and say on standard error which rule fired
+(review-lite also in its status line when the review opens, after any configuration problem):
+
+1. The review last opened for this repository and branch.
+2. Otherwise the branch's open pull request, as `gh pr view` resolves it, keyed exactly as when it
+   is opened by number or URL so marks are shared.
+   A merged or closed pull request is skipped, because its review would no longer follow the
+   branch; reviewing one stays possible by number or URL.
+3. Otherwise `<default branch>..<branch>` (`..HEAD` when detached), where the default branch is
+   what `origin/HEAD` names, or else the first of `origin/main`, `origin/master`, `main` and
+   `master` that exists.
+   Any `gh` failure (not installed, not authenticated, no GitHub remote, no pull request) only
+   skips rule 2 and is reported as the reason.
+   With no default branch, or no commit on `HEAD` beyond it, opening fails and asks for a target
+   or `--worktree`.
+
+A remembered review always wins, so a pull request opened after a range review of the same branch
+is picked up only by naming it once.
 
 ## Front ends
 
@@ -674,21 +694,64 @@ it, muted, so it never reads as code.
 - **Modes.** Three modes, each its own key context and focus handle, and one at a time:
   - *Files* (the left pane): `j`/`k` move and preview each file's diff, `h`/`l` fold and unfold
     folders, Enter folds a folder or opens a file, `0` opens the diff, Space approves or
-    unapproves the file or folder, `!` flags it and `u` resets it.
+    unapproves the file or folder, `!` flags it and `u` resets it. `/` filters the tree as
+    lazygit does: typing narrows it to the files whose path contains the query (and their
+    folders), Enter keeps the filter and returns to the list, Esc clears it. A filtered folder
+    cannot be marked as a whole, since it hides some of its files.
   - *Diff*: a file opens at its first hunk that needs the reviewer. `j`/`k` move between hunks,
     `Ctrl+D`/`Ctrl+U` scroll, Space approves the hunk and moves to the next open one (and, at the
     end of a file, names the next file, which `n` opens), `!` flags, `za` folds, Esc or `h` goes
-    back to the files.
+    back to the files. `/` searches the diff's code as vim does, without leaving the diff:
+    matches are highlighted, `n`/`N` step through them (while a search is active `n` steps
+    rather than opening the next file), and the selected hunk follows the match, so Space acts
+    on the hunk that holds it. Leaving the diff ends the search.
   - *File* (`=`): the whole head version as a read-only buffer at the selected hunk, with the
     changed lines marked in the gutter and syntax everywhere; vim motions (`j`/`k`, `gg`, `G`,
     `Ctrl+D`/`Ctrl+U`, `w`/`b`), `/` with `n`/`N`, `gd` when trusted, and Space approves the hunk
     under the cursor. `=` or Esc goes back to the diff at the same place.
   - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
     request overview and `?` the keys, both overlays that own the keyboard until closed.
+  - `s` shows the diff side by side or unified, `|` cycles the diff styles, and `T` or `,` opens
+    the settings list (below).
+- **Pickers.** Telescope's two most used, from every mode, as overlays that own the keyboard
+  and the pointer: `Ctrl+P` finds a file by a fuzzy match of its path (`nucleo-matcher`, the
+  matcher Helix uses), each entry with its change kind and review progress; `Ctrl+G` searches
+  file contents as you type, each hit as `path:line` with the line and its match highlighted,
+  beside a preview of the lines around it. Both start on the review's changed files; Tab widens
+  them to the whole head tree. The query takes typing; Esc gives the list the keys (`j`/`k`,
+  `i` or `/` to type again, Esc or `q` closes), as in vim. Enter opens a changed file in the
+  diff, at the hunk holding a content hit or, when no hunk shows that line, in the file buffer
+  at it; a file outside the review opens read-only in the buffer. Changed files are searched in
+  the head texts the window already holds for the diff, which are exactly the text the diff and
+  the buffer show, so a hit's line is the line that opens and typing starts no process; the
+  whole tree is not in memory, so it is searched with `git grep` on the pinned head snapshot and
+  listed with `git ls-tree`, never the worktree. Searches run in the background, a newer query
+  cancels the older one (killing its `git grep`), and only the newest result lands. The picker
+  is a list, a query and an optional preview, meant to host other searchable lists later.
+- **Holding a key.** Moving the tree cursor previews each file's diff. A single press builds it
+  at once; while a held key repeats, only the file's header follows the cursor and the diff is
+  built once the cursor rests (120 ms), so the cursor and header move every keypress. No
+  older file's rows ever show under a newer header, and any mark, mode change or buffer
+  completes the preview first, so a key pressed right after a burst acts on the file shown.
+  Anything that would rebuild the diff meanwhile (a mark landing, text arriving) keeps the
+  header alone, so the file still opens at its place once the cursor rests. Layouts are not
+  cached: a layout reads text, highlights and folds that change on their own,
+  and building one only when the cursor rests is fast enough.
+- **Keys act on what shows.** Every mark resolves its target from the screen in one place:
+  in the tree, the file under the cursor must be the file whose diff shows; in the diff, the
+  rows must be the selected file's and the selected hunk must be on screen (one scrolled away
+  is shown first, and the next press marks it); in the buffer, only a buffer of the selected
+  file has hunks. Every way a file comes to show (the tree, `n`, following a move, a picker)
+  goes through one function that also reveals it in the tree, clearing a filter that hides it
+  and unfolding its folders. A diff search selects the hunk that holds its match, or the
+  nearest one for unchanged code.
 - **Actions as data.** `app/keymap.rs` is one table of actions: their mode, default keys, group,
   help and hint priority. Dispatch, the bottom bar, the `?` sheet and `[keys]` in the
   configuration all read it. The bottom bar shows what the keys act on (`hunk 2/3 ·
-  src/engine.rs`) and the five to seven most useful keys of the current mode that can act now.
+  src/engine.rs`) at the left and every hinted key of the current mode at the right, in rank
+  order with `? keys` last at the edge. Keys that cannot act now are dimmed, not removed, and a
+  narrow window drops whole hints from the highest rank down, so the bar never shifts as the
+  selection changes.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the lines it covers, at most one tag (`only reformatting`, `whitespace changed ·
@@ -705,17 +768,73 @@ it, muted, so it never reads as code.
   where the code arrives. The file buffer's header names the scopes around the cursor
   (`src/engine.rs › impl Ledger › fn balance`). On tinted lines, syntax colors too dim to read are
   lifted toward the text color until they reach a 3:1 contrast.
-- **Diff styles.** `syntax` (the default) keeps syntax colors on delta's line backgrounds
-  (`#5f1519`, `#14471f`, overridable per theme); `plain` colors changed lines red and green.
-  `|` switches and remembers it in `[diff] style`. Unchanged code is syntax-colored in both.
-  Changed-token emphasis is off by default (`[diff] token_emphasis`).
+- **Diff styles.** How a diff is colored is independent of the theme: a diff style is a named
+  bundle of syntax colors (on or off), what changed lines are drawn on (`none`, `muted`, mixed
+  toward the editor background, or `bold`), hunk headers (`bands` across the width or small
+  muted `chips`) and a change bar in the gutter. A style is colors only: it never moves a row,
+  so cycling styles never shifts the content. Three are built in, in the order `|` cycles them:
+  `plain`, lazygit's red and green text without syntax or backgrounds; `bold` (the default),
+  delta's syntax colors on its line backgrounds (`#5f1519`, `#14471f`, overridable per theme);
+  and `soft`, the Zed prototype's muted look with chips and a change bar. `[styles.<name>]`
+  tables add more (one that sets `density` is rejected with an error saying where it belongs),
+  `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `|`
+  hint names the style in use. Changed-token emphasis is off by default
+  (`[diff] token_emphasis`).
+- **Density.** The rows' spacing is its own setting, `[diff] density`: `compact`, a terminal's
+  line height with each hunk right after the code before it; `normal` (the default), a little
+  more line height and a blank row before each hunk; `comfortable`, Zed's taller lines with the
+  same blank rows. Every row keeps one height, and the air is whole blank rows, so places and
+  scrolling stay row arithmetic.
+- **Side by side.** `s` toggles `[diff] layout` between `unified` and `side-by-side`. Pairing is a
+  projection after the rows are laid out (`rows::present`): a run of removed lines beside the
+  added lines right after it in the same unit and hunk, line by line, with the shorter side
+  padded; unchanged lines on both sides with each side's own line number. A nested diff pairs
+  the same way within its own block and never with the chunk's lines: a move's edits show the
+  source's lines numbered as in the source file on the left and the moved lines numbered as in
+  the target on the right, and an interdiff the reviewed version on the left and the current
+  one on the right. Every line of code shows exactly once, in order on its side; notes, gaps,
+  headers and move rows keep their rows across the width, and every row keeps its owners. Each
+  half is a fixed viewport, and one text offset moves the code of every row while gutters, the
+  middle divider and the tool's own rows stay put, so a hunk's header and a move's link never
+  pan out of view; another file starts back at the left edge. When a half
+  would show fewer than 40 cells, the diff shows unified and says so, without changing the
+  remembered layout. A selection keeps the half it started in and copies that side's lines,
+  skipping padding but keeping blank lines. `/` searches each half apart, the base's half before
+  the head's in each row, and highlights a match only in its own half.
+- **Settings and presets.** `T` or `,` opens a keyboard-first settings list in the files pane's
+  place (over the left of the diff when the files pane is hidden or narrower than 260 px), so
+  the diff keeps its exact geometry: presets, themes, diff styles, density, layout, token
+  emphasis and font size, with a search over every entry and the cursor's detail in a footer.
+  The list and its search field are two key contexts (Tab or a click into the field switches;
+  the field takes everything typed). Every entry under the cursor previews over what is
+  applied, through the presentation transition, always from where the lists were when the
+  list opened, so a preview that had to move a list never moves the place for good; moving off
+  it or closing the list drops the preview, Space or Enter applies and writes it to the
+  configuration (a preset all its fields in one edit), and a failed write says the look was
+  applied but not saved. Measured on the 60,000-line fixture in a release build, a preview
+  that rebuilds the rows takes under 4 ms, so previews need no debounce. The panel keeps the
+  text size and row height it opened with, so previewing a density or a font size never moves
+  the panel. Opening
+  the settings closes a picker and opening a picker closes the settings, so one overlay owns the
+  keys. A preset bundles theme, diff style, density, layout and token emphasis: built in are
+  `delta` and `delta side-by-side` (normal), `lazygit` (compact) and `zed` (One Dark with `soft`,
+  comfortable), and `[presets.<name>]` adds more; one naming a missing theme or style is listed
+  as unusable, never applied with a fallback. A mistake in one `[styles.<name>]` or
+  `[presets.<name>]` table costs only that entry; any configuration problem shows in the status
+  line when the review opens, not only on stderr. The configuration is edited as TOML
+  (`toml_edit`), keeping comments and everything it does not change.
+- **Presentation changes.** The layout, the density, the font size and the narrow fallback, and
+  previews of them, go through one transition that notes where every list is by row identity,
+  stops scroll animations, drops a selection whose rows changed, projects the rows again and
+  puts every list back at its row. Places kept for other files are row identities too, so a
+  density change never lands a returning reviewer on another line.
 - **Themes as data.** A theme is a TOML file of semantic roles (`[ui]`, `[review]`, `[kind]`,
   `[diff]`, `[syntax]`). Nine are built in under `crates/review-lite/themes/`, each citing its
   source palette and license: carbonfox (the default), nightfox, nordfox, terafox, duskfox,
   tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine. Files in
   `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
-  `[theme] name` picks one; `T` cycles and remembers it. The app is dark only and monospace
-  throughout.
+  `[theme] name` picks one, and the settings list previews and applies them. The app is dark
+  only and monospace throughout.
 - **State model.** What is shown derives from a snapshot (one history, one pinned revision) and
   caches keyed by blob identity, so reloading never pairs new changes with old text. Every row
   names its hunk explicitly or none. A mark captures its exact units and revision when the

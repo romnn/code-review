@@ -1,0 +1,8 @@
+# A configuration with a mistake in one diff style, which the smoke script opens last: the
+# window opens with the rest of it and names the mistake in its status line. The script only
+# reads it; nothing in it applies a setting, which would write here.
+[diff]
+style = "soft"
+
+[styles.calm]
+density = "comfortable"

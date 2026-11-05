@@ -51,7 +51,8 @@ comment in `crates/review-lite/src/app/qa.rs`; read it when a command here fails
 |---|---|
 | `key <keystrokes>` | Types through gpui's key dispatch, so the real bindings apply: `key j`, `key shift-t`, `key z a`, `key ctrl-d`. Several keystrokes are typed one after another, so `key b a l` types into the find bar. |
 | `action <name>` | Dispatches an action by name, such as `action review_lite::NextHunk`. |
-| `rapid <command>` | Runs a command and answers at once, without waiting for background work or a frame; a few `rapid` lines in a row race input against saving marks and loading. |
+| `rapid <command>` | Runs a command and answers at once, without waiting for background work or a frame; a few `rapid` lines in a row race input against saving marks and loading. `rapid state` prints the state right away. |
+| `repeat <count> <ms> <keystroke>` | Types a keystroke `count` times, one every `ms`, as a held key repeats, then prints JSON with each keystroke's handling time and the input-to-frame latency percentiles over the burst; `repeat 25 33 j` in the tree measures holding `j`. Use `QA_BINARY=target/release/review-lite` for release numbers. |
 | `file <path>` | Moves the files cursor to a file and shows its diff, as `j`/`k` would. |
 | `click <x> <y> [count] [ctrl] [shift] [right]` | Mouse click at window coordinates; `count` 2 or 3 makes a double or triple click. |
 | `drag <x1> <y1> <x2> <y2>` | Press, render a frame, move in steps, release; use it for selection, pane dividers and the title bar. |
@@ -63,7 +64,7 @@ comment in `crates/review-lite/src/app/qa.rs`; read it when a command here fails
 | `resize <W>x<H>` | Resizes the window. |
 | `clipboard` | Prints the clipboard as a JSON string; use it after selecting and copying. |
 | `latency` | Input-to-frame latency percentiles. |
-| `state` | The observable UI state as one line of JSON: `mode` (Tree, Diff, Buffer), `area` (which key context has the keyboard), `screen`, `selected`, `hunk`, `hunk_units`, `hunk_badges`, `pending` and `queued` marks, `revision` and `newer`, visible `rows` with their `kind`, `hunk`, `tag` and `scope`, `tree` rows with change kind and `progress`, `buffer` (cursor row and column), `find`, `layout`, `window_events` (title-bar moves, zooms, minimizes, menus), and `view` (`overlay`, `token_emphasis`, `diff_style`, `theme`). |
+| `state` | The observable UI state as one line of JSON: `mode` (Tree, Diff, Buffer), `area` (which key context has the keyboard), `screen`, `selected`, `hunk`, `hunk_units`, `hunk_badges`, `pending` and `queued` marks, `revision` and `newer`, visible `rows` with their `kind`, `hunk`, `tag` and `scope`, `tree` rows with change kind and `progress`, `buffer` (cursor row and column), `find` (its `target` mode, query, matches, current match and its `current_column`), `filter` (the tree's `/` filter), `picker` (kind, scope, query, `editing`, `count`, the first entries), `shown` (the file whose diff rows show) and `preview` (a held-key preview awaiting its diff), `layout`, `window_events` (title-bar moves, zooms, minimizes, menus), and `view` (`overlay`, `token_emphasis`, `diff_style`, `theme`, `density`, `layout` and the `effective_` ones that show, `previewing`, and the open `settings` list with its cursor and panel `geometry`). |
 
 Find click coordinates by looking at a screenshot: the image's pixels are window coordinates,
 because the window fills the output.
@@ -88,8 +89,10 @@ the feature you changed:
 3. Race input against saving with `rapid` lines (approve, then leave the file at once) and check
    that the mark lands on exactly the hunk approved and the view shows the latest selection.
 4. Open the whole file with `=`, use the vim motions, `/` with `n`/`N`, and `gd` on a trusted
-   and on an untrusted review; expand context and follow a move. Switch `|` and cycle themes
-   with `T`, and check every theme's contrast.
+   and on an untrusted review; expand context and follow a move. Cycle the diff styles with `|`
+   (plain, bold, soft), toggle side by side with `s` and pan it with `pan <px>`, and open the
+   settings list with `T`: preview themes and presets with `j`/`k`, search with Tab, apply with
+   Space, and check every theme's contrast in every style.
 5. Select text with the mouse, copy it, and check `clipboard`.
 6. Scroll with the wheel and with the keys, sampling during the animation, and check `latency`.
 7. Run `start --demo-revision 2` on the same data and check that carried marks, changed since

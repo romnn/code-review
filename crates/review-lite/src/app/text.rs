@@ -20,11 +20,28 @@ pub enum Pane {
     Source,
 }
 
+/// Which column of a pane a line is painted in, and a selection takes its text from.
+///
+/// Columns order as a row reads: the base half of a side-by-side row before its head half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Column {
+    /// The whole width: every line of the buffer and of the unified diff, and the rows of the
+    /// side-by-side diff that span both halves.
+    Whole,
+    /// The base half of the side-by-side diff.
+    Left,
+    /// The head half of the side-by-side diff.
+    Right,
+}
+
 /// A selection: fixed at `anchor`, extended to `head` by dragging or shift-clicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     /// The pane the selection is in.
     pub pane: Pane,
+    /// The column it started in, which it keeps: a selection in one half of the side-by-side
+    /// diff takes that side's lines only.
+    pub column: Column,
     /// Where the selection started.
     pub anchor: TextPos,
     /// Where it ends now.
@@ -34,12 +51,20 @@ pub struct Selection {
 impl Selection {
     /// An empty selection at `pos`.
     #[must_use]
-    pub fn caret(pane: Pane, pos: TextPos) -> Self {
+    pub fn caret(pane: Pane, column: Column, pos: TextPos) -> Self {
         Self {
             pane,
+            column,
             anchor: pos,
             head: pos,
         }
+    }
+
+    /// Whether a line painted in `column` takes part in the selection: one in its column, or
+    /// one across the whole width.
+    #[must_use]
+    pub fn covers(&self, column: Column) -> bool {
+        column == self.column || column == Column::Whole
     }
 
     /// The start and end in text order.
@@ -194,6 +219,7 @@ mod tests {
         let rows = ["alpha beta", "gamma", "delta epsilon"];
         let selection = Selection {
             pane: Pane::Diff,
+            column: Column::Whole,
             anchor: pos(2, 5),
             head: pos(0, 6),
         };
@@ -206,7 +232,8 @@ mod tests {
             "beta\ngamma\ndelta"
         );
         assert_eq!(
-            Selection::caret(Pane::Diff, pos(1, 2)).text(|row| rows.get(row).copied()),
+            Selection::caret(Pane::Diff, Column::Whole, pos(1, 2))
+                .text(|row| rows.get(row).copied()),
             ""
         );
     }

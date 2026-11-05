@@ -26,6 +26,16 @@ impl ReviewApp {
         cx.notify();
     }
 
+    /// Whether any row of the selected hunk is in the diff's viewport, where it is or is
+    /// heading; before the list is laid out, it counts as shown.
+    pub(super) fn hunk_in_view(&self) -> bool {
+        let Some(rows) = self.hunk_rows.get(self.hunk) else {
+            return false;
+        };
+        let viewport = f32::from(self.list.viewport_bounds().size.height);
+        scroll::shows(rows, self.list_target(), viewport, self.fonts.row_height())
+    }
+
     /// Scrolls the selected hunk into view, as much of it as fits, starting at its header.
     pub(super) fn reveal_hunk(&mut self) {
         let Some(rows) = self.hunk_rows.get(self.hunk).cloned() else {
@@ -141,7 +151,7 @@ impl ReviewApp {
             .get(rows.clone())
             .unwrap_or_default()
             .iter()
-            .find_map(|row| row.link);
+            .find_map(|row| row.note()?.link);
         if let Some(target) = link {
             self.follow(target, cx);
             return;
@@ -152,7 +162,7 @@ impl ReviewApp {
             .get(rows)
             .unwrap_or_default()
             .iter()
-            .find_map(|row| match row.fold {
+            .find_map(|row| match row.note()?.fold {
                 Some(Fold::Expand(unit)) => Some(unit),
                 _ => None,
             });
@@ -189,7 +199,8 @@ impl ReviewApp {
 
     /// Expands the gap at `row` by a step of unchanged lines.
     pub(super) fn expand_gap(&mut self, row: usize, cx: &mut Context<Self>) {
-        let Some(Fold::Gap { file, at }) = self.rows.rows.get(row).and_then(|row| row.fold) else {
+        let Some(Fold::Gap { file, at }) = self.rows.rows.get(row).and_then(|row| row.note()?.fold)
+        else {
             return;
         };
         let Some(path) = self.rows.files.get(file).map(|file| file.path.clone()) else {
@@ -200,8 +211,12 @@ impl ReviewApp {
         cx.notify();
     }
 
-    /// `n` in the diff: the next file that still needs the reviewer.
+    /// `n`: the next match while a `/` search is in the diff, else the next file to review.
     pub(super) fn next_file(&mut self, _: &NextFile, _: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_search_active() {
+            self.find_step(true, false, cx);
+            return;
+        }
         match self.next_open_file() {
             Some(path) => {
                 self.show_file(&path);
@@ -332,6 +347,6 @@ impl ReviewApp {
         self.rows
             .rows
             .get(row)
-            .is_some_and(|row| row.kind == RowKind::Gap)
+            .is_some_and(|row| row.kind() == RowKind::Gap)
     }
 }
