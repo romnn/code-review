@@ -153,15 +153,22 @@ be proven, and is never used as identity:
   after `'`, macro metavariables after `$`, `$x:frag` bindings, tuple-index chains such as
   `x.0.1`), and the indentation of every Python logical line. Python re-indentation is therefore never formatting-only, even
   when uniform; wrapping inside brackets still is.
-- In the MVP, a file's chunks are **formatting-only** exactly when the two canonical trees are equal
-  and neither side has a parse error. Whole-file equality is the simplest rule that cannot hide a
-  structural change: dedenting a Python statement out of an `if` block changes the tree, and so
-  does JavaScript's `return\nisAdmin;`.
-- In a file with real changes, no chunk is formatting-only, but a leaf-level diff still highlights
-  which tokens really changed so reformatting noise is easy to read past. Nothing is hidden there.
-- A per-chunk proof is later work. It must include each leaf's attachment to its enclosing
-  structure (for example the root path of node kinds and field names), not just the subtree around
-  the chunk, since a Python dedent changes attachment without changing the statement itself.
+- A file is **formatting-only** when the two canonical trees are equal and neither side has a
+  parse error. Whole-file equality cannot hide a structural change: dedenting a Python statement
+  out of an `if` block changes the tree, and so does JavaScript's `return\nisAdmin;`.
+- In a file with real changes, a chunk whose tokens are unchanged (the `whitespace_only` hint) is
+  proven on its own with two hybrids: the old file with only this chunk applied, and the new file
+  with only this chunk reverted. The chunk is formatting-only when the first has the old file's
+  canonical tree and the second the new file's. Requiring both proves the chunk a pure reformat in
+  the old file and beside every other change in the new one; another chunk that opens a string
+  around it breaks the second comparison. A parse error in any of the four trees, or an
+  unsupported language, leaves it unproven, and the grammar decides what is significant (Python
+  indentation, JavaScript's automatic semicolons), so there is no language whitelist. Each
+  candidate costs two parses about the file's size; past 64 MiB of hybrids per file, candidates
+  stay unproven. `Unit::formatting_only` carries either proof, `FileChange::formatting_only` the
+  whole-file one; this is `ANALYSIS_FORMAT` 4.
+- Chunks that stay unproven keep a leaf-level diff that highlights which tokens really changed, so
+  reformatting noise is easy to read past. Nothing is hidden there.
 - Each language's predicate is validated by its own test suite of equivalent and non-equivalent
   pairs before the language counts as supported.
 - Inside other chunks of supported languages, a leaf-level diff highlights which tokens really
@@ -371,44 +378,127 @@ end is chosen.
 
 ### lite
 
-As built for M2 (`crates/review-lite`):
+#### Product direction
+
+review-lite works like lazygit, with approving where lazygit stages. The reviewer moves through
+files, opens one file's diff, steps from hunk to hunk and approves each with one key; a whole
+file or folder is approved from the tree the same way. The look is a bold terminal editor's, but
+calm: code is an uninterrupted grid, and everything the tool says about the code sits apart from
+it, muted, so it never reads as code.
+
+- **Modes.** Three modes, each its own key context and focus handle, and one at a time:
+  - *Files* (the left pane): `j`/`k` move and preview each file's diff, `h`/`l` fold and unfold
+    folders, Enter folds a folder or opens a file, `0` opens the diff, Space approves or
+    unapproves the file or folder, `!` flags it and `u` resets it.
+  - *Diff*: a file opens at its first hunk that needs the reviewer. `j`/`k` move between hunks,
+    `Ctrl+D`/`Ctrl+U` scroll, Space approves the hunk and moves to the next open one (and, at the
+    end of a file, names the next file, which `n` opens), `!` flags, `za` folds, Esc or `h` goes
+    back to the files.
+  - *File* (`=`): the whole head version as a read-only buffer at the selected hunk, with the
+    changed lines marked in the gutter and syntax everywhere; vim motions (`j`/`k`, `gg`, `G`,
+    `Ctrl+D`/`Ctrl+U`, `w`/`b`), `/` with `n`/`N`, `gd` when trusted, and Space approves the hunk
+    under the cursor. `=` or Esc goes back to the diff at the same place.
+  - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
+    request overview and `?` the keys, both overlays that own the keyboard until closed.
+- **Actions as data.** `app/keymap.rs` is one table of actions: their mode, default keys, group,
+  help and hint priority. Dispatch, the bottom bar, the `?` sheet and `[keys]` in the
+  configuration all read it. The bottom bar shows what the keys act on (`hunk 2/3 ·
+  src/engine.rs`) and the five to seven most useful keys of the current mode that can act now.
+- **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
+  separate band without a gutter, in muted text: a hunk header is one quiet line with the review
+  state's glyph, the lines it covers, at most one tag (`only reformatting`, `whitespace changed ·
+  not proven equivalent`, `changed since revision 1`) and the scope breadcrumb; unchanged lines left
+  out are one rule (`15 unchanged lines`, Enter shows more); a note is a bounded block with an
+  accent bar; the selected hunk has a thin accent bar along its left edge. Approved hunks fold to
+  their header. Formatting-only hunks still show, on a neutral background without red and green,
+  labeled `only reformatting`; an unproven whitespace change keeps red and green and reads
+  `whitespace changed · not proven equivalent`. Tree rows are an indent, a change-kind letter
+  colored by kind, and the name colored by review state; only state that needs action or confirms
+  done carries a glyph (`✓` done, `◐` partly reviewed, `!` flagged, `↻` changed since reviewed), so
+  unreviewed files are just bright names. Change details and counts live in the diff's header. Moves
+  are one quiet line naming the other end (Enter follows it); a move with edits also shows its edits
+  where the code arrives. The file buffer's header names the scopes around the cursor
+  (`src/engine.rs › impl Ledger › fn balance`). On tinted lines, syntax colors too dim to read are
+  lifted toward the text color until they reach a 3:1 contrast.
+- **Diff styles.** `syntax` (the default) keeps syntax colors on delta's line backgrounds
+  (`#5f1519`, `#14471f`, overridable per theme); `plain` colors changed lines red and green.
+  `|` switches and remembers it in `[diff] style`. Unchanged code is syntax-colored in both.
+  Changed-token emphasis is off by default (`[diff] token_emphasis`).
+- **Themes as data.** A theme is a TOML file of semantic roles (`[ui]`, `[review]`, `[kind]`,
+  `[diff]`, `[syntax]`). Nine are built in under `crates/review-lite/themes/`, each citing its
+  source palette and license: carbonfox (the default), nightfox, nordfox, terafox, duskfox,
+  tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine. Files in
+  `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
+  `[theme] name` picks one; `T` cycles and remembers it. The app is dark only and monospace
+  throughout.
+- **State model.** What is shown derives from a snapshot (one history, one pinned revision) and
+  caches keyed by blob identity, so reloading never pairs new changes with old text. Every row
+  names its hunk explicitly or none. A mark captures its exact units and revision when the
+  reviewer acts and shows at once as pending; marks are saved one at a time in the background,
+  and each completion rebuilds the view from the current selection, so a slow save never acts on
+  what is shown now. The engine refuses a mark against a revision that is no longer current. A
+  newer revision is announced in the status bar and never switched to by itself: `R` switches to
+  it, or fetches when there is none. Language-server requests have deadlines.
+
+#### Implementation
 
 - **Stack.** `gpui-pre` 0.3.9 and `gpui-component` 0.8.0, both Apache-2.0. 0.9.0 and 0.8.1 are
   newer but still inside the repository's 14-day dependency cooldown; move to 0.9.0 (which uses
   `gpui-pre` 0.3.11) once it clears. `gpui-pre-platform` is built with the `wayland` feature only,
-  so the Linux build links nothing from X11 and needs only `libxkbcommon-dev`. The app is dark
-  only; it ignores the system appearance.
+  so the Linux build links nothing from X11 and needs only `libxkbcommon-dev`.
 - **One tree-sitter.** `gpui-component`'s tree-sitter highlighter is an optional feature and stays
   off, so the dependency graph has exactly one tree-sitter, the one `review-core` pins to Zed's
-  revision, and no `links` conflict. Syntax highlighting in the app waits for a highlighter that
-  shares that version.
-- **Rendering.** A sidebar of walkthrough steps with reviewed/total counts, and a `uniform_list`
-  of single-line rows for the selected step, laid out from the engine's answers: collapse reasons,
-  moves, interdiffs, display hunks, descriptions and notes. Front ends never decide these
-  themselves; navigation order, step progress and next-unreviewed come from
-  `walkthrough::Partition`. Marks go through `Review::mark` on a background thread, then the
-  history is reloaded and the rows rebuilt from it. `gpui-component`'s editor and its diff view
-  are not used: a uniform list of prepared rows is the simplest thing that stays smooth at 50,000
-  lines.
-- **Go to definition.** A minimal synchronous stdio JSON-RPC client (`lsp.rs`, about 400 lines)
-  speaks `initialize`, `didOpen` and `textDocument/definition` to rust-analyzer (and, if
-  installed, gopls, pyright and typescript-language-server) rooted at the revision's worktree, on
-  gpui's background executor. Zed's `lsp` crate was the alternative, but it is async on Zed's
-  executor and pulls in its settings, fs and http layers; one request type does not justify that.
-  Build scripts, proc macros and `cargo check` stay off in rust-analyzer, but `cargo metadata`
-  and `rustc` still run under the reviewed tree's Cargo configuration, which can name any
-  program as a `rustc` wrapper. Running a language server on a reviewed head is therefore
-  arbitrary code execution, and it is gated on trust (below). Find references and hover reuse the
-  same client later.
+  revision, and no `links` conflict.
+- **Syntax highlighting.** review-lite runs Zed's `highlights.scm` queries (copied under
+  `crates/review-lite/queries/` with their source commit; TOML's comes with its grammar) on the
+  grammars `review-core` exposes through `Language::grammar`. Each blob is highlighted once, in
+  the background after the first frame, and cached by its object ID; added and unchanged lines
+  take the head's colors and removed lines the base's.
+- **Scope breadcrumbs.** `review_core::scope` finds named scopes (`impl Ledger › fn apply`,
+  `class Parser › def parse`, `func (*Ledger) Apply`, `[package]`) for every supported language,
+  and `RevisionView::scope` gives a unit's breadcrumb, read from the head, or from the base for a
+  deletion-only chunk. Each hunk header shows it.
+- **Rendering.** A `uniform_list` of single-line rows for the selected file, laid out from the
+  engine's answers: collapse reasons, moves, interdiffs, display hunks and notes. Front ends never
+  decide these themselves. `gpui-component`'s editor and its diff view are not used: a uniform
+  list of prepared rows is the simplest thing that stays smooth at 50,000 lines. Walkthrough
+  steps stay in the engine and the CLI; the app orders by files.
+- **Go to definition.** A minimal synchronous stdio JSON-RPC client (`lsp.rs`) speaks
+  `initialize`, `didOpen` and `textDocument/definition` to rust-analyzer (and, if installed,
+  gopls, pyright and typescript-language-server) rooted at the revision's worktree, on gpui's
+  background executor; a reader thread lets every request time out. Zed's `lsp` crate was the
+  alternative, but it is async on Zed's executor and pulls in its settings, fs and http layers;
+  one request type does not justify that. Build scripts, proc macros and `cargo check` stay off in
+  rust-analyzer, but `cargo metadata` and `rustc` still run under the reviewed tree's Cargo
+  configuration, which can name any program as a `rustc` wrapper. Running a language server on a
+  reviewed head is therefore arbitrary code execution, and it is gated on trust (below). The
+  definition opens in the file buffer; `Ctrl+O` goes back.
 - **Trust.** No tool that can execute reviewed code starts unless the review is trusted.
   `Review::trust` and `Review::set_trusted` in `review-core` store the decision as a `trust` event
   in the review's log, so every front end shares it. Without a decision, the working tree and a
   range whose head is a local branch are trusted, and pull requests and other ranges, such as a
   remote-tracking ref or a bare commit, are not. A local branch can still hold someone else's
-  code, for example one made by `gh pr checkout`; revoke trust for it. In review-lite, `g` on an
-  untrusted review shows a one-line hint, and `T` explains what will run and trusts on a second
-  press, or revokes trust and stops the language servers. The demo's head is a local branch, so it
-  is trusted.
+  code, for example one made by `gh pr checkout`; revoke trust for it. In review-lite, `gd` on an
+  untrusted review shows a one-line hint, and `Ctrl+T` explains what will run and trusts on a
+  second press, or revokes trust and stops the language servers. The demo's head is a local
+  branch, so it is trusted.
+- **Window chrome.** gpui asks for server-side decorations; GNOME has no `xdg-decoration`, so
+  the window falls back to client decorations and review-lite draws its own square title bar
+  (`app/chrome.rs`): the title, a drag area, minimize, maximize and close. As in Zed's
+  `platform_title_bar` on Linux, a press arms a move and the first motion calls
+  `start_window_move`; the armed state lives on the app, not in the frame's closures, because a
+  re-render between press and motion would otherwise drop it. A double click toggles maximize and
+  a right click opens the window menu. The QA sway forces client decorations so screenshots show
+  the same bar.
+- **File change kinds.** `FileStatus::change` (`FileChangeSummary`: git's kind, noise,
+  formatting-only, moves, entry changes such as binary or mode) and its `FileTone` come from
+  `review-core`. The tree shows the kind as a colored letter; the diff header spells out the
+  details.
+- **Layout.** Fixed row heights and fixed-width columns, so folding, marking and moving the
+  cursor never shift anything else, and no pane animates its width; square corners throughout; a
+  4 px grid with 12 px side padding; pane headers line up on one hairline. The files pane resizes
+  by dragging its divider (double click resets, limits keep the diff at least 400 px wide),
+  `Ctrl+B` hides it, and the width is remembered in the `[layout]` table of the configuration.
 - **Scrolling.** `review-lite --bench-scroll` scrolls every row of the review once, 30 rows per
   frame, and prints frame-interval and per-frame build-time percentiles. On the perf fixture
   (60,000 changed lines, 70,000 rows) it holds 60 Hz, with about 1 ms of app work per frame.
@@ -427,26 +517,58 @@ the shared fixture for both front ends; the Zed fork opens the same review.
 
 ### QA harness
 
-`review-lite --qa` reads line commands on standard input (`key`, `action`, `find`, `scroll`,
-`resize`, `state`, `quit`) and answers each with one line once its background work is done and a
-frame has rendered; `state` prints the visible UI state as JSON. `scripts/qa/run.sh` (`task qa --
+`review-lite --qa` reads line commands on standard input (`key`, `action`, `click`, `drag`,
+`hover`, `hit`, `file`, `find`, `scroll`, `resize`, `state`, `quit` and more; see `app/qa.rs`)
+and answers each with one line once its background work is done and a frame has rendered;
+`rapid <command>` answers without waiting, so a script can race input against background work.
+`state` prints the visible UI state as JSON. `scripts/qa/run.sh` (`task qa --
 <script>`) runs the app inside a headless sway, feeds it a script, checks answers with `expect`
-lines and saves `grim` screenshots to `target/qa/`. `scripts/qa/smoke.qa` walks the demo. The Zed
-fork reuses the runner with its own QA mode.
+lines and saves `grim` screenshots to `target/qa/`. `scripts/qa/smoke.qa` walks the demo. QA runs
+keep their configuration and demo under `target/qa/`, so they never touch the user's settings or
+race another front end's demo. The Zed fork reuses the runner with its own QA mode.
 
 ### zed
 
-- Clone Zed into `~/dev/zed-review` with `upstream` pointing at `zed-industries/zed`; build with
-  `CARGO_TARGET_DIR=/mnt/ssd2/cargo-targets/zed-review`. Whether and where to publish the fork is
-  decided later (a GitHub fork of a public repository is always public).
-- A `code_review` crate registers an action to open a review. It opens the revision's worktree as
-  the project, then a review item: a multibuffer with one excerpt per hunk in walkthrough order,
-  step headers as blocks, and a buffer diff against the base text so Zed renders the hunks
-  natively.
-- A dock panel lists steps and progress; mark actions are bound in the keymap; review state shows in
-  the gutter. LSP, highlighting and browsing come from Zed.
-- The patch to upstream files stays minimal (workspace member, registration in `zed` init, keymap
-  entries) so rebasing on upstream stays cheap.
+As built for M3 in `~/dev/zed-review` (remote `upstream`, Zed `main` at c7bea34383), crate
+`crates/code_review`:
+
+- **Patch to upstream:** five lines in four files: the workspace member and dependency in
+  `Cargo.toml`, the dependency in `crates/zed/Cargo.toml`, `code_review::init(cx)` in `main.rs`,
+  and `code_review::bind_keys(cx)` at the end of `load_default_keymap` in `zed.rs`. Zed reloads its
+  keymap by clearing every binding, so the crate's own `keymap.json` must be re-bound from there;
+  that line is also what lets the review keys win over vim's normal mode. `Cargo.lock` gains
+  `code_review`, `review-core` and `tree-sitter-toml-ng`; there is one tree-sitter in the graph.
+- **Opening:** command-palette actions (`code_review: open demo`, `open demo revision`,
+  `review working tree`, `review range`) and, at startup, `CODE_REVIEW_DEMO=1`,
+  `CODE_REVIEW_DEMO_REVISION=N`, `CODE_REVIEW_RANGE=a..b` or `CODE_REVIEW_WORKTREE=REF`, because
+  Zed's CLI rejects unknown flags. `scripts/zed/launch.sh` wraps them with its own Zed profile
+  (dark theme, terminal font, diff colors as theme overrides). The review's head worktree opens as
+  a workspace in the first window; every buffer of it is made read-only.
+- **Review item:** one `MultiBuffer` per step over the head worktree's project buffers, so
+  highlighting, go-to-definition, search, excerpt expansion, sticky scroll and breadcrumbs are
+  Zed's. Each file gets a `BufferDiff` whose base text is the head file with only the step's
+  shown units reverted, so Zed renders exactly the step's own units as hunks and every other change
+  as context. Header blocks carry the badge, collapsed units (formatting-only, plain moves, noise,
+  exact moves with edits) are `Replace` blocks with a one-line summary that `enter` expands in
+  place, and interdiffs, inner move diffs, descriptions and notes are blocks below. A PR overview
+  with the description rendered by Zed's Markdown renderer sits above the step.
+- **Panel:** Steps and Files tabs; the file tree comes from `review_core::tree` and marks whole
+  files and directories through `Review::mark_files`.
+- **State:** engine work runs on the background executor; a mark shows as a pending badge in the
+  next frame and the reloaded snapshot replaces it without rebuilding the excerpts. Base texts are
+  built off the main thread; the only main-thread work is Zed's excerpt and block update on a step
+  change (a few milliseconds on the demo), and every engine call and layout pass logs its time.
+- **Snapshot hygiene:** rust-analyzer's default `cargo check` on save writes a `target/` directory
+  into the head worktree, which Zed then rescans on its main thread (multi-second hangs) and which
+  runs the reviewed code. The launch profile turns off check on save, build scripts and proc
+  macros, as review-lite does; the fork should enforce this per review worktree rather than rely
+  on the profile.
+- **Trust:** the engine's trust decision maps onto Zed's restricted mode (`TrustedWorktrees`):
+  trusted reviews trust the head worktree, untrusted ones restrict it, and trusting it in Zed's
+  prompt records the trust in the engine.
+- **QA:** `CODE_REVIEW_QA=1` speaks the same stdin protocol as review-lite's `--qa`;
+  `scripts/qa/zed-smoke.qa` walks the demo, and `QA_BINARY=scripts/zed/launch.sh` drives the fork
+  with `scripts/qa/session.sh`.
 
 ## Milestones
 

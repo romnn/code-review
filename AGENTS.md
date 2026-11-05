@@ -8,7 +8,9 @@ to date when a decision changes.
 
 - `crates/review-core`: the engine (MIT OR Apache-2.0).
 - `crates/review-cli`: the `cr` binary (MIT OR Apache-2.0).
-- `crates/review-lite`: the gpui + gpui-component desktop app (GPL-3.0-or-later).
+- `crates/review-lite`: the gpui + gpui-component desktop app (GPL-3.0-or-later), a
+  lazygit-style flow described under "Product direction" in PLAN.md. Its themes are TOML data in
+  `crates/review-lite/themes/`, each citing its source palette.
 - The Zed-fork front end lives in a separate checkout, `~/dev/zed-review`, as the `code_review`
   crate, and depends on `review-core` by path.
 
@@ -55,6 +57,9 @@ to date when a decision changes.
   (needs `sway` and `grim`), drives it with the script's commands and saves screenshots to
   `target/qa/`. Read the screenshots to check rendering. Commands are documented in
   `crates/review-lite/src/app/qa.rs` and `scripts/qa/run.sh`.
+- Any front-end change is QA'd interactively with the `app-qa` skill (`.claude/skills/app-qa`,
+  driven by `scripts/qa/session.sh`): drive the app, read the screenshots, and fix the UX issues you
+  find before reporting.
 - `review-lite --bench-scroll` scrolls a whole review and prints frame timing. The perf test
   exports its 60,000-line fixture for it with
   `REVIEW_PERF_FIXTURE_DIR=$PWD/target/perf-fixture cargo nextest run --release --run-ignored only -E 'test(perf)'`;
