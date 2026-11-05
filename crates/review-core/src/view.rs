@@ -748,6 +748,29 @@ impl<'h> RevisionView<'h> {
         })
     }
 
+    /// Returns the complete old and new tree entries of file unit `id`, each described with
+    /// every value (path, type, mode, blob, symlink target or submodule commit) and `nothing`
+    /// for an absent side, or `None` for a chunk. Front ends show these as the evidence of a
+    /// change that has no lines.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::unit`].
+    pub fn entries(&self, id: UnitId) -> Result<Option<(String, String)>, Error> {
+        let unit = self.unit(id)?;
+        let file = self.file(id)?;
+        let entry = |side: Option<&EntrySide>| {
+            side.map_or_else(
+                || "nothing".to_owned(),
+                |side| format!("{} {}", side.path, describe_entry(side)),
+            )
+        };
+        Ok(match &unit.kind {
+            UnitKind::Chunk(_) => None,
+            UnitKind::File(_) => Some((entry(file.old.as_ref()), entry(file.new.as_ref()))),
+        })
+    }
+
     /// Returns the interdiff of unit `id` against its last reviewed predecessor, if it is
     /// changed since reviewed.
     ///
@@ -934,6 +957,22 @@ impl<'h> RevisionView<'h> {
             }
         }
         Ok(covered)
+    }
+
+    /// Returns the units of exactly the file shown at `path` (its head path, or its base path
+    /// when it was deleted), never of files below a directory of that name. A selected file
+    /// resolves through this; folder operations use [`Self::units_under`].
+    #[must_use]
+    pub fn units_of_file(&self, path: &str) -> Vec<UnitId> {
+        let Some(analysis) = self.analysis() else {
+            return Vec::new();
+        };
+        analysis
+            .files
+            .iter()
+            .filter(|file| file.display_path() == path)
+            .flat_map(|file| file.units.iter().map(|&index| self.id(index)))
+            .collect()
     }
 
     /// Returns every unit of the files at `paths`, or below them when a path is a directory,

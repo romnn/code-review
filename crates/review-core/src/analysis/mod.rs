@@ -21,7 +21,7 @@ use crate::syntax::Language;
 
 /// The version of the analysis format and algorithm; cached analyses of another version are
 /// recomputed.
-pub const ANALYSIS_FORMAT: u32 = 4;
+pub const ANALYSIS_FORMAT: u32 = 9;
 
 /// Units within this many lines of each other are shown together as one hunk.
 pub const HUNK_MERGE_DISTANCE: usize = 3;

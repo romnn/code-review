@@ -142,44 +142,329 @@ an entry can have both chunks and file units.
 ### Format-independent classification
 
 Formatting-only is a claim that two pieces of code are equivalent, so it is only made when it can
-be proven, and is never used as identity:
+be proven, and is never used as identity. Three review rounds found new holes in the previous
+canonical form, which normalized every gap between tree nodes and then patched exceptions (a
+blacklist). This section specifies its replacement, a conservative canonical form in which every
+normalization is positively justified. It is implemented in `review-core/src/syntax.rs` as
+`ANALYSIS_FORMAT` 9. Every syntax token is kept: the form normalizes whitespace only, never
+punctuation.
 
-- Supported languages are parsed with tree-sitter on the **whole** old and new blobs.
-- Each side is serialized as its canonical tree: node kinds, field names, nesting and leaf text
-  (comments and string literals verbatim, zero-width nodes such as automatic semicolons included),
-  and nothing about whitespace, except where whitespace is syntax: any non-whitespace byte between
-  sibling nodes (a token the grammar hides), whitespace between JSX children and inside JSX element
-  names, whitespace inside lexemes a grammar splits into several tokens (Rust lifetimes and labels
-  after `'`, macro metavariables after `$`, `$x:frag` bindings, tuple-index chains such as
-  `x.0.1`), and the indentation of every Python logical line. Python re-indentation is therefore never formatting-only, even
-  when uniform; wrapping inside brackets still is.
-- A file is **formatting-only** when the two canonical trees are equal and neither side has a
-  parse error. Whole-file equality cannot hide a structural change: dedenting a Python statement
-  out of an `if` block changes the tree, and so does JavaScript's `return\nisAdmin;`.
-- In a file with real changes, a chunk whose tokens are unchanged (the `whitespace_only` hint) is
-  proven on its own with two hybrids: the old file with only this chunk applied, and the new file
-  with only this chunk reverted. The chunk is formatting-only when the first has the old file's
-  canonical tree and the second the new file's. Requiring both proves the chunk a pure reformat in
-  the old file and beside every other change in the new one; another chunk that opens a string
-  around it breaks the second comparison. A parse error in any of the four trees, or an
-  unsupported language, leaves it unproven, and the grammar decides what is significant (Python
-  indentation, JavaScript's automatic semicolons), so there is no language whitelist. Each
-  candidate costs two parses about the file's size; past 64 MiB of hybrids per file, candidates
-  stay unproven. `Unit::formatting_only` carries either proof, `FileChange::formatting_only` the
-  whole-file one; this is `ANALYSIS_FORMAT` 4.
-- Chunks that stay unproven keep a leaf-level diff that highlights which tokens really changed, so
-  reformatting noise is easy to read past. Nothing is hidden there.
-- Each language's predicate is validated by its own test suite of equivalent and non-equivalent
-  pairs before the language counts as supported.
-- Inside other chunks of supported languages, a leaf-level diff highlights which tokens really
-  changed.
-- MVP languages: Rust, Python, JavaScript, TypeScript and TSX, Go, JSON and TOML. Grammar versions
-  are pinned to the ones Zed uses so the engine can link into the Zed fork. Like Zed, JavaScript is
-  parsed with the TSX grammar. Zed ships no TOML grammar (TOML is an extension there), so
-  `tree-sitter-toml-ng` has no Zed pin; it has no `links` key and shares Zed's
-  `tree-sitter-language`.
-- Unsupported languages and parse errors are never formatting-only. Lines whose only difference is
-  whitespace may be dimmed there, but they stay visible and unreviewed.
+#### What equivalent means
+
+Two sources are equivalent when every conforming implementation of the language accepts both or
+neither and gives them the same meaning, except for source positions: line and column numbers
+(`line!()`, `column!()`, `Location::caller`, proc-macro span positions, Python tracebacks and
+`co_firstlineno`, stack traces, debug info) and source-text reflection (`inspect.getsource`,
+`Function.prototype.toString`) may differ. Every reformatting changes those, so no formatter
+preserves them. Documentation tools are out of scope too, except that comments stay verbatim.
+
+The carve-out has a plain limit: code that branches on its own source positions or reflected
+source text, such as a test asserting `line!()` or a function printing its own source, can
+behave differently after a reformatting the proof accepts. That is accepted and documented, not
+detected.
+
+#### The proof
+
+- Supported languages are parsed with tree-sitter on the **whole** old and new blobs. A parse with
+  any `ERROR` or `MISSING` node proves nothing. Grammar acceptance is evidence that the structure
+  matches, never proof that the source is valid: every lexical rule the proof relies on comes from
+  the language's specification, not from the grammar.
+- A **file** is formatting-only when the canonical forms (below) of both sides are equal.
+- A **chunk** of a file with real changes, whose tokens are unchanged (the `whitespace_only`
+  hint), is formatting-only when two hybrids keep the canonical forms: the old file with only
+  this chunk applied must canonicalize like the old file, and the new file with only this chunk
+  reverted like the new file. Requiring both proves the chunk a pure reformat in the old file and
+  beside every other change in the new one; another chunk that opens a string around it breaks
+  the second comparison. Both proofs use the same canonical form. A parse error in any of the four
+  trees leaves the chunk unproven. Each candidate parses two hybrids about the file's size, and past
+  64 MiB of hybrids per file the remaining candidates stay unproven.
+- `Unit::formatting_only` carries either proof, `FileChange::formatting_only` the whole-file one.
+  Changing the canonical form bumps `ANALYSIS_FORMAT`.
+- Unproven chunks keep a token-level diff that highlights what really changed. Nothing is hidden.
+
+#### The canonical form
+
+The canonical form is lossless by default: every byte of the source belongs to exactly one item,
+and only items positively classified as trivia are normalized.
+
+1. **Items.** The serializer walks the tree in source order and emits node kinds, field names and
+   nesting as today, and for the bytes:
+   - a **token**: a leaf whose kind the language's lexical table (below) classifies as an
+     identifier, keyword, punctuator or operator, recorded with its exact text;
+   - an **opaque literal**: a node of a kind the table lists as literal (strings and their
+     interpolations, characters, numbers, regular expressions, template literals, JSX text, TOML
+     quoted keys and dates, comments), recorded with its exact bytes, hidden children included;
+   - a **prefix**: the bytes before the first item, recorded exactly (a JavaScript or Rust
+     hashbang must start at byte 0);
+   - a **gap**: the bytes between two adjacent items.
+2. **Unclassified means significant.** A leaf kind the table does not classify, and every gap next
+   to one, is recorded byte for byte. A gap inside an opaque literal does not exist: it is part of
+   the literal. This is what makes hidden grammar content, such as the whitespace inside a TOML
+   quoted key, impossible to drop: the quote leaves are not tokens, so the gap between them is
+   exact.
+3. **Trivia alphabet.** Each language lists the bytes that are whitespace between its tokens. A
+   gap is trivia only if it lies between two classified items and holds only bytes from that list;
+   any other byte (a vertical tab in JSON, a no-break space in Python) makes it exact.
+4. **Line breaks and touching.** A trivia gap records two things. Whether it holds a line break
+   (how many and how much horizontal whitespace are never recorded), unless the gap is a **wrap
+   site** of the language (below). And whether it is empty, so the two items touch, unless the
+   language shows that touching cannot matter there (*separable* gaps, below). Touching is kept
+   by default because some languages read touching tokens as one lexeme or forbid them: Rust's
+   `1custom` is one suffixed literal to a macro, and TypeScript rejects `1as number`. Gaps next
+   to a comment are never wrap sites: a line comment ends at a break, JavaScript's `-->` comment
+   must start a line, and Go and JavaScript treat a comment containing a break as a break. Next
+   to a comment, whether there is a break and whether there are two or more (a blank line) is
+   recorded. The gap before a Go directive comment (`//line`, `/*line`, `//go:`, `//export`,
+   `//extern`, `// +build`) is exact, since a directive's place on its line is part of its
+   meaning; a cgo preamble's distance to `import "C"` is kept by the comment rule. Python's
+   encoding declaration counts only on line 1 or 2, which the exact prefix and the comment rule
+   keep.
+   After an unclassified item, the rest of the file is exact even when it is empty.
+5. **Indentation.** Python records the exact indentation bytes of every logical line (below).
+6. **Completeness check.** For each pinned grammar, a test enumerates every terminal kind the
+   grammar's `node-types.json` lists and fails unless the lexical table classifies it as token,
+   literal, comment, structure or deliberately unclassified. A grammar upgrade that adds a kind
+   turns the test red instead of silently normalizing it.
+7. **Linear cost.** The context a gap is judged in (the node whose children it separates, the
+   enclosing JSX name, the parent kind) is carried down the walk, so no gap looks up through
+   its ancestors; a 25,000-term left-deep expression serializes in a fraction of a second.
+
+Separable gaps, where touching is not recorded, are only three classes. The grammars split
+sequences that the real lexers merge or reject (Go reads `a<-b` as a receive, JavaScript reads
+`<!--` as a comment, Rust rejects `0x1.0` and reserves `foo#bar`), so touching next to other
+punctuation is never assumed harmless:
+
+- **A bracket `( ) [ ] { }` on either side.** A bracket is a one-character token in every
+  supported language, and no longer token contains one outside a literal, which is opaque, so
+  whitespace next to it can neither join it to a neighbour nor split a neighbour. Rust
+  (Reference, "Delimiters"): brackets reach a macro as a `Group` without spacing; punctuation
+  before a bracket still keeps its touching, since its own `Spacing` reaches the macro. Python
+  (Language Reference, "Delimiters"), JavaScript and TypeScript (ECMA-262, "Punctuators"; a
+  template's `${` and `}` belong to the opaque template literal) and Go (specification,
+  "Operators and punctuation"): brackets are one-character tokens. TOML 1.0.0: whitespace inside
+  arrays and inline tables and around a header's key "is ignored"; the `[[` and `]]` of array
+  tables are tokens of their own and keep touching.
+- **A chain link in Rust, JavaScript and TypeScript:** a `.` (and `?.` in JavaScript and
+  TypeScript) right after an identifier, `self`, `Self`, `super`, `crate` or `this`, where
+  rustfmt and prettier break chains. An identifier is a maximal token, so a following `.`
+  cannot join it. Rust (Reference, "Identifiers", "Reserved prefixes"): the only characters
+  that make a touching identifier lex differently are `#`, `"` and `'`, and `proc_macro::Ident`
+  carries no spacing. ECMA-262 ("Punctuators", "Names and Keywords"): after an
+  `IdentifierName`, `.` is always the punctuator, and `?.` is the `OptionalChainingPunctuator`
+  unless a digit follows, which the unchanged tokens show; only a numeric literal followed by
+  `.` lexes differently, and literals are excluded. Python and Go do not get it: black wraps
+  inside brackets, and gofmt keeps the dot at the end of the line.
+- **JSON, every gap** (RFC 8259, section 2): whitespace is insignificant around the structural
+  characters, every gap is next to one, and JSON has no comments or operators that touching
+  could form.
+
+The cost: spacing normalization next to operators and commas (`f(a,b)` to `f(a, b)`, `x=y+1` to
+`x = y + 1`) stays unproven, and so does a `.` after a literal or other punctuation.
+
+#### Per language
+
+Each wrap site carries a one-line justification from the specification; a language or construct
+without one stays unproven.
+
+**Rust** (The Rust Reference, "Whitespace" and "Tokens").
+- Alphabet: Pattern_White_Space (U+0009–U+000D, U+0020, U+0085, U+200E, U+200F, U+2028,
+  U+2029); line break: LF.
+- Wrap sites: every gap between two non-comment tokens. *The Reference: "all forms of
+  whitespace serve only to separate tokens in the grammar, and have no semantic significance."*
+- Touching: whether a punctuation token (any non-delimiter punctuator, with the `'` of lifetimes
+  and labels and the `$` of metavariables counted as punctuation) touches the **next token of
+  any kind** is recorded everywhere, inside and outside macros. *`proc_macro::Punct::spacing` is
+  `Joint` when the next character is punctuation, and attribute macros receive whole items, so
+  any punctuation may reach a macro; `stringify!` prints spacing from the same information.*
+  This one rule replaces today's special cases for lifetimes, metavariables, `$x:frag` bindings
+  and tuple-index chains. Delimiters `()[]{}` are groups, not punctuation, so `vec![\n1, 2\n]`
+  still reflows. rustfmt leaves adjacency alone when it rewraps formatted code, but changes it
+  when it normalizes unformatted code (`b+-1` to `b + -1`, `r=&&x` to `r = &&x`); those
+  formatting passes stay unproven.
+- Literals: strings, raw strings, byte strings, C strings, characters, numbers, comments (doc
+  comments included), the hashbang.
+
+**Go** (The Go Programming Language Specification, "Semicolons", "Tokens").
+- Alphabet: space, tab, CR, LF; line break: LF.
+- Wrap sites:
+  - a gap whose preceding token is **not** an identifier, a basic literal, one of the keywords
+    `break`, `continue`, `fallthrough`, `return`, or one of `++ -- ) ] }`. *The lexer inserts a
+    semicolon after exactly those tokens when a line ends, so a line break anywhere else
+    produces the same token stream.* Identifiers are lexical: `nil`, `true`, `false` and `iota`
+    are identifiers whatever node kind the grammar gives them, and so trigger insertion;
+  - a gap before the `}` closing a block, a struct's field list, an interface, a switch or a
+    select. *"A semicolon may be omitted before a closing `}`," so one inserted there changes
+    nothing.* A composite literal's `}` is not one of these.
+
+  This keeps breaks after a comma, an opening delimiter or a binary operator and before a block's
+  closing brace, and rejects `g(1\n+ 2)`, `func f(x\nint)` and `[]int{1\n}`.
+- Touching: recorded except next to a bracket (separable gaps above); a break after an
+  identifier inserts a semicolon in Go, so chains get no exception here.
+- Literals: interpreted and raw strings and runes, all opaque, and numbers; comments.
+
+**Python** (The Python Language Reference, "Lexical analysis").
+- Alphabet: space, tab, form feed; line breaks: LF, CR, CRLF.
+- Wrap sites: gaps inside parentheses, brackets and braces. *Implicit line joining: "Expressions
+  in parentheses, square brackets or curly braces can be split over more than one physical line
+  without using backslashes."* Outside brackets a break is a NEWLINE token and stays recorded;
+  blank lines are not (*"A logical line that contains only spaces, tabs, formfeeds and possibly
+  a comment, is ignored"*).
+- Indentation: the exact leading bytes of every logical line outside brackets. An explicit line
+  continuation (a backslash and a line break between tokens) is unclassified, so it and the gaps
+  on both sides, the next line's indentation included, are exact.
+- Literals: strings of every prefix, with f-string and t-string replacement fields (`f"{x=}"`
+  prints its own source text), implicit concatenations element by element, numbers, comments.
+
+**JavaScript, TypeScript and TSX** (ECMA-262 16th edition, 12.10 "Automatic Semicolon
+Insertion"; TypeScript has no specification, so its rules come from the TypeScript 6.0 parser,
+`parser.ts`).
+- Alphabet: tab, VT, FF, space, U+00A0, U+FEFF, other Zs; line breaks: LF, CR, U+2028, U+2029.
+- Wrap sites, and nowhere else (so `interface\nI`, `throw\nx`, `x\nas T` stay recorded):
+  - after `(`, `[`, `{`, `,`, `;` — *no restricted production has [no LineTerminator here]
+    right after a punctuator, and the token after it is parsed the same way on either line;*
+  - before `)`, `]`, `}` — *ASI before a closing punctuator inserts nothing a closing punctuator
+    does not already end;*
+  - after a binary or assignment operator except `<`, `>`, `!`, `in`, `instanceof`, `as`,
+    `satisfies` — *a binary operator needs a right operand, so ASI cannot fire after it; `<` and
+    `>` are excluded because TypeScript type arguments make line breaks around them
+    significant;*
+  - after `=>` — *only the break before `=>` is restricted;*
+  - after the spread `...` — *no restricted production follows it;*
+  - before `.` and `?.` when the previous token is an identifier, `this`, `super`, `)` or `]` —
+    *MemberExpression and OptionalChain have no restriction before the dot, and the dot cannot
+    start a statement;*
+  - before `?` and `:` of a conditional expression or conditional type, and before `|` and `&`
+    of a union or intersection type — *no restriction precedes them in ECMA-262 or in TypeScript
+    6.0's parser;*
+  - inside a JSX opening or self-closing tag, between its name, attributes and closing `>` or
+    `/>` — *JSX attributes are separated by JavaScript whitespace.*
+- Touching: recorded except next to a bracket and between an identifier and a following `.`
+  or `?.` (separable gaps above); inside JSX element names every gap is exact.
+- Literals: strings, template literals with their substitutions, regular expressions, numbers,
+  comments (including `<!--` and `-->` HTML-like comments), JSX text, the hashbang.
+
+**JSON** (RFC 8259, section 2).
+- Alphabet: space, tab, LF, CR; wrap sites: every gap. *"Insignificant whitespace is allowed
+  before or after any of the six structural characters."*
+- Literals: strings and numbers; `true`, `false` and `null` are tokens. A comment is not JSON: a
+  file with one stays unproven.
+
+**TOML** (TOML 1.0.0).
+- Alphabet: space, tab; line breaks: LF, CRLF.
+- Wrap sites: only the direct gaps between an array's own children — `[`, its values, its commas
+  and `]` — never a gap deeper inside a value. *"Arrays can span
+  multiple lines … any number of newlines and comments may precede values, commas, and the
+  closing bracket."* Everywhere else a break ends a key/value pair and stays recorded; inline
+  tables are single-line in TOML 1.0.
+- Literals: basic, literal and multi-line strings, quoted keys, bare keys, numbers, booleans,
+  dates and times (which can contain a space), comments.
+
+#### Commas and other punctuation
+
+Every syntax token is kept, so a reflow that adds or removes a comma, a semicolon or a parenthesis
+is not formatting-only. An earlier draft dropped optional trailing commas; review showed that
+macros and TypeScript observe them. Comma normalization may come later, one grammar production at
+a time and after measuring how much coverage it buys, and each production must pass these negative
+fixtures first:
+
+- Rust: `S { ..s, }` is invalid while `S { ..s }` is valid; every item an attribute or derive
+  macro can see (the annotated item and everything inside it, including conditional attributes)
+  observes its commas.
+- Python: `f(x for x in xs,)` is invalid; a one-element tuple needs its comma, and in a subscript
+  `a[1,]` is a tuple.
+- JavaScript: a lone comma in an array is an elision (`[,]` has one element).
+- Go: a trailing comma disambiguates type parameters (`[T any,]`).
+- TOML: inline tables allow no trailing comma.
+- TypeScript: type arguments forbid one (`f<string,>()`, diagnostic 1009), and in TSX, `.mts`
+  and `.cts` the comma in `<T,>` decides whether a generic arrow function parses.
+
+#### Coverage
+
+What stays proven. Rows marked *tested* have a test in `syntax.rs`; the others are expectations
+from the rules, without measurement on real formatter output.
+
+| Formatter | Reflow | Proven |
+|---|---|---|
+| rustfmt | Block expansion: `for entry in &entries[..take] { self.apply(entry); }` over three lines | yes, tested |
+| rustfmt | Chains broken before `.`, after `)` or an identifier, binary operators wrapped | yes, tested |
+| rustfmt | Re-indentation | yes, expected |
+| rustfmt | Breaking a list vertically when that adds a trailing comma | no |
+| rustfmt | Breaking a list vertically without a comma change | yes, expected |
+| rustfmt | Spacing normalization of unformatted code (`b+-1`, `x=&&y`, `foo(a,b)`) | no: punctuation's spacing reaches macros |
+| rustfmt | Import sorting, brace removal in `use`, match arm commas | no |
+| prettier | Arguments, objects, arrays broken vertically when that adds a trailing comma | no |
+| prettier | Chains broken before `.` or `?.`, wraps after binary operators and `=>`, ternaries with leading `?` and `:` | yes, tested |
+| prettier | Union types reflowed with a leading `\|` | no: it adds a token |
+| prettier | JSX attributes one per line | yes, expected |
+| prettier | Quote normalization, added semicolons or parentheses, JSX text re-wrapping | no |
+| gofmt | Indentation, alignment of fields and trailing comments, block expansion | yes, tested |
+| gofmt | Lists broken after commas without a comma change | yes, tested |
+| gofmt | `gofmt -s` simplifications, import sorting | no |
+| black | Wrapping inside brackets without a comma change, blank lines | yes, tested |
+| black, prettier, gofmt | Spacing next to operators and commas (`f(a,b)` to `f(a, b)`, `x=y+1`) | no: touching is kept |
+| any | Spacing inside brackets (`f( a )` to `f(a)`) | yes, tested |
+| black | Magic trailing comma, added parentheses, quote normalization, numeric literal case | no |
+| JSON | Pretty-printing | yes, tested |
+| TOML | Arrays reflowed without a comma change | yes, expected |
+| TOML | Alignment and spacing around `=` | no: touching is kept |
+
+#### Tests
+
+The tests in `syntax.rs` and `analysis/build.rs` pin the rules:
+
+- `every_terminal_kind_is_classified` holds every pinned grammar's terminal kinds to the lexical
+  tables. It is an upgrade alarm: it cannot show that a kind is classified correctly.
+- `review_counterexamples_are_not_equivalent` holds every counterexample of the reviews, both
+  ways round, and `significant_whitespace_chunks_are_not_proven_beside_real_changes` runs three
+  of them through the per-chunk proof.
+- `spacing_next_to_punctuation_stays_unproven` pins the coverage given up: comma and operator
+  spacing, and a `.` after a literal or `#`; `chains_break_after_an_identifier` pins the chain
+  link that stays proven.
+- `deep_trees_serialize_in_linear_time` serializes 25,000-term left-deep sums in Rust, TSX and
+  Go within a generous bound.
+- `common_reflows_stay_equivalent` holds the reflows that must stay proven, among them the
+  `for entry in &entries[..take] { self.apply(entry); }` block expansion of the demo.
+- The older tests kept their verdicts, except two that flipped to not proven: `a + -b` against
+  `a +-b` outside macros (Rust touching), and a re-indented explicit Python continuation (exact
+  continuation gaps). Trailing-comma cases stay unproven, as before.
+
+| Round | Counterexample | Rejected by |
+|---|---|---|
+| 2 | Python `# \` comment, then an over-indented `b()` | indentation of every logical line |
+| 2 | `throw` + break + `new Error()` | no wrap site after `throw` |
+| 2 | `return`, `break`, `continue`, `yield`, `async`, `=>`, postfix `++` with a break | no wrap site there |
+| 2 | Macro `++` against `+ +` | Rust touching |
+| 2 | Bare CR, U+2028 and U+2029 as breaks; a break inside a comment | line-break alphabets; comment gaps |
+| 3 | TypeScript `interface` + break + `I` | no wrap site after `interface` |
+| 3 | Macro `+'a` against `+ 'a` | Rust touching, `'` as punctuation |
+| 3 | `#[policy] fn f() { a + -b }` against `a +-b` | Rust touching everywhere |
+| 3 | Go `g(1\n+ 2)`, `func f(x\nint)`, `[]int{1\n}` | Go's wrap sites follow semicolon insertion |
+| 3 | JSON `{"a":<VT>1}`, Python `x = (1<VT>+ 2)` | whitespace alphabets |
+| 3 | TOML `" " = 1` against `"  " = 1`, and single-quoted | quoted keys are opaque |
+| 3 | A space before a JavaScript hashbang | exact prefix |
+| 3 | `const x = 1;\n--> c` against `const x = 1; --> c` | comment gaps are never wrap sites |
+| 4 | `#[probe] fn f(x: u8,)` against `fn f(x: u8)` | commas are tokens |
+| 4 | `f<string,>()` against `f<string>()`; `<T,>` against `<T>` in TSX | commas are tokens |
+| 4 | A comment in JSON | comments refuse a JSON proof |
+| 5 | Rust `probe!(1custom)` against `probe!(1 custom)`, and string, raw-string and char suffixes | touching is kept by default |
+| 5 | TypeScript `1as number`, JavaScript `1in obj` against the spaced forms | touching is kept by default |
+| 5 | Python `x=1\` at the end of the file, with and without a further line break | exact rest after an unclassified item |
+| 5 | Go `//line x:notanumber` at the start of a line against one space before it | exact gap before a directive |
+| 6 | Go `a< -b`, `a+ +b`, `a- -b`, `a/ *b` against the touching forms | touching kept next to punctuation |
+| 6 | JavaScript `(a< !--b)` against `(a<!--b)` | touching kept next to punctuation |
+| 6 | Rust `m!(0x1 .0)` against `m!(0x1.0)`, `m!(foo #bar)` against `m!(foo#bar)` | touching kept next to punctuation |
+
+#### Languages
+
+MVP languages: Rust, Python, JavaScript, TypeScript and TSX, Go, JSON and TOML. Grammar versions
+are pinned to the ones Zed uses so the engine can link into the Zed fork. Like Zed, JavaScript is
+parsed with the TSX grammar. Zed ships no TOML grammar (TOML is an extension there), so
+`tree-sitter-toml-ng` has no Zed pin; it has no `links` key and shares Zed's
+`tree-sitter-language`. Every language above has a justified wrap-site list, so none is dropped;
+TypeScript's list rests on its parser rather than a specification and is the first to drop if
+review finds a construct it cannot justify. Unsupported languages and parse errors are never
+formatting-only; lines whose only difference is whitespace may be dimmed there, but they stay
+visible and unreviewed.
 
 ### Move detection
 
@@ -499,9 +784,10 @@ it, muted, so it never reads as code.
   4 px grid with 12 px side padding; pane headers line up on one hairline. The files pane resizes
   by dragging its divider (double click resets, limits keep the diff at least 400 px wide),
   `Ctrl+B` hides it, and the width is remembered in the `[layout]` table of the configuration.
-- **Scrolling.** `review-lite --bench-scroll` scrolls every row of the review once, 30 rows per
-  frame, and prints frame-interval and per-frame build-time percentiles. On the perf fixture
-  (60,000 changed lines, 70,000 rows) it holds 60 Hz, with about 1 ms of app work per frame.
+- **Scrolling.** `review-lite --bench-scroll` scrolls every row of every file of the review once,
+  file after file, 30 rows per frame, and prints frame-interval and per-frame build-time
+  percentiles. On the perf fixture (25 files, 90,000 rows) the app's work per frame is about
+  1.4 ms at the median and 3.6 ms at p99 in a release build.
 
 ### Demo review
 

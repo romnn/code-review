@@ -620,6 +620,80 @@ mod tests {
         ));
     }
 
+    /// The three canonical-form gaps a mixed file exposed: each chunk keeps its tokens beside
+    /// a real change elsewhere, and none is a reformat.
+    #[test]
+    fn significant_whitespace_chunks_are_not_proven_beside_real_changes() {
+        let cases = [
+            (
+                Language::Python,
+                "if ready:\n    a()\n    # \\\n    b()\n\nlimit = 1\n",
+                "if ready:\n    a()\n    # \\\n      b()\n\nlimit = 2\n",
+            ),
+            (
+                Language::JavaScript,
+                "function f() {\n  throw new Error(\"denied\");\n}\nconst a = 1;\nconst b = 2;\n",
+                "function f() {\n  throw\n  new Error(\"denied\");\n}\nconst a = 1;\nconst b = 3;\n",
+            ),
+            (
+                Language::Rust,
+                "const FLAG: bool = first_spacing!(++);\n\nconst LIMIT: u32 = 1;\n",
+                "const FLAG: bool = first_spacing!(+ +);\n\nconst LIMIT: u32 = 2;\n",
+            ),
+        ];
+        for (language, old, new) in cases {
+            assert_eq!(
+                hints(language, old, new),
+                [true, false],
+                "{language:?} candidate"
+            );
+            assert_eq!(
+                proofs(language, old, new),
+                (vec![false, false], false),
+                "{language:?}"
+            );
+        }
+    }
+
+    /// A candidate past the budget stays unproven and spends nothing.
+    #[test]
+    fn candidates_past_the_budget_stay_unproven() {
+        let old = "fn f() {\n    for x in xs { g(x); }\n    let z = 0;\n    let a = 1;\n}\n";
+        let new = "fn f() {\n    for x in xs {\n        g(x);\n    }\n    let z = 0;\n    let a = 2;\n}\n";
+        let parsed = syntax::parse(Language::Rust, old).zip(syntax::parse(Language::Rust, new));
+        let (old_side, new_side) = (Side::new(old), Side::new(new));
+        let hunk = text::diff_lines(&old_side.lines, &new_side.lines)
+            .into_iter()
+            .next()
+            .unwrap();
+        let prove = |budget: &mut usize| {
+            chunk_is_formatting_only(
+                Some(Language::Rust),
+                &old_side,
+                &new_side,
+                parsed.as_ref(),
+                &hunk,
+                budget,
+            )
+        };
+        let cost = old.len() + new.len();
+        let mut short = cost - 1;
+        assert!(!prove(&mut short));
+        assert_eq!(short, cost - 1, "an unproven candidate spends nothing");
+        let mut enough = cost;
+        assert!(prove(&mut enough));
+        assert_eq!(enough, 0);
+    }
+
+    /// CRLF line endings and a last line without a terminator: the reflow at the end of the
+    /// file is proven, the real change is not, and the splices keep every byte.
+    #[test]
+    fn a_reflow_at_a_crlf_end_of_file_is_proven() {
+        let old = "fn a() -> u32 {\r\n    1\r\n}\r\n\r\nfn b() { c(1, 2) }";
+        let new = "fn a() -> u32 {\r\n    2\r\n}\r\n\r\nfn b() {\r\n    c(1, 2)\r\n}";
+        assert_eq!(proofs(Language::Rust, old, new), (vec![false, true], false));
+    }
+
     /// A parse error in the new file leaves even a pure reflow elsewhere unproven.
     #[test]
     fn a_file_with_a_parse_error_proves_nothing() {

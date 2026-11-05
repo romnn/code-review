@@ -273,6 +273,40 @@ fn type_change_shows_introduced_content() -> eyre::Result<()> {
         description.contains("symlink (120000) to \"target.rs\""),
         "{description}"
     );
+    // The entries carry every value, for front ends to show in full.
+    let (old, new) = view
+        .entries(view.unit_ids()[0])?
+        .ok_or_else(|| eyre::eyre!("a file unit has entries"))?;
+    assert_eq!(old, "link symlink (120000) to \"target.rs\"");
+    assert!(new.starts_with("link file (100644, blob "), "{new}");
+    Ok(())
+}
+
+/// A file that becomes a directory: its own units resolve exactly, apart from the files that
+/// now live below a directory of its name.
+#[test]
+fn a_file_resolves_apart_from_a_directory_of_its_name() -> eyre::Result<()> {
+    let (_repo, review) = staged_change(
+        |repo| stage_entry(repo, "100644", "fn old() {}\n", "foo"),
+        |repo| {
+            repo.git(&["rm", "--cached", "-q", "foo"])?;
+            stage_entry(repo, "100644", "fn a() {}\n", "foo/a.rs")?;
+            stage_entry(repo, "100644", "fn b() {}\n", "foo/b.rs")
+        },
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let own = view.units_of_file("foo");
+    assert_ne!(own.len(), 0);
+    for &unit in &own {
+        assert_eq!(view.file(unit)?.display_path(), "foo");
+    }
+    let below = view.units_under(&["foo".to_owned()]);
+    assert!(
+        below.len() > own.len(),
+        "the folder operation still takes every file"
+    );
+    assert_eq!(view.units_of_file("foo/a.rs").len(), 1);
     Ok(())
 }
 
