@@ -1,0 +1,92 @@
+# Walks the built-in demo in the Zed fork: steps, marks, go-to-definition, a force-push.
+# Mirrors smoke.qa. Run with `scripts/qa/run.sh scripts/qa/zed-smoke.qa scripts/zed/launch.sh`
+# after building the fork (`cargo build -p zed` in ~/dev/zed-review with
+# CARGO_TARGET_DIR=/mnt/ssd2/cargo-targets/zed-review); screenshots land in target/qa/.
+# Keys are the fork's review keymap (crates/code_review/keymap.json).
+
+launch --demo
+expect "revision":"1"
+expect "trusted":true
+expect "selected_step":0
+expect "badge":"accepted"
+shot zed-01-open
+
+# Mark the second unit of the step seen, the third flagged, then undo the flag.
+key ] h
+key s
+key ] h
+key !
+state
+expect "focused_unit":"u1-0011"
+expect "u1-0010","badge":"seen"
+expect "u1-0011","badge":"flagged"
+key x
+state
+expect "u1-0011","badge":"unseen"
+shot zed-02-marks
+
+# Moves, the rename and the formatter change.
+key ] s
+state
+expect "selected_step":1
+shot zed-03-module-split
+
+# Go to the definition of `format_cents`, called on an added line of the moved table renderer.
+find format_cents(*cents)
+state
+expect "token":"format_cents"
+# Retries while rust-analyzer indexes the worktree; `key f12` is the binding a reviewer uses.
+definition src/util.rs
+state
+expect "active":"src/util.rs:[0-9]+ \(read-only\)"
+shot zed-04-definition
+action pane::GoBack
+wait review
+
+# The remaining steps.
+key ] s
+shot zed-05-front-end
+key ] s
+key ] s
+state
+expect "step_title":"Noise"
+shot zed-06-noise
+scroll 20
+shot zed-07-noise-scrolled
+
+# Next unreviewed from the first step skips reviewed units.
+key [ s
+key [ s
+key [ s
+key [ s
+key ] u
+state
+expect "focused_unit":"u1-0011"
+
+# The Files tab: a collapsible tree with aggregated counts; a file expands to its units, and a
+# whole file is marked at once through the engine.
+action code_review::ToggleReviewPanel
+key tab
+key j
+shot zed-08-files
+key j
+key j
+key enter
+shot zed-09-files-expanded
+key s
+state
+expect "status":"marked [0-9]+ unit\(s\) seen
+
+# Revision 2 simulates a force-push: earlier marks carry over and changed units show interdiffs.
+launch --demo-revision 2
+expect "revision":"2"
+expect \(carried\)
+expect changed since
+shot zed-10-revision-2
+find interdiff against
+shot zed-11-interdiff
+
+launch --demo-revision 3
+expect "revision":"3"
+find identical to the reviewed version
+shot zed-12-revision-3-return
