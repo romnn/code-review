@@ -15,6 +15,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{ANALYSIS_FORMAT, Analysis, analyze};
@@ -446,6 +447,33 @@ impl Review {
         };
         self.store_info(&info)?;
         Ok(info)
+    }
+
+    /// Returns the view state `front_end` last saved with
+    /// [`save_view_state`](Self::save_view_state), or `None` when it has saved none.
+    ///
+    /// View state is how a front end last showed the review, such as which folders were
+    /// folded; it is not review state, so it takes no lock and never enters the event log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFrontEnd`] for a name that is not plain, and an error when the
+    /// file cannot be read or does not decode as `T`, as after the front end changed its format.
+    pub fn view_state<T: DeserializeOwned>(&self, front_end: &str) -> Result<Option<T>, Error> {
+        store::read_json(&self.dir.view_state(front_end)?)
+    }
+
+    /// Saves `state` as `front_end`'s view state of this review, replacing the previous one.
+    ///
+    /// The file is replaced atomically, so a reader sees the old state or the new one whole;
+    /// of two concurrent saves, the later rename wins.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFrontEnd`] for a name that is not plain, and an error when the
+    /// state cannot be encoded or written.
+    pub fn save_view_state<T: Serialize>(&self, front_end: &str, state: &T) -> Result<(), Error> {
+        store::write_json_atomic(&self.dir.view_state(front_end)?, state, "view state")
     }
 
     /// Stores `info` as what the review is about.

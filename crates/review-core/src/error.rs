@@ -163,6 +163,9 @@ pub enum Error {
     /// No unit of the revision is in the given files or directories.
     #[error("no changed file at or below {}", .0.join(", "))]
     NoChangedFiles(Vec<String>),
+    /// A front end's name for its view state is not a plain lowercase name.
+    #[error("invalid front-end name {0:?}; use lowercase letters, digits, `-` and `_`")]
+    InvalidFrontEnd(String),
 }
 
 impl Error {

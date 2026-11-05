@@ -6,6 +6,8 @@
 //! - `analysis/<base>-<head>.json`: content-addressed analyses, written atomically.
 //! - `analysis/<base>-<head>--<base>-<head>.json`: content-addressed correspondences.
 //! - `worktrees/<head>`: detached worktrees for browsing a revision.
+//! - `view/<front-end>.json`: each front end's own view state, such as folded folders, written
+//!   atomically and never part of the review's state.
 
 pub mod events;
 pub mod log;
@@ -80,6 +82,23 @@ impl ReviewDir {
         self.root.join("analysis").join(format!(
             "{older_base}-{older_head}--{newer_base}-{newer_head}.json"
         ))
+    }
+
+    /// Returns the path of `front_end`'s view state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFrontEnd`] unless `front_end` is 1 to 64 lowercase ASCII
+    /// letters, digits, `-` and `_`, so it is always one plain file name.
+    pub fn view_state(&self, front_end: &str) -> Result<PathBuf, Error> {
+        let plain = (1..=64).contains(&front_end.len())
+            && front_end.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            });
+        if !plain {
+            return Err(Error::InvalidFrontEnd(front_end.to_owned()));
+        }
+        Ok(self.root.join("view").join(format!("{front_end}.json")))
     }
 
     /// Returns the browsing worktree path of a head snapshot.

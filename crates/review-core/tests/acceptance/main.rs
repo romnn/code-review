@@ -15,4 +15,5 @@ mod scope;
 mod search;
 mod storage;
 mod trust;
+mod view_state;
 mod walkthrough;
