@@ -105,6 +105,10 @@ enum Command {
         /// Mark every unit of this category in the current revision instead.
         #[arg(long, value_enum)]
         category: Option<commands::Category>,
+        /// Mark every unit of this file, or of every file below this directory, in the current
+        /// revision instead; repeatable.
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<String>,
     },
     /// Attach a note to a unit.
     Note {
@@ -196,7 +200,11 @@ fn main() -> eyre::Result<()> {
                 revision,
             },
         ),
-        Command::Mark { args, category } => commands::mark(&context, &args, category),
+        Command::Mark {
+            args,
+            category,
+            files,
+        } => commands::mark(&context, &args, category, &files),
         Command::Note { unit, text } => commands::note(&context, &unit, &text.join(" ")),
         Command::Export { format, revision } => commands::export(&context, format, revision),
         Command::Walkthrough { command } => match command {

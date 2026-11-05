@@ -227,13 +227,26 @@ struct MarkOutput {
     marked: Vec<UnitId>,
 }
 
-pub fn mark(context: &Context, args: &[String], category: Option<Category>) -> eyre::Result<()> {
+pub fn mark(
+    context: &Context,
+    args: &[String],
+    category: Option<Category>,
+    files: &[String],
+) -> eyre::Result<()> {
     let (verdict, ids) = args
         .split_last()
         .ok_or_eyre("pass the units and a verdict")?;
     let verdict: MarkVerdict = verdict.parse().map_err(|err: String| eyre::eyre!(err))?;
     let review = context.load()?;
     let history = review.history()?;
+    if !files.is_empty() {
+        eyre::ensure!(
+            ids.is_empty() && category.is_none(),
+            "pass either unit IDs, --category or --file"
+        );
+        let marked = review.mark_files(&history.current_view()?, files, verdict)?;
+        return print_marked(context, verdict, marked);
+    }
     let mut by_revision: BTreeMap<RevisionNumber, Vec<UnitId>> = BTreeMap::new();
     if let Some(category) = category {
         eyre::ensure!(
@@ -275,6 +288,10 @@ pub fn mark(context: &Context, args: &[String], category: Option<Category>) -> e
         review.mark(&view, &units, verdict)?;
         marked.extend(units);
     }
+    print_marked(context, verdict, marked)
+}
+
+fn print_marked(context: &Context, verdict: MarkVerdict, marked: Vec<UnitId>) -> eyre::Result<()> {
     if context.json {
         return print_json(&MarkOutput {
             verdict: verdict.name(),

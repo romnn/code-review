@@ -321,3 +321,35 @@ fn commands_follow_a_force_push_back() -> eyre::Result<()> {
     assert_eq!(status["total"]["reviewed"], 0);
     Ok(())
 }
+
+/// `cr mark --file` marks every unit of a file, or below a directory, in the current revision.
+#[test]
+fn mark_file_covers_a_file_or_directory() -> eyre::Result<()> {
+    let repo_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    git(repo, &["init", "--quiet", "--initial-branch=main"])?;
+    std::fs::create_dir_all(repo.join("src/app"))?;
+    for path in ["src/app/a.rs", "src/b.rs", "c.rs"] {
+        std::fs::write(repo.join(path), "fn one() {}\n")?;
+    }
+    git(repo, &["add", "--all"])?;
+    git(repo, &["commit", "--quiet", "-m", "base"])?;
+    git(repo, &["checkout", "--quiet", "-b", "feature"])?;
+    for path in ["src/app/a.rs", "src/b.rs", "c.rs"] {
+        std::fs::write(repo.join(path), "fn two() {}\n")?;
+    }
+    git(repo, &["commit", "--quiet", "--all", "-m", "feature"])?;
+    cr(repo, data, &["open", "main..feature"])?;
+
+    // A directory covers both files below it; the top-level file stays new.
+    let marked = cr_json(repo, data, &["mark", "--file", "src", "accepted"])?;
+    assert_eq!(marked["marked"].as_array().map(Vec::len), Some(2));
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["total"]["accepted"], 2);
+    assert_eq!(status["total"]["new"], 1);
+
+    // A path without changes fails instead of marking nothing.
+    assert!(cr(repo, data, &["mark", "--file", "docs", "seen"]).is_err());
+    Ok(())
+}
