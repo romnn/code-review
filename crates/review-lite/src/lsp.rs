@@ -141,7 +141,9 @@ pub struct Definition {
 /// A running language server for one workspace root.
 pub struct LanguageServer {
     child: Child,
-    stdin: ChildStdin,
+    /// Messages to the server, written on a thread of their own, so a server that stops
+    /// reading never blocks a request past its deadline, nor dropping the server.
+    outgoing: mpsc::Sender<Vec<u8>>,
     /// Messages from the server, read on a thread of their own so every wait is bounded.
     messages: mpsc::Receiver<Result<Value, LspError>>,
     next_id: i64,
@@ -156,30 +158,7 @@ impl LanguageServer {
     ///
     /// Returns an error when the server cannot start or the handshake fails.
     pub fn start(command: &ServerCommand, root: &Path) -> Result<Self, LspError> {
-        let mut child = Command::new(command.program)
-            .args(command.args)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| LspError::Spawn {
-                command: command.program.to_owned(),
-                source,
-            })?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err(LspError::Protocol("server has no stdio pipes".to_owned()));
-        };
-        let (sender, messages) = mpsc::channel();
-        std::thread::spawn(move || read_messages(BufReader::new(stdout), &sender));
-        let mut server = Self {
-            child,
-            stdin,
-            messages,
-            next_id: 1,
-            language_id: command.language_id,
-            opened: HashSet::new(),
-        };
+        let mut server = Self::spawn(command.program, command.args, root, command.language_id)?;
         let root_uri = file_uri(root);
         server.request(
             Instant::now() + HANDSHAKE_DEADLINE,
@@ -201,6 +180,41 @@ impl LanguageServer {
         )?;
         server.notify("initialized", &json!({}))?;
         Ok(server)
+    }
+
+    /// Starts `program` in `root` with its reading and writing threads, before any handshake.
+    fn spawn(
+        program: &str,
+        args: &[&str],
+        root: &Path,
+        language_id: &'static str,
+    ) -> Result<Self, LspError> {
+        let mut child = Command::new(program)
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| LspError::Spawn {
+                command: program.to_owned(),
+                source,
+            })?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(LspError::Protocol("server has no stdio pipes".to_owned()));
+        };
+        let (sender, messages) = mpsc::channel();
+        std::thread::spawn(move || read_messages(BufReader::new(stdout), &sender));
+        let (outgoing, to_write) = mpsc::channel();
+        std::thread::spawn(move || write_messages(stdin, &to_write));
+        Ok(Self {
+            child,
+            outgoing,
+            messages,
+            next_id: 1,
+            language_id,
+            opened: HashSet::new(),
+        })
     }
 
     /// Finds the definition of the symbol at `position` in `path`, whose content is `text`,
@@ -254,14 +268,16 @@ impl LanguageServer {
         }
     }
 
-    fn send(&mut self, message: &Value) -> Result<(), LspError> {
+    /// Queues a message for the writing thread; it never waits for the server.
+    fn send(&self, message: &Value) -> Result<(), LspError> {
         let body = message.to_string();
-        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len())?;
-        self.stdin.flush()?;
-        Ok(())
+        let frame = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        self.outgoing
+            .send(frame.into_bytes())
+            .map_err(|_| LspError::Protocol("server closed its input".to_owned()))
     }
 
-    fn notify(&mut self, method: &str, params: &Value) -> Result<(), LspError> {
+    fn notify(&self, method: &str, params: &Value) -> Result<(), LspError> {
         self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
     }
 
@@ -321,6 +337,20 @@ impl LanguageServer {
     }
 }
 
+/// Writes queued messages to the server until the queue closes, when the server is dropped, or
+/// a write fails, when the server is gone; killing the server ends a write it never reads.
+fn write_messages(mut stdin: ChildStdin, to_write: &mpsc::Receiver<Vec<u8>>) {
+    for bytes in to_write {
+        if stdin
+            .write_all(&bytes)
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 /// Reads messages from the server's output until it closes, which it does when the server
 /// exits, so the reading thread always ends.
 fn read_messages(
@@ -360,7 +390,8 @@ fn read_one(stdout: &mut BufReader<ChildStdout>) -> Result<Value, LspError> {
 
 impl Drop for LanguageServer {
     fn drop(&mut self) {
-        // Ask politely, then make sure the process is gone and reaped.
+        // Ask politely, then make sure the process is gone and reaped. Queuing the messages
+        // never blocks, and killing the server ends any write it is not reading.
         let shutdown = json!({ "jsonrpc": "2.0", "id": self.next_id, "method": "shutdown" });
         let exit = json!({ "jsonrpc": "2.0", "method": "exit" });
         if self
@@ -458,6 +489,25 @@ pub fn byte_column(line: &str, utf16: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that never reads its input blocks neither a message nor dropping it.
+    #[test]
+    fn a_server_that_stops_reading_never_blocks() {
+        let root = std::env::temp_dir();
+        let started = Instant::now();
+        let server = LanguageServer::spawn("sleep", &["30"], &root, "rust").unwrap();
+        // Far more than a pipe holds: a blocking write would hang here.
+        let text = "x".repeat(8 << 20);
+        server
+            .notify("textDocument/didOpen", &json!({ "text": text }))
+            .unwrap();
+        drop(server);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn uris_round_trip_and_definitions_parse() {

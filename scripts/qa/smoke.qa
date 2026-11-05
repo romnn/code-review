@@ -16,6 +16,8 @@ state
 expect "selected":"src/engine.rs"
 expect "hunks":3
 expect "scope":"impl Ledger › fn apply_batch"
+# The brace reflow at lines 27–29 is proven formatting-only beside the file's real changes.
+expect "text":"lines 27–29","tag":"only reformatting"
 shot 02-engine
 
 # The diff starts at the first hunk that needs the reviewer; j/k move between hunks, and
@@ -77,6 +79,11 @@ expect "overlay":"Help"
 expect "hunk":1,
 expect "hunk_badges":\["Unreviewed"\]
 shot 05-help
+# Clicks under an overlay do nothing either: hash.rs's row sits under the sheet.
+click 100 445
+state
+expect "selected":"src/engine.rs"
+expect "overlay":"Help"
 key escape
 key i
 key space

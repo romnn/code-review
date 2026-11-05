@@ -393,7 +393,7 @@ async fn run(
             .flatten(),
         Command::File(path) => this
             .update(cx, |this, cx| {
-                if !this.tree.iter().any(|node| &node.path == path) {
+                if !super::state::is_file(&this.tree, path) {
                     return Err(format!("no file {path}"));
                 }
                 this.show_file(path);
@@ -456,7 +456,7 @@ async fn settle(this: &WeakEntity<ReviewApp>, cx: &mut AsyncWindowContext) -> Re
                 this.marking
                     || !this.marks.is_empty()
                     || this.looking_up
-                    || this.highlighting
+                    || this.highlighting > 0
                     || this.refreshing
                     || this.list_animation.is_some()
                     || this.buffer_animation.is_some()

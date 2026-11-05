@@ -222,10 +222,22 @@ impl FullText {
         let longest = lines
             .iter()
             .enumerate()
-            .max_by_key(|(_, line)| line.len())
+            .max_by_key(|(_, line)| display_width(line))
             .map_or(0, |(index, _)| index);
         Self { lines, longest }
     }
+}
+
+/// How many monospace cells `text` takes: wide characters count two, a tab four, and
+/// combining marks none, so the widest line, not the longest in bytes, sets the scroll width.
+#[must_use]
+pub fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|character| match character {
+            '\t' => 4,
+            other => unicode_width::UnicodeWidthChar::width(other).unwrap_or(0),
+        })
+        .sum()
 }
 
 /// The view's folds, which [`build`] applies.
@@ -298,8 +310,26 @@ pub struct Layout {
     pub unit_rows: HashMap<UnitId, usize>,
     /// The file sections in display order.
     pub files: Vec<FileSection>,
-    /// The row with the longest text, which sets the width for horizontal scrolling.
-    pub longest: usize,
+    /// The code row and the annotation row that take the most cells. Code and annotations
+    /// render at different font sizes and indents, so the view compares the two in pixels and
+    /// measures the wider one to set how far it scrolls sideways.
+    pub widest_code: Option<(usize, usize)>,
+    pub widest_annotation: Option<(usize, usize)>,
+}
+
+impl Row {
+    /// The cells a row's text takes: a code row's code, or an annotation's text with the tag
+    /// and scope that follow it on the same line.
+    #[must_use]
+    pub fn cells(&self) -> usize {
+        let extra =
+            |text: &Option<String>| text.as_deref().map_or(0, |text| display_width(text) + 3);
+        if self.kind.is_code() {
+            display_width(&self.text)
+        } else {
+            display_width(&self.text) + extra(&self.tag) + extra(&self.scope)
+        }
+    }
 }
 
 /// Lays out `units` (in review order) of `view`, applying `folds`.
@@ -377,12 +407,17 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
             &notes,
         );
     }
-    layout.longest = layout
-        .rows
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, row)| row.text.len())
-        .map_or(0, |(index, _)| index);
+    let widest = |code: bool| {
+        layout
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.kind.is_code() == code)
+            .map(|(index, row)| (index, row.cells()))
+            .max_by_key(|&(_, cells)| cells)
+    };
+    layout.widest_code = widest(true);
+    layout.widest_annotation = widest(false);
     layout
 }
 
@@ -673,7 +708,7 @@ fn hunk_header(
         .unwrap_or_default();
     let mut row = plain_row(file, first, Some(hunk), RowKind::Header, text);
     row.badge = view.state(first).ok().map(Badge::of);
-    row.tag = units.iter().find_map(|&unit| header_tag(view, unit));
+    row.tag = hunk_tag(units.iter().map(|&unit| header_tag(view, unit)).collect());
     let path = layout.files.get(file).map(|section| section.path.clone());
     row.scope = view.scope_anchor(first).ok().flatten().and_then(|anchor| {
         let syntax = folds.syntax.get(path.as_deref()?)?;
@@ -685,6 +720,37 @@ fn hunk_header(
         (!enclosing.is_empty()).then(|| breadcrumb(&enclosing))
     });
     layout.rows.push(row);
+}
+
+/// A note's lines, one per row; an empty note still takes one.
+fn note_lines(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() { vec![""] } else { lines }
+}
+
+/// The label of a hunk from its units' labels. A label the units share speaks for the hunk; when
+/// they differ, each says only that the hunk includes it, so one proven reflow never labels a
+/// real edit beside it "only reformatting".
+fn hunk_tag(tags: Vec<Option<String>>) -> Option<String> {
+    let first = tags.first()?.clone();
+    if tags.iter().all(|tag| *tag == first) {
+        return first;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for tag in tags.into_iter().flatten() {
+        let part = match tag.as_str() {
+            "only reformatting" => "includes reformatting".to_owned(),
+            "whitespace changed · not proven equivalent" => {
+                "includes unproven whitespace changes".to_owned()
+            }
+            other if other.starts_with("changed since") => format!("partly {other}"),
+            other => format!("includes {other}"),
+        };
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// Joins two units' line descriptions into the span of a display hunk: "lines 3–9".
@@ -731,10 +797,16 @@ fn unit_rows(
     unit_body(&mut pusher, view, unit, folds);
     for note in notes {
         if note.attached == (NoteAttachment::Unit { unit }) {
-            let mut row = pusher.row(RowKind::Note, note.text.clone());
-            row.hunk = None;
-            row.tag = Some(format!("note · revision {}", note.written_on.revision()));
-            pusher.add(row);
+            // Rows have one height, so each line of a note is a row of its own; the first says
+            // where the note comes from.
+            for (index, line) in note_lines(&note.text).into_iter().enumerate() {
+                let mut row = pusher.row(RowKind::Note, line.to_owned());
+                row.hunk = None;
+                if index == 0 {
+                    row.tag = Some(format!("note · revision {}", note.written_on.revision()));
+                }
+                pusher.add(row);
+            }
         }
     }
 }
@@ -915,8 +987,14 @@ fn unit_body(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId, fol
             }
             pusher.chunk_with_moves(chunk, head_path, removed.as_ref(), added.as_ref());
         }
-        // A file unit's header already says what it changes.
-        UnitKind::File(_) => {}
+        // A change without lines shows its evidence in full: the entries before and after,
+        // with every value, such as a symlink's target.
+        UnitKind::File(_) => {
+            if let Ok(Some((old, new))) = view.entries(unit) {
+                pusher.push(RowKind::Info, format!("before  {old}"));
+                pusher.push(RowKind::Info, format!("after   {new}"));
+            }
+        }
     }
     for found in moves.iter().filter(|found| !described.contains(&found.id)) {
         let mut row = pusher.row(RowKind::Moved, move_text(found, unit));
@@ -1009,7 +1087,7 @@ fn section_rows(
     // Changes of this file in other steps are never shown as unchanged context.
     let shown: HashSet<UnitId> = group.iter().copied().collect();
     let others: Vec<(usize, usize, UnitId)> = view
-        .units_under(std::slice::from_ref(&path))
+        .units_of_file(&path)
         .into_iter()
         .filter(|unit| !shown.contains(unit))
         .filter_map(|unit| {
@@ -1028,19 +1106,19 @@ fn section_rows(
         text,
         others: &others,
     };
+    // Display hunks come from the engine's grouping of the units alone, never from whether the
+    // text has arrived, so a hunk approves the same units before and after.
+    let sorted: Vec<UnitId> = chunks.iter().map(|&(unit, ..)| unit).collect();
+    let sizes: Vec<usize> = view.display_hunks(&sorted).iter().map(Vec::len).collect();
     let mut line = 0;
     let mut index = 0;
-    while let Some(&(first, first_start, _)) = chunks.get(index) {
-        // A display hunk: chunks whose unchanged gaps fit inside the context.
-        let mut last = index;
-        while let (Some(&(_, _, end)), Some(&(_, next, _))) =
-            (chunks.get(last), chunks.get(last + 1))
-        {
-            if next.saturating_sub(end) > context.saturating_mul(2) {
-                break;
-            }
-            last += 1;
-        }
+    for size in sizes {
+        let Some(&(first, first_start, _)) = chunks.get(index) else {
+            break;
+        };
+        let last = index + size.max(1) - 1;
+        // Context after the hunk stops where the next hunk's changes start.
+        let next_start = chunks.get(last + 1).map_or(lines, |&(_, start, _)| start);
         let revealed = folds
             .gaps
             .get(&(path.clone(), first_start))
@@ -1080,7 +1158,10 @@ fn section_rows(
             unit_rows(layout, view, file, hunk_index, unit, folds, notes);
             let until = match chunks.get(position + 1).filter(|_| position < last) {
                 Some(&(_, next, _)) => next,
-                None => end.saturating_add(context).min(lines),
+                None => end
+                    .saturating_add(context)
+                    .min(lines)
+                    .min(next_start.max(end)),
             };
             emitter.lines(layout, unit, end..until.max(end));
             line = until.max(end).max(start);
@@ -1200,6 +1281,34 @@ mod tests {
         (dir, layout)
     }
 
+    /// Which units a hunk holds never depends on whether the file's text has arrived, nor on
+    /// how much context shows, so a key acts on the same units before and after.
+    #[test]
+    fn hunks_do_not_depend_on_cached_text() {
+        let (_dir, bare) = demo_layout(&Folds::default());
+        let texts: HashMap<String, Arc<FullText>> = bare
+            .files
+            .iter()
+            .filter_map(|section| {
+                let path = review_core::demo::fixture_dir()
+                    .join("trees/feature-1")
+                    .join(&section.path);
+                let text = std::fs::read_to_string(path).ok()?;
+                Some((section.path.clone(), Arc::new(FullText::new(&text))))
+            })
+            .collect();
+        assert!(texts.contains_key("src/engine.rs"));
+        for context in [0, 3, 10, 50] {
+            let folds = Folds {
+                texts: texts.clone(),
+                context,
+                ..Folds::default()
+            };
+            let (_dir, with_text) = demo_layout(&folds);
+            assert_eq!(with_text.hunks, bare.hunks, "context {context}");
+        }
+    }
+
     /// Files start with a header, are separated by a spacer, and every unit has a header row.
     #[test]
     fn rows_form_file_sections() {
@@ -1220,6 +1329,87 @@ mod tests {
                 assert!(layout.unit_rows.contains_key(unit), "{unit} has no row");
             }
         }
+    }
+
+    /// Code and annotation rows compete separately for the widest row, by cells including an
+    /// annotation's tag and scope.
+    #[test]
+    fn code_and_annotations_have_their_own_widest_row() {
+        let (_dir, layout) = demo_layout(&Folds::default());
+        let (code, code_cells) = layout.widest_code.unwrap();
+        let (note, note_cells) = layout.widest_annotation.unwrap();
+        assert!(layout.rows[code].kind.is_code());
+        assert!(!layout.rows[note].kind.is_code());
+        for row in &layout.rows {
+            let limit = if row.kind.is_code() {
+                code_cells
+            } else {
+                note_cells
+            };
+            assert!(row.cells() <= limit);
+        }
+    }
+
+    /// The widest line sets the scroll width, not the longest in bytes.
+    #[test]
+    fn the_widest_line_wins_over_the_longest_in_bytes() {
+        let accents = "é".repeat(200);
+        let ascii = "x".repeat(300);
+        let text = FullText::new(&format!("{accents}\n{ascii}\n"));
+        assert!(accents.len() > ascii.len());
+        assert_eq!(text.longest, 1);
+        assert_eq!(display_width("中文"), 4);
+        assert_eq!(display_width("\tx"), 5);
+    }
+
+    /// A note of several lines takes one row per line, so fixed-height rows never clip it.
+    #[test]
+    fn multi_line_notes_take_a_row_per_line() {
+        assert_eq!(note_lines(""), [""]);
+    }
+
+    /// A change without lines shows the full entries before and after, such as a symlink's
+    /// old and new targets.
+    #[test]
+    fn file_units_show_their_entries_in_full() {
+        let (_dir, layout) = demo_layout(&Folds::default());
+        let info: Vec<&str> = layout
+            .rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Info)
+            .map(|row| row.text.as_str())
+            .collect();
+        assert!(
+            info.contains(&"before  docs/current symlink (120000) to \"v1.md\""),
+            "{info:?}"
+        );
+        assert!(info.contains(&"after   docs/current symlink (120000) to \"v2.md\""));
+    }
+
+    /// A hunk is "only reformatting" only when every unit is; otherwise it says what it
+    /// includes.
+    #[test]
+    fn hunk_labels_need_every_unit() {
+        let reflow = Some("only reformatting".to_owned());
+        assert_eq!(
+            hunk_tag(vec![reflow.clone(), reflow.clone()]),
+            reflow,
+            "shared by every unit"
+        );
+        assert_eq!(
+            hunk_tag(vec![reflow.clone(), None]).as_deref(),
+            Some("includes reformatting")
+        );
+        assert_eq!(
+            hunk_tag(vec![
+                None,
+                Some("changed since revision 1".to_owned()),
+                reflow
+            ])
+            .as_deref(),
+            Some("partly changed since revision 1 · includes reformatting")
+        );
+        assert_eq!(hunk_tag(vec![None, None]), None);
     }
 
     /// A move with edits shows one linked row at each end, and its edits where the code

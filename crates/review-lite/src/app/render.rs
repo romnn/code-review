@@ -285,6 +285,31 @@ impl ReviewApp {
         Palette::new(self.theme(), self.settings.removed, self.settings.added)
     }
 
+    /// The diff row to measure for the list's width: the widest code row or the widest
+    /// annotation, whichever is wider in pixels at their font sizes and indents. Both fonts are
+    /// the same monospace family, so a cell is a fixed share of the font size.
+    fn widest_row(&self) -> Option<usize> {
+        const CELL: f32 = 0.6;
+        let code_indent = 3.0 + GRID * 13.0 + GRID * 4.0;
+        let note_indent = 3.0 + GRID * 17.0;
+        let pixels =
+            |indent: f32, cells: usize, size: f32| indent + scroll::float(cells) * size * CELL;
+        let code = self
+            .rows
+            .widest_code
+            .map(|(row, cells)| (row, pixels(code_indent, cells, self.fonts.code_size)));
+        let note = self
+            .rows
+            .widest_annotation
+            .map(|(row, cells)| (row, pixels(note_indent, cells, self.fonts.ui_size())));
+        match (code, note) {
+            (Some((code, code_width)), Some((note, note_width))) => {
+                Some(if note_width > code_width { note } else { code })
+            }
+            (one, other) => one.or(other).map(|(row, _)| row),
+        }
+    }
+
     /// The rows of the diff list, built on demand by the virtualized list.
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = self.palette();
@@ -702,7 +727,7 @@ impl ReviewApp {
                 let directory = node.kind == NodeKind::Directory;
                 let progress = Progress::of(&node.counts);
                 let collapsed = self.tree_collapsed.contains(&node.path);
-                let shown = self.selected.as_deref() == Some(node.path.as_str());
+                let shown = !directory && self.selected.as_deref() == Some(node.path.as_str());
                 let is_cursor = position == cursor;
                 let kind = node.change.as_ref().map(|change| {
                     (
@@ -948,7 +973,7 @@ impl ReviewApp {
         )
         .track_scroll(&self.list)
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-        .with_width_from_item(Some(self.rows.longest))
+        .with_width_from_item(self.widest_row())
         .size_full();
         let empty = match &self.phase {
             Phase::Loading(started) => Some(state_card(
@@ -1018,12 +1043,11 @@ impl ReviewApp {
         let selection = self
             .selection
             .filter(|selection| selection.pane == Pane::Source);
-        let matches: Arc<Vec<super::find::Match>> = Arc::new(
-            self.find
-                .as_ref()
-                .map(|find| find.matches.clone())
-                .unwrap_or_default(),
-        );
+        let matches: Arc<Vec<super::find::Match>> = self
+            .find
+            .as_ref()
+            .map(|find| Arc::clone(&find.matches))
+            .unwrap_or_default();
         let current = self
             .find
             .as_ref()
@@ -1673,9 +1697,11 @@ impl Render for ReviewApp {
             .children(find_bar)
             .child(bars)
             .children(overlay.map(|overlay| {
+                // The overlay owns the pointer as well as the keyboard: nothing under it reacts.
                 div()
                     .absolute()
                     .inset_0()
+                    .occlude()
                     .key_context(Area::Overlay.context())
                     .track_focus(&self.overlay_focus)
                     .on_action(cx.listener(Self::close_overlay))

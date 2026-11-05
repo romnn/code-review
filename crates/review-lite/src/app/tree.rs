@@ -1,18 +1,30 @@
 //! The file tree: moving through it previews each file's diff, folders fold, and files and
 //! folders are approved as a whole.
 
+use std::sync::Arc;
+
 use gpui::{Context, Window};
 use review_core::tree::{NodeKind, TreeNode};
 
-use super::state::Progress;
+use super::state::{self, Progress};
 use super::{
     Activate, CloseAllFolds, FocusDiff, FocusTree, Mode, OpenAllFolds, Place, ReviewApp,
     TreeCollapse, TreeDown, TreeExpand, TreeUp, file_paths, scroll,
 };
 
 impl ReviewApp {
-    /// The indices into the tree of the nodes not hidden by a folded folder.
-    pub(super) fn visible_tree(&self) -> Vec<usize> {
+    /// The indices into the tree of the nodes not hidden by a folded folder, kept until the
+    /// tree or its folds change rather than recomputed for every frame.
+    pub(super) fn visible_tree(&self) -> Arc<Vec<usize>> {
+        Arc::clone(&self.tree_visible)
+    }
+
+    /// Recomputes the visible tree nodes; call it whenever the tree or its folds change.
+    pub(super) fn update_visible_tree(&mut self) {
+        self.tree_visible = Arc::new(self.compute_visible_tree());
+    }
+
+    fn compute_visible_tree(&self) -> Vec<usize> {
         let mut visible = Vec::new();
         let mut hidden_below: Option<usize> = None;
         for (index, node) in self.tree.iter().enumerate() {
@@ -28,6 +40,14 @@ impl ReviewApp {
             }
         }
         visible
+    }
+
+    /// The index into the tree of the node under the tree cursor.
+    pub(super) fn tree_index(&self) -> Option<usize> {
+        let visible = self.visible_tree();
+        visible
+            .get(self.tree_cursor.min(visible.len().saturating_sub(1)))
+            .copied()
     }
 
     /// The node under the tree cursor.
@@ -73,11 +93,12 @@ impl ReviewApp {
         let place = place.unwrap_or_default();
         self.list_animation = None;
         scroll::set_offset_of(&self.list, place.offset);
-        if let Some(position) = self
-            .visible_tree()
-            .iter()
-            .position(|&index| self.tree.get(index).is_some_and(|node| node.path == path))
-        {
+        if let Some(position) = self.visible_tree().iter().position(|&index| {
+            // The file node, never a folder that shares its path.
+            self.tree
+                .get(index)
+                .is_some_and(|node| node.kind == NodeKind::File && node.path == path)
+        }) {
             self.tree_cursor = position;
             self.reveal_tree_cursor();
         }
@@ -143,6 +164,7 @@ impl ReviewApp {
         } else {
             self.tree_collapsed.remove(&path);
         }
+        self.update_visible_tree();
         cx.notify();
         true
     }
@@ -243,7 +265,7 @@ impl ReviewApp {
     /// Folds or unfolds every folder, keeping the cursor on its node or the folder that now
     /// holds it.
     pub(super) fn tree_fold_all(&mut self, close: bool, cx: &mut Context<Self>) {
-        let selected = self.tree_node().map(|node| node.path.clone());
+        let cursor = self.cursor_identity();
         if close {
             self.tree_collapsed = self
                 .tree
@@ -254,17 +276,28 @@ impl ReviewApp {
         } else {
             self.tree_collapsed.clear();
         }
-        if let Some(selected) = selected {
-            let visible = self.visible_tree();
-            let position = visible.iter().rposition(|&index| {
-                self.tree
-                    .get(index)
-                    .is_some_and(|node| review_core::tree::is_under(&selected, &node.path))
-            });
-            self.tree_cursor = position.unwrap_or(0);
-        }
+        self.update_visible_tree();
+        self.restore_cursor(cursor);
         self.reveal_tree_cursor();
         cx.notify();
+    }
+
+    /// What the tree cursor is on: a path and whether it is a file or a folder, since a deleted
+    /// file `foo` and a folder `foo/` can both be in the tree.
+    pub(super) fn cursor_identity(&self) -> Option<(String, NodeKind)> {
+        self.tree_node().map(|node| (node.path.clone(), node.kind))
+    }
+
+    /// Puts the tree cursor back on the node `identity` names, or, when a fold hides it, on the
+    /// innermost visible folder that holds it; never on a file that only shares a folder's path.
+    pub(super) fn restore_cursor(&mut self, identity: Option<(String, NodeKind)>) {
+        let Some((path, kind)) = identity else {
+            return;
+        };
+        let visible = self.visible_tree();
+        if let Some(position) = state::cursor_position(&self.tree, &visible, &path, kind) {
+            self.tree_cursor = position;
+        }
     }
 
     pub(super) fn close_all_folds(

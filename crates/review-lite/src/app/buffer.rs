@@ -39,6 +39,8 @@ pub enum Origin {
 /// One file shown in full.
 #[derive(Clone)]
 pub struct Buffer {
+    /// Unique for the session, so an answer for one buffer is never applied to another.
+    pub id: u64,
     pub origin: Origin,
     pub lines: Arc<FullText>,
     pub syntax: Option<Arc<SideSyntax>>,
@@ -112,7 +114,7 @@ impl ReviewApp {
         let Some(view) = self.view() else {
             return;
         };
-        let units = view.units_under(std::slice::from_ref(&path));
+        let units = view.units_of_file(&path);
         let Some(head) = units
             .first()
             .and_then(|&unit| view.file(unit).ok())
@@ -153,22 +155,45 @@ impl ReviewApp {
         let row = start_row
             .unwrap_or(0)
             .min(lines.lines.len().saturating_sub(1));
-        self.buffer = Some(Buffer {
+        let buffer = Buffer {
+            id: self.next_buffer_id(),
             origin: super::buffer::Origin::Review(path),
             syntax: self.blobs.syntax.get(&head.oid).cloned(),
             lines,
             markers: Arc::new(markers),
             cursor: TextPos { row, col: 0 },
             previous: None,
-        });
+        };
+        self.set_buffer(Some(buffer));
         self.buffer_animation = None;
-        let height = self.fonts.row_height();
-        scroll::set_offset_of(
-            &self.buffer_list,
-            (scroll::float(row) * height - 240.0).max(0.0),
-        );
+        // The list may not be laid out yet, so the cursor is centered once it is.
+        self.buffer_list
+            .scroll_to_item_strict(row, gpui::ScrollStrategy::Center);
         self.enter_mode(Mode::Buffer, window, cx);
-        self.reveal_buffer_cursor();
+    }
+
+    /// A fresh buffer identity.
+    pub(super) fn next_buffer_id(&mut self) -> u64 {
+        self.buffer_ids += 1;
+        self.buffer_ids
+    }
+
+    /// Shows `next` instead of the current buffer. The search belongs to the buffer's text, so
+    /// its matches are found again in the new text, or dropped with the buffer.
+    pub(super) fn set_buffer(&mut self, next: Option<Buffer>) {
+        self.buffer = next;
+        self.selection = None;
+        match (&mut self.find, &self.buffer) {
+            (Some(find), Some(buffer)) => {
+                find.matches = Arc::new(find::matches(
+                    buffer.lines.lines.iter().map(String::as_str),
+                    &find.query,
+                ));
+                find.current = None;
+            }
+            (Some(_), None) => self.find = None,
+            (None, _) => {}
+        }
     }
 
     /// Back to the diff, at the hunk the cursor is in or the last one before it.
@@ -343,7 +368,7 @@ impl ReviewApp {
         self.find = Some(Find {
             input,
             query: String::new(),
-            matches: Vec::new(),
+            matches: Arc::new(Vec::new()),
             current: None,
             editing: true,
             _subscription: subscription,
@@ -363,7 +388,10 @@ impl ReviewApp {
                 let query = input.read(cx).value().to_string();
                 let lines = self.buffer.as_ref().map(|buffer| Arc::clone(&buffer.lines));
                 if let (Some(find), Some(lines)) = (&mut self.find, lines) {
-                    find.matches = find::matches(lines.lines.iter().map(String::as_str), &query);
+                    find.matches = Arc::new(find::matches(
+                        lines.lines.iter().map(String::as_str),
+                        &query,
+                    ));
                     find.query = query;
                     find.current = None;
                 }
@@ -444,7 +472,7 @@ impl ReviewApp {
         else {
             return;
         };
-        let units = view.units_under(std::slice::from_ref(&path));
+        let units = view.units_of_file(&path);
         let oid = units
             .first()
             .and_then(|&unit| view.file(unit).ok())
@@ -505,6 +533,8 @@ impl ReviewApp {
         ) else {
             return;
         };
+        // The answer applies only to the buffer and revision it was asked for.
+        let request = (buffer.id, record.number);
         let servers = std::sync::Arc::clone(&self.servers);
         self.looking_up = true;
         self.set_status("Looking up the definition; the language server may need to index first…");
@@ -520,6 +550,16 @@ impl ReviewApp {
                 if !this.trusted {
                     // Trust was revoked during the lookup: stop the servers, ignore the answer.
                     this.servers.lock().clear();
+                    return;
+                }
+                let current = this
+                    .buffer
+                    .as_ref()
+                    .map(|buffer| buffer.id)
+                    .zip(this.snapshot.as_ref().map(|snapshot| snapshot.revision));
+                if current != Some(request) {
+                    this.set_status("The definition lookup finished for a file no longer shown.");
+                    cx.notify();
                     return;
                 }
                 match found {
@@ -544,6 +584,7 @@ impl ReviewApp {
             current
         } else {
             Buffer {
+                id: self.next_buffer_id(),
                 origin: Origin::Definition(found.path.clone()),
                 syntax: Some(Arc::new(found.syntax)),
                 lines: Arc::new(found.lines),
@@ -556,8 +597,12 @@ impl ReviewApp {
             row: found.line,
             col: found.column,
         };
-        self.buffer = Some(next);
-        self.selection = None;
+        if same {
+            self.buffer = Some(next);
+            self.selection = None;
+        } else {
+            self.set_buffer(Some(next));
+        }
         self.reveal_buffer_cursor();
         self.set_status(format!("{}:{}", found.path, found.line + 1));
         cx.notify();
@@ -570,8 +615,7 @@ impl ReviewApp {
             .as_mut()
             .and_then(|buffer| buffer.previous.take());
         if let Some(previous) = previous {
-            self.buffer = Some(*previous);
-            self.selection = None;
+            self.set_buffer(Some(*previous));
             self.reveal_buffer_cursor();
             cx.notify();
         }

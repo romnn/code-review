@@ -5,13 +5,15 @@
 //! file text. A mark captures its exact units and the revision they were shown in when the
 //! reviewer acts, so a later revision can never widen it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use review_core::{
-    Counts, FileStatus, History, MarkVerdict, RevisionNumber, RevisionView, UnitId, UnitState,
-    Verdict,
+    Counts, FileStatus, History, MarkVerdict, ObjectId, RevisionNumber, RevisionView, UnitId,
+    UnitState, Verdict,
 };
+
+use review_core::tree::{NodeKind, TreeNode};
 
 use crate::rows::Badge;
 
@@ -52,6 +54,83 @@ pub struct MarkJob {
     pub verdict: MarkVerdict,
     /// The history the units were resolved in, which the engine checks the mark against.
     pub history: Arc<History>,
+}
+
+/// What background work makes of a blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Product {
+    /// Its text, for context lines and the file buffer.
+    Text,
+    /// Its highlighting and scopes.
+    Syntax,
+}
+
+/// Work running on blobs, per product: a blob's text and its highlighting are claimed apart, so
+/// a running highlight never keeps its text from loading, and each claim is free again once its
+/// work finishes, so a blob that comes back after its results were pruned is worked on again.
+#[derive(Debug, Default)]
+pub struct Outstanding(HashSet<(ObjectId, Product)>);
+
+impl Outstanding {
+    /// Claims `product` of `oid` for new work; `false` when that work is already running.
+    pub fn claim(&mut self, oid: &ObjectId, product: Product) -> bool {
+        self.0.insert((oid.clone(), product))
+    }
+
+    /// Frees the claims of finished work, whatever its outcome.
+    pub fn finish(&mut self, claims: &[(ObjectId, Product)]) {
+        for claim in claims {
+            self.0.remove(claim);
+        }
+    }
+}
+
+/// The files a folder node shows below it: the file nodes after it, deeper than it, up to the
+/// next node at its depth or above. A folder acts on exactly these, the files its counts sum,
+/// never on a file that only shares the folder's name, such as a deleted `foo` beside `foo/`.
+#[must_use]
+pub fn folder_files(tree: &[TreeNode], folder: usize) -> Vec<&str> {
+    let Some(depth) = tree.get(folder).map(|node| node.depth) else {
+        return Vec::new();
+    };
+    tree.iter()
+        .skip(folder + 1)
+        .take_while(|node| node.depth > depth)
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| node.path.as_str())
+        .collect()
+}
+
+/// Where in `visible` (indices into `tree`) the node `path` of `kind` is, or, when a fold
+/// hides it, the innermost visible folder that holds it. Only a node of the same kind counts as
+/// the node itself, and only a folder as its holder.
+#[must_use]
+pub fn cursor_position(
+    tree: &[TreeNode],
+    visible: &[usize],
+    path: &str,
+    kind: NodeKind,
+) -> Option<usize> {
+    let node = |position: usize| visible.get(position).and_then(|&index| tree.get(index));
+    (0..visible.len())
+        .find(|&position| node(position).is_some_and(|node| node.kind == kind && node.path == path))
+        .or_else(|| {
+            (0..visible.len()).rev().find(|&position| {
+                node(position).is_some_and(|node| {
+                    node.kind == NodeKind::Directory
+                        && node.path != path
+                        && review_core::tree::is_under(path, &node.path)
+                })
+            })
+        })
+}
+
+/// Whether `path` is a file of `tree`; a selection survives a new revision only as the same
+/// file, never as a folder that took its name.
+#[must_use]
+pub fn is_file(tree: &[TreeNode], path: &str) -> bool {
+    tree.iter()
+        .any(|node| node.kind == NodeKind::File && node.path == path)
 }
 
 /// The badge a pending verdict shows until the engine has recorded it.
@@ -283,6 +362,115 @@ mod tests {
         assert_eq!(
             newer.revision, revision,
             "the shown revision does not change by itself"
+        );
+    }
+
+    /// A blob's text and highlighting are claimed apart, each once while its work runs and
+    /// again after it finished, as when its text returns in a later revision (A, then B, then A)
+    /// after its results were pruned.
+    #[test]
+    fn finished_work_frees_its_claims() {
+        let a = ObjectId::parse(&"a".repeat(40)).unwrap();
+        let b = ObjectId::parse(&"b".repeat(40)).unwrap();
+        let mut outstanding = Outstanding::default();
+        assert!(outstanding.claim(&a, Product::Syntax));
+        assert!(
+            outstanding.claim(&a, Product::Text),
+            "highlighting a blob never keeps its text from loading"
+        );
+        assert!(
+            !outstanding.claim(&a, Product::Syntax),
+            "running work is not started twice"
+        );
+        outstanding.finish(&[(a.clone(), Product::Syntax), (a.clone(), Product::Text)]);
+        assert!(outstanding.claim(&b, Product::Syntax));
+        outstanding.finish(&[(b, Product::Syntax)]);
+        assert!(
+            outstanding.claim(&a, Product::Syntax),
+            "A is highlighted again when it returns"
+        );
+        assert!(outstanding.claim(&a, Product::Text));
+    }
+
+    /// A folder covers the files its counts sum, never a deleted file of the same name.
+    #[test]
+    fn a_folder_covers_exactly_its_displayed_files() {
+        let file = |path: &str| FileStatus {
+            path: path.to_owned(),
+            counts: Counts {
+                units: 1,
+                new: 1,
+                ..Counts::default()
+            },
+            renamed_from: None,
+            change: review_core::FileChangeSummary::modified(),
+        };
+        let tree = review_core::tree::file_tree(&[file("foo"), file("foo/bar.rs"), file("zed.rs")]);
+        let folder = tree
+            .iter()
+            .position(|node| node.kind == NodeKind::Directory && node.path == "foo")
+            .unwrap();
+        assert_eq!(folder_files(&tree, folder), ["foo/bar.rs"]);
+        assert_eq!(tree[folder].counts.units, 1, "the counts agree");
+        assert!(is_file(&tree, "foo"), "the deleted file is its own node");
+    }
+
+    /// The cursor keeps a node's kind: with a deleted file `foo` beside a folder `foo/`, the
+    /// folder stays the folder when folds hide or show its files, and the file stays the file.
+    #[test]
+    fn the_cursor_keeps_file_and_folder_apart() {
+        let file = |path: &str| FileStatus {
+            path: path.to_owned(),
+            counts: Counts {
+                units: 1,
+                new: 1,
+                ..Counts::default()
+            },
+            renamed_from: None,
+            change: review_core::FileChangeSummary::modified(),
+        };
+        let tree = review_core::tree::file_tree(&[file("foo"), file("foo/bar.rs")]);
+        let all: Vec<usize> = (0..tree.len()).collect();
+        let folder = cursor_position(&tree, &all, "foo", NodeKind::Directory).unwrap();
+        let deleted = cursor_position(&tree, &all, "foo", NodeKind::File).unwrap();
+        assert_ne!(folder, deleted);
+        assert_eq!(tree[all[folder]].kind, NodeKind::Directory);
+        assert_eq!(tree[all[deleted]].kind, NodeKind::File);
+        // Folded: `foo/bar.rs` is hidden, and its cursor goes to the folder, not the file.
+        let hidden: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|&index| tree[index].path != "foo/bar.rs")
+            .collect();
+        let holder = cursor_position(&tree, &hidden, "foo/bar.rs", NodeKind::File).unwrap();
+        assert_eq!(tree[hidden[holder]].kind, NodeKind::Directory);
+        assert_eq!(tree[hidden[holder]].path, "foo");
+    }
+
+    /// A selected file resolves to exactly its own units, and only a file keeps a selection;
+    /// a folder of the same name, as when a file becomes a directory, does not.
+    #[test]
+    fn selections_resolve_to_exactly_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let review = prepare(
+            &DemoPaths::under(dir.path()),
+            &fixture_dir(),
+            DemoRequest::Fresh,
+        )
+        .unwrap();
+        let history = review.history().unwrap();
+        let view = history.current_view().unwrap();
+        let tree = review_core::tree::file_tree(&view.status().files);
+        assert!(is_file(&tree, "src/engine.rs"));
+        assert!(!is_file(&tree, "src"), "a folder is never a file selection");
+        assert_eq!(view.units_of_file("src"), Vec::new());
+        assert_ne!(view.units_under(&["src".to_owned()]).len(), 0);
+        let engine = view.units_of_file("src/engine.rs");
+        assert_ne!(engine.len(), 0);
+        assert!(
+            engine
+                .iter()
+                .all(|&unit| { view.file(unit).unwrap().display_path() == "src/engine.rs" })
         );
     }
 

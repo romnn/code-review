@@ -15,6 +15,7 @@ use super::state::{self, MarkJob};
 use super::{
     Mode, Refresh, ResetReview, ReviewApp, ToggleApprove, ToggleFlag, ToggleTrust, overview, plural,
 };
+use crate::rows;
 
 impl ReviewApp {
     /// The units the current mode's review keys act on, and what to call them.
@@ -22,8 +23,17 @@ impl ReviewApp {
         let view = self.view()?;
         match self.mode {
             Mode::Tree => {
-                let node = self.tree_node()?;
-                let units = view.units_under(std::slice::from_ref(&node.path));
+                let index = self.tree_index()?;
+                let node = self.tree.get(index)?;
+                // A folder acts on the files it shows, a file on exactly itself.
+                let units = if node.kind == review_core::tree::NodeKind::Directory {
+                    state::folder_files(&self.tree, index)
+                        .into_iter()
+                        .flat_map(|path| view.units_of_file(path))
+                        .collect()
+                } else {
+                    view.units_of_file(&node.path)
+                };
                 Some((units, node.path.clone()))
             }
             Mode::Diff => {
@@ -231,9 +241,9 @@ impl ReviewApp {
 
     /// `R`: switches to a newer revision when there is one, otherwise fetches and records the
     /// target's latest state in the background.
-    pub(super) fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn refresh(&mut self, _: &Refresh, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(newer) = self.snapshot.as_ref().and_then(state::Snapshot::newer) {
-            self.switch_revision(newer, cx);
+            self.switch_revision(newer, window, cx);
             return;
         }
         let Some(review) = self.review.clone() else {
@@ -281,7 +291,16 @@ impl ReviewApp {
     }
 
     /// Shows `revision` instead of the current one, once no mark is waiting for the old one.
-    fn switch_revision(&mut self, revision: review_core::RevisionNumber, cx: &mut Context<Self>) {
+    ///
+    /// One transition: everything derived from the old revision (rows, hunks, folds, places,
+    /// the buffer and its search) goes first, then the selection is chosen again in the new
+    /// revision, and a mode whose subject is gone falls back to one that has it.
+    fn switch_revision(
+        &mut self,
+        revision: review_core::RevisionNumber,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.marking || !self.marks.is_empty() {
             self.set_status("Saving marks; press R again in a moment.");
             cx.notify();
@@ -291,6 +310,9 @@ impl ReviewApp {
             return;
         };
         snapshot.revision = revision;
+        if let Some(view) = snapshot.view() {
+            self.blobs.retain_for(&view);
+        }
         // Unit IDs and hunks belong to a revision; the reviewer's folds and places do not
         // carry over.
         self.folds.units.clear();
@@ -298,17 +320,22 @@ impl ReviewApp {
         self.folds.expanded.clear();
         self.folds.gaps.clear();
         self.places.clear();
-        self.buffer = None;
+        self.set_buffer(None);
+        self.rows = rows::Layout::default();
+        self.hunk_rows.clear();
         self.hunk = 0;
+        let previous = self.selected.take();
         self.refresh_tree();
-        let still = self
-            .selected
-            .take()
-            .filter(|path| self.tree.iter().any(|node| &node.path == path));
-        match still {
+        match previous.filter(|path| state::is_file(&self.tree, path)) {
             Some(path) => self.show_file(&path),
             None => self.select_first_file(),
         }
+        let mode = match self.mode {
+            _ if self.selected.is_none() => Mode::Tree,
+            Mode::Buffer => Mode::Diff,
+            mode => mode,
+        };
+        self.enter_mode(mode, window, cx);
         self.request_syntax(cx);
         self.set_status(format!("Showing revision {revision}. {}", self.summary()));
         cx.notify();

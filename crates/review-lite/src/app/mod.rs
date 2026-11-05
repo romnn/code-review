@@ -260,7 +260,8 @@ struct Place {
 struct Find {
     input: Entity<InputState>,
     query: String,
-    matches: Vec<find::Match>,
+    /// Shared with each frame's rows rather than copied.
+    matches: Arc<Vec<find::Match>>,
     current: Option<usize>,
     /// Whether the bar takes typing; after Enter, the matches stay for `n` and `N`.
     editing: bool,
@@ -277,6 +278,9 @@ struct Bench {
     built: Option<Duration>,
     work: Vec<Duration>,
     rendered_rows: usize,
+    /// Files scrolled through to their end, and their rows.
+    files: usize,
+    rows: usize,
 }
 
 /// Input-to-frame latency samples.
@@ -300,20 +304,40 @@ struct Blobs {
     syntax: HashMap<ObjectId, Arc<SideSyntax>>,
 }
 
+impl Blobs {
+    /// Keeps only the blobs `view` shows, so a long review's earlier revisions do not stay in
+    /// memory for the session.
+    fn retain_for(&mut self, view: &review_core::RevisionView<'_>) {
+        let shown: HashSet<&ObjectId> = view
+            .analysis()
+            .into_iter()
+            .flat_map(|analysis| &analysis.files)
+            .flat_map(|file| [file.old.as_ref(), file.new.as_ref()])
+            .flatten()
+            .map(|side| &side.oid)
+            .collect();
+        self.texts.retain(|oid, _| shown.contains(oid));
+        self.syntax.retain(|oid, _| shown.contains(oid));
+    }
+}
+
 /// The review window.
 pub struct ReviewApp {
     phase: Phase,
     review: Option<Arc<Review>>,
     snapshot: Option<Snapshot>,
     blobs: Blobs,
-    /// Blobs being read or highlighted, so each is requested once.
-    requested: HashSet<ObjectId>,
+    /// Blobs being read or highlighted right now, so none is requested twice at once; an entry
+    /// goes when its work completes, so a blob shown again after pruning is requested again.
+    requested: state::Outstanding,
     /// What the review is about.
     info: Option<review_core::ReviewInfo>,
     revisions: Vec<overview::RevisionSummary>,
     /// The file tree with pending marks applied.
     tree: Vec<TreeNode>,
     tree_collapsed: HashSet<String>,
+    /// The visible tree nodes, from [`Self::update_visible_tree`].
+    tree_visible: Arc<Vec<usize>>,
     tree_cursor: usize,
     tree_list: UniformListScrollHandle,
     /// The file whose diff shows, by display path.
@@ -333,6 +357,8 @@ pub struct ReviewApp {
     list_bar: PagedScroll,
     list_animation: Option<Animation>,
     buffer: Option<buffer::Buffer>,
+    /// The last buffer identity handed out.
+    buffer_ids: u64,
     buffer_list: UniformListScrollHandle,
     buffer_bar: PagedScroll,
     buffer_animation: Option<Animation>,
@@ -357,7 +383,8 @@ pub struct ReviewApp {
     /// When the status line last reported a failure, for tinting it.
     failed_at: Option<Instant>,
     looking_up: bool,
-    highlighting: bool,
+    /// Background reads and highlighting jobs still running.
+    highlighting: usize,
     client_decorated: bool,
     /// Whether language servers may run on the reviewed code; see [`Review::trust`].
     trusted: bool,
@@ -395,11 +422,12 @@ impl ReviewApp {
             review: None,
             snapshot: None,
             blobs: Blobs::default(),
-            requested: HashSet::new(),
+            requested: state::Outstanding::default(),
             info: None,
             revisions: Vec::new(),
             tree: Vec::new(),
             tree_collapsed: HashSet::new(),
+            tree_visible: Arc::new(Vec::new()),
             tree_cursor: 0,
             tree_list: UniformListScrollHandle::new(),
             selected: None,
@@ -419,6 +447,7 @@ impl ReviewApp {
             list,
             list_animation: None,
             buffer: None,
+            buffer_ids: 0,
             buffer_bar: PagedScroll::new(&buffer_list),
             buffer_list,
             buffer_animation: None,
@@ -438,7 +467,7 @@ impl ReviewApp {
             status: "Opening the review…".into(),
             failed_at: None,
             looking_up: false,
-            highlighting: false,
+            highlighting: 0,
             client_decorated: false,
             trusted: false,
             trust_pending: false,
@@ -617,7 +646,10 @@ impl ReviewApp {
             return;
         };
         let files = state::statuses(&view, &self.pending);
+        let cursor = self.cursor_identity();
         self.tree = review_core::tree::file_tree(&files);
+        self.update_visible_tree();
+        self.restore_cursor(cursor);
     }
 
     /// Lays out the selected file's diff from the current state, keeping the selected hunk.
@@ -633,7 +665,7 @@ impl ReviewApp {
             self.hunk_rows.clear();
             return;
         };
-        let units = view.units_under(std::slice::from_ref(&path));
+        let units = view.units_of_file(&path);
         let file = units.first().and_then(|&unit| view.file(unit).ok());
         // Text and highlights come from the caches by the blobs of this revision's file, so
         // they always belong to what the units describe.
@@ -657,8 +689,19 @@ impl ReviewApp {
             };
             self.folds.syntax.insert(path.clone(), Arc::new(syntax));
         }
+        // The selection is the selected hunk's units; its index follows them into the new rows.
+        let selected = self
+            .rows
+            .hunks
+            .get(self.hunk)
+            .and_then(|hunk| hunk.first().copied());
         self.rows = rows::build(&view, &units, &self.folds);
         self.hunk_rows = hunk_rows(&self.rows);
+        if let Some(found) =
+            selected.and_then(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)))
+        {
+            self.hunk = found;
+        }
         self.hunk = self.hunk.min(self.hunk_rows.len().saturating_sub(1));
     }
 
@@ -826,9 +869,14 @@ impl ReviewApp {
         };
         let mut wanted: Vec<(String, ObjectId)> = Vec::new();
         for file in &analysis.files {
-            for side in [file.new.as_ref(), file.old.as_ref()].into_iter().flatten() {
+            for side in [file.new.as_ref(), file.old.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter(|side| is_regular(side))
+                .filter(|side| review_core::syntax::Language::from_path(&side.path).is_some())
+            {
                 if !self.blobs.syntax.contains_key(&side.oid)
-                    && self.requested.insert(side.oid.clone())
+                    && self.requested.claim(&side.oid, state::Product::Syntax)
                 {
                     wanted.push((side.path.clone(), side.oid.clone()));
                 }
@@ -838,13 +886,24 @@ impl ReviewApp {
             .files
             .iter()
             .filter_map(|file| file.new.as_ref())
+            .filter(|side| is_regular(side))
             .filter(|side| !self.blobs.texts.contains_key(&side.oid))
+            .filter(|side| self.requested.claim(&side.oid, state::Product::Text))
             .map(|side| side.oid.clone())
             .collect();
         if wanted.is_empty() && texts_wanted.is_empty() {
             return;
         }
-        self.highlighting = true;
+        let asked: Vec<(ObjectId, state::Product)> = wanted
+            .iter()
+            .map(|(_, oid)| (oid.clone(), state::Product::Syntax))
+            .chain(
+                texts_wanted
+                    .iter()
+                    .map(|oid| (oid.clone(), state::Product::Text)),
+            )
+            .collect();
+        self.highlighting += 1;
         let work = cx.background_executor().spawn(async move {
             let mut texts = HashMap::new();
             let mut syntax = HashMap::new();
@@ -862,9 +921,6 @@ impl ReviewApp {
                 }
             }
             for (path, oid) in wanted {
-                if review_core::syntax::Language::from_path(&path).is_none() {
-                    continue;
-                }
                 if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
                     && let Ok(text) = std::str::from_utf8(&bytes)
                 {
@@ -876,9 +932,14 @@ impl ReviewApp {
         cx.spawn(async move |this, cx| {
             let (texts, syntax) = work.await;
             this.update(cx, |this, cx| {
-                this.highlighting = false;
+                this.highlighting = this.highlighting.saturating_sub(1);
+                this.requested.finish(&asked);
                 this.blobs.texts.extend(texts);
                 this.blobs.syntax.extend(syntax);
+                // A late answer for a revision no longer shown is not kept.
+                if let Some(view) = this.snapshot.as_ref().and_then(state::Snapshot::view) {
+                    this.blobs.retain_for(&view);
+                }
                 this.rebuild();
                 this.refresh_buffer_syntax();
                 cx.notify();
@@ -889,6 +950,13 @@ impl ReviewApp {
     }
 
     fn start_bench(&mut self, mode: BenchMode, window: &mut Window, cx: &mut Context<Self>) {
+        // The bench walks every file of the review, from the first.
+        if let Some(first) = file_paths(&self.tree)
+            .first()
+            .map(|path| (*path).to_owned())
+        {
+            self.show_file(&first);
+        }
         let now = Instant::now();
         self.bench = Some(Bench {
             mode,
@@ -899,6 +967,8 @@ impl ReviewApp {
             built: None,
             work: Vec::new(),
             rendered_rows: 0,
+            files: 0,
+            rows: 0,
         });
         cx.notify();
         cx.on_next_frame(window, ReviewApp::bench_frame);
@@ -921,8 +991,26 @@ impl ReviewApp {
             f32::from(self.list.content_size().height - self.list.viewport_bounds().size.height);
         let current = scroll::offset_of(&self.list);
         if bench.intervals.len() > 1 && current >= max - 0.5 {
-            println!("{}", bench_report(bench, self.rows.rows.len()));
-            cx.quit();
+            // The end of one file: on to the next, so the bench covers the whole review.
+            bench.files += 1;
+            bench.rows += self.rows.rows.len();
+            let paths = file_paths(&self.tree);
+            let next = self
+                .selected
+                .as_deref()
+                .and_then(|selected| paths.iter().position(|path| *path == selected))
+                .and_then(|position| paths.get(position + 1))
+                .map(|path| (*path).to_owned());
+            if let Some(path) = next {
+                self.list_animation = None;
+                self.show_file(&path);
+                scroll::set_offset_of(&self.list, 0.0);
+                cx.notify();
+                cx.on_next_frame(window, ReviewApp::bench_frame);
+            } else {
+                println!("{}", bench_report(bench));
+                cx.quit();
+            }
             return;
         }
         match bench.mode {
@@ -982,7 +1070,12 @@ fn read_texts(
     let Ok(mut reader) = review.repo().blob_reader() else {
         return texts;
     };
-    for side in analysis.files.iter().filter_map(|file| file.new.as_ref()) {
+    for side in analysis
+        .files
+        .iter()
+        .filter_map(|file| file.new.as_ref())
+        .filter(|side| is_regular(side))
+    {
         if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&side.oid)
             && !bytes.contains(&0)
         {
@@ -993,6 +1086,12 @@ fn read_texts(
         }
     }
     texts
+}
+
+/// Whether a tree entry is a regular file, whose blob is text to show; a symlink's blob is its
+/// target and a submodule's is a commit, which the entry evidence shows instead.
+fn is_regular(side: &review_core::analysis::EntrySide) -> bool {
+    side.mode.entry_type() == review_core::git::EntryType::File
 }
 
 /// The row range of each display hunk: the rows that carry its index, which are contiguous.
@@ -1028,12 +1127,14 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 /// Summarizes the scroll benchmark's frame intervals and per-frame work.
-fn bench_report(bench: &Bench, rows: usize) -> String {
+fn bench_report(bench: &Bench) -> String {
     let intervals: Vec<Duration> = bench.intervals.iter().skip(1).copied().collect();
     format!(
-        "scrolled {rows} rows ({:?}) in {} frames over {:.1?} ({} rows rendered)\n\
+        "scrolled {} rows of {} files ({:?}) in {} frames over {:.1?} ({} rows rendered)\n\
          frame interval: {}\n\
          render through row building: {}",
+        bench.rows,
+        bench.files,
         bench.mode,
         intervals.len(),
         bench.last - bench.started,
