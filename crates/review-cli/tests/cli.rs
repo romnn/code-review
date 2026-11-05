@@ -353,3 +353,164 @@ fn mark_file_covers_a_file_or_directory() -> eyre::Result<()> {
     assert!(cr(repo, data, &["mark", "--file", "docs", "seen"]).is_err());
     Ok(())
 }
+
+/// `cr open` without a target, with `PATH` pointing at no `gh` or at a fake one; the fake is a
+/// shell script, so these run on Unix only.
+#[cfg(unix)]
+mod open_without_target {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+    use std::process::Command;
+
+    use color_eyre::eyre::{self, WrapErr as _};
+    use serde_json::Value;
+
+    use super::{GIT_ENV, git, repo_with_change};
+
+    /// Runs `cr --json` with `args` in `repo` with `PATH` set to `path`, and returns its JSON output
+    /// and standard error.
+    fn cr_json_with_path(
+        repo: &Path,
+        data: &Path,
+        path: &OsStr,
+        args: &[&str],
+    ) -> eyre::Result<(Value, String)> {
+        let output = Command::new(env!("CARGO_BIN_EXE_cr"))
+            .args(args)
+            .arg("--json")
+            .arg("-C")
+            .arg(repo)
+            .env("CR_DATA_DIR", data)
+            .env("PATH", path)
+            .envs(GIT_ENV)
+            .output()
+            .wrap_err("failed to run cr")?;
+        let stderr = String::from_utf8(output.stderr)?;
+        eyre::ensure!(
+            output.status.success(),
+            "cr {} failed: {stderr}",
+            args.join(" ")
+        );
+        Ok((serde_json::from_slice(&output.stdout)?, stderr))
+    }
+
+    /// Returns a `PATH` that finds `git` but no `gh`: a directory holding only a link to `git`.
+    fn path_without_gh(directory: &Path) -> eyre::Result<OsString> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let git = std::env::split_paths(&path)
+            .map(|dir| dir.join("git"))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| eyre::eyre!("git is not on PATH"))?;
+        std::os::unix::fs::symlink(git, directory.join("git"))?;
+        Ok(directory.as_os_str().to_owned())
+    }
+
+    /// Returns a `PATH` whose `gh` prints `json` for any command, ahead of the inherited `PATH`.
+    fn path_with_fake_gh(directory: &Path, json: &str) -> eyre::Result<OsString> {
+        let gh = directory.join("gh");
+        std::fs::write(&gh, format!("#!/bin/sh\ncat <<'JSON'\n{json}\nJSON\n"))?;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let dirs =
+            std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited));
+        Ok(std::env::join_paths(dirs)?)
+    }
+
+    /// What a fake `gh pr view` reports for pull request 7 of `example.invalid/owner/repo`.
+    fn pull_request_json(state: &str) -> String {
+        format!(
+            r#"{{"number":7,"url":"https://example.invalid/owner/repo/pull/7","state":"{state}","headRefName":"feature","baseRefName":"main","title":"Feature","body":"","author":{{"login":"someone"}},"labels":[],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}}"#
+        )
+    }
+
+    /// `cr open` without a target and without `gh` reviews the default branch against the current
+    /// branch, says why on standard error, and uses the key an explicit range gets.
+    #[test]
+    fn falls_back_to_the_default_branch_range() -> eyre::Result<()> {
+        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+        let (data_dir, bin_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+        let (repo, data) = (repo_dir.path(), data_dir.path());
+        let path = path_without_gh(bin_dir.path())?;
+
+        let (opened, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
+        assert_eq!(
+            stderr.trim(),
+            "cr: reviewing main..feature: gh is not installed"
+        );
+        let (explicit, _) = cr_json_with_path(repo, data, &path, &["open", "main..feature"])?;
+        assert_eq!(opened["review"], explicit["review"]);
+
+        // A second open without a target returns to the remembered review.
+        let (again, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
+        assert_eq!(
+            stderr.trim(),
+            "cr: reopened the review last opened on this branch"
+        );
+        assert_eq!(again["review"], opened["review"]);
+        Ok(())
+    }
+
+    /// `cr open` without a target reviews the branch's open pull request under the same key as
+    /// opening it by number.
+    #[test]
+    fn reviews_the_branch_pull_request() -> eyre::Result<()> {
+        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+        let (data_dir, bin_dir, forge_dir) = (
+            tempfile::tempdir()?,
+            tempfile::tempdir()?,
+            tempfile::tempdir()?,
+        );
+        let (repo, data) = (repo_dir.path(), data_dir.path());
+
+        // The remote's path ends in the pull request's host, owner and repository, so the engine
+        // fetches the pull request's refs from it instead of the network.
+        let remote = forge_dir.path().join("example.invalid/owner/repo");
+        std::fs::create_dir_all(&remote)?;
+        git(&remote, &["init", "--quiet", "--bare"])?;
+        let remote_url = remote.display().to_string();
+        git(repo, &["remote", "add", "origin", &remote_url])?;
+        git(
+            repo,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                "main",
+                "feature:refs/pull/7/head",
+            ],
+        )?;
+        let path = path_with_fake_gh(bin_dir.path(), &pull_request_json("OPEN"))?;
+
+        let (opened, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
+        assert_eq!(
+            stderr.trim(),
+            "cr: reviewing pull request #7 from feature (https://example.invalid/owner/repo/pull/7)"
+        );
+        assert_eq!(opened["recorded"]["number"], 1);
+        let review = opened["review"].as_str().unwrap_or_default();
+        assert!(
+            review.starts_with("example.invalid/owner/repo#7@"),
+            "{review}"
+        );
+        let (by_number, _) = cr_json_with_path(repo, data, &path, &["open", "7"])?;
+        assert_eq!(by_number["review"], opened["review"]);
+        Ok(())
+    }
+
+    /// A merged pull request is not reviewed; the default branch range is, and stderr says why.
+    #[test]
+    fn skips_a_merged_pull_request() -> eyre::Result<()> {
+        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+        let (data_dir, bin_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+        let (repo, data) = (repo_dir.path(), data_dir.path());
+        let path = path_with_fake_gh(bin_dir.path(), &pull_request_json("MERGED"))?;
+
+        let (_, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
+        assert_eq!(
+            stderr.trim(),
+            "cr: reviewing main..feature: its pull request #7 is merged"
+        );
+        Ok(())
+    }
+}

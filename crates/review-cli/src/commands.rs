@@ -147,8 +147,14 @@ struct OpenOutput<'a> {
 
 pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> eyre::Result<()> {
     let repo = Repo::discover(&context.repo_dir)?;
-    let target = ReviewTarget::from_arguments(target, worktree, &repo)?;
-    let review = Review::open(&context.data_dir, repo, target)?;
+    let review = if target.is_none() && worktree.is_none() {
+        let (review, detected) = Review::open_for_current_branch(&context.data_dir, repo)?;
+        eprintln!("cr: {detected}");
+        review
+    } else {
+        let target = ReviewTarget::from_arguments(target, worktree, &repo)?;
+        Review::open(&context.data_dir, repo, target)?
+    };
     let recorded = review.refresh()?;
     context.remember(&review)?;
     let history = review.history()?;
