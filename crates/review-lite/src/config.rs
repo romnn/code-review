@@ -13,6 +13,7 @@
 //! style = "bold"    # plain, bold, soft or one of [styles]; `|` cycles them
 //! density = "normal"    # or "compact" or "comfortable": the rows' spacing
 //! layout = "unified"    # or "side-by-side"; `s` toggles it
+//! approved = "folded"   # or "shown": approved hunks show their code; `zA` toggles it
 //! removed = "#5f1519"   # overrides the theme's line backgrounds
 //! added = "#14471f"
 //! token_emphasis = false
@@ -188,6 +189,7 @@ struct DiffSection {
     style: Option<String>,
     density: Option<Density>,
     layout: Option<DiffLayout>,
+    approved: Option<Approved>,
     removed: Option<String>,
     added: Option<String>,
     token_emphasis: Option<bool>,
@@ -243,6 +245,38 @@ impl DiffLayout {
         match self {
             Self::Unified => "unified",
             Self::SideBySide => "side-by-side",
+        }
+    }
+}
+
+/// Whether approved hunks fold to their header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Approved {
+    /// Approved hunks show their header alone, and fully reviewed files their header alone,
+    /// until the reviewer unfolds one.
+    #[default]
+    Folded,
+    /// Approved hunks and fully reviewed files show like any other.
+    Shown,
+}
+
+impl Approved {
+    /// The other choice.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Folded => Self::Shown,
+            Self::Shown => Self::Folded,
+        }
+    }
+
+    /// The choice's name as the configuration file spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Folded => "folded",
+            Self::Shown => "shown",
         }
     }
 }
@@ -366,6 +400,8 @@ pub struct Config {
     /// How the diff is laid out, as the reviewer asked for it; a narrow window may still show
     /// it unified.
     pub diff_layout: DiffLayout,
+    /// Whether approved hunks fold to their header.
+    pub approved: Approved,
     /// The removed-line background, as `0xRRGGBB`, overriding the theme's.
     pub removed: Option<u32>,
     /// The added-line background, likewise.
@@ -395,6 +431,7 @@ impl Default for Config {
             diff_style: None,
             density: Density::default(),
             diff_layout: DiffLayout::Unified,
+            approved: Approved::Folded,
             removed: None,
             added: None,
             theme: None,
@@ -605,6 +642,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
         diff_style: file.diff.style,
         density: file.diff.density.unwrap_or(defaults.density),
         diff_layout: file.diff.layout.unwrap_or(defaults.diff_layout),
+        approved: file.diff.approved.unwrap_or(defaults.approved),
         removed: color(file.diff.removed)?,
         added: color(file.diff.added)?,
         theme: file.theme.name,
@@ -980,6 +1018,16 @@ NextHunk = [\"j\"]
             config.problems
         );
         assert!(parse("[diff]\nlayout = \"split\"\n").is_err());
+    }
+
+    /// Approved hunks fold unless the file says to show them.
+    #[test]
+    fn approved_hunks_fold_by_default() {
+        assert_eq!(parse("").unwrap().approved, Approved::Folded);
+        let config = parse("[diff]\napproved = \"shown\"\n").unwrap();
+        assert_eq!(config.approved, Approved::Shown);
+        assert_eq!(config.approved.toggled(), Approved::Folded);
+        assert!(parse("[diff]\napproved = \"open\"\n").is_err());
     }
 
     /// 13 points is 17.33 logical pixels; gpui applies the display scale on top.

@@ -65,12 +65,24 @@ impl ReviewApp {
 
     /// Selects the first file that needs attention, or the first file, and puts the tree
     /// cursor on it.
+    ///
+    /// A file the folded folders show comes first, so a folder the reviewer folded stays
+    /// folded; only when every file that needs attention is folded away does one unfold.
     pub(super) fn select_first_file(&mut self) {
-        let target = self
-            .tree
+        let needs_attention = |node: &&TreeNode| {
+            node.kind == NodeKind::File && Progress::of(&node.counts).needs_attention()
+        };
+        let visible = self.visible_tree();
+        let target = visible
             .iter()
-            .find(|node| {
-                node.kind == NodeKind::File && Progress::of(&node.counts).needs_attention()
+            .filter_map(|&index| self.tree.get(index))
+            .find(needs_attention)
+            .or_else(|| self.tree.iter().find(needs_attention))
+            .or_else(|| {
+                visible
+                    .iter()
+                    .filter_map(|&index| self.tree.get(index))
+                    .find(|node| node.kind == NodeKind::File)
             })
             .or_else(|| self.tree.iter().find(|node| node.kind == NodeKind::File))
             .map(|node| node.path.clone());

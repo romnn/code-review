@@ -35,8 +35,8 @@
 //!
 //! Each command (except `sample`) answers with one line on standard output (`ok`,
 //! `error: ...`, or the state) only once background work it started (marks, lookups, file
-//! loads, scroll animations) is done and a frame has been rendered after it, so a screenshot
-//! taken after the answer shows the result.
+//! loads, saves, scroll animations) is done and a frame has been rendered after it, so a
+//! screenshot taken after the answer shows the result.
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -587,6 +587,7 @@ async fn settle(this: &WeakEntity<ReviewApp>, cx: &mut AsyncWindowContext) -> Re
                         .as_ref()
                         .is_some_and(super::picker::Picker::busy)
                     || this.refreshing
+                    || this.folders.busy()
                     || this.list_animation.is_some()
                     || this.buffer_animation.is_some()
                     || matches!(this.phase, Phase::Loading(_))
@@ -728,6 +729,8 @@ impl ReviewApp {
                 }))
             })
             .collect();
+        let mut collapsed: Vec<&str> = self.tree_collapsed.iter().map(String::as_str).collect();
+        collapsed.sort_unstable();
         let buffer = self.buffer.as_ref().map(|buffer| {
             json!({
                 "title": buffer.title(),
@@ -749,6 +752,7 @@ impl ReviewApp {
             "effective_layout": self.rows.presentation.layout.name(),
             "density": look.density.name(),
             "effective_density": self.rows.presentation.density.name(),
+            "approved": self.folds.approved.name(),
             "style": {
                 "syntax": look.style.syntax,
                 "background": look.style.background.name(),
@@ -853,6 +857,7 @@ impl ReviewApp {
             "viewport": [f32::from(viewport.left()), f32::from(viewport.top()), f32::from(viewport.size.width), height],
             "tree": tree,
             "tree_cursor": self.tree_cursor,
+            "collapsed": collapsed,
             "buffer": buffer,
             "find": find,
             "filter": filter,

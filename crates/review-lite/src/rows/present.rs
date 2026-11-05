@@ -214,8 +214,10 @@ fn set(projected: &mut [usize], source: usize, at: usize) {
 /// Adds a blank row before each hunk: before its header, or before the gap of unchanged lines
 /// that leads to it.
 ///
-/// Never at the top, and never twice in a row.
+/// Never at the top, never twice in a row, and never between two folded hunks' headers, so a
+/// run of them reads as one list.
 fn space(rows: Vec<Row>, projected: &mut [usize]) -> Vec<Row> {
+    let folded = |row: &Row| row.note().is_some_and(|note| note.folded);
     let mut out: Vec<Row> = Vec::with_capacity(rows.len() + rows.len() / 8);
     // Where each row moved, so the earlier pass's targets can follow.
     let mut moved: Vec<usize> = Vec::with_capacity(rows.len());
@@ -223,7 +225,9 @@ fn space(rows: Vec<Row>, projected: &mut [usize]) -> Vec<Row> {
     while let Some(row) = rows.next() {
         let kind = row.kind();
         let starts_hunk = match kind {
-            RowKind::Header => out.last().is_none_or(|last| last.kind() != RowKind::Gap),
+            RowKind::Header => out
+                .last()
+                .is_none_or(|last| last.kind() != RowKind::Gap && !(folded(last) && folded(&row))),
             RowKind::Gap => rows
                 .peek()
                 .is_some_and(|next| next.kind() == RowKind::Header),
@@ -523,6 +527,47 @@ mod tests {
                 .rows
                 .iter()
                 .all(|row| row.kind() != RowKind::Spacer || row.hunk.is_none())
+        );
+    }
+
+    /// Folded hunks' headers in a row read as one list, without air between them; an unfolded
+    /// hunk after them still gets its blank row.
+    #[test]
+    fn folded_headers_read_as_a_list() {
+        let (first, second, third) = (unit_id("u1-0"), unit_id("u1-1"), unit_id("u1-2"));
+        let folded = |unit, hunk| {
+            let mut row = note(RowKind::Header, "line 1", unit, Some(hunk));
+            if let Body::Note(note) = &mut row.body {
+                note.folded = true;
+            }
+            row
+        };
+        let rows = vec![
+            folded(first, 0),
+            folded(second, 1),
+            note(RowKind::Header, "line 9", third, Some(2)),
+            code(RowKind::Added, "x", third, Some(2)),
+            folded(third, 3),
+        ];
+        let shown = present(
+            layout(rows),
+            Presentation {
+                layout: DiffLayout::Unified,
+                density: Density::Normal,
+            },
+        );
+        let kinds: Vec<RowKind> = shown.rows.iter().map(Row::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::Header,
+                RowKind::Header,
+                RowKind::Spacer,
+                RowKind::Header,
+                RowKind::Added,
+                RowKind::Spacer,
+                RowKind::Header,
+            ]
         );
     }
 

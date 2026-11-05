@@ -30,6 +30,9 @@ scripts/qa/session.sh stop                  # always, before you report
   `--demo-revision N`, a `base..head` range, `--worktree`, `--font-size`, `--decorations client`
   and `-C <repo>`.
 - `start` replaces a running session.
+- `start --demo` rebuilds the demo with fresh data; `start --demo-revision N` reopens the same
+  data, keeping marks and saved view state such as folded folders (`N` = 1 stays at revision
+  1). Check anything that persists across launches with that relaunch.
 - The app keeps its settings in `target/qa/<session>-config.toml` and its demo in
   `target/qa/<session>-demo`, never the user's configuration or `target/demo`; `QA_SESSION=name`
   (default `session`) keeps an agent's session apart from others. Delete the
@@ -64,7 +67,7 @@ comment in `crates/review-lite/src/app/qa.rs`; read it when a command here fails
 | `resize <W>x<H>` | Resizes the window. |
 | `clipboard` | Prints the clipboard as a JSON string; use it after selecting and copying. |
 | `latency` | Input-to-frame latency percentiles. |
-| `state` | The observable UI state as one line of JSON: `mode` (Tree, Diff, Buffer), `area` (which key context has the keyboard), `screen`, `selected`, `hunk`, `hunk_units`, `hunk_badges`, `pending` and `queued` marks, `revision` and `newer`, visible `rows` with their `kind`, `hunk`, `tag` and `scope`, `tree` rows with change kind and `progress`, `buffer` (cursor row and column), `find` (its `target` mode, query, matches, current match and its `current_column`), `filter` (the tree's `/` filter), `picker` (kind, scope, query, `editing`, `count`, the first entries), `shown` (the file whose diff rows show) and `preview` (a held-key preview awaiting its diff), `layout`, `window_events` (title-bar moves, zooms, minimizes, menus), and `view` (`overlay`, `token_emphasis`, `diff_style`, `theme`, `density`, `layout` and the `effective_` ones that show, `previewing`, and the open `settings` list with its cursor and panel `geometry`). |
+| `state` | The observable UI state as one line of JSON: `mode` (Tree, Diff, Buffer), `area` (which key context has the keyboard), `screen`, `selected`, `hunk`, `hunk_units`, `hunk_badges`, `pending` and `queued` marks, `revision` and `newer`, visible `rows` with their `kind`, `hunk`, `tag` and `scope`, `tree` rows with change kind and `progress`, `collapsed` (the folded folders), `buffer` (cursor row and column), `find` (its `target` mode, query, matches, current match and its `current_column`), `filter` (the tree's `/` filter), `picker` (kind, scope, query, `editing`, `count`, the first entries), `shown` (the file whose diff rows show) and `preview` (a held-key preview awaiting its diff), `layout`, `window_events` (title-bar moves, zooms, minimizes, menus), and `view` (`overlay`, `token_emphasis`, `diff_style`, `theme`, `density`, `layout` and the `effective_` ones that show, `approved` (`folded` or `shown`), `previewing`, and the open `settings` list with its cursor and panel `geometry`). |
 
 Find click coordinates by looking at a screenshot: the image's pixels are window coordinates,
 because the window fills the output.

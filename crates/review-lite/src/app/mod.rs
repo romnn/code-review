@@ -40,6 +40,7 @@ mod buffer;
 mod chrome;
 mod diff;
 mod find;
+mod folders;
 pub mod keymap;
 mod markdown;
 mod marks;
@@ -202,6 +203,8 @@ pub struct Settings {
     pub config_path: Option<PathBuf>,
     /// Unchanged lines shown around each hunk.
     pub context: usize,
+    /// Whether approved hunks fold, as the configuration sets it.
+    pub approved: crate::config::Approved,
     /// The removed-line background, as `0xRRGGBB`, when the configuration overrides the
     /// theme's.
     pub removed: Option<u32>,
@@ -393,7 +396,9 @@ pub struct ReviewApp {
     revisions: Vec<overview::RevisionSummary>,
     /// The file tree with pending marks applied.
     tree: Vec<TreeNode>,
+    /// The folded folders, saved with the review by [`folders::Saver`].
     tree_collapsed: HashSet<String>,
+    folders: folders::Saver,
     /// The visible tree nodes, from [`Self::update_visible_tree`].
     tree_visible: Arc<Vec<usize>>,
     tree_cursor: usize,
@@ -515,6 +520,7 @@ impl ReviewApp {
             revisions: Vec::new(),
             tree: Vec::new(),
             tree_collapsed: HashSet::new(),
+            folders: folders::Saver::default(),
             tree_visible: Arc::new(Vec::new()),
             tree_cursor: 0,
             tree_list: UniformListScrollHandle::new(),
@@ -534,6 +540,7 @@ impl ReviewApp {
             hunk: 0,
             folds: Folds {
                 context: settings.context,
+                approved: settings.approved,
                 single_file: true,
                 ..Folds::default()
             },
@@ -591,8 +598,10 @@ impl ReviewApp {
             let revision = history.current().ok_or("the review has no revision yet")?;
             let history = Arc::new(history);
             let texts = read_texts(&review, &history, revision);
+            let collapsed = folders::load(&review);
             Ok::<_, String>(Opened {
                 review,
+                collapsed,
                 found,
                 trusted: trust.trusted,
                 info,
@@ -630,6 +639,7 @@ impl ReviewApp {
                 window.set_window_title(&self.title());
                 self.phase = Phase::Ready;
                 self.refresh_tree();
+                self.restore_folders(opened.collapsed, cx);
                 self.select_first_file();
                 let (status, failed) = opening_status(
                     &self.summary(),
@@ -1188,6 +1198,8 @@ impl ReviewApp {
 /// What opening a review produced.
 struct Opened {
     review: Review,
+    /// The folded folders saved with the review.
+    collapsed: Vec<String>,
     found: Option<String>,
     trusted: bool,
     info: Option<review_core::ReviewInfo>,

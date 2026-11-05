@@ -575,6 +575,10 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   moves), content-addressed by its snapshot IDs, written atomically (temporary file and rename) and
   recomputable from git.
 - `review.lock`: serializes state transitions (held exclusively) and log reads (held shared).
+- `view/<front-end>.json`: each front end's own view state, such as review-lite's folded folders,
+  through `Review::view_state` and `Review::save_view_state`. It is how the review was last shown,
+  not review state: written atomically without the lock, never in the event log, and a front end
+  that cannot read it starts afresh.
 
 Rules:
 
@@ -697,7 +701,10 @@ it, muted, so it never reads as code.
     unapproves the file or folder, `!` flags it and `u` resets it. `/` filters the tree as
     lazygit does: typing narrows it to the files whose path contains the query (and their
     folders), Enter keeps the filter and returns to the list, Esc clears it. A filtered folder
-    cannot be marked as a whole, since it hides some of its files.
+    cannot be marked as a whole, since it hides some of its files. Folded folders are saved with
+    the review whenever they change and fold again when it reopens, except folders the shown
+    revision no longer has; the review opens at the first file that needs the reviewer outside
+    them, and unfolds one only when every such file is folded away.
   - *Diff*: a file opens at its first hunk that needs the reviewer. `j`/`k` move between hunks,
     `Ctrl+D`/`Ctrl+U` scroll, Space approves the hunk and moves to the next open one (and, at the
     end of a file, names the next file, which `n` opens), `!` flags, `za` folds, Esc or `h` goes
@@ -711,8 +718,8 @@ it, muted, so it never reads as code.
     under the cursor. `=` or Esc goes back to the diff at the same place.
   - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
     request overview and `?` the keys, both overlays that own the keyboard until closed.
-  - `s` shows the diff side by side or unified, `|` cycles the diff styles, and `T` or `,` opens
-    the settings list (below).
+  - `s` shows the diff side by side or unified, `zA` shows or folds approved hunks, `|` cycles
+    the diff styles, and `T` or `,` opens the settings list (below).
 - **Pickers.** Telescope's two most used, from every mode, as overlays that own the keyboard
   and the pointer: `Ctrl+P` finds a file by a fuzzy match of its path (`nucleo-matcher`, the
   matcher Helix uses), each entry with its change kind and review progress; `Ctrl+G` searches
@@ -754,11 +761,18 @@ it, muted, so it never reads as code.
   selection changes.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
-  state's glyph, the lines it covers, at most one tag (`only reformatting`, `whitespace changed ·
-  not proven equivalent`, `changed since revision 1`) and the scope breadcrumb; unchanged lines left
-  out are one rule (`15 unchanged lines`, Enter shows more); a note is a bounded block with an
-  accent bar; the selected hunk has a thin accent bar along its left edge. Approved hunks fold to
-  their header. Formatting-only hunks still show, on a neutral background without red and green,
+  state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
+  changes), at most one tag (`only reformatting`, `whitespace changed · not proven equivalent`,
+  `changed since revision 1`), and the lines it covers only when its code is folded away or no
+  scope names it, since the gutter numbers the shown lines (unit IDs stay out; `y i` copies
+  one); unchanged lines left out are one rule (`15 unchanged lines`, Enter shows more); a note is
+  a bounded block with an accent bar; every hunk header is a gray band and every hunk has a gray bar
+  along its left edge, both in the accent's blue for the selected hunk, so each hunk's start and
+  extent show at a glance. Approved hunks fold to
+  their header, and unchanged lines between folded hunks or between one and the file's edge
+  show nothing, not even a gap rule or a blank row, so a run of folded hunks reads as a list of
+  headers; `zA` (`[diff] approved = "folded"` or `"shown"`) shows approved hunks like any other,
+  and fully reviewed files then stay open too. Formatting-only hunks still show, on a neutral background without red and green,
   labeled `only reformatting`; an unproven whitespace change keeps red and green and reads
   `whitespace changed · not proven equivalent`. Tree rows are an indent, a change-kind letter
   colored by kind, and the name colored by review state; only state that needs action or confirms
@@ -804,7 +818,7 @@ it, muted, so it never reads as code.
 - **Settings and presets.** `T` or `,` opens a keyboard-first settings list in the files pane's
   place (over the left of the diff when the files pane is hidden or narrower than 260 px), so
   the diff keeps its exact geometry: presets, themes, diff styles, density, layout, token
-  emphasis and font size, with a search over every entry and the cursor's detail in a footer.
+  emphasis, approved hunks (folded or shown, not part of a preset) and font size, with a search over every entry and the cursor's detail in a footer.
   The list and its search field are two key contexts (Tab or a click into the field switches;
   the field takes everything typed). Every entry under the cursor previews over what is
   applied, through the presentation transition, always from where the lists were when the
@@ -823,10 +837,12 @@ it, muted, so it never reads as code.
   `[presets.<name>]` table costs only that entry; any configuration problem shows in the status
   line when the review opens, not only on stderr. The configuration is edited as TOML
   (`toml_edit`), keeping comments and everything it does not change.
-- **Presentation changes.** The layout, the density, the font size and the narrow fallback, and
-  previews of them, go through one transition that notes where every list is by row identity,
-  stops scroll animations, drops a selection whose rows changed, projects the rows again and
-  puts every list back at its row. Places kept for other files are row identities too, so a
+- **Presentation changes.** The layout, the density, the font size, the narrow fallback and
+  whether approved hunks fold, and previews of them, go through one transition that notes where
+  every list is by row identity, stops scroll animations, drops a selection whose rows changed,
+  projects the rows again and puts every list back at its row. Showing or folding approved hunks
+  lays the rows out anew, so the diff finds its place by what its top row showed: the same line,
+  or else its unit's header. Places kept for other files are row identities too, so a
   density change never lands a returning reviewer on another line.
 - **Themes as data.** A theme is a TOML file of semantic roles (`[ui]`, `[review]`, `[kind]`,
   `[diff]`, `[syntax]`). Nine are built in under `crates/review-lite/themes/`, each citing its

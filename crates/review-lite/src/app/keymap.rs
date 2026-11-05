@@ -502,6 +502,15 @@ const DEFAULTS: &[Default] = &[
         None,
     ),
     (
+        "ToggleApproved",
+        &["z shift-a"],
+        &[Area::Tree, Area::Diff],
+        "View",
+        "show or fold approved hunks",
+        None,
+        None,
+    ),
+    (
         "OpenSettings",
         &["shift-t", ","],
         MODES,

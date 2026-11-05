@@ -255,6 +255,7 @@ fn settings(
         styles,
         presets,
         context: config.context,
+        approved: config.approved,
         removed: config.removed,
         added: config.added,
         layout: config.layout,

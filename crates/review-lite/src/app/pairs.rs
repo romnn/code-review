@@ -24,7 +24,7 @@ use gpui_component::h_flex;
 use gpui_component::scroll::ScrollbarHandle;
 
 use super::present::{DIVIDER, FRAME, GUTTER, SIGN};
-use super::render::{GRID, Palette, frame_bar};
+use super::render::{Frame, GRID, Palette, frame_bar};
 use super::text::{Column, Pane};
 use super::{ReviewApp, scroll};
 use crate::config::DiffLayout;
@@ -143,7 +143,7 @@ impl ReviewApp {
         index: usize,
         file: usize,
         pair: &Pair,
-        in_frame: bool,
+        frame: Frame,
         colors: &Palette,
     ) -> AnyElement {
         let half = |cell: Option<&Cell>, column| self.half(index, file, cell, column, colors);
@@ -153,7 +153,7 @@ impl ReviewApp {
             .w_full()
             .h(px(self.fonts.row_height()))
             .whitespace_nowrap()
-            .child(frame_bar(in_frame, colors))
+            .child(frame_bar(frame, colors))
             .child(left)
             .child(
                 div()
@@ -228,13 +228,18 @@ impl ReviewApp {
         (halves.max(code) + GRID * 4.0).max(0.0)
     }
 
-    /// Sideways wheel input over the side-by-side diff, or Shift with the wheel, moves the text.
+    /// Wheel input over the diff stops its scroll animation; sideways input over the side-by-side
+    /// diff, or Shift with the wheel, moves the text.
     pub(super) fn text_wheel(
         &mut self,
         event: &ScrollWheelEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The wheel takes over from a scroll animation, which would otherwise pull the diff
+        // back to its target on the next frames.
+        self.list_animation = None;
+        self.list_bar.cancel_page_request();
         if !self.side_by_side() {
             return;
         }

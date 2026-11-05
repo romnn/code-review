@@ -1,7 +1,7 @@
 //! Changing how the diff is presented while keeping the reviewer's place.
 //!
-//! The layout (unified or side by side), the density, the font size and the narrow-window
-//! fallback all change which rows show or how tall they are.
+//! The layout (unified or side by side), the density, the font size, the narrow-window
+//! fallback and whether approved hunks fold all change which rows show or how tall they are.
 //! Each change, and each preview of a look and its rollback, goes through
 //! [`ReviewApp::transition`], which:
 //!
@@ -9,8 +9,11 @@
 //!   row at its top, the tree and the buffer by their top row;
 //! - stops scroll animations and track-click pages, which aim at pixels of the old rows;
 //! - drops a drag, and a diff selection whose rows were projected anew;
-//! - projects the rows again when the presentation changed, then puts every list back at its
-//!   row, clamped to the new extent.
+//! - projects the rows again when the presentation changed, or lays them out again when
+//!   approved hunks fold or show now, then puts every list back at its row, clamped to the new
+//!   extent. Rows laid out with other folds than the place was taken on are other rows, so the
+//!   diff finds its place again by what its top row showed: the same line, or else the header
+//!   of the same unit.
 //!
 //! Places kept for files not shown are row identities too, so returning to a file after a
 //! density change lands on the same line.
@@ -21,12 +24,12 @@ use gpui_component::scroll::ScrollbarHandle as _;
 use super::render::GRID;
 use super::text::Pane;
 use super::{ReviewApp, panes, scroll};
-use crate::config::DiffLayout;
+use crate::config::{Approved, DiffLayout};
 use crate::look;
-use crate::rows::{Layout, Presentation};
+use crate::rows::{Layout, Presentation, Row, RowKind};
 
 /// The accent bar along a row's left edge, in logical pixels.
-pub const FRAME: f32 = 3.0;
+pub const FRAME: f32 = 5.0;
 
 /// A code row's line-number gutter.
 pub const GUTTER: f32 = GRID * 13.0;
@@ -73,12 +76,68 @@ impl Anchor {
     }
 }
 
+/// A diff row by what it shows rather than where it is, to find it again in rows laid out
+/// with other folds: its unit, and the head or base line of its code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowKey {
+    unit: review_core::UnitId,
+    head: Option<usize>,
+    base: Option<usize>,
+    /// Whether the line belongs to a nested diff, whose lines may be another file's.
+    nested: bool,
+}
+
+impl RowKey {
+    /// The key of `row`.
+    #[must_use]
+    pub fn of(row: &Row) -> Self {
+        Self {
+            unit: row.unit,
+            head: row
+                .cells()
+                .find_map(|cell| cell.head.as_ref().map(|head| head.line)),
+            base: row.cells().find_map(|cell| cell.base),
+            nested: row.cells().any(|cell| {
+                matches!(
+                    cell.kind,
+                    RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
+                )
+            }),
+        }
+    }
+
+    /// Whether `row` shows the same line of code.
+    fn same_line(self, row: &Row) -> bool {
+        let other = Self::of(row);
+        other.nested == self.nested
+            && ((self.head.is_some() && other.head == self.head)
+                || (self.base.is_some() && other.base == self.base))
+    }
+
+    /// The unified row of `layout` that shows the same line, of the same unit when it can;
+    /// or else the header of the same unit.
+    #[must_use]
+    pub fn find(self, layout: &Layout) -> Option<usize> {
+        let rows = &layout.rows;
+        let row = rows
+            .iter()
+            .find(|row| row.unit == self.unit && self.same_line(row))
+            .or_else(|| rows.iter().find(|row| self.same_line(row)))
+            .or_else(|| rows.get(*layout.unit_rows.get(&self.unit)?))?;
+        Some(row.source)
+    }
+}
+
 /// Where every list is, by row: the diff by its unified row, the tree and the buffer by their
 /// own rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Places {
     /// The diff, by its unified row.
     pub diff: Anchor,
+    /// What the diff's top row shows, for rows laid out with other folds.
+    pub diff_key: Option<RowKey>,
+    /// Whether approved hunks folded in the rows the diff's place was taken on.
+    pub approved: Approved,
     /// The file tree.
     pub tree: Anchor,
     /// The file buffer.
@@ -180,8 +239,15 @@ impl ReviewApp {
     /// Where every list is now, by row, or where a scroll animation takes it.
     pub(super) fn places(&self) -> Places {
         let height = self.fonts.row_height();
+        let offset = self.list_target();
         Places {
-            diff: diff_anchor(&self.rows, self.list_target(), height),
+            diff: diff_anchor(&self.rows, offset, height),
+            diff_key: self
+                .rows
+                .rows
+                .get(Anchor::at(offset, height).row)
+                .map(RowKey::of),
+            approved: self.folds.approved,
             tree: Anchor::at(scroll::offset_of(&self.tree_list), height),
             buffer: Anchor::at(self.buffer_target(), height),
         }
@@ -204,7 +270,14 @@ impl ReviewApp {
     /// lists were when it opened, so a preview clamped at the end of a list never moves the
     /// place for good.
     pub(super) fn transition_from(&mut self, places: Places, change: impl FnOnce(&mut Self)) {
-        let Places { diff, tree, buffer } = places;
+        let Places {
+            diff,
+            diff_key,
+            approved,
+            tree,
+            buffer,
+        } = places;
+        let approved_before = self.folds.approved;
 
         // Motion aimed at the old rows' pixels stops.
         self.list_animation = None;
@@ -216,7 +289,7 @@ impl ReviewApp {
         change(self);
         self.fonts.line_height = look::line_height(self.look().density);
         let presentation = self.presentation();
-        if presentation != self.presented {
+        if presentation != self.presented || self.folds.approved != approved_before {
             self.presented = presentation;
             // The diff's rows are new, so row and column of a selection in it mean other text.
             self.selection = self
@@ -226,6 +299,12 @@ impl ReviewApp {
         }
 
         // Every list back at its row, within the new extent.
+        let diff = match diff_key {
+            Some(key) if self.folds.approved != approved => key
+                .find(&self.rows)
+                .map_or(diff, |row| Anchor { row, ..diff }),
+            _ => diff,
+        };
         let height = self.fonts.row_height();
         let clamp = |offset: f32, rows: usize, viewport: f32| {
             offset.clamp(0.0, (scroll::float(rows) * height - viewport).max(0.0))
@@ -294,6 +373,70 @@ mod tests {
         assert_eq!(
             effective_layout(DiffLayout::Unified, 3000.0, size),
             DiffLayout::Unified
+        );
+    }
+
+    /// A place found again by what its row shows, in rows laid out with approved hunks shown
+    /// and then folded: a header stays its header, and a line that folds away gives way to
+    /// its unit's header.
+    #[test]
+    fn row_keys_find_their_line_in_rows_laid_out_anew() {
+        use crate::rows::{Folds, FullText, build, present};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let review = review_core::demo::prepare(
+            &review_core::demo::DemoPaths::under(dir.path()),
+            &review_core::demo::fixture_dir(),
+            review_core::demo::DemoRequest::Fresh,
+        )
+        .unwrap();
+        let history = review.history().unwrap();
+        let view = history.current_view().unwrap();
+        let units = view.units_of_file("src/engine.rs");
+        review
+            .mark(&view, &units, review_core::MarkVerdict::Accepted)
+            .unwrap();
+        let history = review.history().unwrap();
+        let view = history.current_view().unwrap();
+        let engine = std::fs::read_to_string(
+            review_core::demo::fixture_dir().join("trees/feature-1/src/engine.rs"),
+        )
+        .unwrap();
+        let lay_out = |approved| {
+            let folds = Folds {
+                texts: HashMap::from([(
+                    "src/engine.rs".to_owned(),
+                    Arc::new(FullText::new(&engine)),
+                )]),
+                single_file: true,
+                approved,
+                ..Folds::default()
+            };
+            present(build(&view, &units, &folds), Presentation::default())
+        };
+        let shown = lay_out(Approved::Shown);
+        let folded = lay_out(Approved::Folded);
+
+        let unit = folded.hunks[1][0];
+        let header = RowKey::of(&folded.rows[folded.unit_rows[&unit]]);
+        assert_eq!(header.find(&shown), Some(shown.unit_rows[&unit]));
+
+        let added = shown
+            .rows
+            .iter()
+            .find(|row| row.unit == unit && row.kind() == RowKind::Added)
+            .unwrap();
+        assert_eq!(
+            RowKey::of(added).find(&shown),
+            Some(added.source),
+            "a line finds itself"
+        );
+        assert_eq!(
+            RowKey::of(added).find(&folded),
+            Some(folded.unit_rows[&unit]),
+            "a folded line gives way to its unit's header"
         );
     }
 

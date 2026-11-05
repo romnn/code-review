@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::config::Approved;
 use crate::syntax::FileSyntax;
 use review_core::analysis::{Chunk, FileUnit, UnitKind};
 use review_core::scope::breadcrumb;
@@ -139,6 +140,8 @@ pub struct Note {
     /// "only reformatting", "whitespace changed · not proven equivalent" or "changed since
     /// revision 1".
     pub tag: Option<String>,
+    /// For a hunk header, whether the hunk shows its header alone.
+    pub folded: bool,
 }
 
 impl Note {
@@ -152,6 +155,7 @@ impl Note {
             fold: None,
             scope: None,
             tag: None,
+            folded: false,
         }
     }
 
@@ -375,8 +379,11 @@ pub struct Folds {
     pub files: HashMap<String, bool>,
     /// Units whose bodies the reviewer folded.
     pub units: HashSet<UnitId>,
-    /// Approved units the reviewer unfolded; other approved units show only their header.
+    /// Approved units the reviewer unfolded; other approved units show only their header,
+    /// unless `approved` shows them all.
     pub opened: HashSet<UnitId>,
+    /// Whether approved units and fully reviewed files fold by default or show like any other.
+    pub approved: Approved,
     /// Whether the layout is one file's diff, without file headers.
     pub single_file: bool,
     /// Moves, formatting-only and noise units expanded to show their code.
@@ -387,12 +394,15 @@ pub struct Folds {
 
 impl Folds {
     /// Whether `unit`'s body is folded: when the reviewer folded it, or when it is approved
-    /// (seen or accepted, and unchanged since) and the reviewer has not unfolded it. Flagged
-    /// and unreviewed units always show.
+    /// (seen or accepted, and unchanged since), approved units fold, and the reviewer has not
+    /// unfolded it. Flagged and unreviewed units always show.
     #[must_use]
     pub fn is_folded(&self, view: &RevisionView<'_>, unit: UnitId) -> bool {
         if self.units.contains(&unit) {
             return true;
+        }
+        if self.approved == Approved::Shown {
+            return false;
         }
         let approved = matches!(
             view.state(unit),
@@ -414,6 +424,7 @@ impl Default for Folds {
             files: HashMap::new(),
             units: HashSet::new(),
             opened: HashSet::new(),
+            approved: Approved::Folded,
             single_file: false,
             expanded: HashSet::new(),
             syntax: HashMap::new(),
@@ -583,11 +594,12 @@ fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> Fil
         }
     }
     let total = group.len();
+    // A fully reviewed file folds like its approved units, unless the reviewer chose.
     let collapsed = folds
         .files
         .get(&path)
         .copied()
-        .unwrap_or(total > 0 && reviewed == total);
+        .unwrap_or(folds.approved == Approved::Folded && total > 0 && reviewed == total);
     FileSection {
         has_head: file.is_some_and(|file| file.new.is_some()),
         formatting_only: file.is_some_and(|file| file.formatting_only),
@@ -875,6 +887,7 @@ fn hunk_header(
             let enclosing = side.scopes.enclosing(anchor.line);
             (!enclosing.is_empty()).then(|| breadcrumb(&enclosing))
         }),
+        folded: units.iter().all(|&unit| folds.is_folded(view, unit)),
         ..Note::plain(RowKind::Header, text)
     };
     layout.rows.push(note_row(file, first, Some(hunk), note));
@@ -1199,6 +1212,10 @@ fn interdiff_rows(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId
 /// Lays out a file section: file units first, then each chunk with `context` unchanged lines
 /// around it from `text`, and gap rows for the unchanged lines left out. Without `text`, chunks
 /// show without context. With `context` at `usize::MAX`, the whole file shows.
+///
+/// A folded hunk is its header alone, and unchanged lines between folded hunks or between one
+/// and the file's edge show nothing at all, so consecutive folded hunks read as a list of
+/// headers.
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1279,6 +1296,10 @@ fn section_rows(
     let sizes: Vec<usize> = view.display_hunks(&sorted).iter().map(Vec::len).collect();
     let mut line = 0;
     let mut index = 0;
+    // Whether the unchanged lines from `line` on follow the file's start or a folded hunk.
+    // With a folded hunk or the file's end after them as well, they are context without a
+    // change, and show nothing: no lines, no gap.
+    let mut bare = true;
     for size in sizes {
         let Some(&(first, first_start, _)) = chunks.get(index) else {
             break;
@@ -1299,13 +1320,20 @@ fn section_rows(
             .collect();
         // A folded hunk is its header alone; its lines count toward the gaps around it.
         let folded = hunk_units.iter().all(|&unit| folds.is_folded(view, unit));
+        let hidden = folded && bare;
+        bare = folded;
         let context_before = if folded {
             revealed
         } else {
             context.saturating_add(revealed)
         };
-        let from = first_start.saturating_sub(context_before).max(line);
-        if from > line {
+        let from = if hidden {
+            first_start
+        } else {
+            first_start.saturating_sub(context_before)
+        }
+        .max(line);
+        if from > line && !hidden {
             emitter.gap(layout, first, line..from, first_start);
         }
         let hunk_index = layout.hunks.len();
@@ -1335,7 +1363,9 @@ fn section_rows(
         }
         index = last + 1;
     }
-    if line < lines {
+    // After a folded last hunk, the rest of the file is context without a change too.
+    let after_folded = bare && !chunks.is_empty();
+    if line < lines && !after_folded {
         let owner = chunks
             .last()
             .map_or_else(|| group.first().copied(), |&(unit, ..)| Some(unit));
@@ -1809,5 +1839,139 @@ mod tests {
             .filter(|row| row.file == index && row.kind() == RowKind::Context)
             .count();
         assert!(shown > context.len(), "{shown} > {}", context.len());
+    }
+
+    /// The demo's `src/engine.rs` with its text, every hunk approved, laid out with `folds`
+    /// in the normal density.
+    fn approved_engine(folds: Folds) -> (tempfile::TempDir, Layout) {
+        let (dir, review) = demo_review(1);
+        let history = review.history().unwrap();
+        let view = history.current_view().unwrap();
+        let units = view.units_of_file("src/engine.rs");
+        review
+            .mark(&view, &units, review_core::MarkVerdict::Accepted)
+            .unwrap();
+        let history = review.history().unwrap();
+        let view = history.current_view().unwrap();
+        let engine = std::fs::read_to_string(
+            review_core::demo::fixture_dir().join("trees/feature-1/src/engine.rs"),
+        )
+        .unwrap();
+        let folds = Folds {
+            texts: HashMap::from([("src/engine.rs".to_owned(), Arc::new(FullText::new(&engine)))]),
+            ..folds
+        };
+        let presentation = Presentation {
+            density: crate::config::Density::Normal,
+            ..Presentation::default()
+        };
+        let layout = present(build(&view, &units, &folds), presentation);
+        (dir, layout)
+    }
+
+    fn kinds(layout: &Layout) -> Vec<RowKind> {
+        layout.rows.iter().map(Row::kind).collect()
+    }
+
+    /// Approved hunks fold to their headers, and with every hunk folded no unchanged line
+    /// shows: no context, no gap and no spacer, only a list of headers.
+    #[test]
+    fn folded_hunks_show_no_context_without_a_change() {
+        let (_dir, layout) = approved_engine(Folds {
+            single_file: true,
+            ..Folds::default()
+        });
+        assert_eq!(layout.hunks.len(), 3);
+        assert_eq!(kinds(&layout), [RowKind::Header; 3]);
+        assert!(
+            layout
+                .rows
+                .iter()
+                .all(|row| row.note().is_some_and(|note| note.folded))
+        );
+        for (hunk, units) in layout.hunks.iter().enumerate() {
+            assert_eq!(layout.unit_rows[&units[0]], hunk);
+            assert_eq!(layout.rows[hunk].hunk, Some(hunk));
+        }
+    }
+
+    /// An unfolded hunk between folded ones keeps the gaps that lead to and from it, with air
+    /// before them, while the file's leading and trailing lines beside folded hunks stay out.
+    #[test]
+    fn context_beside_an_unfolded_hunk_stays() {
+        let (_dir, folded) = approved_engine(Folds {
+            single_file: true,
+            ..Folds::default()
+        });
+        let middle = folded.hunks[1].clone();
+        let (_dir, layout) = approved_engine(Folds {
+            single_file: true,
+            opened: middle.iter().copied().collect(),
+            ..Folds::default()
+        });
+        let kinds = kinds(&layout);
+        assert_eq!(kinds.first(), Some(&RowKind::Header), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&RowKind::Header), "{kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|&&kind| kind == RowKind::Gap).count(),
+            2,
+            "{kinds:?}"
+        );
+        assert_eq!(kinds[1..3], [RowKind::Spacer, RowKind::Gap]);
+        let header = layout.unit_rows[&middle[0]];
+        assert!(!layout.rows[header].note().unwrap().folded);
+        assert_eq!(layout.rows[header + 1].kind(), RowKind::Context);
+        let last = layout.rows.last().unwrap();
+        assert!(last.note().unwrap().folded);
+        assert_eq!(layout.rows[layout.rows.len() - 2].kind(), RowKind::Gap);
+        // Lines keep their base numbers whatever folds around them.
+        let unfolded = layout
+            .rows
+            .iter()
+            .filter(|row| row.kind() == RowKind::Context)
+            .filter_map(|row| row.cells().next())
+            .all(|cell| cell.base.is_some() && cell.head.is_some());
+        assert!(unfolded);
+    }
+
+    /// Showing approved hunks lays them out like any other, context and gaps included, and a
+    /// fully reviewed file no longer folds to its header; the reviewer's own folds still win.
+    #[test]
+    fn approved_hunks_show_on_request() {
+        let (_dir, shown) = approved_engine(Folds {
+            single_file: true,
+            approved: Approved::Shown,
+            ..Folds::default()
+        });
+        let kinds = kinds(&shown);
+        assert_eq!(kinds.first(), Some(&RowKind::Gap), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&RowKind::Gap), "{kinds:?}");
+        assert!(kinds.contains(&RowKind::Added) || kinds.contains(&RowKind::Removed));
+        assert!(
+            shown
+                .rows
+                .iter()
+                .filter_map(Row::note)
+                .all(|note| !note.folded)
+        );
+
+        let (_dir, sections) = approved_engine(Folds::default());
+        assert!(sections.files[0].collapsed, "a fully reviewed file folds");
+        let (_dir, sections) = approved_engine(Folds {
+            approved: Approved::Shown,
+            ..Folds::default()
+        });
+        assert!(!sections.files[0].collapsed);
+
+        let first = shown.hunks[0].clone();
+        let (_dir, refolded) = approved_engine(Folds {
+            single_file: true,
+            approved: Approved::Shown,
+            units: first.iter().copied().collect(),
+            ..Folds::default()
+        });
+        let header = refolded.unit_rows[&first[0]];
+        assert_eq!(header, 0, "no context leads to a folded first hunk");
+        assert!(refolded.rows[header].note().unwrap().folded);
     }
 }

@@ -1,5 +1,6 @@
 //! The settings list, opened with `T` or `,`: presets, themes, diff styles, density, layout,
-//! token emphasis and font size, keyboard first, with a search over every entry.
+//! token emphasis, approved hunks and font size, keyboard first, with a search over every
+//! entry.
 //!
 //! The list and its search field own the keyboard apart, as two key contexts: the list takes
 //! `j`/`k`, Space and `q`, the field takes everything typed, and Tab switches between them.
@@ -27,7 +28,7 @@ use super::keymap::Area;
 use super::present::Places;
 use super::render::{BAR, GRID, Palette};
 use super::{Overlay, ReviewApp, chrome, plural};
-use crate::config::{Density, DiffLayout, Remembered, points_to_pixels};
+use crate::config::{Approved, Density, DiffLayout, Remembered, points_to_pixels};
 use crate::look::{self, DiffStyle, FONT_SIZES, Look};
 use crate::theme::Theme;
 
@@ -36,6 +37,7 @@ actions!(
     [
         OpenSettings,
         ToggleLayout,
+        ToggleApproved,
         SettingsNext,
         SettingsPrevious,
         SettingsApply,
@@ -72,8 +74,21 @@ pub enum Choice {
     Layout(DiffLayout),
     /// Whether changed tokens are underlined.
     Emphasis(bool),
+    /// Whether approved hunks fold to their header.
+    Approved(Approved),
     /// A code size in points.
     FontSize(u8),
+}
+
+/// What the diff previews over what is applied; `None` drops that part of a preview.
+#[derive(Debug, Clone, Default)]
+struct Preview {
+    /// A look over the applied one.
+    look: Option<Look>,
+    /// A code size over the one in use, in logical pixels.
+    code_size: Option<f32>,
+    /// Approved hunks folded or shown, over what is in use.
+    approved: Option<Approved>,
 }
 
 /// One entry of the list.
@@ -136,6 +151,8 @@ pub struct Panel {
     list: UniformListScrollHandle,
     /// The code size in use apart from a font size's preview, in logical pixels.
     code_size: f32,
+    /// Whether approved hunks fold apart from a preview.
+    approved: Approved,
     /// Where the lists were when the panel opened; every preview starts from there, so one
     /// that moved a list to fit it never moves the place for good.
     places: Places,
@@ -225,6 +242,18 @@ fn entries(app: &ReviewApp) -> Vec<Entry> {
         "on",
         "underline the tokens that changed",
         Choice::Emphasis(true),
+    );
+    option(
+        "Approved hunks",
+        "folded",
+        "their header alone · zA",
+        Choice::Approved(Approved::Folded),
+    );
+    option(
+        "Approved hunks",
+        "shown",
+        "with their code · zA",
+        Choice::Approved(Approved::Shown),
     );
     for &size in FONT_SIZES {
         let default = (look::points_of(app.fonts.default_code_size) - f32::from(size)).abs() < 0.5;
@@ -319,6 +348,7 @@ impl ReviewApp {
             searching: false,
             list: UniformListScrollHandle::new(),
             code_size: self.fonts.code_size,
+            approved: self.folds.approved,
             places,
             text_size,
             row_height: (text_size * PANEL_LINE_HEIGHT).round(),
@@ -333,7 +363,7 @@ impl ReviewApp {
 
     /// Closes the list, dropping a preview; what was applied stays.
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.preview(None, None);
+        self.preview(Preview::default());
         self.settings_panel = None;
         if self.overlay == Some(Overlay::Settings) {
             self.overlay = None;
@@ -391,11 +421,17 @@ impl ReviewApp {
         }) {
             panel.list.scroll_to_item(line, ScrollStrategy::Nearest);
         }
-        let look = cursor.as_ref().and_then(|choice| self.preview_of(choice));
-        let code_size = cursor
-            .as_ref()
-            .and_then(|choice| self.size_preview_of(choice));
-        self.preview(look, code_size);
+        let preview = Preview {
+            look: cursor.as_ref().and_then(|choice| self.preview_of(choice)),
+            code_size: cursor
+                .as_ref()
+                .and_then(|choice| self.size_preview_of(choice)),
+            approved: match cursor {
+                Some(Choice::Approved(approved)) => Some(approved),
+                _ => None,
+            },
+        };
+        self.preview(preview);
     }
 
     /// The look an entry previews, when it differs from the applied one.
@@ -423,7 +459,7 @@ impl ReviewApp {
                 token_emphasis: *on,
                 ..applied.clone()
             },
-            Choice::FontSize(_) => return None,
+            Choice::Approved(_) | Choice::FontSize(_) => return None,
         };
         (look != *applied).then_some(look)
     }
@@ -444,23 +480,41 @@ impl ReviewApp {
             .map_or(self.fonts.code_size, |panel| panel.code_size)
     }
 
+    /// Whether approved hunks fold apart from a preview.
+    fn approved_in_use(&self) -> Approved {
+        self.settings_panel
+            .as_ref()
+            .map_or(self.folds.approved, |panel| panel.approved)
+    }
+
     /// Whether the diff shows a preview rather than what was applied.
     pub(super) fn previewing(&self) -> bool {
         self.settings.appearance.preview.is_some()
             || (self.fonts.code_size - self.code_size_in_use()).abs() > 0.01
+            || self.folds.approved != self.approved_in_use()
     }
 
-    /// Shows `look` over the applied look and the code size `code_size` over the one in use,
-    /// or drops either preview for `None`, through the presentation transition so a preview's
-    /// layout, density and size keep the reviewer's place.
-    fn preview(&mut self, look: Option<Look>, code_size: Option<f32>) {
+    /// Shows `preview` over what is applied and in use, dropping each part that is `None`,
+    /// through the presentation transition so a preview's layout, density, size and folds keep
+    /// the reviewer's place.
+    fn preview(&mut self, preview: Preview) {
+        let Preview {
+            look,
+            code_size,
+            approved,
+        } = preview;
         let size = code_size.unwrap_or_else(|| self.code_size_in_use());
-        if self.settings.appearance.preview == look && (self.fonts.code_size - size).abs() < 0.01 {
+        let approved = approved.unwrap_or_else(|| self.approved_in_use());
+        if self.settings.appearance.preview == look
+            && (self.fonts.code_size - size).abs() < 0.01
+            && self.folds.approved == approved
+        {
             return;
         }
         self.settings_transition(|this| {
             this.settings.appearance.preview = look;
             this.fonts.code_size = size;
+            this.folds.approved = approved;
         });
     }
 
@@ -512,6 +566,7 @@ impl ReviewApp {
             Choice::Density(density) => applied.density == *density,
             Choice::Layout(layout) => applied.layout == *layout,
             Choice::Emphasis(on) => applied.token_emphasis == *on,
+            Choice::Approved(approved) => self.approved_in_use() == *approved,
             Choice::FontSize(size) => {
                 (look::points_of(self.code_size_in_use()) - f32::from(*size)).abs() < 0.5
             }
@@ -638,6 +693,9 @@ impl ReviewApp {
             Choice::Layout(layout) => {
                 return self.apply_layout(*layout);
             }
+            Choice::Approved(approved) => {
+                return self.apply_approved(*approved);
+            }
             Choice::Emphasis(on) => (
                 Look {
                     token_emphasis: *on,
@@ -728,6 +786,37 @@ impl ReviewApp {
                  give it room).",
             );
         }
+    }
+
+    /// Folds approved hunks or shows them, keeping the reviewer's place, and remembers it.
+    pub(super) fn apply_approved(&mut self, approved: Approved) {
+        if let Some(panel) = &mut self.settings_panel {
+            panel.approved = approved;
+        }
+        self.settings_transition(|this| this.folds.approved = approved);
+        let what = match approved {
+            Approved::Folded => "Approved hunks folded to their headers",
+            Approved::Shown => "Approved hunks shown",
+        };
+        self.remember(
+            &[Remembered {
+                table: "diff",
+                key: "approved",
+                value: approved.name().into(),
+            }],
+            what,
+        );
+    }
+
+    /// `zA` in the files and the diff: approved hunks folded or shown.
+    pub(super) fn toggle_approved(
+        &mut self,
+        _: &ToggleApproved,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_approved(self.folds.approved.toggled());
+        cx.notify();
     }
 
     /// Writes `remembered` to the configuration and says what was applied, or that it could
@@ -1043,6 +1132,7 @@ impl ReviewApp {
             | Choice::Density(_)
             | Choice::Layout(_)
             | Choice::Emphasis(_)
+            | Choice::Approved(_)
             | Choice::FontSize(_) => None,
         };
         let choice = entry.choice.clone();

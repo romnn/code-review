@@ -11,17 +11,18 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Decorations, Div, FontWeight, HighlightStyle, Hsla,
-    ListHorizontalSizingBehavior, MouseButton, SharedString, Stateful, StyledText, UnderlineStyle,
-    Window, div, px, relative, uniform_list,
+    ListHorizontalSizingBehavior, MouseButton, ScrollWheelEvent, SharedString, Stateful,
+    StyledText, UnderlineStyle, Window, div, px, relative, uniform_list,
 };
 use gpui_component::input::Input;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::{h_flex, v_flex, window_border};
-use review_core::FileTone;
 use review_core::tree::NodeKind;
+use review_core::{FileTone, UnitId};
 
 use super::buffer::Marker;
 use super::keymap::Area;
+use super::present::FRAME;
 use super::state::{self, Progress};
 use super::text::{Column, Pane};
 use super::{Mode, Overlay, Phase, ReviewApp, scroll};
@@ -197,17 +198,6 @@ fn badges_glyph(badges: &[Badge]) -> (Badge, &'static str) {
         (Badge::Unreviewed, "◐")
     } else {
         (Badge::Unreviewed, "○")
-    }
-}
-
-/// A hunk's state in a word, for the chips of a comfortable header.
-fn badge_word(badges: &[Badge]) -> &'static str {
-    match badges_glyph(badges) {
-        (Badge::Flagged, _) => "flagged",
-        (Badge::Changed, _) => "changed",
-        (Badge::Accepted, _) => "approved",
-        (_, "◐") => "partly approved",
-        _ => "new",
     }
 }
 
@@ -405,8 +395,8 @@ impl ReviewApp {
     /// the same monospace family, so a cell is a fixed share of the font size.
     fn widest_row(&self) -> Option<usize> {
         const CELL: f32 = 0.6;
-        let code_indent = 3.0 + GRID * 13.0 + GRID * 4.0;
-        let note_indent = 3.0 + GRID * 17.0;
+        let code_indent = FRAME + GRID * 13.0 + GRID * 4.0;
+        let note_indent = FRAME + GRID * 17.0;
         let pixels =
             |indent: f32, cells: usize, size: f32| indent + scroll::float(cells) * size * CELL;
         let code = self
@@ -425,11 +415,22 @@ impl ReviewApp {
         }
     }
 
+    /// Whether diff row `index` is in a hunk, from its header to its last row.
+    fn in_hunk(&self, index: usize) -> bool {
+        // Hunks are in row order, so the one that may hold the row is the last starting at or
+        // before it.
+        let after = self.hunk_rows.partition_point(|rows| rows.start <= index);
+        after
+            .checked_sub(1)
+            .and_then(|hunk| self.hunk_rows.get(hunk))
+            .is_some_and(|rows| rows.contains(&index))
+    }
+
     /// The rows of the diff list, built on demand by the virtualized list.
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = self.palette();
         let row_height = self.fonts.row_height();
-        let framed = self
+        let selected = self
             .hunk_rows
             .get(self.hunk)
             .cloned()
@@ -437,15 +438,21 @@ impl ReviewApp {
         let rows: Vec<AnyElement> = range
             .filter_map(|index| {
                 let row = self.rows.rows.get(index)?;
-                let in_frame = framed.as_ref().is_some_and(|frame| frame.contains(&index));
+                let frame = if selected.as_ref().is_some_and(|rows| rows.contains(&index)) {
+                    Frame::Selected
+                } else if self.in_hunk(index) {
+                    Frame::Hunk
+                } else {
+                    Frame::Outside
+                };
                 let element = match &row.body {
                     Body::Code(cell) => self
-                        .code_row(index, row.file, cell, in_frame, &colors)
+                        .code_row(index, row.file, cell, frame, &colors)
                         .h(px(row_height))
                         .into_any_element(),
-                    Body::Pair(pair) => self.pair_row(index, row.file, pair, in_frame, &colors),
+                    Body::Pair(pair) => self.pair_row(index, row.file, pair, frame, &colors),
                     Body::Note(note) => self
-                        .annotation_row(index, row, note, in_frame, &colors, cx)
+                        .annotation_row(index, row, note, frame, &colors, cx)
                         .h(px(row_height))
                         .into_any_element(),
                 };
@@ -663,7 +670,7 @@ impl ReviewApp {
         index: usize,
         file: usize,
         cell: &Cell,
-        in_frame: bool,
+        frame: Frame,
         colors: &Palette,
     ) -> Div {
         let (parts, layout) = self.code_cell(index, file, cell, Column::Whole, colors);
@@ -675,7 +682,7 @@ impl ReviewApp {
             .whitespace_nowrap()
             .when_some(parts.background, gpui::Styled::bg)
             .when_some(parts.text_color, gpui::Styled::text_color)
-            .child(frame_bar(in_frame, colors))
+            .child(frame_bar(frame, colors))
             .child(parts.gutter)
             .child(parts.sign)
             .child(self.shifted(h_flex().child(parts.text).children(parts.blank)))
@@ -688,7 +695,7 @@ impl ReviewApp {
         index: usize,
         row: &Row,
         note: &Note,
-        in_frame: bool,
+        frame: Frame,
         colors: &Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -704,7 +711,7 @@ impl ReviewApp {
             RowKind::Spacer => base,
             RowKind::Gap => base
                 .cursor_pointer()
-                .child(frame_bar(in_frame, colors))
+                .child(frame_bar(frame, colors))
                 .child(div().w(px(GRID * 17.0)).flex_none())
                 .child(
                     self.clipped(
@@ -722,10 +729,10 @@ impl ReviewApp {
                 )
                 .hover(|row| row.bg(colors.band))
                 .on_click(cx.listener(move |this, _, _, cx| this.expand_gap(index, cx))),
-            RowKind::Header => self.hunk_header(row, note, in_frame, base, colors),
+            RowKind::Header => self.hunk_header(row, note, frame, base, colors),
             RowKind::Note => base
                 .bg(colors.band)
-                .child(frame_bar(in_frame, colors))
+                .child(frame_bar(frame, colors))
                 .child(div().w(px(GRID * 13.0)).flex_none())
                 .child(div().w(px(3.0)).h_full().flex_none().bg(colors.accent))
                 .child(
@@ -753,7 +760,7 @@ impl ReviewApp {
                     _ => None,
                 };
                 base.bg(colors.band)
-                    .child(frame_bar(in_frame, colors))
+                    .child(frame_bar(frame, colors))
                     .child(div().w(px(GRID * 17.0)).flex_none())
                     .child(
                         self.clipped(
@@ -771,16 +778,29 @@ impl ReviewApp {
         }
     }
 
-    /// A hunk's header: one quiet line with its state glyph, where it is, what kind of change
-    /// it is and the scopes around it.
+    /// Whether `units` are all chunks of text, so their header's text is only where they are.
+    fn all_chunks(&self, units: &[UnitId]) -> bool {
+        self.view().is_some_and(|view| {
+            !units.is_empty()
+                && units.iter().all(|&unit| {
+                    view.unit(unit)
+                        .ok()
+                        .and_then(|record| record.chunk())
+                        .is_some()
+                })
+        })
+    }
+
+    /// A hunk's header: one quiet line with its state glyph, the scopes around it, what kind of
+    /// change it is, and where it is when its code is folded away or no scope names it.
     ///
-    /// Compact, it is a band; comfortable, it sits on the background with its parts as small
-    /// muted chips, set apart by the air around it.
+    /// It is a gray band, blue when selected; with chips headers its tag and location are small
+    /// muted chips.
     fn hunk_header(
         &self,
         row: &Row,
         note: &Note,
-        in_frame: bool,
+        frame: Frame,
         base: Stateful<Div>,
         colors: &Palette,
     ) -> Stateful<Div> {
@@ -797,17 +817,28 @@ impl ReviewApp {
         let folded = self
             .view()
             .is_some_and(|view| units.iter().all(|&unit| self.folds.is_folded(&view, unit)));
-        let selected = in_frame;
+        let selected = frame == Frame::Selected;
         let label = if folded && badge == Badge::Accepted {
             colors.faint
         } else {
             colors.dim
         };
         let chips = self.look().style.headers == Headers::Chips;
-        let background = match (chips, selected) {
-            (_, true) => colors.raised,
-            (false, false) => colors.band,
-            (true, false) => colors.background,
+        let background = header_background(selected, colors);
+        // What the hunk changes leads: the scopes around it, innermost brightest. Where it is
+        // matters only when its code is folded away or no scope names it, since the gutter
+        // numbers the lines that show; a file unit's text says what changed, so it stays.
+        let receding = folded && badge == Badge::Accepted;
+        let lines_only = self.all_chunks(&units);
+        let scope = note
+            .scope
+            .as_deref()
+            .map(|scope| scope_title(scope, receding, colors));
+        let location = (scope.is_none() || folded || !lines_only).then(|| note.text.clone());
+        let location_color = if scope.is_some() && lines_only {
+            colors.faint
+        } else {
+            label
         };
         let content = if chips {
             let chip = |text: String, color: Hsla| {
@@ -823,46 +854,36 @@ impl ReviewApp {
                     .text_color(color)
                     .child(text)
             };
-            let first = units.first().map(ToString::to_string).unwrap_or_default();
-            let unit = match units.len() {
-                0 | 1 => first,
-                more => format!("{first} +{}", more - 1),
-            };
             h_flex()
                 .min_w_0()
                 .gap(px(GRID * 2.0))
-                .child(chip(badge_word(&badges).to_owned(), colors.badge(badge)))
-                .child(chip(unit, colors.faint))
-                .child(chip(note.text.clone(), label))
+                .children(scope)
                 .children(note.tag.clone().map(|tag| chip(tag, colors.kind_quiet)))
-                .children(note.scope.clone().map(|scope| {
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(colors.faint)
-                        .child(scope)
-                }))
+                .children(location.map(|text| chip(text, location_color)))
         } else {
+            let after = |first: bool| if first { 0.0 } else { GRID * 2.0 };
+            let has_scope = scope.is_some();
             h_flex()
                 .min_w_0()
-                .child(div().text_color(label).child(note.text.clone()))
+                .children(scope)
                 .children(note.tag.clone().map(|tag| {
                     div()
-                        .ml(px(GRID * 2.0))
+                        .ml(px(after(!has_scope)))
+                        .flex_none()
                         .text_color(colors.kind_quiet)
-                        .child(format!("· {tag}"))
+                        .child(if has_scope { format!("· {tag}") } else { tag })
                 }))
-                .children(note.scope.clone().map(|scope| {
+                .children(location.map(|text| {
+                    let first = !has_scope && note.tag.is_none();
                     div()
-                        .ml(px(GRID * 2.0))
-                        .min_w_0()
-                        .truncate()
-                        .text_color(colors.faint)
-                        .child(format!("· {scope}"))
+                        .ml(px(after(first)))
+                        .flex_none()
+                        .text_color(location_color)
+                        .child(if first { text } else { format!("· {text}") })
                 }))
         };
         base.bg(background)
-            .child(frame_bar(in_frame, colors))
+            .child(frame_bar(frame, colors))
             .child(
                 div()
                     .w(px(GRID * 13.0))
@@ -980,14 +1001,25 @@ impl ReviewApp {
                 let collapsed = self.tree_collapsed.contains(&node.path);
                 let shown = !directory && self.selected.as_deref() == Some(node.path.as_str());
                 let is_cursor = position == cursor;
+                // Only what still needs the reviewer carries ink; done files recede, so the eye
+                // lands on open, flagged and changed ones.
+                let done = progress == Progress::Done;
                 let kind = node.change.as_ref().map(|change| {
                     (
                         change.kind.letter(),
-                        colors.tone(change.tone()),
+                        if done {
+                            colors.faint
+                        } else {
+                            colors.tone(change.tone())
+                        },
                         change.kind == review_core::ChangeKind::Deleted,
                     )
                 });
-                let name_color = colors.progress(progress);
+                let (name_color, glyph_color) = if done {
+                    (colors.dim, colors.faint)
+                } else {
+                    (colors.progress(progress), colors.progress(progress))
+                };
                 Some(
                     h_flex()
                         .id(("tree-node", index))
@@ -1052,7 +1084,7 @@ impl ReviewApp {
                                 .w(px(GRID * 4.0))
                                 .flex_none()
                                 .text_center()
-                                .text_color(colors.progress(progress))
+                                .text_color(glyph_color)
                                 .child(progress_glyph(progress)),
                         )
                         .on_click(
@@ -1490,6 +1522,12 @@ impl ReviewApp {
                             this.mouse_down(Pane::Source, event, window, cx);
                         }),
                     )
+                    .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, _| {
+                        // The wheel takes over from a scroll animation, which would
+                        // otherwise pull the buffer back to its target on the next frames.
+                        this.buffer_animation = None;
+                        this.buffer_bar.cancel_page_request();
+                    }))
                     .child(list)
                     .child(Scrollbar::vertical(&self.buffer_bar).mode(ScrollbarMode::Always))
                     .child(Scrollbar::horizontal(&self.buffer_bar)),
@@ -1806,13 +1844,63 @@ impl ReviewApp {
 
 use std::rc::Rc;
 
-/// The accent bar along the left edge of the selected hunk's rows.
-pub(super) fn frame_bar(on: bool, colors: &Palette) -> Div {
-    div()
-        .w(px(3.0))
-        .h_full()
-        .flex_none()
-        .when(on, |bar| bar.bg(colors.accent))
+/// A hunk header's scopes, such as `impl Ledger › fn apply`: the outer ones faint and cut first
+/// when space runs out, the innermost bright, or dim once the hunk is approved and folded.
+fn scope_title(scope: &str, receding: bool, colors: &Palette) -> Div {
+    let (outer, inner) = match scope.rsplit_once(" › ") {
+        Some((outer, inner)) => (Some(format!("{outer} › ")), inner),
+        None => (None, scope),
+    };
+    h_flex()
+        .min_w_0()
+        .whitespace_nowrap()
+        .children(outer.map(|outer| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(colors.faint)
+                .child(outer)
+        }))
+        .child(
+            div()
+                .flex_none()
+                .text_color(if receding { colors.dim } else { colors.text })
+                .child(inner.to_owned()),
+        )
+}
+
+/// Where a diff row is relative to the hunks, for the bar along its left edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Frame {
+    /// Between hunks: no bar.
+    Outside,
+    /// In a hunk that is not selected: a gray bar, so every hunk's extent shows.
+    Hunk,
+    /// In the selected hunk: the accent's bar.
+    Selected,
+}
+
+/// The bar along the left edge of a hunk's rows: gray, or the accent in the selected hunk.
+pub(super) fn frame_bar(frame: Frame, colors: &Palette) -> Div {
+    let bar = div().w(px(FRAME)).h_full().flex_none();
+    match frame {
+        Frame::Outside => bar,
+        Frame::Hunk => bar.bg(colors.faint),
+        Frame::Selected => bar.bg(colors.accent),
+    }
+}
+
+/// A hunk header's background: a gray band, so each hunk's start shows at a glance, and the
+/// accent's blue on the selected one.
+fn header_background(selected: bool, colors: &Palette) -> Hsla {
+    if selected {
+        Hsla {
+            a: 0.3,
+            ..colors.accent
+        }
+    } else {
+        colors.band
+    }
 }
 
 /// A reviewed/total meter with tabular counts, so it never shifts as numbers change.
@@ -2031,6 +2119,7 @@ impl Render for ReviewApp {
                     .on_action(cx.listener(Self::toggle_diff_style))
                     .on_action(cx.listener(Self::open_settings))
                     .on_action(cx.listener(Self::toggle_layout))
+                    .on_action(cx.listener(Self::toggle_approved))
                     .on_action(cx.listener(Self::screen_next))
                     .on_action(cx.listener(Self::screen_previous))
                     .on_action(cx.listener(Self::toggle_help))

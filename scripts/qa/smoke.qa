@@ -119,26 +119,26 @@ expect "hunk_badges":\["Accepted"\]
 # their height and their places stay as they were.
 state
 expect "density":"normal"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 expect "row_height":28.0
 key |
 state
 expect "diff_style":"soft"
 expect "headers":"chips","change_bar":true
 expect "density":"normal"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 expect "row_height":28.0
 shot 06-soft
 key |
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 shot 06-plain
 key |
 state
 expect "diff_style":"bold"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Gap","hunk":null,"y":82.0,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 
 # Side by side: removed lines beside added ones, each side with its own line numbers; a
 # selection in a half copies that side only, and when the diff gets too narrow it shows
@@ -168,6 +168,23 @@ key space
 state
 expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
 shot 07-file-done
+
+# Approved hunks fold to their headers, and unchanged lines between folded hunks show nothing,
+# so the done file reads as a list of headers. zA shows approved hunks like any other, keeping
+# the place, and folds them again.
+state
+expect "approved":"folded"
+expect "row_count":3,"rows":\[\{"row":0,"source":0,"kind":"Header"
+key z shift-a
+state
+expect "approved":"shown"
+expect "status":"Approved hunks shown\."
+expect "row_count":48,
+shot 07b-approved-shown
+key z shift-a
+state
+expect "approved":"folded"
+expect "row_count":3,
 
 # The settings list: T opens it on the theme in use and j previews the next one; Escape drops
 # the preview and keeps what was applied.
@@ -240,6 +257,18 @@ key escape
 key escape
 state
 expect "token_emphasis":false
+expect "previewing":false
+key ,
+key tab
+key a p p r o v e d space s h o w n
+state
+expect "cursor":"Approved hunks: shown"
+expect "approved":"shown"
+expect "previewing":true
+key escape
+key escape
+state
+expect "approved":"folded"
 expect "previewing":false
 
 # Each density previews, moving the diff's rows, while the panel keeps the text size and row
@@ -604,10 +633,19 @@ key space
 state
 expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
 
+# Folded folders are saved with the review: the relaunch below, on the same data, folds them
+# again.
+file src/generated/schema.rs
+key h
+key h
+state
+expect "collapsed":\["src/generated"\]
+
 # Revision 2 simulates a force-push: approvals carry over where the code is unchanged, and
 # hunks that changed since they were reviewed say so.
 launch --demo-revision 2
 expect "revision":"2"
+expect "collapsed":\["src/generated"\]
 expect "trusted":true
 file src/engine.rs
 find changed since
