@@ -182,8 +182,8 @@ impl Builder {
                 file_texts.new.as_deref(),
             );
             formatting_only = file_chunks.formatting_only;
-            for chunk in file_chunks.chunks {
-                indices.push(self.push_unit(file_index, UnitKind::Chunk(chunk), formatting_only));
+            for (chunk, proven) in file_chunks.chunks.into_iter().zip(file_chunks.proven) {
+                indices.push(self.push_unit(file_index, UnitKind::Chunk(chunk), proven));
             }
         }
         if indices.is_empty() {
@@ -310,8 +310,17 @@ fn content_change(
 
 struct FileChunks {
     chunks: Vec<Chunk>,
+    /// Whether the whole file is proven formatting-only.
     formatting_only: bool,
+    /// For each chunk, whether it is proven formatting-only, by the whole-file proof or its
+    /// own.
+    proven: Vec<bool>,
 }
+
+/// How many bytes the per-chunk proofs of one file may parse, beyond the two whole files.
+/// Each candidate chunk parses two hybrids about the file's size; candidates past the budget
+/// stay unproven.
+const CHUNK_PROOF_BUDGET: usize = 64 << 20;
 
 /// One side of a file prepared for chunking: its lines, their byte offsets and its tokens.
 struct Side<'a> {
@@ -389,6 +398,8 @@ fn chunks(
         old_parsed.canonical.is_some() && old_parsed.canonical == new_parsed.canonical
     });
 
+    let mut proven = Vec::with_capacity(hunks.len());
+    let mut budget = CHUNK_PROOF_BUDGET;
     let chunks = hunks
         .iter()
         .map(|hunk| {
@@ -410,6 +421,18 @@ fn chunks(
             let whitespace_only = !removed.is_empty()
                 && !added.is_empty()
                 && token_text(&removed, &removed_tokens) == token_text(&added, &added_tokens);
+            proven.push(
+                formatting_only
+                    || (whitespace_only
+                        && chunk_is_formatting_only(
+                            language,
+                            &old,
+                            &new,
+                            parsed.as_ref(),
+                            hunk,
+                            &mut budget,
+                        )),
+            );
             let highlights = if formatting_only || removed.is_empty() || added.is_empty() {
                 text::ChangedRanges::default()
             } else {
@@ -439,7 +462,60 @@ fn chunks(
     FileChunks {
         chunks,
         formatting_only,
+        proven,
     }
+}
+
+/// Proves one chunk formatting-only on its own, for a file whose other changes are real.
+///
+/// Two hybrids are parsed: the old file with only this chunk applied, and the new file with
+/// only this chunk reverted. The chunk is a pure reformat only when the first has the old
+/// file's canonical tree and the second the new file's, so it is proven both on its own and
+/// beside every other change of the file; another chunk that, say, opens a string around it
+/// breaks the second comparison. A parse error in any of the four trees, or an unsupported
+/// language, leaves it unproven. The grammar decides what is significant, such as Python's
+/// indentation or JavaScript's automatic semicolons.
+fn chunk_is_formatting_only(
+    language: Option<Language>,
+    old: &Side<'_>,
+    new: &Side<'_>,
+    parsed: Option<&(syntax::ParsedFile, syntax::ParsedFile)>,
+    hunk: &text::Hunk,
+    budget: &mut usize,
+) -> bool {
+    let (Some(language), Some((old_parsed, new_parsed))) = (language, parsed) else {
+        return false;
+    };
+    let (Some(old_canonical), Some(new_canonical)) = (&old_parsed.canonical, &new_parsed.canonical)
+    else {
+        return false;
+    };
+    let cost = old.text.len() + new.text.len();
+    if cost > *budget {
+        return false;
+    }
+    *budget -= cost;
+    let (removed, added) = (old.byte_range(&hunk.before), new.byte_range(&hunk.after));
+    let splice = |text: &str, range: &Range<usize>, with: &str| {
+        let (Some(before), Some(after)) = (text.get(..range.start), text.get(range.end..)) else {
+            return None;
+        };
+        Some([before, with, after].concat())
+    };
+    let (Some(removed_text), Some(added_text)) =
+        (old.text.get(removed.clone()), new.text.get(added.clone()))
+    else {
+        return false;
+    };
+    let (Some(forward), Some(backward)) = (
+        splice(old.text, &removed, added_text),
+        splice(new.text, &added, removed_text),
+    ) else {
+        return false;
+    };
+    let canonical = |text: &str| syntax::parse(language, text).and_then(|parsed| parsed.canonical);
+    canonical(&forward).as_ref() == Some(old_canonical)
+        && canonical(&backward).as_ref() == Some(new_canonical)
 }
 
 /// Returns the tokens overlapping `range`, clipped to it and made relative to its start.
@@ -459,7 +535,146 @@ fn clip_tokens(tokens: &[Range<usize>], range: &Range<usize>) -> Vec<Range<usize
 
 #[cfg(test)]
 mod tests {
-    use super::escape_bytes;
+    use super::{Side, chunk_is_formatting_only, chunks, escape_bytes};
+    use crate::syntax::{self, Language};
+    use crate::text;
+
+    /// Each chunk's proof, and the whole file's.
+    fn proofs(language: Language, old: &str, new: &str) -> (Vec<bool>, bool) {
+        let file = chunks(Some(language), Some(old), Some(new));
+        (file.proven, file.formatting_only)
+    }
+
+    /// Each chunk's token hint: whether only whitespace differs, which makes it a candidate.
+    fn hints(language: Language, old: &str, new: &str) -> Vec<bool> {
+        chunks(Some(language), Some(old), Some(new))
+            .chunks
+            .iter()
+            .map(|chunk| chunk.whitespace_only)
+            .collect()
+    }
+
+    /// A brace reflow is proven on its own, beside a real change elsewhere in the file.
+    #[test]
+    fn a_rust_brace_reflow_is_proven_beside_a_real_change() {
+        let old = "fn f(xs: &[u32]) -> u32 {\n    for x in xs { g(*x); }\n    let a = 1;\n    let b = 2;\n    a + b\n}\n";
+        let new = "fn f(xs: &[u32]) -> u32 {\n    for x in xs {\n        g(*x);\n    }\n    let a = 1;\n    let b = 3;\n    a + b\n}\n";
+        assert_eq!(proofs(Language::Rust, old, new), (vec![true, false], false));
+    }
+
+    /// A file with one reformatted chunk and one real one proves only the first.
+    #[test]
+    fn only_the_reformatted_chunk_of_a_mixed_file_is_proven() {
+        let old = "export function f(a: number, b: number) { return g(a, b); }\n\nexport const limit = 100;\n";
+        let new = "export function f(a: number, b: number) {\n  return g(a, b);\n}\n\nexport const limit = 300;\n";
+        assert_eq!(
+            proofs(Language::TypeScript, old, new),
+            (vec![true, false], false)
+        );
+    }
+
+    /// Re-indenting a Python statement out of its block keeps its tokens but changes the
+    /// program, so it is never proven.
+    #[test]
+    fn a_python_statement_moved_out_of_a_block_is_not_proven() {
+        let old = "def f(x):\n    if x:\n        a()\n        b()\n    c = 0\n    return 1\n";
+        let new = "def f(x):\n    if x:\n        a()\n    b()\n    c = 0\n    return 2\n";
+        assert_eq!(
+            hints(Language::Python, old, new),
+            [true, false],
+            "a candidate"
+        );
+        assert_eq!(
+            proofs(Language::Python, old, new),
+            (vec![false, false], false)
+        );
+    }
+
+    /// Any parse error among the four trees leaves a chunk unproven: here a hybrid that does
+    /// not parse, though both files do.
+    #[test]
+    fn a_hybrid_that_does_not_parse_is_not_proven() {
+        let old = "fn f() {\n    a();\n    b();\n}\n";
+        let new = "fn f() {\n    a(\n    b());\n}\n";
+        let parsed = syntax::parse(Language::Rust, old).zip(syntax::parse(Language::Rust, new));
+        let (old_side, new_side) = (Side::new(old), Side::new(new));
+        // Only the first line taken as the chunk: applied alone, its open call never closes.
+        let hunk = text::Hunk {
+            before: 1..2,
+            after: 1..2,
+        };
+        let forward = "fn f() {\n    a(\n    b();\n}\n";
+        assert!(
+            syntax::parse(Language::Rust, forward)
+                .and_then(|parsed| parsed.canonical)
+                .is_none()
+        );
+        let mut budget = usize::MAX;
+        assert!(!chunk_is_formatting_only(
+            Some(Language::Rust),
+            &old_side,
+            &new_side,
+            parsed.as_ref(),
+            &hunk,
+            &mut budget,
+        ));
+    }
+
+    /// A parse error in the new file leaves even a pure reflow elsewhere unproven.
+    #[test]
+    fn a_file_with_a_parse_error_proves_nothing() {
+        let old = "fn f() {\n    for x in xs { g(x); }\n    let a = 1;\n    let b = 2;\n}\n";
+        let new =
+            "fn f() {\n    for x in xs {\n        g(x);\n    }\n    let a = 1;\n    let b = ;\n}\n";
+        assert_eq!(
+            proofs(Language::Rust, old, new),
+            (vec![false, false], false)
+        );
+    }
+
+    /// Splitting `return x` over two lines lets automatic semicolon insertion end the return,
+    /// so the grammar sees a different program.
+    #[test]
+    fn a_javascript_return_split_from_its_value_is_not_proven() {
+        let old = "function f(x) {\n  return x;\n}\nconst a = 1;\nconst b = 2;\n";
+        let new = "function f(x) {\n  return\n  x;\n}\nconst a = 1;\nconst b = 3;\n";
+        assert_eq!(
+            hints(Language::JavaScript, old, new),
+            [true, false],
+            "a candidate"
+        );
+        assert_eq!(
+            proofs(Language::JavaScript, old, new),
+            (vec![false, false], false)
+        );
+    }
+
+    /// A chunk inside a string that another chunk opens is a reformat in the old file but not
+    /// in the new one, so the backward hybrid rejects it.
+    #[test]
+    fn a_chunk_inside_a_string_another_chunk_opens_is_not_proven() {
+        let old = "fn f() {\n    let a = 1;\n    let x = 0;\n    let b = foo(2);\n    let y = 0;\n    let c = 3;\n}\n";
+        let new = "fn f() {\n    let a = \"\n    let x = 0;\n    let b = foo( 2 );\n    let y = 0;\n    \";\n}\n";
+        let (proven, formatting_only) = proofs(Language::Rust, old, new);
+        assert!(!formatting_only);
+        assert!(proven.iter().all(|&proven| !proven), "{proven:?}");
+        // Even taken as a whitespace-only candidate, the proof refuses it.
+        let (old_side, new_side) = (Side::new(old), Side::new(new));
+        let hunk = text::diff_lines(&old_side.lines, &new_side.lines)
+            .into_iter()
+            .find(|hunk| hunk.before == (3..4))
+            .unwrap();
+        let parsed = syntax::parse(Language::Rust, old).zip(syntax::parse(Language::Rust, new));
+        let mut budget = usize::MAX;
+        assert!(!chunk_is_formatting_only(
+            Some(Language::Rust),
+            &old_side,
+            &new_side,
+            parsed.as_ref(),
+            &hunk,
+            &mut budget,
+        ));
+    }
 
     #[test]
     fn escaping_is_lossless_and_printable() {

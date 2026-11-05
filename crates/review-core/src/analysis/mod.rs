@@ -21,7 +21,7 @@ use crate::syntax::Language;
 
 /// The version of the analysis format and algorithm; cached analyses of another version are
 /// recomputed.
-pub const ANALYSIS_FORMAT: u32 = 3;
+pub const ANALYSIS_FORMAT: u32 = 4;
 
 /// Units within this many lines of each other are shown together as one hunk.
 pub const HUNK_MERGE_DISTANCE: usize = 3;
@@ -119,7 +119,8 @@ pub struct Unit {
     pub file: usize,
     /// What changed.
     pub kind: UnitKind,
-    /// Whether the change is proven formatting-only.
+    /// Whether the change is proven formatting-only, by its file's whole-file proof or, for a
+    /// chunk, by its own.
     pub formatting_only: bool,
     /// Whether plain moves cover every changed line of this unit.
     pub moved: bool,

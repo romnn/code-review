@@ -6,6 +6,10 @@
 //! time.
 
 mod github;
+mod info;
+
+pub use info::{Commit, PullRequest, ReviewInfo};
+pub(crate) use info::{LOG_FORMAT, parse_log};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -178,6 +182,9 @@ pub struct Recorded {
     pub head: ObjectId,
     /// Every merge base; more than one is worth telling the user about.
     pub merge_bases: Vec<ObjectId>,
+    /// Why the pull request's metadata or the range's commits could not be refreshed, if they
+    /// could not; the revision is recorded regardless.
+    pub info_error: Option<String>,
 }
 
 /// Who writes a freshly computed analysis to the cache.
@@ -268,6 +275,55 @@ impl Review {
     ///
     /// Returns an error when the target cannot be resolved or fetched, or recording fails.
     pub fn refresh(&self) -> Result<Recorded, Error> {
+        let mut recorded = self.record_target()?;
+        recorded.info_error = self.refresh_info().err().map(|err| err.to_string());
+        Ok(recorded)
+    }
+
+    /// Returns what the review is about, as last fetched, or `None` before the first refresh.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stored record cannot be read.
+    pub fn info(&self) -> Result<Option<ReviewInfo>, Error> {
+        store::read_json(&self.dir.info())
+    }
+
+    /// Fetches the pull request's metadata with `gh`, or the range's commits with `git log`,
+    /// and stores them atomically with the review.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `gh` or `git` fails or the record cannot be written.
+    pub fn refresh_info(&self) -> Result<ReviewInfo, Error> {
+        let info = match &self.meta.target {
+            ReviewTarget::PullRequest {
+                host,
+                owner,
+                repo,
+                number,
+            } => {
+                let url = format!("https://{host}/{owner}/{repo}/pull/{number}");
+                ReviewInfo::PullRequest(Box::new(github::details(&self.repo, &url)?.into()))
+            }
+            ReviewTarget::Range { base, head } => ReviewInfo::Commits {
+                commits: self.repo.commits(base, head)?,
+            },
+            ReviewTarget::Worktree { base } => ReviewInfo::Commits {
+                commits: self.repo.commits(base, "HEAD")?,
+            },
+        };
+        self.store_info(&info)?;
+        Ok(info)
+    }
+
+    /// Stores `info` as what the review is about.
+    pub(crate) fn store_info(&self, info: &ReviewInfo) -> Result<(), Error> {
+        store::write_json_atomic(&self.dir.info(), info, "review info")
+    }
+
+    /// Records the current state of the target as a revision.
+    fn record_target(&self) -> Result<Recorded, Error> {
         match &self.meta.target {
             ReviewTarget::Range { base, head } => {
                 let target = self.repo.resolve_commit(base)?;
@@ -358,6 +414,7 @@ impl Review {
                 base: existing.base.clone(),
                 head: existing.head.clone(),
                 merge_bases: existing.merge_bases.clone(),
+                info_error: None,
             });
         }
         let number = match revisions.last() {
@@ -389,6 +446,7 @@ impl Review {
             base: input.base,
             head: input.head,
             merge_bases: input.merge_bases,
+            info_error: None,
         })
     }
 
@@ -511,6 +569,30 @@ impl Review {
             log.append(event)?;
         }
         Ok(())
+    }
+
+    /// Marks every unit of the files at `paths` (or below them, for directories) in `view`'s
+    /// revision, which must be the current revision, and returns them.
+    ///
+    /// This is a convenience over [`mark`](Self::mark): the units are fixed from `view`, so units
+    /// that appear in later revisions are never covered, and they are recorded under one lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoChangedFiles`] when no unit matches, and the errors of
+    /// [`mark`](Self::mark).
+    pub fn mark_files(
+        &self,
+        view: &RevisionView<'_>,
+        paths: &[String],
+        verdict: MarkVerdict,
+    ) -> Result<Vec<UnitId>, Error> {
+        let units = view.units_under(paths);
+        if units.is_empty() {
+            return Err(Error::NoChangedFiles(paths.to_vec()));
+        }
+        self.mark(view, &units, verdict)?;
+        Ok(units)
     }
 
     /// Acknowledges a plain move: marks `seen` exactly the units it covers completely, on both

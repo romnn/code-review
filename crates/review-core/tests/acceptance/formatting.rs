@@ -46,14 +46,18 @@ fn rewrapped_rust_call_is_formatting_only() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A re-wrapped call next to one real edit: no chunk is formatting-only, and only the edited
-/// token is highlighted.
+/// A re-wrapped call next to one real edit: the file is not formatting-only, the re-wrap alone
+/// is proven, and only the edited token is highlighted.
 #[test]
-fn real_edit_disables_formatting_only_and_is_highlighted() -> eyre::Result<()> {
+fn real_edit_keeps_the_rewrap_proven_and_is_highlighted() -> eyre::Result<()> {
     let before = "fn main() {\n    let total = compute(alpha, beta, gamma);\n    let other = 0;\n    let limit = 1;\n    run(total, limit);\n}\n";
     let after = "fn main() {\n    let total = compute(\n        alpha,\n        beta,\n        gamma\n    );\n    let other = 0;\n    let limit = 2;\n    run(total, limit);\n}\n";
     let (_repo, analysis) = analyze_change("src/lib.rs", before, after)?;
-    assert!(analysis.units.iter().all(|unit| !unit.formatting_only));
+    assert!(!analysis.files[0].formatting_only);
+    assert_that!(
+        formatting_flags(&analysis),
+        elements_are![eq(&true), eq(&false)]
+    );
     let edit = analysis
         .units
         .iter()

@@ -50,9 +50,11 @@ pub mod git;
 mod history;
 mod ids;
 mod review;
+pub mod scope;
 pub mod store;
 pub mod syntax;
 mod text;
+pub mod tree;
 mod view;
 pub mod walkthrough;
 
@@ -60,10 +62,13 @@ pub use error::Error;
 pub use git::Repo;
 pub use history::{History, RevisionRecord, UnitState, Verdict};
 pub use ids::{MoveId, ObjectId, ParseIdError, ReviewKey, RevisionNumber, UnitId, UnitIndex};
-pub use review::{Recorded, Review, ReviewMeta, ReviewTarget, RevisionInput, Trust};
+pub use review::{
+    Commit, PullRequest, Recorded, Review, ReviewInfo, ReviewMeta, ReviewTarget, RevisionInput,
+    Trust,
+};
 pub use store::events::MarkVerdict;
 pub use view::{
-    Collapse, Counts, DiffLine, DiffLineKind, FileStatus, Interdiff, LineEnding, Location, MoveEnd,
-    MoveView, NoteAttachment, ResolvedNote, RevisionView, SideDiff, SplitLine, Status,
-    split_line_ending,
+    ChangeKind, Collapse, Counts, DiffLine, DiffLineKind, FileChangeSummary, FileStatus, FileTone,
+    Interdiff, LineEnding, Location, MoveEnd, MoveView, NoteAttachment, ResolvedNote, RevisionView,
+    ScopeAnchor, Side, SideDiff, SplitLine, Status, split_line_ending,
 };

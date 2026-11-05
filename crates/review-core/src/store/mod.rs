@@ -52,6 +52,12 @@ impl ReviewDir {
         self.root.join("review.lock")
     }
 
+    /// Returns the path of what the review is about: the pull request or the commits.
+    #[must_use]
+    pub fn info(&self) -> PathBuf {
+        self.root.join("info.json")
+    }
+
     /// Returns the metadata file's path.
     #[must_use]
     pub fn meta(&self) -> PathBuf {

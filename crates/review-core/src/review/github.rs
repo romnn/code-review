@@ -79,6 +79,38 @@ pub(crate) fn view(repo: &Repo, spec: &str) -> Result<PullRequestInfo, Error> {
     })
 }
 
+/// Runs `gh pr view <spec>` for the pull request's title, description, author, labels and
+/// dates.
+pub(crate) fn details(repo: &Repo, spec: &str) -> Result<super::info::GhPullRequest, Error> {
+    let mut command = Command::new("gh");
+    if let Some(work_tree) = repo.work_tree() {
+        command.current_dir(work_tree);
+    }
+    let args = ["pr", "view", spec, "--json", super::info::GH_FIELDS];
+    let output = command
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "gh",
+            args: args.join(" "),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(Error::CommandFailed {
+            program: "gh",
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    serde_json::from_slice(&output.stdout).map_err(|err| Error::UnexpectedOutput {
+        program: "gh",
+        command: "pr view".to_owned(),
+        detail: err.to_string(),
+    })
+}
+
 /// Temporary refs that receive a fetch, deleted when dropped.
 pub(crate) struct TemporaryRefs<'a> {
     repo: &'a Repo,

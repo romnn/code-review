@@ -1,0 +1,14 @@
+{
+  "kind": "pull_request",
+  "number": 128,
+  "title": "Split ledger helpers and add balance reconciliation",
+  "body": "## Summary\n\nThis splits the grab-bag `util` and `report` modules and adds a reconciliation pass to the ledger engine.\n\n- Moves `render_table` into a new `format` module and tidies its output with a column separator.\n- Moves the hashing helpers into `hash`, unchanged.\n- Renames `legacy` to `compat` and trims header lines when detecting the v1 format.\n- Adds `Ledger::reconcile`, which lists accounts whose balance differs from an expected map.\n- Raises the batch `LIMIT` from 100 to 250.\n\n## Testing\n\n```sh\ncargo test -p ledger\n```\n\nSee the [design notes](https://example.com/ledger/design) for why reconciliation lives in the engine.\n",
+  "author": "ana-lopez",
+  "state": "OPEN",
+  "base_ref": "main",
+  "head_ref": "feature/reconcile",
+  "labels": ["engine", "refactor"],
+  "created_at": "2000-01-01T00:00:00Z",
+  "updated_at": "2000-01-01T02:00:00Z",
+  "url": "https://example.com/ledger/pull/128"
+}

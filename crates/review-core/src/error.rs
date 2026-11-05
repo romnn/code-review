@@ -156,6 +156,9 @@ pub enum Error {
     /// A note was empty.
     #[error("a note must not be empty")]
     EmptyNote,
+    /// No unit of the revision is in the given files or directories.
+    #[error("no changed file at or below {}", .0.join(", "))]
+    NoChangedFiles(Vec<String>),
 }
 
 impl Error {

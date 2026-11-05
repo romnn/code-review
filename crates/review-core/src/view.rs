@@ -4,12 +4,14 @@
 use serde::Serialize;
 
 use crate::analysis::{
-    Analysis, EntrySide, FileChange, Move, MoveKind, NoiseCategory, Unit, UnitKind,
+    Analysis, EntrySide, FileChange, FileUnit, Move, MoveKind, NoiseCategory, Unit, UnitKind,
 };
 use crate::correspond::LinkKind;
 use crate::error::Error;
+use crate::git::{Blob, BlobReader, ChangeStatus};
 use crate::history::{History, RevisionData, RevisionRecord, UnitState, Verdict};
 use crate::ids::{MoveId, RevisionNumber, UnitId, UnitIndex};
+use crate::scope::{Scope, ScopeMap};
 use crate::text::{diff_lines, split_lines};
 
 /// A view of one revision of a review.
@@ -262,6 +264,19 @@ impl Counts {
         self.moved += usize::from(unit.moved);
     }
 
+    /// Adds `other`'s counts to these.
+    pub fn merge(&mut self, other: &Self) {
+        self.units += other.units;
+        self.new += other.new;
+        self.changed += other.changed;
+        self.reviewed += other.reviewed;
+        self.accepted += other.accepted;
+        self.flagged += other.flagged;
+        self.noise += other.noise;
+        self.formatting_only += other.formatting_only;
+        self.moved += other.moved;
+    }
+
     /// Returns the number of units that still need review.
     #[must_use]
     pub fn unreviewed(&self) -> usize {
@@ -276,6 +291,180 @@ pub struct FileStatus {
     pub path: String,
     /// The file's counts.
     pub counts: Counts,
+    /// For a renamed file, its path at the base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+    /// How the file changed.
+    pub change: FileChangeSummary,
+}
+
+/// Which version of a file a line number refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    /// The base, before the change.
+    Base,
+    /// The head, after the change.
+    Head,
+}
+
+/// Where a unit's scope breadcrumb is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ScopeAnchor {
+    /// The version of the file.
+    pub side: Side,
+    /// The zero-based line in that version.
+    pub line: usize,
+}
+
+/// How a file changed as a whole, as git classifies the entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    /// The file is new.
+    Added,
+    /// The file was removed.
+    Deleted,
+    /// The file changed in place.
+    Modified,
+    /// The file moved to a new path, possibly with edits.
+    Renamed,
+    /// The entry changed type, for example from a file to a symlink.
+    TypeChanged,
+}
+
+impl ChangeKind {
+    /// The one-letter code `git status` uses: `A`, `D`, `M`, `R` or `T`.
+    #[must_use]
+    pub fn letter(self) -> char {
+        match self {
+            Self::Added => 'A',
+            Self::Deleted => 'D',
+            Self::Modified => 'M',
+            Self::Renamed => 'R',
+            Self::TypeChanged => 'T',
+        }
+    }
+}
+
+/// The character of a file's change, for coloring file lists, ordered from least to most
+/// significant so a directory can show its most significant file's tone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTone {
+    /// A generated file, lockfile or snapshot.
+    Generated,
+    /// Every chunk is proven formatting-only.
+    FormattingOnly,
+    /// Plain moves cover every changed line.
+    Moved,
+    /// Edited in place.
+    Modified,
+    /// The entry changed type.
+    TypeChanged,
+    /// Renamed, possibly with edits.
+    Renamed,
+    /// New.
+    Added,
+    /// Removed.
+    Deleted,
+}
+
+/// What kind of change a file has, beyond its review counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileChangeSummary {
+    /// How the entry changed.
+    pub kind: ChangeKind,
+    /// The noise category of a generated file, lockfile or snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noise: Option<NoiseCategory>,
+    /// Whether every chunk is proven formatting-only.
+    pub formatting_only: bool,
+    /// Whether some of the file's lines are part of a detected move.
+    pub moves: bool,
+    /// Whether plain moves cover every changed line.
+    pub moved_only: bool,
+    /// The changes that are not line changes, other than the rename itself: binary content,
+    /// mode, type, symlink and submodule changes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entry_changes: Vec<FileUnit>,
+}
+
+impl FileChangeSummary {
+    /// A plain modification with nothing special about it.
+    #[must_use]
+    pub fn modified() -> Self {
+        Self {
+            kind: ChangeKind::Modified,
+            noise: None,
+            formatting_only: false,
+            moves: false,
+            moved_only: false,
+            entry_changes: Vec::new(),
+        }
+    }
+
+    /// The tone to color the file with. Deletions, additions and renames show as such even
+    /// when generated, except that a new file holding only moved code reads as a move;
+    /// otherwise noise and formatting-only changes stay quiet.
+    #[must_use]
+    pub fn tone(&self) -> FileTone {
+        match self.kind {
+            ChangeKind::Deleted => FileTone::Deleted,
+            ChangeKind::Added if self.moved_only => FileTone::Moved,
+            ChangeKind::Added => FileTone::Added,
+            ChangeKind::Renamed => FileTone::Renamed,
+            ChangeKind::TypeChanged => FileTone::TypeChanged,
+            ChangeKind::Modified if self.noise.is_some() => FileTone::Generated,
+            ChangeKind::Modified if self.formatting_only => FileTone::FormattingOnly,
+            ChangeKind::Modified if self.moved_only => FileTone::Moved,
+            ChangeKind::Modified => FileTone::Modified,
+        }
+    }
+
+    fn of(analysis: &Analysis, index: usize, file: &FileChange) -> Self {
+        let kind = match file.status {
+            ChangeStatus::Added => ChangeKind::Added,
+            ChangeStatus::Deleted => ChangeKind::Deleted,
+            ChangeStatus::Modified => ChangeKind::Modified,
+            ChangeStatus::TypeChanged => ChangeKind::TypeChanged,
+            ChangeStatus::Renamed { .. } => ChangeKind::Renamed,
+        };
+        let units: Vec<&Unit> = file
+            .units
+            .iter()
+            .filter_map(|unit| analysis.units.get(unit.get()))
+            .collect();
+        let moves = analysis.moves.iter().any(|moved| {
+            [moved.source.unit, moved.target.unit].iter().any(|unit| {
+                analysis
+                    .units
+                    .get(unit.get())
+                    .is_some_and(|unit| unit.file == index)
+            })
+        });
+        let chunks: Vec<&Unit> = units
+            .iter()
+            .copied()
+            .filter(|unit| unit.chunk().is_some())
+            .collect();
+        let mut entry_changes: Vec<FileUnit> = units
+            .iter()
+            .filter_map(|unit| match unit.kind {
+                UnitKind::File(FileUnit::Rename) | UnitKind::Chunk(_) => None,
+                UnitKind::File(change) => Some(change),
+            })
+            .collect();
+        entry_changes.dedup();
+        Self {
+            kind,
+            noise: file.noise,
+            formatting_only: file.formatting_only,
+            moves,
+            moved_only: !chunks.is_empty() && chunks.iter().all(|unit| unit.moved),
+            entry_changes,
+        }
+    }
 }
 
 /// Progress of a revision, per file and in total.
@@ -747,6 +936,91 @@ impl<'h> RevisionView<'h> {
         Ok(covered)
     }
 
+    /// Returns every unit of the files at `paths`, or below them when a path is a directory,
+    /// matching both the head and the base path of renamed files.
+    #[must_use]
+    pub fn units_under(&self, paths: &[String]) -> Vec<UnitId> {
+        let Some(analysis) = self.analysis() else {
+            return Vec::new();
+        };
+        let matches = |path: &str| paths.iter().any(|node| crate::tree::is_under(path, node));
+        analysis
+            .files
+            .iter()
+            .filter(|file| {
+                [&file.old, &file.new]
+                    .into_iter()
+                    .flatten()
+                    .any(|side| matches(&side.path))
+            })
+            .flat_map(|file| file.units.iter().map(|&index| self.id(index)))
+            .collect()
+    }
+
+    /// Where a chunk unit's scope breadcrumb is taken: its first added line at the head, or, for
+    /// a deletion-only chunk, its first removed line at the base. `None` for file units.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the unit does not exist in this revision.
+    pub fn scope_anchor(&self, unit: UnitId) -> Result<Option<ScopeAnchor>, Error> {
+        let record = self.unit(unit)?;
+        Ok(record.chunk().map(|chunk| {
+            if chunk.new.len > 0 {
+                ScopeAnchor {
+                    side: Side::Head,
+                    line: chunk.new.start,
+                }
+            } else {
+                ScopeAnchor {
+                    side: Side::Base,
+                    line: chunk.old.start,
+                }
+            }
+        }))
+    }
+
+    /// The named scopes around `unit`, outermost first, such as `impl Ledger` and
+    /// `fn apply_batch`, read from the file at the side [`Self::scope_anchor`] picks. Empty for
+    /// file units, unsupported languages and unreadable blobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the unit does not exist in this revision or the blob cannot be read.
+    pub fn scope(&self, unit: UnitId, reader: &mut BlobReader) -> Result<Vec<Scope>, Error> {
+        let Some(anchor) = self.scope_anchor(unit)? else {
+            return Ok(Vec::new());
+        };
+        let file = self.file(unit)?;
+        let side = match anchor.side {
+            Side::Head => file.new.as_ref(),
+            Side::Base => file.old.as_ref(),
+        };
+        let Some(side) = side else {
+            return Ok(Vec::new());
+        };
+        let Blob::Content(bytes) = reader.read(&side.oid)? else {
+            return Ok(Vec::new());
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok(Vec::new());
+        };
+        let map = ScopeMap::for_path(&side.path, text);
+        Ok(map.enclosing(anchor.line).into_iter().cloned().collect())
+    }
+
+    /// Returns how the file of `unit` changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the unit does not exist in this revision.
+    pub fn file_change(&self, unit: UnitId) -> Result<FileChangeSummary, Error> {
+        let index = self.unit(unit)?.file;
+        let analysis = self.analysis().ok_or(Error::UnknownUnit(unit))?;
+        let file = analysis.files.get(index).ok_or(Error::UnknownUnit(unit))?;
+        Ok(FileChangeSummary::of(analysis, index, file))
+    }
+
     /// Returns progress counts per file and in total.
     #[must_use]
     pub fn status(&self) -> Status {
@@ -758,7 +1032,7 @@ impl<'h> RevisionView<'h> {
         let Some(analysis) = self.analysis() else {
             return status;
         };
-        for file in &analysis.files {
+        for (index, file) in analysis.files.iter().enumerate() {
             let mut counts = Counts::default();
             for &index in &file.units {
                 let id = self.id(index);
@@ -768,9 +1042,15 @@ impl<'h> RevisionView<'h> {
                 counts.add(state, unit, Some(file));
                 status.total.add(state, unit, Some(file));
             }
+            let renamed_from = match (&file.old, &file.new) {
+                (Some(old), Some(new)) if old.path != new.path => Some(old.path.clone()),
+                _ => None,
+            };
             status.files.push(FileStatus {
                 path: file.display_path().to_owned(),
                 counts,
+                renamed_from,
+                change: FileChangeSummary::of(analysis, index, file),
             });
         }
         status

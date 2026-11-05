@@ -305,6 +305,25 @@ impl Repo {
         Ok(())
     }
 
+    /// Lists the commits in `base..head`, newest first, at most 500.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git fails.
+    pub fn commits(&self, base: &str, head: &str) -> Result<Vec<crate::review::Commit>, Error> {
+        let range = format!("{base}..{head}");
+        let output = self.run([
+            "log",
+            "--max-count=500",
+            crate::review::LOG_FORMAT,
+            &range,
+            "--",
+        ])?;
+        Ok(crate::review::parse_log(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
     /// Returns the object `name` points to, or `None` when the ref does not exist.
     ///
     /// # Errors

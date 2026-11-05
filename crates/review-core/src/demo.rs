@@ -177,6 +177,9 @@ pub fn prepare(paths: &DemoPaths, fixture: &Path, request: DemoRequest) -> Resul
     if let DemoRequest::UpTo(target) = request {
         advance(&review, &manifest, target)?;
     }
+    // The demo plays a pull request; refreshing a range would store its commits instead.
+    let info: crate::ReviewInfo = read_fixture(fixture, "pr.json")?;
+    review.store_info(&info)?;
     Ok(review)
 }
 

@@ -3,7 +3,7 @@
 use color_eyre::eyre;
 use googletest::prelude::*;
 use review_core::analysis::{FileUnit, NoiseCategory, UnitKind};
-use review_core::{MarkVerdict, Repo, Review, ReviewTarget, UnitState};
+use review_core::{ChangeKind, FileTone, MarkVerdict, Repo, Review, ReviewTarget, UnitState};
 
 use crate::common::{TestRepo, latest_analysis, mark_all, refresh, rust_functions, summaries};
 
@@ -384,6 +384,83 @@ fn undecodable_symlink_targets_stay_distinct() -> eyre::Result<()> {
         elements_are![eq(
             &r#"symlink target changed: "dir/\x80" -> "dir/\x81""#.to_owned()
         )]
+    );
+    Ok(())
+}
+
+/// Every file carries its change kind and tone: the demo covers additions, renames, moves,
+/// formatting-only, generated, lockfile, binary and mode changes.
+#[test]
+fn files_carry_their_change_kind() -> eyre::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let review = review_core::demo::prepare(
+        &review_core::demo::DemoPaths::under(dir.path()),
+        &review_core::demo::fixture_dir(),
+        review_core::demo::DemoRequest::Fresh,
+    )?;
+    let history = review.history()?;
+    let status = history.current_view()?.status();
+    let tone = |path: &str| {
+        status
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| (file.change.kind, file.change.tone()))
+    };
+    assert_that!(
+        tone("src/format.rs"),
+        some(eq((ChangeKind::Added, FileTone::Added)))
+    );
+    // An added file that only holds moved code reads as a move.
+    assert_that!(
+        tone("src/hash.rs"),
+        some(eq((ChangeKind::Added, FileTone::Moved)))
+    );
+    assert_that!(
+        tone("src/compat.rs"),
+        some(eq((ChangeKind::Renamed, FileTone::Renamed)))
+    );
+    assert_that!(
+        tone("src/engine.rs"),
+        some(eq((ChangeKind::Modified, FileTone::Modified)))
+    );
+    assert_that!(
+        tone("src/parser.rs"),
+        some(eq((ChangeKind::Modified, FileTone::FormattingOnly)))
+    );
+    assert_that!(
+        tone("Cargo.lock"),
+        some(eq((ChangeKind::Modified, FileTone::Generated)))
+    );
+    let entry_changes = |path: &str| {
+        status
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| file.change.entry_changes.clone())
+    };
+    assert_that!(
+        entry_changes("assets/logo.bin"),
+        some(eq(&vec![FileUnit::Binary]))
+    );
+    assert_that!(
+        entry_changes("scripts/release.sh"),
+        some(eq(&vec![FileUnit::Mode]))
+    );
+    let moves: Vec<&str> = status
+        .files
+        .iter()
+        .filter(|file| file.change.moves)
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_that!(
+        moves,
+        eq(&vec![
+            "src/format.rs",
+            "src/hash.rs",
+            "src/report.rs",
+            "src/util.rs"
+        ])
     );
     Ok(())
 }

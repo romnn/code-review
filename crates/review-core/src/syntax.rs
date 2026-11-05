@@ -59,7 +59,10 @@ impl Language {
         })
     }
 
-    fn grammar(self) -> tree_sitter::Language {
+    /// The tree-sitter grammar this crate parses the language with, so front ends that
+    /// highlight code share it and link one tree-sitter.
+    #[must_use]
+    pub fn grammar(self) -> tree_sitter::Language {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
