@@ -1,0 +1,58 @@
+# Nordfox, from nightfox.nvim by EdenEast (MIT, Copyright (c) 2021 James Simpson):
+# lua/nightfox/palette/nordfox.lua, evaluated with nightfox's own color functions.
+name = "nordfox"
+title = "Nordfox"
+
+[ui]
+background = "#2e3440"
+panel = "#232831"
+band = "#363d4b"
+raised = "#444c5e"
+hairline = "#444c5e"
+text = "#cdcecf"
+dim = "#abb1bb"
+faint = "#7e8188"
+accent = "#81a1c1"
+selection = "#4f6074"
+find = "#d9b263"
+error = "#bf616a"
+
+[review]
+open = "#cdcecf"
+done = "#a3be8c"
+flagged = "#bf616a"
+changed = "#b48ead"
+
+[kind]
+added = "#a3be8c"
+modified = "#81a1c1"
+deleted = "#bf616a"
+renamed = "#88c0d0"
+moved = "#b48ead"
+type = "#c9826b"
+quiet = "#7e8188"
+
+[diff]
+removed_line = "#5f1519"
+added_line = "#14471f"
+quiet_line = "#39404f"
+removed_text = "#bf616a"
+added_text = "#a3be8c"
+removed_sign = "#d06f79"
+added_sign = "#b1d196"
+
+[syntax]
+keyword = "#b48ead"
+function = "#8cafd2"
+type = "#ebcb8b"
+string = "#a3be8c"
+constant = "#d89079"
+comment = "#60728a"
+parameter = "#e5e9f0"
+attribute = "#d092ce"
+operator = "#abb1bb"
+punctuation = "#abb1bb"
+property = "#81a1c1"
+special = "#bf616a"
+tag = "#b48ead"
+escape = "#f0d399"

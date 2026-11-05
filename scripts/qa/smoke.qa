@@ -1,105 +1,180 @@
-# Walks the built-in demo: steps, marks, go-to-definition, scrolling, and a force-push.
-# Run with `task qa -- scripts/qa/smoke.qa`; screenshots land in target/qa/.
+# Walks the built-in demo the lazygit way: files, one file's diff, hunks approved and flagged,
+# the whole file as a buffer, overlays, input racing background work, window chrome, themes,
+# and a force-push. Run with `task qa -- scripts/qa/smoke.qa`; screenshots land in target/qa/.
 
 launch --demo
 expect "revision":"1"
+expect "mode":"Tree"
+expect "client_decorated":true
+expect "theme":"carbonfox"
+expect "token_emphasis":false,"diff_style":"syntax"
 shot 01-open
 
-# The walkthrough, step by step.
-key ]
+# Moving through the files previews each one's diff.
+file src/engine.rs
 state
-expect "selected_step":0
-expect "badge":"accepted"
-shot 02-step-engine
+expect "selected":"src/engine.rs"
+expect "hunks":3
+expect "scope":"impl Ledger › fn apply_batch"
+shot 02-engine
 
-# Mark the second unit of the step seen, the third flagged, then undo the flag.
-key n
-key s
-key n
-key f
+# The diff starts at the first hunk that needs the reviewer; j/k move between hunks, and
+# space approves and moves on to the next open hunk.
+key 0
 state
-expect "focused_unit":"u1-0011"
-expect "u1-0010","badge":"seen"
-expect "u1-0011","badge":"flagged"
-key x
+expect "mode":"Diff"
+expect "hunk":1,
+expect "hunk_badges":\["Unreviewed"\]
+key space
 state
-expect "u1-0011","badge":"unseen"
-shot 03-marks
-
-# Moves, the rename and the formatter change.
-key ]
+expect "hunk":2,
+key k
 state
-expect "selected_step":1
-shot 04-module-split
-
-# Language servers run reviewed code, so they need trust. The demo's head is a local branch,
-# which is trusted by default; revoking it turns go-to-definition into a hint.
+expect "hunk_badges":\["Accepted"\]
+shot 03-approved
+# Space again takes it back; ! flags and u resets.
+key space
 state
-expect "trusted":true
-key shift-t
+expect "hunk_badges":\["Unreviewed"\]
+key !
 state
-expect "trusted":false
-key g
-state
-expect "source":null
-expect press T to trust
-shot 05-untrusted
-# Trusting takes two presses; the first one says what will run.
-key shift-t
-state
-expect "trusted":false
-expect press T again
-key shift-t
-state
-expect "trusted":true
-
-# Go to the definition of `format_cents`, called on an added line of the moved table renderer.
-find util::format_cents(
-key l
-key l
-key l
-key l
-state
-expect "token":"format_cents"
-key g
-state
-expect "source":"src/util.rs:[0-9]+ \(read-only\)"
-shot 06-definition
-key escape
-
-# The remaining steps, then every change at once, scrolled.
-key ]
-shot 07-front-end
-key ]
-key ]
-state
-expect "step_title":"Noise"
-shot 08-noise
-key ]
-state
-expect "selected_step":null
-scroll 600
-state
-expect "visible_rows":\[30,
-shot 09-all-scrolled
-
-# Next unreviewed wraps around and skips reviewed units.
+expect "hunk_badges":\["Flagged"\]
 key u
 state
-expect "focused_unit":"u1-0011"
+expect "hunk_badges":\["Unreviewed"\]
 
-# Revision 2 simulates a force-push: earlier marks carry over and changed units show interdiffs.
+# The whole file as a read-only buffer, at the selected hunk, with vim motions and find.
+key =
+state
+expect "mode":"Buffer"
+expect "row":26,
+key j
+key w
+state
+expect "row":27,"col":12
+expect "scope":"impl Ledger › fn apply_batch"
+key /
+key b a l a n c e
+key enter
+key n
+state
+expect "query":"balance","matches":12
+expect "scope":"impl Ledger › fn balance"
+expect "editing":false
+shot 04-buffer-find
+key escape
+key escape
+state
+expect "mode":"Diff"
+expect "hunk":1,
+
+# Overlays own the keyboard: review keys under them do nothing.
+key ?
+key space
+key j
+state
+expect "overlay":"Help"
+expect "hunk":1,
+expect "hunk_badges":\["Unreviewed"\]
+shot 05-help
+key escape
+key i
+key space
+state
+expect "overlay":"Overview"
+expect "hunk_badges":\["Unreviewed"\]
+key q
+state
+expect "overlay":null
+
+# Input racing background work: approve, then leave for other files before the mark is saved.
+# The mark lands on exactly the hunk approved, and the view follows the latest selection.
+rapid key space
+rapid key escape
+rapid key j
+rapid key j
+state
+expect "mode":"Tree"
+expect "selected":"src/hash.rs"
+expect "pending":0,"queued":0
+expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Partial"
+file src/engine.rs
+key 0
+state
+expect "hunk":2,
+key k
+state
+expect "hunk_badges":\["Accepted"\]
+
+# Plain red and green instead of syntax on tinted rows.
+key |
+state
+expect "diff_style":"plain"
+shot 06-plain
+key |
+
+# Approving a whole file from the tree, as lazygit stages one.
+key escape
+key space
+state
+expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
+shot 07-file-done
+
+# Themes.
+key shift-t
+state
+expect "theme":"tokyonight-night"
+shot 08-tokyonight
+key shift-t
+key shift-t
+key shift-t
+key shift-t
+key shift-t
+key shift-t
+key shift-t
+key shift-t
+state
+expect "theme":"carbonfox"
+
+# Screen modes: the diff across the whole width, and back.
+key 0
+key +
+state
+expect "screen":"Full"
+expect "sidebar":null
+key _
+state
+expect "screen":"Split"
+
+# The title bar: buttons, dragging the bar moves the window, a double click maximizes.
+hit 1583 18
+expect "region":"close","cursor":"pointer"
+hit 800 18
+expect "region":"title-bar"
+drag 800 18 860 80
+state
+expect "window_events":\{"move":1\}
+click 800 18 2
+state
+expect "window_events":\{"move":1,"zoom":1\}
+
+# The divider between the files and the diff drags and resets on a double click.
+hit 302 500
+expect "region":"sidebar-divider"
+drag 302 500 400 500
+state
+expect "sidebar":400.0
+click 402 500 2
+state
+expect "sidebar":300.0
+
+# Revision 2 simulates a force-push: approvals carry over where the code is unchanged, and
+# hunks that changed since they were reviewed say so.
 launch --demo-revision 2
 expect "revision":"2"
-# The trust decision is stored with the review.
 expect "trusted":true
-expect \(carried\)
-expect changed since
-shot 10-revision-2
-find interdiff against
-shot 11-interdiff
-
-launch --demo-revision 3
-expect "revision":"3"
-find identical to the reviewed version
-shot 12-revision-3-return
+file src/engine.rs
+find changed since
+state
+expect "tag":"changed since revision 1"
+shot 09-revision-2

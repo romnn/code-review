@@ -1,0 +1,58 @@
+# Carbonfox, from nightfox.nvim by EdenEast (MIT, Copyright (c) 2021 James Simpson):
+# lua/nightfox/palette/carbonfox.lua, evaluated with nightfox's own color functions.
+name = "carbonfox"
+title = "Carbonfox"
+
+[ui]
+background = "#161616"
+panel = "#0c0c0c"
+band = "#212121"
+raised = "#353535"
+hairline = "#353535"
+text = "#f2f4f8"
+dim = "#b6b8bb"
+faint = "#7b7c7e"
+accent = "#78a9ff"
+selection = "#525253"
+find = "#07a19e"
+error = "#ee5396"
+
+[review]
+open = "#f2f4f8"
+done = "#25be6a"
+flagged = "#ee5396"
+changed = "#be95ff"
+
+[kind]
+added = "#25be6a"
+modified = "#78a9ff"
+deleted = "#ee5396"
+renamed = "#33b1ff"
+moved = "#be95ff"
+type = "#3ddbd9"
+quiet = "#7b7c7e"
+
+[diff]
+removed_line = "#5f1519"
+added_line = "#14471f"
+quiet_line = "#252525"
+removed_text = "#ee5396"
+added_text = "#25be6a"
+removed_sign = "#f16da6"
+added_sign = "#46c880"
+
+[syntax]
+keyword = "#be95ff"
+function = "#8cb6ff"
+type = "#08bdba"
+string = "#25be6a"
+constant = "#5ae0df"
+comment = "#6e6f70"
+parameter = "#dfdfe0"
+attribute = "#ff91c1"
+operator = "#b6b8bb"
+punctuation = "#b6b8bb"
+property = "#78a9ff"
+special = "#ee5396"
+tag = "#be95ff"
+escape = "#2dc7c4"

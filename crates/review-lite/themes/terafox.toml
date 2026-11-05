@@ -1,0 +1,58 @@
+# Terafox, from nightfox.nvim by EdenEast (MIT, Copyright (c) 2021 James Simpson):
+# lua/nightfox/palette/terafox.lua, evaluated with nightfox's own color functions.
+name = "terafox"
+title = "Terafox"
+
+[ui]
+background = "#152528"
+panel = "#0f1c1e"
+band = "#1b3033"
+raised = "#254147"
+hairline = "#254147"
+text = "#e6eaea"
+dim = "#cbd9d8"
+faint = "#587b7b"
+accent = "#5a93aa"
+selection = "#425e5e"
+find = "#d78b6c"
+error = "#e85c51"
+
+[review]
+open = "#e6eaea"
+done = "#7aa4a1"
+flagged = "#e85c51"
+changed = "#ad5c7c"
+
+[kind]
+added = "#7aa4a1"
+modified = "#5a93aa"
+deleted = "#e85c51"
+renamed = "#a1cdd8"
+moved = "#ad5c7c"
+type = "#ff8349"
+quiet = "#587b7b"
+
+[diff]
+removed_line = "#5f1519"
+added_line = "#14471f"
+quiet_line = "#1d3337"
+removed_text = "#e85c51"
+added_text = "#7aa4a1"
+removed_sign = "#eb746b"
+added_sign = "#8eb2af"
+
+[syntax]
+keyword = "#ad5c7c"
+function = "#73a3b7"
+type = "#fda47f"
+string = "#7aa4a1"
+constant = "#ff9664"
+comment = "#6d7f8b"
+parameter = "#ebebeb"
+attribute = "#d38d97"
+operator = "#cbd9d8"
+punctuation = "#cbd9d8"
+property = "#5a93aa"
+special = "#e85c51"
+tag = "#ad5c7c"
+escape = "#fdb292"

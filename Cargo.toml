@@ -35,6 +35,9 @@ gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false }
 gpui-component = { version = "=0.8.0", default-features = false }
 parking_lot = "0.12"
+# The icons gpui-component draws, such as the find bar's clear button.
+gpui-kit-assets = "=0.8.0"
+toml = "1"
 
 # CLI dependencies.
 clap = { version = "4.5", features = ["derive", "env"] }

@@ -5367,13 +5367,18 @@ dependencies = [
  "clap",
  "color-eyre",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
  "parking_lot",
  "review-core",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "toml 1.2.0+spec-1.1.0",
+ "tree-sitter",
+ "tree-sitter-toml-ng",
 ]
 
 [[package]]

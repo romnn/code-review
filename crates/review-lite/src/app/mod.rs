@@ -1,492 +1,886 @@
-//! The review window: a sidebar of steps, the selected step's rows, and a source pane.
+//! The review window, in lazygit's shape: the changed files on the left, the selected file's
+//! diff on the right, and the whole file as a read-only buffer on request.
+//!
+//! The window keeps three kinds of state apart:
+//!
+//! - the [`state::Snapshot`] on screen, one revision of one history, and the file text and
+//!   highlights it shows, cached by blob identity;
+//! - the workspace: the selected file, the mode that owns the keyboard, the selected hunk, folds
+//!   and scroll positions;
+//! - the marks waiting for the engine, each with the exact units and the revision they were
+//!   shown in.
+//!
+//! Everything slow (git, analysis, the event log, highlighting, language servers) runs on the
+//! background executor; its results either fill caches keyed by content or carry the identity of
+//! what they were computed for, so they can never land on the wrong view.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::prelude::*;
 use gpui::{
-    App, Context, FocusHandle, FontWeight, HighlightStyle, Hsla, KeyBinding, ScrollStrategy,
-    SharedString, StyledText, UniformListScrollHandle, Window, actions, div, hsla, point, px,
-    uniform_list,
+    App, Context, Entity, FocusHandle, Font, ScrollHandle, SharedString, Subscription, TextLayout,
+    UniformListScrollHandle, Window, actions,
 };
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::input::InputState;
+use gpui_component::scroll::ScrollbarHandle as _;
 use parking_lot::Mutex;
-use review_core::walkthrough::{self, Partition, StepProgress};
-use review_core::{History, MarkVerdict, Review, UnitId};
+use review_core::tree::{NodeKind, TreeNode};
+use review_core::{History, MarkVerdict, ObjectId, Review, RevisionNumber, UnitId};
 
-use crate::lsp::{self, LanguageServer};
-use crate::rows::{self, Badge, HeadLine, Layout, Row, RowKind};
+use crate::lsp::LanguageServer;
+use crate::rows::{self, Folds, Layout};
+use crate::syntax::SideSyntax;
 
+mod buffer;
+mod chrome;
+mod diff;
+mod find;
+pub mod keymap;
+mod markdown;
+mod marks;
+mod overview;
+mod panes;
 mod qa;
+mod render;
+mod scroll;
+mod select;
+mod state;
+mod text;
+mod tree;
+
+use keymap::Area;
+use scroll::{Animation, PagedScroll};
+use state::{MarkJob, Snapshot};
+use text::{Pane, Selection};
 
 actions!(
     review_lite,
     [
-        NextLine,
-        PreviousLine,
-        NextUnit,
-        PreviousUnit,
-        NextUnreviewed,
-        NextStep,
-        PreviousStep,
-        NextToken,
-        PreviousToken,
-        MarkSeen,
-        MarkAccepted,
-        MarkFlagged,
-        MarkUnseen,
-        MarkHunkSeen,
-        MarkHunkAccepted,
-        MarkHunkFlagged,
-        MarkHunkUnseen,
-        GoToDefinition,
+        TreeDown,
+        TreeUp,
+        TreeCollapse,
+        TreeExpand,
+        Activate,
+        FocusDiff,
+        CloseAllFolds,
+        OpenAllFolds,
+        NextHunk,
+        PreviousHunk,
+        FirstHunk,
+        LastHunk,
+        HalfPageDown,
+        HalfPageUp,
+        ToggleFold,
+        NextFile,
+        FocusTree,
+        ToggleBuffer,
+        ToggleApprove,
+        ToggleFlag,
+        ResetReview,
+        Refresh,
         ToggleTrust,
-        CloseSource,
+        YankUnitId,
+        CursorDown,
+        CursorUp,
+        NextWord,
+        PreviousWord,
+        BufferTop,
+        BufferBottom,
+        OpenFind,
+        FindNext,
+        FindPrevious,
+        GoToDefinition,
+        JumpBack,
+        Dismiss,
+        CloseFind,
+        ToggleOverview,
+        ToggleDiffStyle,
+        CycleTheme,
+        ScreenNext,
+        ScreenPrevious,
+        ToggleSidebar,
+        ToggleHelp,
+        CloseOverlay,
+        Copy,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        ToggleFullscreen,
+        CloseWindow,
         Quit,
     ]
 );
 
-/// The key context of the review window.
-const CONTEXT: &str = "ReviewApp";
-
-/// The height of every row; the list is uniform so it only lays out visible rows.
-const ROW_HEIGHT: f32 = 20.0;
-
 /// How far the scroll benchmark moves per frame: thirty rows, a fast fling.
-const BENCH_STEP: f32 = ROW_HEIGHT * 30.0;
+const BENCH_ROWS_PER_FRAME: f32 = 30.0;
+
+/// How many unchanged lines each expansion of a gap reveals.
+const GAP_STEP: usize = 20;
 
 /// How long go-to-definition waits for a language server that is still indexing.
 const DEFINITION_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Binds the review window's keys.
-pub fn bind_keys(cx: &mut App) {
-    let context = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("j", NextLine, context),
-        KeyBinding::new("down", NextLine, context),
-        KeyBinding::new("k", PreviousLine, context),
-        KeyBinding::new("up", PreviousLine, context),
-        KeyBinding::new("n", NextUnit, context),
-        KeyBinding::new("p", PreviousUnit, context),
-        KeyBinding::new("u", NextUnreviewed, context),
-        KeyBinding::new("]", NextStep, context),
-        KeyBinding::new("[", PreviousStep, context),
-        KeyBinding::new("l", NextToken, context),
-        KeyBinding::new("right", NextToken, context),
-        KeyBinding::new("h", PreviousToken, context),
-        KeyBinding::new("left", PreviousToken, context),
-        KeyBinding::new("s", MarkSeen, context),
-        KeyBinding::new("a", MarkAccepted, context),
-        KeyBinding::new("f", MarkFlagged, context),
-        KeyBinding::new("x", MarkUnseen, context),
-        KeyBinding::new("shift-s", MarkHunkSeen, context),
-        KeyBinding::new("shift-a", MarkHunkAccepted, context),
-        KeyBinding::new("shift-f", MarkHunkFlagged, context),
-        KeyBinding::new("shift-x", MarkHunkUnseen, context),
-        KeyBinding::new("g", GoToDefinition, context),
-        KeyBinding::new("shift-t", ToggleTrust, context),
-        KeyBinding::new("f12", GoToDefinition, context),
-        KeyBinding::new("escape", CloseSource, context),
-        KeyBinding::new("q", Quit, context),
-        KeyBinding::new("ctrl-q", Quit, context),
-    ]);
+/// The smallest and largest code size zoom allows, in logical pixels.
+const ZOOM_RANGE: Range<f32> = 9.0..40.0;
+
+/// Binds the review window's keys from the keymap.
+pub fn bind_keys(bindings: &[keymap::Binding], cx: &mut App) {
+    keymap::bind(bindings, cx);
 }
 
 /// What the app does once its window is up, besides waiting for the reviewer.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Startup {
+    /// When the process started, for the time to the first visible hunk.
+    pub process_started: Instant,
     /// Scroll through every row once, print frame statistics, and quit.
-    pub bench_scroll: bool,
-    /// Quit once the first frame is rendered.
+    pub bench_scroll: Option<BenchMode>,
+    /// Quit once the first hunk is visible, printing how long that took.
     pub exit_after_first_frame: bool,
     /// Read QA commands from standard input; see the `qa` module.
     pub qa: bool,
 }
 
-/// Whether a mark covers the focused unit or its whole display hunk.
+/// How the scroll benchmark moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MarkScope {
-    Unit,
-    Hunk,
+pub enum BenchMode {
+    /// Sets the offset directly every frame, like a fast fling.
+    Fling,
+    /// Pages down with the animated scrolling that keyboard jumps use.
+    Animated,
 }
 
-/// The engine's answers for one history, laid out for the window.
-struct Loaded {
-    history: Arc<History>,
-    partition: Partition,
-    progress: Vec<StepProgress>,
-    rows: Layout,
+/// The code font, which the whole window uses.
+#[derive(Debug, Clone)]
+pub struct Fonts {
+    /// The code font, with ligatures off.
+    pub code: Font,
+    /// The code size in logical pixels.
+    pub code_size: f32,
+    /// The code size the window started with, for resetting zoom.
+    pub default_code_size: f32,
 }
 
-/// Derives the partition, progress and rows of `history`'s current revision for the step
-/// `selected`, or for every step when it is `None`.
-fn load(history: Arc<History>, selected: Option<usize>) -> Result<Loaded, review_core::Error> {
-    let (partition, progress, rows) = {
-        let view = history.current_view()?;
-        let partition = walkthrough::partition(&view);
-        let progress = partition.progress(&view);
-        let units = step_units(&partition, selected);
-        let rows = rows::build(&view, &units);
-        (partition, progress, rows)
-    };
-    Ok(Loaded {
-        history,
-        partition,
-        progress,
-        rows,
-    })
-}
+impl Fonts {
+    /// The size of the window's own text: labels, the tree and the bars.
+    fn ui_size(&self) -> f32 {
+        (self.code_size * 0.86).round()
+    }
 
-/// The units of step `selected` in review order, or of every step.
-fn step_units(partition: &Partition, selected: Option<usize>) -> Vec<UnitId> {
-    match selected.and_then(|index| partition.steps.get(index)) {
-        Some(step) => step.units.clone(),
-        None => partition.order(),
+    /// The height of every row; the lists are uniform so they lay out only visible rows.
+    fn row_height(&self) -> f32 {
+        (self.code_size * 1.5).round()
     }
 }
 
-/// A read-only view of a file in the head worktree, opened by go-to-definition.
-struct SourceView {
-    title: SharedString,
-    lines: Vec<SharedString>,
-    target: usize,
+/// View settings from the configuration file.
+#[derive(Debug, Clone)]
+pub struct Settings {
+    /// Where the configuration file is, for remembering choices made in the app.
+    pub config_path: Option<PathBuf>,
+    /// Unchanged lines shown around each hunk.
+    pub context: usize,
+    /// How changed lines are colored.
+    pub diff_style: crate::config::DiffStyle,
+    /// The removed-line background, as `0xRRGGBB`, when the configuration overrides the
+    /// theme's.
+    pub removed: Option<u32>,
+    /// The added-line background, likewise.
+    pub added: Option<u32>,
+    /// The theme in use.
+    pub theme: Arc<crate::theme::Theme>,
+    /// Every theme `T` cycles through.
+    pub themes: Vec<crate::theme::Theme>,
+    /// Whether changed tokens within a line are emphasized.
+    pub token_emphasis: bool,
+    /// The pane widths remembered from the last session.
+    pub layout: PaneLayout,
+    /// The keymap, after the configuration's overrides.
+    pub keymap: Vec<keymap::Binding>,
 }
 
-/// The scroll benchmark's progress.
+/// The pane widths and whether the sidebar shows.
+pub type PaneLayout = crate::config::LayoutConfig;
+
+/// Opens the review and loads its history, off the UI thread.
+pub type Opener = Box<dyn FnOnce() -> Result<(Review, History), String> + Send>;
+
+/// Which part of the window owns the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The file tree; the diff previews the selected file.
+    Tree,
+    /// The selected file's diff, moving between hunks.
+    Diff,
+    /// The whole file as a read-only buffer.
+    Buffer,
+}
+
+/// How the window divides its width, cycled with `+` and `_` as in lazygit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// Files and diff side by side.
+    Split,
+    /// The diff or buffer across the whole width.
+    Full,
+}
+
+/// A layer over the window that takes the keyboard while it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    /// The cheat sheet.
+    Help,
+    /// The pull request overview.
+    Overview,
+}
+
+/// Whether the review is ready to show.
+enum Phase {
+    /// The review is opening; the time it started.
+    Loading(Instant),
+    /// The review is open.
+    Ready,
+    /// The review could not be opened.
+    Failed(String),
+}
+
+/// Where the reviewer was in a file, kept while other files show.
+#[derive(Debug, Clone, Copy, Default)]
+struct Place {
+    hunk: usize,
+    offset: f32,
+}
+
+/// The find bar of the buffer.
+struct Find {
+    input: Entity<InputState>,
+    query: String,
+    matches: Vec<find::Match>,
+    current: Option<usize>,
+    /// Whether the bar takes typing; after Enter, the matches stay for `n` and `N`.
+    editing: bool,
+    _subscription: Subscription,
+}
+
+/// A scroll benchmark in progress.
 struct Bench {
+    mode: BenchMode,
     started: Instant,
     last: Instant,
-    /// Time between consecutive frames, including waiting for the compositor.
     intervals: Vec<Duration>,
-    /// When the view last started rendering.
     render_started: Option<Instant>,
-    /// Time from the start of rendering until the visible rows were built in the frame just
-    /// drawn: the app's own work, without gpui's paint and the compositor.
     built: Option<Duration>,
-    /// `built` for every frame.
     work: Vec<Duration>,
     rendered_rows: usize,
 }
 
-/// Language servers by program and workspace root, started on first use and shared by
-/// background tasks.
+/// Input-to-frame latency samples.
+#[derive(Default)]
+struct Latency {
+    pending: Option<Instant>,
+    samples: Vec<Duration>,
+}
+
+/// Running language servers by program and worktree.
 type Servers = Arc<Mutex<HashMap<(&'static str, PathBuf), LanguageServer>>>;
+
+/// The text layouts of the rows painted in the last frame, for mapping the mouse to text.
+type PaintedRows = Rc<RefCell<HashMap<(Pane, usize), TextLayout>>>;
+
+/// File text and highlights by blob, filled in the background; content never changes under an
+/// object ID, so these never go stale.
+#[derive(Default)]
+struct Blobs {
+    texts: HashMap<ObjectId, Arc<rows::FullText>>,
+    syntax: HashMap<ObjectId, Arc<SideSyntax>>,
+}
 
 /// The review window.
 pub struct ReviewApp {
-    review: Arc<Review>,
-    history: Arc<History>,
-    partition: Partition,
-    progress: Vec<StepProgress>,
-    selected: Option<usize>,
+    phase: Phase,
+    review: Option<Arc<Review>>,
+    snapshot: Option<Snapshot>,
+    blobs: Blobs,
+    /// Blobs being read or highlighted, so each is requested once.
+    requested: HashSet<ObjectId>,
+    /// What the review is about.
+    info: Option<review_core::ReviewInfo>,
+    revisions: Vec<overview::RevisionSummary>,
+    /// The file tree with pending marks applied.
+    tree: Vec<TreeNode>,
+    tree_collapsed: HashSet<String>,
+    tree_cursor: usize,
+    tree_list: UniformListScrollHandle,
+    /// The file whose diff shows, by display path.
+    selected: Option<String>,
+    mode: Mode,
+    screen: Screen,
+    overlay: Option<Overlay>,
+    /// The selected file's diff.
     rows: Layout,
-    cursor: usize,
-    token: Option<Range<usize>>,
+    /// The rows of each display hunk of [`Self::rows`].
+    hunk_rows: Vec<Range<usize>>,
+    /// The selected hunk, by index into the layout's hunks.
+    hunk: usize,
+    folds: Folds,
+    places: HashMap<String, Place>,
     list: UniformListScrollHandle,
-    focus: FocusHandle,
+    list_bar: PagedScroll,
+    list_animation: Option<Animation>,
+    buffer: Option<buffer::Buffer>,
+    buffer_list: UniformListScrollHandle,
+    buffer_bar: PagedScroll,
+    buffer_animation: Option<Animation>,
+    find: Option<Find>,
+    marks: VecDeque<MarkJob>,
+    marking: bool,
+    /// Verdicts asked for but not yet recorded, shown at once.
+    pending: HashMap<UnitId, MarkVerdict>,
+    refreshing: bool,
+    tree_focus: FocusHandle,
+    diff_focus: FocusHandle,
+    buffer_focus: FocusHandle,
+    overlay_focus: FocusHandle,
+    overview_scroll: ScrollHandle,
+    /// The pane widths and whether the files show.
+    layout: PaneLayout,
+    /// Whether the sidebar divider is being dragged.
+    resizing: bool,
+    /// Named hit regions and window operations, for the title bar and QA mode.
+    regions: Rc<chrome::Regions>,
     status: SharedString,
-    busy: bool,
+    /// When the status line last reported a failure, for tinting it.
+    failed_at: Option<Instant>,
     looking_up: bool,
+    highlighting: bool,
+    client_decorated: bool,
     /// Whether language servers may run on the reviewed code; see [`Review::trust`].
     trusted: bool,
-    /// Whether `T` was pressed once and trusting awaits a second press.
+    /// Whether trusting awaits a confirming second press.
     trust_pending: bool,
-    source: Option<SourceView>,
-    source_list: UniformListScrollHandle,
+    selection: Option<Selection>,
+    dragging: Option<Pane>,
+    painted: PaintedRows,
+    fonts: Fonts,
+    settings: Settings,
     servers: Servers,
     bench: Option<Bench>,
+    latency: Latency,
+    startup: Startup,
+    /// How long the first hunk took to show, from process start.
+    first_hunk: Option<Duration>,
 }
 
 impl ReviewApp {
-    /// Lays out the current revision of `history`, which was loaded from `review`.
+    /// Opens the review with `opener` in the background and shows it when it is ready.
     pub fn new(
-        review: Review,
-        history: History,
+        opener: Opener,
+        fonts: Fonts,
+        settings: Settings,
         startup: Startup,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let history = Arc::new(history);
-        let (partition, progress, rows, status) = match load(Arc::clone(&history), None) {
-            Ok(loaded) => (loaded.partition, loaded.progress, loaded.rows, None),
-            Err(err) => (
-                Partition {
-                    revision: review_core::RevisionNumber::FIRST,
-                    title: None,
-                    written_for: None,
-                    steps: Vec::new(),
-                    warnings: Vec::new(),
-                },
-                Vec::new(),
-                Layout::default(),
-                Some(format!("cannot show the review: {err}")),
-            ),
-        };
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        let mut app = Self {
-            review: Arc::new(review),
-            history,
-            partition,
-            progress,
+        let tree_focus = cx.focus_handle();
+        window.focus(&tree_focus, cx);
+        let list = UniformListScrollHandle::new();
+        let buffer_list = UniformListScrollHandle::new();
+        let app = Self {
+            phase: Phase::Loading(Instant::now()),
+            review: None,
+            snapshot: None,
+            blobs: Blobs::default(),
+            requested: HashSet::new(),
+            info: None,
+            revisions: Vec::new(),
+            tree: Vec::new(),
+            tree_collapsed: HashSet::new(),
+            tree_cursor: 0,
+            tree_list: UniformListScrollHandle::new(),
             selected: None,
-            rows,
-            cursor: 0,
-            token: None,
-            list: UniformListScrollHandle::new(),
-            focus,
-            status: SharedString::default(),
-            busy: false,
+            mode: Mode::Tree,
+            screen: Screen::Split,
+            overlay: None,
+            rows: Layout::default(),
+            hunk_rows: Vec::new(),
+            hunk: 0,
+            folds: Folds {
+                context: settings.context,
+                single_file: true,
+                ..Folds::default()
+            },
+            places: HashMap::new(),
+            list_bar: PagedScroll::new(&list),
+            list,
+            list_animation: None,
+            buffer: None,
+            buffer_bar: PagedScroll::new(&buffer_list),
+            buffer_list,
+            buffer_animation: None,
+            find: None,
+            marks: VecDeque::new(),
+            marking: false,
+            pending: HashMap::new(),
+            refreshing: false,
+            tree_focus,
+            diff_focus: cx.focus_handle(),
+            buffer_focus: cx.focus_handle(),
+            overlay_focus: cx.focus_handle(),
+            overview_scroll: ScrollHandle::new(),
+            layout: settings.layout,
+            resizing: false,
+            regions: Rc::new(chrome::Regions::default()),
+            status: "Opening the review…".into(),
+            failed_at: None,
             looking_up: false,
+            highlighting: false,
+            client_decorated: false,
             trusted: false,
             trust_pending: false,
-            source: None,
-            source_list: UniformListScrollHandle::new(),
+            selection: None,
+            dragging: None,
+            painted: PaintedRows::default(),
+            fonts,
+            settings,
             servers: Servers::default(),
             bench: None,
+            latency: Latency::default(),
+            startup,
+            first_hunk: None,
         };
-        let trust = app.review.trust();
-        app.trusted = trust.as_ref().is_ok_and(|trust| trust.trusted);
-        let status = status.or_else(|| {
-            trust
-                .err()
-                .map(|err| format!("cannot read whether the review is trusted: {err}"))
+        let work = cx.background_executor().spawn(async move {
+            let (review, history) = opener()?;
+            let trust = review.trust().map_err(|err| err.to_string())?;
+            let info = review.info().ok().flatten();
+            let revision = history.current().ok_or("the review has no revision yet")?;
+            let history = Arc::new(history);
+            let texts = read_texts(&review, &history, revision);
+            Ok::<_, String>(Opened {
+                review,
+                trusted: trust.trusted,
+                info,
+                snapshot: Snapshot { history, revision },
+                texts,
+            })
         });
-        app.status = status.unwrap_or_else(|| app.summary()).into();
-        app.reset_token();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = work.await;
+            this.update_in(cx, |this, window, cx| this.opened(result, window, cx))
+                .ok();
+        })
+        .detach();
         if startup.qa {
             qa::start(window, cx);
-        }
-        if startup.bench_scroll {
-            cx.on_next_frame(window, ReviewApp::start_bench);
-        } else if startup.exit_after_first_frame {
-            cx.on_next_frame(window, |this, _window, cx| {
-                println!(
-                    "first frame rendered: {} steps, {} rows",
-                    this.partition.steps.len(),
-                    this.rows.rows.len()
-                );
-                cx.quit();
-            });
         }
         app
     }
 
-    /// The status line shown when nothing else needs saying.
+    /// Shows the opened review, or why it could not be opened.
+    fn opened(
+        &mut self,
+        opened: Result<Opened, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match opened {
+            Ok(opened) => {
+                self.info = opened.info;
+                self.trusted = opened.trusted;
+                self.review = Some(Arc::new(opened.review));
+                self.blobs.texts.extend(opened.texts);
+                self.revisions = overview::summarize(&opened.snapshot.history);
+                self.snapshot = Some(opened.snapshot);
+                window.set_window_title(&self.title());
+                self.phase = Phase::Ready;
+                self.refresh_tree();
+                self.select_first_file();
+                self.status = self.summary().into();
+                self.request_syntax(cx);
+            }
+            Err(err) => {
+                eprintln!("review-lite: {err}");
+                self.status = "The review could not be opened.".into();
+                self.phase = Phase::Failed(err);
+            }
+        }
+        let process_started = self.startup.process_started;
+        cx.on_next_frame(window, move |this, window, cx| {
+            this.first_hunk = Some(process_started.elapsed());
+            if let Some(mode) = this.startup.bench_scroll {
+                this.start_bench(mode, window, cx);
+            } else if this.startup.exit_after_first_frame {
+                println!(
+                    "first hunk visible after {:.1?}: {} files, {} rows",
+                    process_started.elapsed(),
+                    this.tree.len(),
+                    this.rows.rows.len()
+                );
+                cx.quit();
+            }
+        });
+        cx.notify();
+    }
+
+    /// The window title: the pull request or range under review.
+    fn title(&self) -> String {
+        match &self.info {
+            Some(review_core::ReviewInfo::PullRequest(pr)) => {
+                format!("#{} {}", pr.number, pr.title)
+            }
+            _ => self.review.as_ref().map_or_else(
+                || "Code review".to_owned(),
+                |review| format!("Review of {}", review.key()),
+            ),
+        }
+    }
+
+    /// One line on where the review stands.
     fn summary(&self) -> String {
-        let (reviewed, total) = self
-            .progress
+        let (reviewed, total) = self.totals();
+        let revision = self.snapshot.as_ref().map_or_else(String::new, |snapshot| {
+            format!("Revision {}", snapshot.revision)
+        });
+        format!(
+            "{revision} · {reviewed} of {} reviewed",
+            plural(total, "hunk")
+        )
+    }
+
+    /// Reviewed and total units over every file, pending marks included.
+    fn totals(&self) -> (usize, usize) {
+        self.tree
             .iter()
-            .fold((0, 0), |(reviewed, total), step| {
-                (reviewed + step.reviewed, total + step.total)
+            .filter(|node| node.depth == 0)
+            .fold((0, 0), |(reviewed, total), node| {
+                let counts = &node.counts;
+                (
+                    reviewed + counts.reviewed + counts.accepted + counts.flagged,
+                    total + counts.units,
+                )
+            })
+    }
+
+    fn set_status(&mut self, status: impl Into<SharedString>) {
+        self.status = status.into();
+        self.failed_at = None;
+    }
+
+    fn fail(&mut self, status: impl Into<SharedString>) {
+        self.status = status.into();
+        self.failed_at = Some(Instant::now());
+    }
+
+    /// The shown revision's view.
+    fn view(&self) -> Option<review_core::RevisionView<'_>> {
+        self.snapshot.as_ref()?.view()
+    }
+
+    /// The area whose keys apply now.
+    fn area(&self) -> Area {
+        let editing = self.find.as_ref().is_some_and(|find| find.editing);
+        match (self.overlay, editing, self.mode) {
+            (Some(_), ..) => Area::Overlay,
+            (None, true, Mode::Buffer) => Area::Find,
+            (None, _, Mode::Tree) => Area::Tree,
+            (None, _, Mode::Diff) => Area::Diff,
+            (None, _, Mode::Buffer) => Area::Buffer,
+        }
+    }
+
+    /// Gives the keyboard to the current mode or overlay.
+    fn focus_mode(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = match (self.overlay, self.mode) {
+            (Some(_), _) => &self.overlay_focus,
+            (None, Mode::Tree) => &self.tree_focus,
+            (None, Mode::Diff) => &self.diff_focus,
+            (None, Mode::Buffer) => &self.buffer_focus,
+        };
+        window.focus(handle, cx);
+    }
+
+    /// Switches to `mode` and gives it the keyboard.
+    fn enter_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = mode;
+        self.selection = None;
+        self.focus_mode(window, cx);
+        cx.notify();
+    }
+
+    /// Recomputes the file tree from the shown revision and the pending marks.
+    fn refresh_tree(&mut self) {
+        let Some(view) = self.view() else {
+            return;
+        };
+        let files = state::statuses(&view, &self.pending);
+        self.tree = review_core::tree::file_tree(&files);
+    }
+
+    /// Lays out the selected file's diff from the current state, keeping the selected hunk.
+    fn rebuild(&mut self) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(view) = snapshot.view() else {
+            return;
+        };
+        let Some(path) = self.selected.clone() else {
+            self.rows = Layout::default();
+            self.hunk_rows.clear();
+            return;
+        };
+        let units = view.units_under(std::slice::from_ref(&path));
+        let file = units.first().and_then(|&unit| view.file(unit).ok());
+        // Text and highlights come from the caches by the blobs of this revision's file, so
+        // they always belong to what the units describe.
+        self.folds.texts.clear();
+        self.folds.syntax.clear();
+        if let Some(file) = file {
+            let head = file.new.as_ref().map(|side| side.oid.clone());
+            let base = file.old.as_ref().map(|side| side.oid.clone());
+            if let Some(text) = head.as_ref().and_then(|oid| self.blobs.texts.get(oid)) {
+                self.folds.texts.insert(path.clone(), Arc::clone(text));
+            }
+            let syntax = crate::syntax::FileSyntax {
+                head: head
+                    .as_ref()
+                    .and_then(|oid| self.blobs.syntax.get(oid))
+                    .cloned(),
+                base: base
+                    .as_ref()
+                    .and_then(|oid| self.blobs.syntax.get(oid))
+                    .cloned(),
+            };
+            self.folds.syntax.insert(path.clone(), Arc::new(syntax));
+        }
+        self.rows = rows::build(&view, &units, &self.folds);
+        self.hunk_rows = hunk_rows(&self.rows);
+        self.hunk = self.hunk.min(self.hunk_rows.len().saturating_sub(1));
+    }
+
+    /// The units of the selected hunk.
+    fn hunk_units(&self) -> Vec<UnitId> {
+        self.rows.hunks.get(self.hunk).cloned().unwrap_or_default()
+    }
+
+    /// The row the diff's keyboard target starts at: the selected hunk's header.
+    fn hunk_start(&self) -> Option<usize> {
+        self.hunk_rows.get(self.hunk).map(|rows| rows.start)
+    }
+
+    fn toggle_help(&mut self, _: &ToggleHelp, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = Some(Overlay::Help);
+        self.focus_mode(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_overview(&mut self, _: &ToggleOverview, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = Some(Overlay::Overview);
+        self.focus_mode(window, cx);
+        cx.notify();
+    }
+
+    fn close_overlay(&mut self, _: &CloseOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = None;
+        self.focus_mode(window, cx);
+        cx.notify();
+    }
+
+    /// `|`: switches between syntax and plain diff colors and remembers the choice.
+    fn toggle_diff_style(&mut self, _: &ToggleDiffStyle, _: &mut Window, cx: &mut Context<Self>) {
+        let style = self.settings.diff_style.toggled();
+        self.settings.diff_style = style;
+        let saved = self.settings.config_path.as_deref().map(|path| {
+            crate::config::remember(path, &[("diff", "style", format!("{:?}", style.name()))])
+        });
+        match saved {
+            Some(Err(err)) => self.fail(format!(
+                "Showing {} diffs; could not remember it: {err}",
+                style.name()
+            )),
+            _ => self.set_status(format!("Showing {} diffs.", style.name())),
+        }
+        cx.notify();
+    }
+
+    /// `T`: the next theme, remembered in the configuration.
+    fn cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
+        let themes = &self.settings.themes;
+        let next = themes
+            .iter()
+            .position(|theme| theme.name == self.settings.theme.name)
+            .map_or(0, |position| (position + 1) % themes.len().max(1));
+        let Some(theme) = themes.get(next).cloned() else {
+            return;
+        };
+        let title = theme.title.clone();
+        let name = theme.name.clone();
+        self.settings.theme = Arc::new(theme);
+        let saved =
+            self.settings.config_path.as_deref().map(|path| {
+                crate::config::remember(path, &[("theme", "name", format!("{name:?}"))])
             });
-        let mut text = format!(
-            "revision {}: {reviewed}/{total} units reviewed",
-            self.partition.revision
-        );
-        if !self.trusted {
-            text = format!("{text}; untrusted, language servers off (T to trust)");
+        match saved {
+            Some(Err(err)) => self.fail(format!("Theme {title}; could not remember it: {err}")),
+            _ => self.set_status(format!("Theme {title}.")),
         }
-        match self.history.warnings().first() {
-            Some(warning) => format!("{text}; warning: {warning}"),
-            None => text,
+        cx.notify();
+    }
+
+    /// `+`: the diff takes the whole width.
+    fn screen_next(&mut self, _: &ScreenNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.screen = Screen::Full;
+        cx.notify();
+    }
+
+    /// `_`: back to files and diff side by side.
+    fn screen_previous(&mut self, _: &ScreenPrevious, window: &mut Window, cx: &mut Context<Self>) {
+        self.screen = Screen::Split;
+        self.layout.sidebar_visible = true;
+        self.focus_mode(window, cx);
+        cx.notify();
+    }
+
+    /// `Ctrl+B`: shows or hides the files, and remembers it.
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout.sidebar_visible = !self.layout.sidebar_visible;
+        self.screen = if self.layout.sidebar_visible {
+            Screen::Split
+        } else {
+            Screen::Full
+        };
+        if !self.layout.sidebar_visible && self.mode == Mode::Tree {
+            self.enter_mode(Mode::Diff, window, cx);
+        }
+        self.remember_layout();
+        cx.notify();
+    }
+
+    /// Whether the files show beside the diff.
+    fn sidebar_shown(&self) -> bool {
+        self.screen == Screen::Split && self.layout.sidebar_visible
+    }
+
+    /// The sidebar's width as shown, zero when hidden.
+    fn shown_sidebar_width(&self, window: &Window) -> f32 {
+        if self.sidebar_shown() {
+            panes::sidebar_width(self.layout.sidebar, f32::from(window.viewport_size().width))
+        } else {
+            0.0
         }
     }
 
-    fn row(&self) -> Option<&Row> {
-        self.rows.rows.get(self.cursor)
+    /// Writes the pane width to the configuration file, for the next launch.
+    fn remember_layout(&mut self) {
+        let Some(path) = self.settings.config_path.clone() else {
+            return;
+        };
+        let layout = self.layout;
+        let values = [
+            ("layout", "sidebar", format!("{}", layout.sidebar.round())),
+            (
+                "layout",
+                "sidebar_visible",
+                layout.sidebar_visible.to_string(),
+            ),
+        ];
+        if let Err(err) = crate::config::remember(&path, &values) {
+            self.fail(format!("Could not remember the pane width: {err}"));
+        }
     }
 
-    fn focused_unit(&self) -> Option<UnitId> {
-        self.row().map(|row| row.unit)
+    fn zoom(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
+        let size = size.unwrap_or(self.fonts.default_code_size);
+        self.fonts.code_size = size.clamp(ZOOM_RANGE.start, ZOOM_RANGE.end);
+        self.set_status(format!("Code size {:.1} px.", self.fonts.code_size));
+        cx.notify();
     }
 
-    /// Selects step `selected` (or every step) and rebuilds its rows from the engine.
-    fn select_step(&mut self, selected: Option<usize>, cx: &mut Context<Self>) {
-        self.trust_pending = false;
-        self.selected = selected;
-        match self.history.current_view() {
-            Ok(view) => {
-                let units = step_units(&self.partition, selected);
-                self.rows = rows::build(&view, &units);
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom(Some(self.fonts.code_size + 1.0), cx);
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom(Some(self.fonts.code_size - 1.0), cx);
+    }
+
+    fn zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom(None, cx);
+    }
+
+    /// Reads, in the background, the head text of the shown revision's files that are not
+    /// cached yet, then highlights both versions of every file.
+    fn request_syntax(&mut self, cx: &mut Context<Self>) {
+        let (Some(review), Some(snapshot)) = (self.review.clone(), self.snapshot.clone()) else {
+            return;
+        };
+        let Some(view) = snapshot.view() else {
+            return;
+        };
+        let Some(analysis) = view.analysis() else {
+            return;
+        };
+        let mut wanted: Vec<(String, ObjectId)> = Vec::new();
+        for file in &analysis.files {
+            for side in [file.new.as_ref(), file.old.as_ref()].into_iter().flatten() {
+                if !self.blobs.syntax.contains_key(&side.oid)
+                    && self.requested.insert(side.oid.clone())
+                {
+                    wanted.push((side.path.clone(), side.oid.clone()));
+                }
             }
-            Err(err) => self.status = format!("cannot show the step: {err}").into(),
         }
-        self.cursor = 0;
-        self.list.scroll_to_item(0, ScrollStrategy::Top);
-        self.reset_token();
-        cx.notify();
-    }
-
-    /// Moves the cursor to `row` and scrolls it into view.
-    fn move_cursor(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.trust_pending = false;
-        let Some(last) = self.rows.rows.len().checked_sub(1) else {
-            return;
-        };
-        self.cursor = row.min(last);
-        self.list
-            .scroll_to_item(self.cursor, ScrollStrategy::Nearest);
-        self.reset_token();
-        cx.notify();
-    }
-
-    /// Moves the cursor to `unit`'s header, switching steps when another step holds it.
-    fn focus_unit(&mut self, unit: UnitId, cx: &mut Context<Self>) {
-        if !self.rows.unit_rows.contains_key(&unit) {
-            let step = self.partition.step_of(unit);
-            self.select_step(step, cx);
-        }
-        if let Some(&row) = self.rows.unit_rows.get(&unit) {
-            self.cursor = row;
-            self.list.scroll_to_item(row, ScrollStrategy::Top);
-            self.reset_token();
-            cx.notify();
-        }
-    }
-
-    fn next_line(&mut self, _: &NextLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(self.cursor + 1, cx);
-    }
-
-    fn previous_line(&mut self, _: &PreviousLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(self.cursor.saturating_sub(1), cx);
-    }
-
-    fn step_unit(&mut self, offset: isize, cx: &mut Context<Self>) {
-        if let Some(unit) = self.partition.neighbor(self.focused_unit(), offset) {
-            self.focus_unit(unit, cx);
-        }
-    }
-
-    fn next_unit(&mut self, _: &NextUnit, _: &mut Window, cx: &mut Context<Self>) {
-        self.step_unit(1, cx);
-    }
-
-    fn previous_unit(&mut self, _: &PreviousUnit, _: &mut Window, cx: &mut Context<Self>) {
-        self.step_unit(-1, cx);
-    }
-
-    fn next_unreviewed(&mut self, _: &NextUnreviewed, _: &mut Window, cx: &mut Context<Self>) {
-        let found = self
-            .history
-            .current_view()
-            .ok()
-            .and_then(|view| self.partition.next_unreviewed(&view, self.focused_unit()));
-        if let Some(unit) = found {
-            self.focus_unit(unit, cx);
-        } else {
-            self.status = "every unit is reviewed".into();
-            cx.notify();
-        }
-    }
-
-    fn change_step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let count = self.partition.steps.len();
-        let selected = match (self.selected, forward) {
-            (None, true) => (count > 0).then_some(0),
-            (None, false) => count.checked_sub(1),
-            (Some(index), true) => (index + 1 < count).then_some(index + 1),
-            (Some(index), false) => index.checked_sub(1),
-        };
-        self.select_step(selected, cx);
-    }
-
-    fn next_step(&mut self, _: &NextStep, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_step(true, cx);
-    }
-
-    fn previous_step(&mut self, _: &PreviousStep, _: &mut Window, cx: &mut Context<Self>) {
-        self.change_step(false, cx);
-    }
-
-    /// Puts the token cursor on the first identifier of the cursor row, if it is a head line.
-    fn reset_token(&mut self) {
-        self.token = self
-            .row()
-            .filter(|row| row.head.is_some())
-            .and_then(|row| identifiers(&row.text).into_iter().next());
-    }
-
-    fn move_token(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(row) = self.row().filter(|row| row.head.is_some()) else {
-            return;
-        };
-        let tokens = identifiers(&row.text);
-        let start = self.token.as_ref().map_or(0, |token| token.start);
-        let next = if forward {
-            tokens.iter().find(|token| token.start > start)
-        } else {
-            tokens.iter().rev().find(|token| token.start < start)
-        };
-        if let Some(next) = next.cloned() {
-            self.token = Some(next);
-            cx.notify();
-        }
-    }
-
-    fn next_token(&mut self, _: &NextToken, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_token(true, cx);
-    }
-
-    fn previous_token(&mut self, _: &PreviousToken, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_token(false, cx);
-    }
-
-    /// Marks the focused unit or hunk through the engine, then reloads the history in the
-    /// background and refreshes the view from it.
-    fn mark(&mut self, verdict: MarkVerdict, scope: MarkScope, cx: &mut Context<Self>) {
-        self.trust_pending = false;
-        if self.busy {
-            self.status = "still saving the previous mark".into();
-            cx.notify();
+        let texts_wanted: Vec<ObjectId> = analysis
+            .files
+            .iter()
+            .filter_map(|file| file.new.as_ref())
+            .filter(|side| !self.blobs.texts.contains_key(&side.oid))
+            .map(|side| side.oid.clone())
+            .collect();
+        if wanted.is_empty() && texts_wanted.is_empty() {
             return;
         }
-        let Some(row) = self.row() else {
-            return;
-        };
-        let units = match scope {
-            MarkScope::Unit => vec![row.unit],
-            MarkScope::Hunk => self.rows.hunks.get(row.hunk).cloned().unwrap_or_default(),
-        };
-        let anchor = (
-            row.unit,
-            self.cursor
-                .saturating_sub(self.rows.unit_rows.get(&row.unit).copied().unwrap_or(0)),
-        );
-        let review = Arc::clone(&self.review);
-        let history = Arc::clone(&self.history);
-        let selected = self.selected;
-        let count = units.len();
-        self.busy = true;
-        self.status = format!("marking {count} unit(s) {}…", verdict.name()).into();
-        cx.notify();
+        self.highlighting = true;
         let work = cx.background_executor().spawn(async move {
-            {
-                let view = history.current_view()?;
-                review.mark(&view, &units, verdict)?;
+            let mut texts = HashMap::new();
+            let mut syntax = HashMap::new();
+            let Ok(mut reader) = review.repo().blob_reader() else {
+                return (texts, syntax);
+            };
+            for oid in texts_wanted {
+                if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
+                    && !bytes.contains(&0)
+                {
+                    texts.insert(
+                        oid,
+                        Arc::new(rows::FullText::new(&String::from_utf8_lossy(&bytes))),
+                    );
+                }
             }
-            load(Arc::new(review.history()?), selected)
+            for (path, oid) in wanted {
+                if review_core::syntax::Language::from_path(&path).is_none() {
+                    continue;
+                }
+                if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
+                    && let Ok(text) = std::str::from_utf8(&bytes)
+                {
+                    syntax.insert(oid, Arc::new(crate::syntax::analyze(&path, text)));
+                }
+            }
+            (texts, syntax)
         });
         cx.spawn(async move |this, cx| {
-            let loaded = work.await;
+            let (texts, syntax) = work.await;
             this.update(cx, |this, cx| {
-                this.busy = false;
-                match loaded {
-                    Ok(loaded) => {
-                        this.apply(loaded, anchor);
-                        this.status = format!(
-                            "marked {count} unit(s) {}; {}",
-                            verdict.name(),
-                            this.summary()
-                        )
-                        .into();
-                    }
-                    Err(err) => this.status = format!("mark failed: {err}").into(),
-                }
+                this.highlighting = false;
+                this.blobs.texts.extend(texts);
+                this.blobs.syntax.extend(syntax);
+                this.rebuild();
+                this.refresh_buffer_syntax();
                 cx.notify();
             })
             .ok();
@@ -494,173 +888,10 @@ impl ReviewApp {
         .detach();
     }
 
-    /// Replaces the engine state, keeping the cursor at the same line of the same unit.
-    fn apply(&mut self, loaded: Loaded, (unit, offset): (UnitId, usize)) {
-        self.history = loaded.history;
-        self.partition = loaded.partition;
-        self.progress = loaded.progress;
-        self.rows = loaded.rows;
-        let last = self.rows.rows.len().saturating_sub(1);
-        self.cursor = self
-            .rows
-            .unit_rows
-            .get(&unit)
-            .map_or(0, |&row| row + offset)
-            .min(last);
-        if self.row().map(|row| row.unit) != Some(unit) {
-            self.cursor = self
-                .rows
-                .unit_rows
-                .get(&unit)
-                .copied()
-                .unwrap_or(0)
-                .min(last);
-        }
-        self.reset_token();
-    }
-
-    fn mark_seen(&mut self, _: &MarkSeen, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Seen, MarkScope::Unit, cx);
-    }
-
-    fn mark_accepted(&mut self, _: &MarkAccepted, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Accepted, MarkScope::Unit, cx);
-    }
-
-    fn mark_flagged(&mut self, _: &MarkFlagged, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Flagged, MarkScope::Unit, cx);
-    }
-
-    fn mark_unseen(&mut self, _: &MarkUnseen, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Unseen, MarkScope::Unit, cx);
-    }
-
-    fn mark_hunk_seen(&mut self, _: &MarkHunkSeen, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Seen, MarkScope::Hunk, cx);
-    }
-
-    fn mark_hunk_accepted(&mut self, _: &MarkHunkAccepted, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Accepted, MarkScope::Hunk, cx);
-    }
-
-    fn mark_hunk_flagged(&mut self, _: &MarkHunkFlagged, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Flagged, MarkScope::Hunk, cx);
-    }
-
-    fn mark_hunk_unseen(&mut self, _: &MarkHunkUnseen, _: &mut Window, cx: &mut Context<Self>) {
-        self.mark(MarkVerdict::Unseen, MarkScope::Hunk, cx);
-    }
-
-    /// Asks a language server, in the background, where the identifier under the token cursor
-    /// is defined, and opens that file read-only.
-    fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, cx: &mut Context<Self>) {
-        self.trust_pending = false;
-        if !self.trusted {
-            self.status = "go-to-definition needs a language server, which runs code from this \
-                           review; press T to trust it first"
-                .into();
-            cx.notify();
-            return;
-        }
-        let (Some(head), Some(token)) = (
-            self.row().and_then(|row| row.head.clone()),
-            self.token.clone(),
-        ) else {
-            self.status =
-                "go-to-definition starts from an added line; move to one with j and k".into();
-            cx.notify();
-            return;
-        };
-        let Some(record) = self
-            .history
-            .revisions()
-            .last()
-            .map(|record| (*record).clone())
-        else {
-            return;
-        };
-        let review = Arc::clone(&self.review);
-        let servers = Arc::clone(&self.servers);
-        self.looking_up = true;
-        self.status = "looking up the definition (the language server may need to index first)…"
-            .to_string()
-            .into();
-        cx.notify();
-        let work = cx.background_executor().spawn(async move {
-            let root = review.worktree(&record).map_err(|err| err.to_string())?;
-            find_definition(&servers, &root, &head, token.start)
-        });
-        cx.spawn(async move |this, cx| {
-            let found = work.await;
-            this.update(cx, |this, cx| {
-                this.looking_up = false;
-                match found {
-                    Ok(source) => {
-                        this.source_list
-                            .scroll_to_item(source.target, ScrollStrategy::Center);
-                        this.status = format!("{}  (escape closes)", source.title).into();
-                        this.source = Some(source);
-                    }
-                    Err(err) => this.status = format!("go-to-definition: {err}").into(),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Trusts the review after a confirming second press, or revokes trust and stops the
-    /// language servers.
-    fn toggle_trust(&mut self, _: &ToggleTrust, _: &mut Window, cx: &mut Context<Self>) {
-        let decision = match (self.trusted, self.trust_pending) {
-            (true, _) => false,
-            (false, true) => true,
-            (false, false) => {
-                self.trust_pending = true;
-                self.status = "trusting runs rust-analyzer in a worktree of the reviewed head, \
-                               and through it cargo metadata and rustc under the review's own \
-                               Cargo configuration, which can run any program; press T again to \
-                               trust"
-                    .into();
-                cx.notify();
-                return;
-            }
-        };
-        self.trust_pending = false;
-        if self.looking_up {
-            self.status = "wait for the definition lookup to finish".into();
-            cx.notify();
-            return;
-        }
-        match self.review.set_trusted(decision) {
-            Ok(()) => {
-                self.trusted = decision;
-                if !decision {
-                    // Dropping a server shuts it down.
-                    self.servers.lock().clear();
-                }
-                let done = if decision { "trusted" } else { "trust revoked" };
-                self.status = format!("{done}; {}", self.summary()).into();
-            }
-            Err(err) => self.status = format!("cannot record trust: {err}").into(),
-        }
-        cx.notify();
-    }
-
-    fn close_source(&mut self, _: &CloseSource, _: &mut Window, cx: &mut Context<Self>) {
-        self.trust_pending = false;
-        self.source = None;
-        self.status = self.summary().into();
-        cx.notify();
-    }
-
-    fn start_bench(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected.is_some() {
-            self.select_step(None, cx);
-        }
+    fn start_bench(&mut self, mode: BenchMode, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.bench = Some(Bench {
+            mode,
             started: now,
             last: now,
             intervals: Vec::new(),
@@ -673,9 +904,10 @@ impl ReviewApp {
         cx.on_next_frame(window, ReviewApp::bench_frame);
     }
 
-    /// Records the interval since the last frame and scrolls one step further, or reports and
-    /// quits at the end of the list.
+    /// Records the interval since the last frame and scrolls further, or reports and quits at
+    /// the end of the list.
     fn bench_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let row_height = self.fonts.row_height();
         let Some(bench) = &mut self.bench else {
             return;
         };
@@ -685,602 +917,124 @@ impl ReviewApp {
         if let Some(built) = bench.built.take() {
             bench.work.push(built);
         }
-        let handle = self.list.0.borrow().base_handle.clone();
-        let max = handle.max_offset().y;
-        let current = -handle.offset().y;
-        if bench.intervals.len() > 1 && current >= max {
+        let max =
+            f32::from(self.list.content_size().height - self.list.viewport_bounds().size.height);
+        let current = scroll::offset_of(&self.list);
+        if bench.intervals.len() > 1 && current >= max - 0.5 {
             println!("{}", bench_report(bench, self.rows.rows.len()));
             cx.quit();
             return;
         }
-        handle.set_offset(point(px(0.0), -(current + px(BENCH_STEP)).min(max)));
+        match bench.mode {
+            BenchMode::Fling => {
+                scroll::set_offset_of(
+                    &self.list,
+                    (current + BENCH_ROWS_PER_FRAME * row_height).min(max),
+                );
+            }
+            BenchMode::Animated => {
+                if self.list_animation.is_none() {
+                    let page =
+                        f32::from(self.list.viewport_bounds().size.height) - 2.0 * row_height;
+                    self.scroll_list_to(current + page);
+                }
+            }
+        }
         cx.notify();
         cx.on_next_frame(window, ReviewApp::bench_frame);
     }
 
-    fn render_rows(
-        &mut self,
-        range: Range<usize>,
-        cx: &mut Context<Self>,
-    ) -> Vec<impl IntoElement + use<>> {
-        let colors = Palette::dark();
-        let theme = cx.theme();
-        let mono = theme.mono_font_family.clone();
-        let focused_hunk = self.row().map(|row| row.hunk);
-        let rows: Vec<_> = range
-            .filter_map(|index| {
-                let row = self.rows.rows.get(index)?;
-                let token = (index == self.cursor).then(|| self.token.clone()).flatten();
-                Some(
-                    render_row(
-                        index,
-                        row,
-                        index == self.cursor,
-                        Some(row.hunk) == focused_hunk,
-                        token,
-                        &colors,
-                    )
-                    .font_family(mono.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.cursor = index;
-                        this.reset_token();
-                        cx.notify();
-                    })),
-                )
-            })
-            .collect();
-        if let Some(bench) = &mut self.bench {
-            bench.rendered_rows += rows.len();
-            bench.built = bench.render_started.map(|started| started.elapsed());
+    /// Records the time from an input event to the end of the frame that shows its effect.
+    fn note_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.latency.pending.is_some() {
+            cx.on_next_frame(window, |this, _, _| {
+                if let Some(started) = this.latency.pending.take() {
+                    this.latency.samples.push(started.elapsed());
+                }
+            });
         }
-        rows
     }
+}
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (active, foreground, muted, done) = (
-            theme.list_active,
-            theme.foreground,
-            theme.muted_foreground,
-            Palette::dark().accepted,
-        );
-        let total = self.progress.iter().fold(
-            StepProgress {
-                reviewed: 0,
-                total: 0,
-            },
-            |sum, step| StepProgress {
-                reviewed: sum.reviewed + step.reviewed,
-                total: sum.total + step.total,
-            },
-        );
-        let entries = std::iter::once((None, "All changes".to_owned(), total)).chain(
-            self.partition
-                .steps
-                .iter()
-                .zip(&self.progress)
-                .enumerate()
-                .map(|(index, (step, progress))| (Some(index), step.title.clone(), *progress)),
-        );
-        let title = self
-            .partition
-            .title
-            .clone()
-            .unwrap_or_else(|| "Files".to_owned());
-        v_flex()
-            .id("steps")
-            .w(px(300.0))
-            .h_full()
-            .overflow_y_scroll()
-            .border_r_1()
-            .border_color(theme.border)
-            .bg(theme.sidebar)
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .font_weight(FontWeight::BOLD)
-                    .child(title),
-            )
-            .children(entries.map(|(index, title, progress)| {
-                let selected = index == self.selected;
-                h_flex()
-                    .id(SharedString::from(format!("step-{index:?}")))
-                    .px_2()
-                    .py_0p5()
-                    .gap_2()
-                    .when(selected, |row| row.bg(active))
-                    .text_color(foreground)
-                    .child(div().flex_1().truncate().child(title))
-                    .child(
-                        div()
-                            .text_color(if progress.reviewed == progress.total {
-                                done
-                            } else {
-                                muted
-                            })
-                            .child(format!("{}/{}", progress.reviewed, progress.total)),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_step(index, cx)))
-            }))
-    }
+/// What opening a review produced.
+struct Opened {
+    review: Review,
+    trusted: bool,
+    info: Option<review_core::ReviewInfo>,
+    snapshot: Snapshot,
+    texts: HashMap<ObjectId, Arc<rows::FullText>>,
+}
 
-    /// The selected step's title and why it matters.
-    fn render_step_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (title, why) = match self
-            .selected
-            .and_then(|index| self.partition.steps.get(index))
+/// Reads the head text of every changed text file of `revision`, by blob, for context lines.
+fn read_texts(
+    review: &Review,
+    history: &History,
+    revision: RevisionNumber,
+) -> HashMap<ObjectId, Arc<rows::FullText>> {
+    let mut texts = HashMap::new();
+    let Some(analysis) = history
+        .view(revision)
+        .ok()
+        .and_then(|view| view.analysis().cloned())
+    else {
+        return texts;
+    };
+    let Ok(mut reader) = review.repo().blob_reader() else {
+        return texts;
+    };
+    for side in analysis.files.iter().filter_map(|file| file.new.as_ref()) {
+        if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&side.oid)
+            && !bytes.contains(&0)
         {
-            Some(step) => (step.title.clone(), step.why.clone()),
-            None => ("All changes".to_owned(), String::new()),
-        };
-        v_flex()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.sidebar)
-            .child(div().font_weight(FontWeight::BOLD).truncate().child(title))
-            .when(!why.is_empty(), |header| {
-                header.child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(why),
-                )
-            })
-    }
-
-    fn render_source(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let source = self.source.as_ref()?;
-        let theme = cx.theme();
-        let (target_bg, muted, mono) = (
-            theme.selection,
-            theme.muted_foreground,
-            theme.mono_font_family.clone(),
-        );
-        let lines = source.lines.clone();
-        let target = source.target;
-        Some(
-            v_flex()
-                .flex_1()
-                .h_full()
-                .border_l_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .font_weight(FontWeight::BOLD)
-                        .truncate()
-                        .child(source.title.clone()),
-                )
-                .child(
-                    uniform_list("source", lines.len(), move |range, _, _| {
-                        range
-                            .filter_map(|index| {
-                                let line = lines.get(index)?.clone();
-                                Some(
-                                    h_flex()
-                                        .h(px(ROW_HEIGHT))
-                                        .px_2()
-                                        .font_family(mono.clone())
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .w_full()
-                                        .when(index == target, |row| row.bg(target_bg))
-                                        .child(
-                                            div()
-                                                .w(px(56.0))
-                                                .flex_none()
-                                                .text_color(muted)
-                                                .child(format!("{:>5}", index + 1)),
-                                        )
-                                        .child(line),
-                                )
-                            })
-                            .collect()
-                    })
-                    .track_scroll(&self.source_list)
-                    .flex_1(),
-                ),
-        )
-    }
-}
-
-/// Colors of the hunk list, tuned for a dark background: muted line backgrounds, stronger
-/// backgrounds for changed tokens, and distinct text colors for moves, collapsed units,
-/// interdiffs and review state badges.
-struct Palette {
-    removed_line: Hsla,
-    removed_token: Hsla,
-    removed_cursor: Hsla,
-    added_line: Hsla,
-    added_token: Hsla,
-    added_cursor: Hsla,
-    header: Hsla,
-    header_cursor: Hsla,
-    plain_cursor: Hsla,
-    hunk_border: Hsla,
-    cursor_border: Hsla,
-    token: Hsla,
-    gutter: Hsla,
-    info: Hsla,
-    moved: Hsla,
-    collapsed: Hsla,
-    interdiff: Hsla,
-    note: Hsla,
-    unreviewed: Hsla,
-    seen: Hsla,
-    accepted: Hsla,
-    flagged: Hsla,
-    changed: Hsla,
-}
-
-impl Palette {
-    fn dark() -> Self {
-        // Hues are fractions of a turn, as gpui's `hsla` takes them.
-        let color =
-            |degrees: f32, saturation, lightness| hsla(degrees / 360.0, saturation, lightness, 1.0);
-        Self {
-            removed_line: color(0.0, 0.30, 0.17),
-            removed_token: color(0.0, 0.50, 0.33),
-            removed_cursor: color(0.0, 0.30, 0.24),
-            added_line: color(140.0, 0.28, 0.15),
-            added_token: color(140.0, 0.45, 0.29),
-            added_cursor: color(140.0, 0.28, 0.22),
-            header: color(220.0, 0.14, 0.17),
-            header_cursor: color(215.0, 0.28, 0.26),
-            plain_cursor: color(215.0, 0.28, 0.22),
-            hunk_border: color(210.0, 0.55, 0.45),
-            cursor_border: color(45.0, 0.95, 0.60),
-            token: color(210.0, 0.70, 0.42),
-            gutter: color(220.0, 0.08, 0.45),
-            info: color(220.0, 0.10, 0.62),
-            moved: color(190.0, 0.55, 0.65),
-            collapsed: color(265.0, 0.35, 0.72),
-            interdiff: color(32.0, 0.85, 0.65),
-            note: color(48.0, 0.80, 0.65),
-            unreviewed: color(210.0, 0.85, 0.70),
-            seen: color(150.0, 0.25, 0.62),
-            accepted: color(140.0, 0.60, 0.58),
-            flagged: color(8.0, 0.80, 0.64),
-            changed: color(40.0, 0.95, 0.58),
+            texts.insert(
+                side.oid.clone(),
+                Arc::new(rows::FullText::new(&String::from_utf8_lossy(&bytes))),
+            );
         }
     }
-
-    fn badge(&self, badge: Badge) -> Hsla {
-        match badge {
-            Badge::Unreviewed => self.unreviewed,
-            Badge::Seen => self.seen,
-            Badge::Accepted => self.accepted,
-            Badge::Flagged => self.flagged,
-            Badge::Changed => self.changed,
-        }
-    }
+    texts
 }
 
-/// Renders one row of the hunk list.
-fn render_row(
-    index: usize,
-    row: &Row,
-    is_cursor: bool,
-    in_focused_hunk: bool,
-    token: Option<Range<usize>>,
-    colors: &Palette,
-) -> gpui::Stateful<gpui::Div> {
-    let (sign, background, cursor_background, strong) = match row.kind {
-        RowKind::Removed | RowKind::NestedOld => (
-            "-",
-            Some(colors.removed_line),
-            colors.removed_cursor,
-            colors.removed_token,
-        ),
-        RowKind::Added | RowKind::NestedNew => (
-            "+",
-            Some(colors.added_line),
-            colors.added_cursor,
-            colors.added_token,
-        ),
-        RowKind::Header => ("", Some(colors.header), colors.header_cursor, colors.header),
-        RowKind::NestedSame
-        | RowKind::Info
-        | RowKind::Moved
-        | RowKind::Collapsed
-        | RowKind::Interdiff
-        | RowKind::Note => (" ", None, colors.plain_cursor, colors.header),
-    };
-    let foreground = match row.kind {
-        RowKind::Info => Some(colors.info),
-        RowKind::Moved => Some(colors.moved),
-        RowKind::Collapsed => Some(colors.collapsed),
-        RowKind::Interdiff => Some(colors.interdiff),
-        RowKind::Note => Some(colors.note),
-        RowKind::Header
-        | RowKind::Removed
-        | RowKind::Added
-        | RowKind::NestedOld
-        | RowKind::NestedNew
-        | RowKind::NestedSame => None,
-    };
-    let highlights = row_highlights(row, token, strong, colors);
-    let nested = matches!(
-        row.kind,
-        RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
-    );
-    let gutter = match &row.head {
-        Some(head) => format!("{:>5}", head.line + 1),
-        // A rule in the gutter sets nested diffs apart from the unit's own lines.
-        None if nested => "    ┆".to_owned(),
-        None => String::new(),
-    };
-    let text = StyledText::new(row.text.clone()).with_highlights(highlights);
-    let border = if is_cursor {
-        colors.cursor_border
-    } else if in_focused_hunk {
-        colors.hunk_border
-    } else {
-        gpui::transparent_black()
-    };
-    h_flex()
-        .id(("row", index))
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .border_l_4()
-        .border_color(border)
-        .when_some(background, gpui::Styled::bg)
-        .when(is_cursor, |div| div.bg(cursor_background))
-        .when(row.kind == RowKind::Header, |div| {
-            div.font_weight(FontWeight::BOLD)
-        })
-        .when_some(foreground, gpui::Styled::text_color)
-        .when(
-            matches!(
-                row.kind,
-                RowKind::Moved | RowKind::Collapsed | RowKind::Info
-            ),
-            gpui::Styled::italic,
-        )
-        .child(
-            div()
-                .w(px(48.0))
-                .flex_none()
-                .text_color(if nested {
-                    colors.interdiff
-                } else {
-                    colors.gutter
-                })
-                .child(gutter),
-        )
-        .child(div().w(px(16.0)).flex_none().child(sign))
-        .child(text)
-}
-
-/// The highlights of a row: changed tokens in `strong`, the go-to-definition token, and the
-/// review state badge, in text order.
-fn row_highlights(
-    row: &Row,
-    token: Option<Range<usize>>,
-    strong: Hsla,
-    colors: &Palette,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    // Token highlights start after the indentation, which would otherwise light up the whole
-    // left edge of a rewritten block.
-    let indent = row.text.len() - row.text.trim_start().len();
-    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = row
-        .highlights
-        .iter()
-        .map(|range| range.start.max(indent)..range.end)
-        .filter(|range| !range.is_empty())
-        .filter(|range| {
-            token
-                .as_ref()
-                .is_none_or(|token| range.end <= token.start || range.start >= token.end)
-        })
-        .map(|range| {
-            (
-                range.clone(),
-                HighlightStyle {
-                    background_color: Some(strong),
-                    ..HighlightStyle::default()
-                },
-            )
-        })
-        .collect();
-    if let Some(token) = token {
-        highlights.push((
-            token,
-            HighlightStyle {
-                background_color: Some(colors.token),
-                ..HighlightStyle::default()
-            },
-        ));
-    }
-    if let Some((badge, range)) = row.badge.zip(badge_range(&row.text)) {
-        highlights.push((
-            range,
-            HighlightStyle {
-                color: Some(colors.badge(badge)),
-                ..HighlightStyle::default()
-            },
-        ));
-    }
-    highlights.sort_by_key(|(range, _)| range.start);
-    highlights
-}
-
-/// The bracketed badge in a header row's text.
-fn badge_range(text: &str) -> Option<Range<usize>> {
-    let start = text.find('[')?;
-    let end = start + text.get(start..)?.find(']')? + 1;
-    Some(start..end)
-}
-
-impl Render for ReviewApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(bench) = &mut self.bench {
-            bench.render_started = Some(Instant::now());
-        }
-        let theme = cx.theme();
-        let (background, foreground, border, status_bg) = (
-            theme.background,
-            theme.foreground,
-            theme.border,
-            theme.status_bar,
-        );
-        let font_size = px(13.0);
-        let sidebar = self.render_sidebar(cx);
-        let step_header = self.render_step_header(cx);
-        let source = self.render_source(cx);
-        let list = uniform_list(
-            "rows",
-            self.rows.rows.len(),
-            cx.processor(|this, range, _, cx| this.render_rows(range, cx)),
-        )
-        .track_scroll(&self.list)
-        .flex_1()
-        .h_full();
-        v_flex()
-            .key_context(CONTEXT)
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::next_line))
-            .on_action(cx.listener(Self::previous_line))
-            .on_action(cx.listener(Self::next_unit))
-            .on_action(cx.listener(Self::previous_unit))
-            .on_action(cx.listener(Self::next_unreviewed))
-            .on_action(cx.listener(Self::next_step))
-            .on_action(cx.listener(Self::previous_step))
-            .on_action(cx.listener(Self::next_token))
-            .on_action(cx.listener(Self::previous_token))
-            .on_action(cx.listener(Self::mark_seen))
-            .on_action(cx.listener(Self::mark_accepted))
-            .on_action(cx.listener(Self::mark_flagged))
-            .on_action(cx.listener(Self::mark_unseen))
-            .on_action(cx.listener(Self::mark_hunk_seen))
-            .on_action(cx.listener(Self::mark_hunk_accepted))
-            .on_action(cx.listener(Self::mark_hunk_flagged))
-            .on_action(cx.listener(Self::mark_hunk_unseen))
-            .on_action(cx.listener(Self::go_to_definition))
-            .on_action(cx.listener(Self::toggle_trust))
-            .on_action(cx.listener(Self::close_source))
-            .on_action(|_: &Quit, _, cx| cx.quit())
-            .size_full()
-            .bg(background)
-            .text_color(foreground)
-            .text_size(font_size)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(sidebar)
-                    .child(v_flex().flex_1().h_full().min_w_0().child(step_header).child(list))
-                    .children(source),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .py_0p5()
-                    .border_t_1()
-                    .border_color(border)
-                    .bg(status_bg)
-                    .truncate()
-                    .child(self.status.clone()),
-            )
-            .child(
-                div().px_2().pb_0p5().bg(status_bg).truncate().child(
-                    "j/k line  n/p unit  u next unreviewed  [/] step  s/a/f/x mark unit (shift: hunk)  h/l token  g definition  T trust  esc close  q quit",
-                ),
-            )
-    }
-}
-
-/// Byte ranges of the identifiers in `text`.
-fn identifiers(text: &str) -> Vec<Range<usize>> {
-    let mut found = Vec::new();
-    let mut start = None;
-    for (index, ch) in text.char_indices() {
-        let word = ch.is_alphanumeric() || ch == '_';
-        match (word, start) {
-            (true, None) => start = Some(index),
-            (false, Some(begin)) => {
-                found.push(begin..index);
-                start = None;
+/// The row range of each display hunk: the rows that carry its index, which are contiguous.
+fn hunk_rows(layout: &Layout) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = vec![0..0; layout.hunks.len()];
+    for (index, row) in layout.rows.iter().enumerate() {
+        if let Some(range) = row.hunk.and_then(|hunk| ranges.get_mut(hunk)) {
+            if range.start == range.end {
+                *range = index..index + 1;
+            } else {
+                range.end = index + 1;
             }
-            _ => {}
         }
     }
-    if let Some(begin) = start {
-        found.push(begin..text.len());
-    }
-    found.retain(|range| !text[range.clone()].starts_with(|ch: char| ch.is_ascii_digit()));
-    found
+    ranges
 }
 
-/// Finds where the identifier at byte `column` of `head` is defined, starting a language server
-/// for `root` on first use, and loads that file.
-fn find_definition(
-    servers: &Servers,
-    root: &Path,
-    head: &HeadLine,
-    column: usize,
-) -> Result<SourceView, String> {
-    // Language servers answer with canonical paths, so the root must be canonical to strip it.
-    let root = &root
-        .canonicalize()
-        .map_err(|err| format!("cannot open {}: {err}", root.display()))?;
-    let path = root.join(&head.path);
-    let command = lsp::server_for(&path)
-        .ok_or_else(|| format!("no language server is configured for {}", head.path))?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("cannot read {}: {err}", head.path))?;
-    let line = text
-        .lines()
-        .nth(head.line)
-        .ok_or_else(|| format!("{} has no line {}", head.path, head.line + 1))?;
-    let position = lsp::Position {
-        line: head.line,
-        character: lsp::utf16_column(line, column.min(line.len())),
-    };
-    let mut servers = servers.lock();
-    let key = (command.program, root.clone());
-    if !servers.contains_key(&key) {
-        let server = LanguageServer::start(&command, root).map_err(|err| err.to_string())?;
-        servers.insert(key.clone(), server);
+/// The paths of the files in `tree`, in tree order.
+fn file_paths(tree: &[TreeNode]) -> Vec<&str> {
+    tree.iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| node.path.as_str())
+        .collect()
+}
+
+/// `count` followed by `noun`, pluralized.
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
-    let server = servers.get_mut(&key).ok_or("the language server is gone")?;
-    let definition = server
-        .definition(&path, &text, position, DEFINITION_DEADLINE)
-        .map_err(|err| err.to_string())?;
-    drop(servers);
-    let target = std::fs::read_to_string(&definition.path)
-        .map_err(|err| format!("cannot read {}: {err}", definition.path.display()))?;
-    let shown = definition
-        .path
-        .strip_prefix(root)
-        .unwrap_or(&definition.path)
-        .display()
-        .to_string();
-    Ok(SourceView {
-        title: format!("{shown}:{} (read-only)", definition.position.line + 1).into(),
-        lines: target
-            .lines()
-            .map(|line| SharedString::from(line.to_owned()))
-            .collect(),
-        target: definition.position.line,
-    })
 }
 
 /// Summarizes the scroll benchmark's frame intervals and per-frame work.
 fn bench_report(bench: &Bench, rows: usize) -> String {
     let intervals: Vec<Duration> = bench.intervals.iter().skip(1).copied().collect();
     format!(
-        "scrolled {rows} rows in {} frames over {:.1?} ({} rows rendered)\n\
+        "scrolled {rows} rows ({:?}) in {} frames over {:.1?} ({} rows rendered)\n\
          frame interval: {}\n\
          render through row building: {}",
+        bench.mode,
         intervals.len(),
         bench.last - bench.started,
         bench.rendered_rows,
@@ -1305,66 +1059,11 @@ fn distribution(mut values: Vec<Duration>) -> String {
     };
     let over = |limit: Duration| values.iter().filter(|&&value| value > limit).count();
     format!(
-        "p50 {:.1?}, p95 {:.1?}, p99 {:.1?}, max {:.1?}; over 16.7 ms: {}, over 33.4 ms: {}",
+        "p50 {:.2?}, p99 {:.2?}, max {:.2?}; over 8.3 ms: {}, over 16.7 ms: {}",
         percentile(0.5),
-        percentile(0.95),
         percentile(0.99),
         values.last().copied().unwrap_or_default(),
+        over(Duration::from_micros(8_300)),
         over(Duration::from_micros(16_700)),
-        over(Duration::from_micros(33_400)),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identifiers_skip_numbers_and_punctuation() {
-        let text = "let total = sum(a_b, 42) + café;";
-        let found: Vec<&str> = identifiers(text)
-            .into_iter()
-            .map(|range| &text[range])
-            .collect();
-        assert_eq!(found, ["let", "total", "sum", "a_b", "café"]);
-    }
-
-    /// Follows a call on an added line of the demo into the head worktree; skipped where
-    /// rust-analyzer is not installed.
-    #[test]
-    fn definition_from_a_demo_head_line() {
-        if std::process::Command::new("rust-analyzer")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipped: rust-analyzer is not installed");
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let review = review_core::demo::prepare(
-            &review_core::demo::DemoPaths::under(dir.path()),
-            &review_core::demo::fixture_dir(),
-            review_core::demo::DemoRequest::Fresh,
-        )
-        .unwrap();
-        let history = review.history().unwrap();
-        let root = review
-            .worktree(history.revisions().last().unwrap())
-            .unwrap();
-        let view = history.current_view().unwrap();
-        let rows = rows::build(&view, &walkthrough::partition(&view).order());
-        let row = rows
-            .rows
-            .iter()
-            .find(|row| row.kind == RowKind::Added && row.text.contains("util::format_cents("))
-            .unwrap();
-        let head = row.head.as_ref().unwrap();
-        assert_eq!(head.path, "src/format.rs");
-
-        let column = row.text.find("format_cents").unwrap();
-        let source = find_definition(&Servers::default(), &root, head, column).unwrap();
-        assert!(source.title.starts_with("src/util.rs:"), "{}", source.title);
-        assert!(source.lines[source.target].contains("fn format_cents"));
-    }
 }

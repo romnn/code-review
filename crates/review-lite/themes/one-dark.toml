@@ -1,0 +1,58 @@
+# One Dark, the palette of Atom's One Dark syntax theme (MIT, Copyright (c) 2016 GitHub Inc.),
+# as onedark.nvim and Zed ship it.
+name = "one-dark"
+title = "One Dark"
+
+[ui]
+background = "#282c34"
+panel = "#21252b"
+band = "#2c313a"
+raised = "#3e4451"
+hairline = "#3b4048"
+text = "#abb2bf"
+dim = "#9da5b4"
+faint = "#5c6370"
+accent = "#61afef"
+selection = "#3e4451"
+find = "#5c6370"
+error = "#e06c75"
+
+[review]
+open = "#abb2bf"
+done = "#98c379"
+flagged = "#e06c75"
+changed = "#d19a66"
+
+[kind]
+added = "#98c379"
+modified = "#61afef"
+deleted = "#e06c75"
+renamed = "#56b6c2"
+moved = "#c678dd"
+type = "#d19a66"
+quiet = "#5c6370"
+
+[diff]
+removed_line = "#5f1519"
+added_line = "#14471f"
+quiet_line = "#3e4451"
+removed_text = "#e06c75"
+added_text = "#98c379"
+removed_sign = "#e06c75"
+added_sign = "#98c379"
+
+[syntax]
+keyword = "#c678dd"
+function = "#61afef"
+type = "#e5c07b"
+string = "#98c379"
+constant = "#d19a66"
+comment = "#5c6370"
+parameter = "#e06c75"
+attribute = "#e5c07b"
+operator = "#56b6c2"
+punctuation = "#abb2bf"
+property = "#e06c75"
+special = "#e5c07b"
+tag = "#e06c75"
+escape = "#56b6c2"

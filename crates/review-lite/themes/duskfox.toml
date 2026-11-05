@@ -1,0 +1,58 @@
+# Duskfox, from nightfox.nvim by EdenEast (MIT, Copyright (c) 2021 James Simpson):
+# lua/nightfox/palette/duskfox.lua, evaluated with nightfox's own color functions.
+name = "duskfox"
+title = "Duskfox"
+
+[ui]
+background = "#232136"
+panel = "#191726"
+band = "#2a2841"
+raised = "#373354"
+hairline = "#373354"
+text = "#e0def4"
+dim = "#cdcbe0"
+faint = "#6e6a86"
+accent = "#569fba"
+selection = "#63577d"
+find = "#e6a852"
+error = "#eb6f92"
+
+[review]
+open = "#e0def4"
+done = "#a3be8c"
+flagged = "#eb6f92"
+changed = "#c4a7e7"
+
+[kind]
+added = "#a3be8c"
+modified = "#569fba"
+deleted = "#eb6f92"
+renamed = "#9ccfd8"
+moved = "#c4a7e7"
+type = "#ea9a97"
+quiet = "#6e6a86"
+
+[diff]
+removed_line = "#5f1519"
+added_line = "#14471f"
+quiet_line = "#2d2a45"
+removed_text = "#eb6f92"
+added_text = "#a3be8c"
+removed_sign = "#f083a2"
+added_sign = "#b1d196"
+
+[syntax]
+keyword = "#c4a7e7"
+function = "#65b1cd"
+type = "#f6c177"
+string = "#a3be8c"
+constant = "#f0a4a2"
+comment = "#817c9c"
+parameter = "#e0def4"
+attribute = "#f0a6cc"
+operator = "#cdcbe0"
+punctuation = "#cdcbe0"
+property = "#569fba"
+special = "#eb6f92"
+tag = "#c4a7e7"
+escape = "#f9cb8c"

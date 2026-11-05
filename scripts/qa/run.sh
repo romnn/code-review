@@ -7,6 +7,7 @@
 #   launch <args...>  start the app with `--qa <args...>`, quitting a running one first
 #   shot <name>       save a screenshot to target/qa/<name>.png
 #   expect <regex>    fail unless the previous answer matches the extended regex
+# Every command and its full answer are also logged to target/qa/answers.log.
 #   anything else     a QA command for the app (see crates/review-lite/src/app/qa.rs); the
 #                     runner waits for its one-line answer and fails on `error: ...`
 #
@@ -22,7 +23,11 @@ binary=${2:-}
 out="$root/target/qa"
 mkdir -p "$out"
 log="$out/app.log"
+answers="$out/answers.log"
 : >"$log"
+: >"$answers"
+# Every run starts from the default settings; launches within it share what they remember.
+rm -f "$out/smoke-config.toml"
 
 if [[ -z $binary ]]; then
     cargo build --quiet -p review-lite --manifest-path "$root/Cargo.toml"
@@ -54,7 +59,8 @@ trap cleanup EXIT
 # Starts headless sway and finds the socket it creates.
 start_sway() {
     local config="$out/sway.conf"
-    printf 'output HEADLESS-1 resolution 1600x1000\ndefault_border none\n' >"$config"
+    # Client-side decorations, as on GNOME, so screenshots show the app's own title bar.
+    printf 'output HEADLESS-1 resolution 1600x1000\ndefault_border none\nfor_window [app_id="code-review"] border csd\n' >"$config"
     local -A before=()
     local path
     for path in "$runtime"/wayland-*; do
@@ -91,6 +97,7 @@ send() {
         echo "qa: no answer to '$1'" >&2
         exit 1
     fi
+    printf '%s\t%s\n' "$1" "$answer" >>"$answers"
 }
 
 quit_app() {
@@ -103,7 +110,7 @@ quit_app() {
 
 launch() {
     quit_app
-    local -a env=(-u DISPLAY WAYLAND_DISPLAY="$socket")
+    local -a env=(-u DISPLAY WAYLAND_DISPLAY="$socket" CODE_REVIEW_CONFIG="$out/smoke-config.toml" CODE_REVIEW_DEMO_DIR="$out/smoke-demo")
     if [[ ${QA_VULKAN:-} == lavapipe ]]; then
         env+=(VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json)
     fi

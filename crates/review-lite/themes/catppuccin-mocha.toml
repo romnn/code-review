@@ -1,0 +1,57 @@
+# Catppuccin Mocha, from catppuccin/palette (MIT, Copyright (c) 2021 Catppuccin).
+name = "catppuccin-mocha"
+title = "Catppuccin Mocha"
+
+[ui]
+background = "#1e1e2e"
+panel = "#181825"
+band = "#232334"
+raised = "#313244"
+hairline = "#313244"
+text = "#cdd6f4"
+dim = "#bac2de"
+faint = "#6c7086"
+accent = "#89b4fa"
+selection = "#45475a"
+find = "#585b70"
+error = "#f38ba8"
+
+[review]
+open = "#cdd6f4"
+done = "#a6e3a1"
+flagged = "#f38ba8"
+changed = "#fab387"
+
+[kind]
+added = "#a6e3a1"
+modified = "#89b4fa"
+deleted = "#f38ba8"
+renamed = "#89dceb"
+moved = "#cba6f7"
+type = "#fab387"
+quiet = "#6c7086"
+
+[diff]
+removed_line = "#5f1519"
+added_line = "#14471f"
+quiet_line = "#313244"
+removed_text = "#f38ba8"
+added_text = "#a6e3a1"
+removed_sign = "#f38ba8"
+added_sign = "#a6e3a1"
+
+[syntax]
+keyword = "#cba6f7"
+function = "#89b4fa"
+type = "#f9e2af"
+string = "#a6e3a1"
+constant = "#fab387"
+comment = "#9399b2"
+parameter = "#eba0ac"
+attribute = "#f9e2af"
+operator = "#89dceb"
+punctuation = "#9399b2"
+property = "#b4befe"
+special = "#f38ba8"
+tag = "#cba6f7"
+escape = "#f5c2e7"

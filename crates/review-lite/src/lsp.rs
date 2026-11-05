@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -42,7 +43,13 @@ pub enum LspError {
     /// The server found no definition before the deadline, for example while still indexing.
     #[error("no definition found")]
     NotFound,
+    /// The server did not answer in time.
+    #[error("the language server did not answer in time")]
+    Timeout,
 }
+
+/// How long a server may take to answer the `initialize` handshake.
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The JSON-RPC error code a server uses when a result went stale while it was computed.
 const CONTENT_MODIFIED: i64 = -32801;
@@ -135,7 +142,8 @@ pub struct Definition {
 pub struct LanguageServer {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Messages from the server, read on a thread of their own so every wait is bounded.
+    messages: mpsc::Receiver<Result<Value, LspError>>,
     next_id: i64,
     language_id: &'static str,
     opened: HashSet<PathBuf>,
@@ -162,16 +170,19 @@ impl LanguageServer {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(LspError::Protocol("server has no stdio pipes".to_owned()));
         };
+        let (sender, messages) = mpsc::channel();
+        std::thread::spawn(move || read_messages(BufReader::new(stdout), &sender));
         let mut server = Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            messages,
             next_id: 1,
             language_id: command.language_id,
             opened: HashSet::new(),
         };
         let root_uri = file_uri(root);
         server.request(
+            Instant::now() + HANDSHAKE_DEADLINE,
             "initialize",
             &json!({
                 "processId": std::process::id(),
@@ -216,8 +227,10 @@ impl LanguageServer {
             )?;
         }
         let started = Instant::now();
+        let until = started + deadline;
         loop {
             let response = self.request(
+                until,
                 "textDocument/definition",
                 &json!({
                     "textDocument": { "uri": uri },
@@ -231,6 +244,7 @@ impl LanguageServer {
                     }
                 }
                 Err(LspError::Response { code, .. }) if code == CONTENT_MODIFIED => {}
+                Err(LspError::Timeout) => return Err(LspError::NotFound),
                 Err(err) => return Err(err),
             }
             if started.elapsed() >= deadline {
@@ -253,12 +267,17 @@ impl LanguageServer {
 
     /// Sends a request and reads messages until its response arrives, answering the server's own
     /// requests with an empty result and ignoring notifications.
-    fn request(&mut self, method: &str, params: &Value) -> Result<Value, LspError> {
+    fn request(
+        &mut self,
+        deadline: Instant,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, LspError> {
         let id = self.next_id;
         self.next_id += 1;
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
         loop {
-            let message = self.read_message()?;
+            let message = self.read_message(deadline)?;
             let is_request = message.get("method").is_some();
             match (message.get("id"), is_request) {
                 (Some(request_id), true) => {
@@ -289,27 +308,54 @@ impl LanguageServer {
         }
     }
 
-    fn read_message(&mut self) -> Result<Value, LspError> {
-        let mut length: Option<usize> = None;
-        loop {
-            let mut header = String::new();
-            if self.stdout.read_line(&mut header)? == 0 {
-                return Err(LspError::Protocol("server closed its output".to_owned()));
-            }
-            let header = header.trim_end();
-            if header.is_empty() {
-                break;
-            }
-            if let Some(value) = header.strip_prefix("Content-Length:") {
-                length = value.trim().parse().ok();
+    /// The next message from the server, waiting at most until `deadline`.
+    fn read_message(&mut self, deadline: Instant) -> Result<Value, LspError> {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        match self.messages.recv_timeout(wait) {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(LspError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(LspError::Protocol("server closed its output".to_owned()))
             }
         }
-        let length =
-            length.ok_or_else(|| LspError::Protocol("missing Content-Length".to_owned()))?;
-        let mut body = vec![0; length];
-        self.stdout.read_exact(&mut body)?;
-        serde_json::from_slice(&body).map_err(|err| LspError::Protocol(err.to_string()))
     }
+}
+
+/// Reads messages from the server's output until it closes, which it does when the server
+/// exits, so the reading thread always ends.
+fn read_messages(
+    mut stdout: BufReader<ChildStdout>,
+    messages: &mpsc::Sender<Result<Value, LspError>>,
+) {
+    loop {
+        let message = read_one(&mut stdout);
+        let closed = message.is_err();
+        if messages.send(message).is_err() || closed {
+            return;
+        }
+    }
+}
+
+/// Reads one `Content-Length`-framed JSON-RPC message.
+fn read_one(stdout: &mut BufReader<ChildStdout>) -> Result<Value, LspError> {
+    let mut length: Option<usize> = None;
+    loop {
+        let mut header = String::new();
+        if stdout.read_line(&mut header)? == 0 {
+            return Err(LspError::Protocol("server closed its output".to_owned()));
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some(value) = header.strip_prefix("Content-Length:") {
+            length = value.trim().parse().ok();
+        }
+    }
+    let length = length.ok_or_else(|| LspError::Protocol("missing Content-Length".to_owned()))?;
+    let mut body = vec![0; length];
+    stdout.read_exact(&mut body)?;
+    serde_json::from_slice(&body).map_err(|err| LspError::Protocol(err.to_string()))
 }
 
 impl Drop for LanguageServer {
@@ -394,6 +440,19 @@ fn path_from_uri(uri: &str) -> Option<PathBuf> {
 pub fn utf16_column(line: &str, byte_offset: usize) -> usize {
     line.get(..byte_offset)
         .map_or(0, |prefix| prefix.encode_utf16().count())
+}
+
+/// Converts a UTF-16 column within `line` into a byte offset, clamped to the line.
+#[must_use]
+pub fn byte_column(line: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    for (offset, character) in line.char_indices() {
+        if units >= utf16 {
+            return offset;
+        }
+        units += character.len_utf16();
+    }
+    line.len()
 }
 
 #[cfg(test)]
