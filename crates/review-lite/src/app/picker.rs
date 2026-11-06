@@ -20,7 +20,7 @@ use gpui::{
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledText, Subscription, UniformListScrollHandle, Window, div, px, relative, uniform_list,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::{h_flex, v_flex};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -815,12 +815,15 @@ impl ReviewApp {
                         )
                         .child(
                             div()
-                                .h(px(GRID * 7.0))
+                                .h(px(self.fonts.strip()))
                                 .flex_none()
+                                .flex()
+                                .items_center()
                                 .px(px(GRID * 3.0))
                                 .border_t_1()
                                 .border_color(colors.hairline)
                                 .text_color(colors.faint)
+                                .truncate()
                                 .child(mode),
                         ),
                 )
@@ -854,24 +857,24 @@ impl ReviewApp {
             )
         };
         h_flex()
-            .h(px(GRID * 10.0))
+            .h(px(self.fonts.bar() + GRID * 2.0))
             .flex_none()
             .px(px(GRID * 3.0))
             .gap(px(GRID * 2.0))
+            .whitespace_nowrap()
             .border_b_1()
             .border_color(colors.hairline)
             .child(
                 div()
+                    .flex_none()
                     .text_color(colors.accent)
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!("{title} ›")),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Input::new(&picker.input).appearance(false)),
-            )
+            .child(div().flex_1().min_w_0().child(super::render::text_field(
+                &picker.input,
+                self.fonts.ui_size(),
+            )))
             .child(div().flex_none().text_color(colors.dim).child(count))
             .child(
                 div()
@@ -896,6 +899,8 @@ impl ReviewApp {
         let row_height = self.fonts.row_height();
         let entries = Arc::clone(&picker.entries);
         let selected = picker.selected;
+        let letter_width = (self.fonts.ui_cell() * 1.5).round();
+        let glyph_width = (self.fonts.ui_cell() * 1.75).round();
         range
             .filter_map(|index| {
                 let entry = entries.get(index)?;
@@ -915,7 +920,7 @@ impl ReviewApp {
                     .hover(|row| row.bg(colors.hairline))
                     .child(
                         div()
-                            .w(px(GRID * 3.0))
+                            .w(px(letter_width))
                             .flex_none()
                             .text_color(tone)
                             .child(letter),
@@ -952,7 +957,14 @@ impl ReviewApp {
                                     .gap(px(GRID * 2.0))
                                     .text_color(colors.progress(change.progress))
                                     .child(format!("{}/{}", change.reviewed, change.total))
-                                    .child(progress_glyph(change.progress))
+                                    // A column as wide as the tree's, so the glyph stays
+                                    // clear of the scrollbar over the row's end.
+                                    .child(
+                                        div()
+                                            .w(px(glyph_width))
+                                            .text_center()
+                                            .child(progress_glyph(change.progress)),
+                                    )
                             })),
                         Some(line) => row
                             .child(

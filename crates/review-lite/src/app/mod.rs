@@ -140,8 +140,8 @@ const GAP_STEP: usize = 20;
 /// How long go-to-definition waits for a language server that is still indexing.
 const DEFINITION_DEADLINE: Duration = Duration::from_secs(120);
 
-/// The smallest and largest code size zoom allows, in logical pixels.
-const ZOOM_RANGE: Range<f32> = 9.0..40.0;
+/// The smallest and largest code size zoom and the configuration allow, in logical pixels.
+pub const ZOOM_RANGE: Range<f32> = 9.0..40.0;
 
 /// Binds the review window's keys from the keymap.
 pub fn bind_keys(bindings: &[keymap::Binding], cx: &mut App) {
@@ -182,6 +182,11 @@ pub struct Fonts {
     /// The line height as a multiple of the code size, which the shown look's density sets;
     /// only [`ReviewApp::transition`] changes it, so the lists keep their place.
     pub line_height: f32,
+    /// A cell's width as a share of the font size, measured from the code font.
+    ///
+    /// The window's text is in the same monospace font, so columns sized in cells hold their
+    /// text at any size.
+    pub advance: f32,
 }
 
 impl Fonts {
@@ -193,6 +198,32 @@ impl Fonts {
     /// The height of every row; the lists are uniform so they lay out only visible rows.
     fn row_height(&self) -> f32 {
         (self.code_size * self.line_height).round()
+    }
+
+    /// A cell's width in text `size` pixels tall.
+    fn cell(&self, size: f32) -> f32 {
+        size * self.advance
+    }
+
+    /// A cell of the window's own text.
+    fn ui_cell(&self) -> f32 {
+        self.cell(self.ui_size())
+    }
+
+    /// A cell of code.
+    fn code_cell(&self) -> f32 {
+        self.cell(self.code_size)
+    }
+
+    /// The height of a pane header, the find bar and the like, which hold one line of the
+    /// window's text.
+    fn bar(&self) -> f32 {
+        render::bar_height(self.ui_size())
+    }
+
+    /// The height of each of the two bottom bars.
+    fn strip(&self) -> f32 {
+        render::strip_height(self.ui_size())
     }
 }
 
@@ -966,7 +997,11 @@ impl ReviewApp {
     /// The sidebar's width as shown, zero when hidden.
     fn shown_sidebar_width(&self, window: &Window) -> f32 {
         if self.sidebar_shown() {
-            panes::sidebar_width(self.layout.sidebar, f32::from(window.viewport_size().width))
+            panes::sidebar_width(
+                self.layout.sidebar,
+                f32::from(window.viewport_size().width),
+                self.fonts.ui_cell(),
+            )
         } else {
             0.0
         }

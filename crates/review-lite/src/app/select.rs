@@ -217,7 +217,8 @@ impl ReviewApp {
         if self.resizing {
             if event.pressed_button == Some(MouseButton::Left) {
                 let width = f32::from(window.viewport_size().width);
-                self.layout.sidebar = panes::sidebar_width(f32::from(event.position.x), width);
+                self.layout.sidebar =
+                    panes::sidebar_width(f32::from(event.position.x), width, self.fonts.ui_cell());
             } else {
                 self.resizing = false;
                 self.remember_layout();

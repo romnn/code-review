@@ -160,19 +160,29 @@ fn code_font(config: &config::FontConfig, cx: &App) -> app::Fonts {
         .chain([theme_mono])
         .filter(|candidate| *candidate != family)
         .collect();
-    let size = config.size_pixels();
+    let size = config
+        .size_pixels()
+        .clamp(app::ZOOM_RANGE.start, app::ZOOM_RANGE.end);
+    let code = Font {
+        family: family.into(),
+        features: FontFeatures::disable_ligatures(),
+        fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
+        weight: FontWeight(config.weight.unwrap_or(config::DEFAULT_WEIGHT)),
+        style: FontStyle::Normal,
+    };
+    // Measured at a large size, so rounding to whole pixels hardly skews the share.
+    let measured = 100.0;
+    let text_system = cx.text_system();
+    let advance = text_system
+        .em_advance(text_system.resolve_font(&code), px(measured))
+        .map_or(0.6, |width| f32::from(width) / measured);
     app::Fonts {
-        code: Font {
-            family: family.into(),
-            features: FontFeatures::disable_ligatures(),
-            fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
-            weight: FontWeight(config.weight.unwrap_or(config::DEFAULT_WEIGHT)),
-            style: FontStyle::Normal,
-        },
+        code,
         code_size: size,
         default_code_size: size,
         // The window sets it from the look's density when it opens.
         line_height: look::line_height(config::Density::default()),
+        advance,
     }
 }
 

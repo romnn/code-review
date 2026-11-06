@@ -330,7 +330,7 @@ key tab
 key f o n t
 state
 expect "cursor":"Font size: 10 pt"
-expect "scroll_offset":132.0,
+expect "scroll_offset":114.0,
 key escape
 key escape
 state
@@ -690,3 +690,11 @@ expect "hunk":1,
 launch --demo --config scripts/qa/broken-style.toml
 expect "status":"Configuration: \[styles.calm\] cannot be used: it sets density
 expect "diff_style":"soft"
+
+# A font size past what zoom allows opens at the largest zoom does; the screenshot shows the
+# chrome scaled with it, with bars holding their text and columns kept apart.
+launch --demo --font-size 100
+expect "font":\{"family":"[^"]*","size":40\.0
+file src/engine.rs
+key 0
+shot 30-largest-font

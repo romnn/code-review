@@ -23,7 +23,7 @@ use gpui::{
 use gpui_component::h_flex;
 use gpui_component::scroll::ScrollbarHandle;
 
-use super::present::{DIVIDER, FRAME, GUTTER, SIGN};
+use super::present::{DIVIDER, FRAME};
 use super::render::{Frame, GRID, Palette, frame_bar};
 use super::text::{Column, Pane};
 use super::{ReviewApp, scroll};
@@ -208,16 +208,11 @@ impl ReviewApp {
 
     /// How far the side-by-side code can move: the largest overflow of a half or a full-width
     /// line of code, at the window's cell widths.
-    pub(super) fn text_extent(&self, window: &Window, list_width: f32) -> f32 {
-        let cell = |size: f32| {
-            let system = window.text_system();
-            system
-                .em_advance(system.resolve_font(&self.fonts.code), px(size))
-                .map_or(size * 0.6, f32::from)
-        };
-        let code_cell = cell(self.fonts.code_size);
-        let lead = FRAME + GUTTER + SIGN;
-        let half = (list_width - FRAME - DIVIDER) / 2.0 - GUTTER - SIGN;
+    pub(super) fn text_extent(&self, list_width: f32) -> f32 {
+        let code_cell = self.fonts.code_cell();
+        let columns = super::present::gutter(code_cell) + super::present::sign(code_cell);
+        let lead = FRAME + columns;
+        let half = (list_width - FRAME - DIVIDER) / 2.0 - columns;
         let full = list_width - lead;
         let overflow = |cells: usize, cell: f32, room: f32| scroll::float(cells) * cell - room;
         let halves = overflow(self.rows.widest_half, code_cell, half);

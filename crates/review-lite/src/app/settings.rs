@@ -18,13 +18,13 @@ use gpui::{
     AnyElement, Context, Entity, FontWeight, Hsla, MouseButton, ScrollStrategy, Subscription,
     UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode};
 use gpui_component::{h_flex, v_flex};
 
 use super::keymap::Area;
 use super::present::Places;
-use super::render::{BAR, GRID, Palette};
+use super::render::{GRID, LINE, Palette, bar_height};
 use super::{Overlay, ReviewApp, chrome, plural};
 use crate::config::{Approved, Density, DiffLayout, Remembered, points_to_pixels};
 use crate::look::{self, DiffStyle, FONT_SIZES, Look};
@@ -46,15 +46,18 @@ actions!(
 );
 
 /// How wide the settings panel is over the diff, when the files pane has no room for it, in
-/// logical pixels.
-const PANEL_WIDTH: f32 = 440.0;
+/// cells of the panel's text.
+const PANEL_CELLS: f32 = 46.0;
 
-/// The narrowest files pane the panel takes the place of.
-const PANEL_MIN_WIDTH: f32 = 260.0;
+/// The most of the window the panel takes over the diff, so a preview stays in view.
+const PANEL_MAX_SHARE: f32 = 0.6;
 
-/// The narrowest panel that lists each entry's detail beside its label; a narrower one shows
-/// only the cursor's, in its footer.
-const DETAILS_MIN_WIDTH: f32 = 400.0;
+/// The narrowest files pane the panel takes the place of, in cells of the panel's text.
+const PANEL_MIN_CELLS: f32 = 28.0;
+
+/// The narrowest panel that lists each entry's detail beside its label, in cells of the
+/// panel's text; a narrower one shows only the cursor's, in its footer.
+const DETAILS_MIN_CELLS: f32 = 43.0;
 
 /// The panel's row height as a multiple of its text size.
 const PANEL_LINE_HEIGHT: f32 = 1.75;
@@ -328,7 +331,7 @@ impl ReviewApp {
             places,
             text_size,
             row_height: (text_size * PANEL_LINE_HEIGHT).round(),
-            width: std::cell::Cell::new(PANEL_WIDTH),
+            width: std::cell::Cell::new(0.0),
             _subscription: subscription,
         });
         self.overlay = Some(Overlay::Settings);
@@ -797,7 +800,8 @@ impl ReviewApp {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let panel = self.settings_panel.as_ref()?;
-        let width = self.settings_width(window);
+        let cell = self.fonts.cell(panel.text_size);
+        let width = self.settings_width(window, cell);
         panel.width.set(width);
         let colors = self.palette();
         let shown = self.shown_entries();
@@ -814,7 +818,7 @@ impl ReviewApp {
             "settings",
             lines.len(),
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                this.render_settings_lines(range, width >= DETAILS_MIN_WIDTH, cx)
+                this.render_settings_lines(range, width >= cell * DETAILS_MIN_CELLS, cx)
             }),
         )
         .track_scroll(&panel.list)
@@ -830,14 +834,15 @@ impl ReviewApp {
             .absolute()
             .left_0()
             .top(px(top))
-            .bottom(px(2.0 * (BAR - GRID)))
+            // Above the two bottom bars, which follow a previewed font size.
+            .bottom(px(2.0 * self.fonts.strip()))
             .w(px(width))
             .text_size(px(panel.text_size))
             .bg(colors.surface)
             .border_r_1()
             .border_color(colors.hairline)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(Self::render_settings_title(&colors))
+            .child(Self::render_settings_title(panel, &colors))
             .child(
                 search.capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                     // A click into the field gives it the keys, as Tab does.
@@ -888,12 +893,14 @@ impl ReviewApp {
 
     /// The panel's width: the files pane's, whose place it takes so the diff keeps its own, or
     /// its own over the diff when the files pane is hidden or too narrow.
-    fn settings_width(&self, window: &Window) -> f32 {
+    fn settings_width(&self, window: &Window, cell: f32) -> f32 {
         let files = self.shown_sidebar_width(window);
-        if files >= PANEL_MIN_WIDTH {
+        if files >= cell * PANEL_MIN_CELLS {
             files
         } else {
-            PANEL_WIDTH
+            (cell * PANEL_CELLS)
+                .min(f32::from(window.viewport_size().width) * PANEL_MAX_SHARE)
+                .round()
         }
     }
 
@@ -910,11 +917,16 @@ impl ReviewApp {
                 .text_color(colors.faint)
                 .child(entry.detail.clone())
         });
+        let height = self
+            .settings_panel
+            .as_ref()
+            .map_or_else(|| self.fonts.bar(), |panel| bar_height(panel.text_size));
         h_flex()
-            .h(px(BAR))
+            .h(px(height))
             .flex_none()
             .px(px(GRID * 3.0))
             .gap(px(GRID * 2.0))
+            .whitespace_nowrap()
             .border_t_1()
             .border_color(colors.hairline)
             .children(
@@ -925,9 +937,9 @@ impl ReviewApp {
     }
 
     /// The panel's title row.
-    fn render_settings_title(colors: &Palette) -> gpui::Div {
+    fn render_settings_title(panel: &Panel, colors: &Palette) -> gpui::Div {
         h_flex()
-            .h(px(BAR))
+            .h(px(bar_height(panel.text_size)))
             .flex_none()
             .px(px(GRID * 3.0))
             .border_b_1()
@@ -959,14 +971,16 @@ impl ReviewApp {
             colors.hairline
         };
         h_flex()
-            .h(px(BAR))
+            .h(px(bar_height(panel.text_size)))
             .flex_none()
             .px(px(GRID * 3.0))
             .gap(px(GRID * 2.0))
+            .whitespace_nowrap()
             .border_b_1()
             .border_color(accent)
             .child(
                 div()
+                    .flex_none()
                     .text_color(if focused { colors.accent } else { colors.faint })
                     .child("/"),
             )
@@ -974,7 +988,7 @@ impl ReviewApp {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&panel.input).appearance(false)),
+                    .child(super::render::text_field(&panel.input, panel.text_size)),
             )
             .child(div().flex_none().text_color(colors.faint).child(count))
     }
@@ -988,10 +1002,10 @@ impl ReviewApp {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let colors = self.palette();
-        let Some((row_height, cursor)) = self
+        let Some((row_height, text_size, cursor)) = self
             .settings_panel
             .as_ref()
-            .map(|panel| (panel.row_height, panel.cursor.clone()))
+            .map(|panel| (panel.row_height, panel.text_size, panel.cursor.clone()))
         else {
             return Vec::new();
         };
@@ -1009,7 +1023,9 @@ impl ReviewApp {
                         .px(px(GRID * 3.0))
                         .flex()
                         .items_end()
-                        .pb(px(GRID))
+                        // One line of text, so the title sits low in the row, clear of the
+                        // hairline above at any size.
+                        .line_height(px((text_size * LINE).round()))
                         .when(position > 0, |title| {
                             title.border_t_1().border_color(colors.hairline)
                         })
@@ -1047,8 +1063,13 @@ impl ReviewApp {
             details,
         } = row;
         let applied = self.is_applied(&entry.choice);
+        let cell = self.fonts.cell(
+            self.settings_panel
+                .as_ref()
+                .map_or(self.fonts.ui_size(), |panel| panel.text_size),
+        );
         let swatch = match &entry.choice {
-            Choice::Theme(name) => self.find_theme(name).map(swatch),
+            Choice::Theme(name) => self.find_theme(name).map(|theme| swatch(theme, cell)),
             Choice::Style(_)
             | Choice::Density(_)
             | Choice::Layout(_)
@@ -1069,11 +1090,7 @@ impl ReviewApp {
         // With details, labels share one column so swatches and details line up down the
         // list; without, the label takes the room and the swatch sits at the edge.
         let label = if details {
-            let text_size = self
-                .settings_panel
-                .as_ref()
-                .map_or(self.fonts.ui_size(), |panel| panel.text_size);
-            label.w(px(text_size * 0.6 * 20.0)).flex_none()
+            label.w(px((cell * 20.0).round())).flex_none()
         } else {
             label.flex_1()
         };
@@ -1095,7 +1112,7 @@ impl ReviewApp {
             )
             .child(
                 div()
-                    .w(px(GRID * 3.0))
+                    .w(px((cell * 1.5).round()))
                     .flex_none()
                     .text_color(colors.accepted)
                     .child(if applied { "●" } else { "" }),
@@ -1158,9 +1175,11 @@ impl ReviewApp {
     }
 }
 
-/// Four squares of a theme's colors: its background, removed and added lines, and accent.
-fn swatch(theme: &Theme) -> gpui::Div {
-    let square = |color: Hsla| div().size(px(GRID * 2.5)).flex_none().bg(color);
+/// Four squares of a theme's colors, each about a text cell `cell` pixels wide: its
+/// background, removed and added lines, and accent.
+fn swatch(theme: &Theme, cell: f32) -> gpui::Div {
+    let side = px(cell.round());
+    let square = |color: Hsla| div().size(side).flex_none().bg(color);
     h_flex()
         .flex_none()
         .border_1()

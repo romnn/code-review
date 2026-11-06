@@ -16,7 +16,13 @@ use gpui_component::h_flex;
 use super::render::{GRID, Palette};
 
 /// The title bar's height.
+///
+/// Like the platform's title bars, it keeps its size whatever the font size, so the settings
+/// panel's top stays put while a font size is previewed.
 pub const HEIGHT: f32 = 36.0;
+
+/// The largest title text, whose line still fits the bar with a grid step around it.
+const TITLE_TEXT_MAX: f32 = 17.0;
 
 /// One named rectangle of the last frame, with the pointer it shows.
 #[derive(Debug, Clone)]
@@ -123,6 +129,7 @@ fn button(
 /// counts towards a double click, which toggles maximize; a right click opens the window menu.
 pub fn title_bar(
     title: SharedString,
+    text_size: f32,
     window: &Window,
     regions: &Rc<Regions>,
     colors: &Palette,
@@ -178,6 +185,7 @@ pub fn title_bar(
                 .min_w_0()
                 .truncate()
                 .text_center()
+                .text_size(px(text_size.min(TITLE_TEXT_MAX)))
                 .text_color(if window.is_window_active() {
                     colors.text
                 } else {

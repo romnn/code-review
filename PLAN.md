@@ -913,11 +913,21 @@ it, muted, so it never reads as code.
   details.
 - **Layout.** Fixed row heights and fixed-width columns, so folding, marking and moving the
   cursor never shift anything else, and no pane animates its width; square corners throughout; a
-  4 px grid with 12 px side padding; pane headers line up on one hairline. The files pane resizes
-  by dragging its divider (double click resets, limits keep the diff at least 400 px wide),
-  `Ctrl+B` hides it, and the width is remembered in the `[layout]` table of the configuration.
-  Under its header, two progress lines show the files and the hunks reviewed: a bar, done of
-  total, and the whole percent, rounded down so 100% means all of it.
+  4 px grid with 12 px side padding; pane headers line up on one hairline. Nothing that holds
+  text has a fixed pixel size: columns are sized in cells of the monospace font, whose advance is
+  measured at startup (the line-number gutter is five code cells, the sign column one and a half,
+  the tree's chevron, kind and state columns one and three quarters each), bars are one line of
+  their text plus a grid step, and counts are padded to their widest, so nothing overlaps, clips
+  or wraps at any font size from 9 to 40 px (zoom and `--font-size` clamp to that range). Where
+  room runs out, long text truncates with an ellipsis (paths from their start) and whole
+  lower-priority parts make way: the file header drops its line counts, then its meter. Only the
+  title bar and its buttons keep the platform's fixed size, so previewing a font size never moves
+  the settings panel. The files pane resizes by dragging its divider (double click resets, limits
+  keep it at least 180 px and 16 text cells wide and the diff at least 400 px wide), `Ctrl+B`
+  hides it, and the width is remembered in the `[layout]` table of the configuration. Under its
+  header, two progress lines show the files and the hunks reviewed: a bar, done of total, and the
+  whole percent, rounded down so 100% means all of it; in a narrow pane the bar makes way first,
+  then the percent, then the label.
 - **Scrolling.** `review-lite --bench-scroll` scrolls every row of every file of the review once,
   file after file, 30 rows per frame, and prints frame-interval and per-frame build-time
   percentiles. On the perf fixture (25 files, 90,000 rows) the app's work per frame is about

@@ -109,8 +109,13 @@ fn styled(text: &markdown::Inline, colors: &Palette) -> StyledText {
     StyledText::new(SharedString::from(text.text.clone())).with_highlights(highlights)
 }
 
-/// Renders Markdown blocks.
-fn render_markdown(source: &str, colors: &Palette, code_font: &gpui::Font) -> gpui::Div {
+/// Renders Markdown blocks, with headings a step above the body's `text_size`.
+fn render_markdown(
+    source: &str,
+    text_size: f32,
+    colors: &Palette,
+    code_font: &gpui::Font,
+) -> gpui::Div {
     let blocks = markdown::parse(source);
     v_flex()
         .gap(px(GRID * 2.0))
@@ -120,7 +125,9 @@ fn render_markdown(source: &str, colors: &Palette, code_font: &gpui::Font) -> gp
                     .pt(px(GRID * 2.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.text)
-                    .when(level <= 2, gpui::Styled::text_lg)
+                    .when(level <= 2, |heading| {
+                        heading.text_size(px(text_size * LARGE))
+                    })
                     .child(styled(&text, colors))
                     .into_any_element(),
                 Block::Paragraph(text) => div()
@@ -141,6 +148,7 @@ fn render_markdown(source: &str, colors: &Palette, code_font: &gpui::Font) -> gp
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .text_color(colors.text)
                             .child(styled(&text, colors)),
                     )
@@ -163,6 +171,10 @@ fn render_markdown(source: &str, colors: &Palette, code_font: &gpui::Font) -> gp
         }))
 }
 
+/// A large heading's size, and a title's, as multiples of the body's.
+const LARGE: f32 = 1.125;
+const TITLE: f32 = 1.25;
+
 /// A section title in the overview.
 fn section(title: &'static str, colors: &Palette) -> gpui::Div {
     div()
@@ -183,8 +195,12 @@ impl ReviewApp {
         let colors = self.palette();
         let code_font = self.fonts.code.clone();
         let (reviewed, total) = self.totals();
+        let text_size = self.fonts.ui_size();
+        let cell = self.fonts.ui_cell();
+        let code_cell = self.fonts.code_cell();
+        let title = px(text_size * TITLE);
         let mut body = v_flex()
-            .max_w(px(920.0))
+            .max_w(px((cell * 100.0).round()))
             .w_full()
             .gap(px(GRID * 2.0))
             .p(px(GRID * 6.0));
@@ -199,17 +215,20 @@ impl ReviewApp {
                 body = body
                     .child(
                         h_flex()
+                            .items_start()
                             .gap(px(GRID * 3.0))
                             .child(
                                 div()
+                                    .flex_none()
                                     .text_color(colors.dim)
-                                    .text_xl()
+                                    .text_size(title)
                                     .child(format!("#{}", pr.number)),
                             )
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_xl()
+                                    .min_w_0()
+                                    .text_size(title)
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(colors.text)
                                     .child(pr.title.clone()),
@@ -255,13 +274,13 @@ impl ReviewApp {
                             ),
                     )
                     .child(section("Description", &colors))
-                    .child(render_markdown(&pr.body, &colors, &code_font));
+                    .child(render_markdown(&pr.body, text_size, &colors, &code_font));
             }
             Some(ReviewInfo::Commits { commits }) => {
                 body = body
                     .child(
                         div()
-                            .text_xl()
+                            .text_size(title)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.text)
                             .child(
@@ -289,20 +308,19 @@ impl ReviewApp {
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
                                             .text_color(colors.text)
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(commit.subject.clone()),
                                     )
-                                    .child(div().text_color(colors.faint).child(format!(
-                                        "{} · {}",
-                                        commit.author,
-                                        short_time(&commit.date)
-                                    ))),
+                                    .child(div().flex_none().text_color(colors.faint).child(
+                                        format!("{} · {}", commit.author, short_time(&commit.date)),
+                                    )),
                             )
                             .when(!commit.body.is_empty(), |entry| {
                                 entry.child(
                                     div()
-                                        .pl(px(GRID * 26.0))
+                                        .pl(px((code_cell * 10.0).round() + GRID * 3.0))
                                         .text_color(colors.dim)
                                         .child(commit.body.clone()),
                                 )
@@ -316,9 +334,23 @@ impl ReviewApp {
                     ));
             }
         }
+        // The revisions' columns hold their longest number and head, so they line up.
+        let longest = |text: fn(&RevisionSummary) -> String| {
+            self.revisions
+                .iter()
+                .map(|revision| text(revision).chars().count())
+                .max()
+                .unwrap_or(0)
+        };
+        let number_width = (cell
+            * super::scroll::float(longest(|revision| format!("r{}", revision.number)) + 1))
+        .round();
+        let head_width = (code_cell
+            * super::scroll::float(longest(|revision| revision.head.clone()) + 1))
+        .round();
         body = body
             .child(section("Progress", &colors))
-            .child(progress_meter(reviewed, total, &colors))
+            .child(progress_meter(reviewed, total, cell, &colors))
             .child(section("Revisions", &colors))
             .children(self.revisions.iter().rev().map(|revision| {
                 h_flex()
@@ -326,27 +358,39 @@ impl ReviewApp {
                     .py(px(GRID))
                     .child(
                         div()
-                            .w(px(40.0))
+                            .w(px(number_width))
+                            .flex_none()
+                            .whitespace_nowrap()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("r{}", revision.number)),
                     )
                     .child(
                         div()
-                            .w(px(150.0))
+                            .w(px((cell * 17.0).round()))
+                            .flex_none()
+                            .whitespace_nowrap()
                             .text_color(colors.dim)
                             .child(format_time(revision.recorded_at)),
                     )
                     .child(
                         div()
-                            .w(px(110.0))
+                            .w(px(head_width))
+                            .flex_none()
+                            .truncate()
                             .font(code_font.clone())
                             .text_color(colors.faint)
                             .child(revision.head.clone()),
                     )
-                    .child(div().text_color(colors.dim).child(format!(
-                        "{} units · {} new · {} changed since reviewed · {} reviewed",
-                        revision.units, revision.new, revision.changed, revision.reviewed
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(colors.dim)
+                            .child(format!(
+                                "{} units · {} new · {} changed since reviewed · {} reviewed",
+                                revision.units, revision.new, revision.changed, revision.reviewed
+                            )),
+                    )
             }))
             .child(
                 div()
@@ -357,9 +401,7 @@ impl ReviewApp {
         div()
             .id("overview")
             .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
+            .size_full()
             .child(
                 div()
                     .id("overview-scroll")
@@ -368,6 +410,8 @@ impl ReviewApp {
                     .overflow_y_scroll()
                     .flex()
                     .justify_center()
+                    // The body keeps its own height, so what is past the window scrolls.
+                    .items_start()
                     .child(body),
             )
             .child(Scrollbar::vertical(&self.overview_scroll).mode(ScrollbarMode::Always))

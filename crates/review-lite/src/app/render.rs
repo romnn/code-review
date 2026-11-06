@@ -38,8 +38,34 @@ pub const FLASH: Duration = Duration::from_millis(450);
 /// The grid every spacing is a multiple of.
 pub const GRID: f32 = 4.0;
 
-/// The height of the pane headers and the bars.
-pub const BAR: f32 = GRID * 8.0;
+/// gpui's default line height, as a multiple of the font size.
+pub const LINE: f32 = 1.618;
+
+/// The height of a bar holding one line of `text_size` text with a grid step above and below
+/// it: the pane headers, the find bar and the settings panel's title, search and footer.
+pub fn bar_height(text_size: f32) -> f32 {
+    (text_size * LINE + GRID * 2.0).round()
+}
+
+/// The height of each bottom bar: one line of `text_size` text and half a step around it.
+pub fn strip_height(text_size: f32) -> f32 {
+    (text_size * LINE + GRID).round()
+}
+
+/// A bare one-line text field in `text_size` text and one line tall, instead of the
+/// component's fixed sizes in rems, so it fits its bar at any font size.
+pub fn text_field(
+    state: &gpui::Entity<gpui_component::input::InputState>,
+    text_size: f32,
+) -> Input {
+    let line = px((text_size * LINE).round());
+    Input::new(state)
+        .appearance(false)
+        .text_size(px(text_size))
+        .line_height(line)
+        .py_0()
+        .h(line)
+}
 
 /// The colors of the window, by role, from the theme and the configured diff colors.
 #[derive(Clone, Copy)]
@@ -343,8 +369,9 @@ struct CellInk {
     bar: Option<Hsla>,
 }
 
-/// A line's number in its file, with the change bar along the gutter's edge when there is one.
-fn gutter(cell: &Cell, column: Column, bar: Option<Hsla>, colors: &Palette) -> Div {
+/// A line's number in its file, with the change bar along the gutter's edge when there is one,
+/// for code cells `width` pixels wide.
+fn gutter(cell: &Cell, column: Column, bar: Option<Hsla>, width: f32, colors: &Palette) -> Div {
     let nested = matches!(
         cell.kind,
         RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
@@ -363,14 +390,14 @@ fn gutter(cell: &Cell, column: Column, bar: Option<Hsla>, colors: &Palette) -> D
         None => String::new(),
     };
     div()
-        .w(px(super::present::GUTTER))
+        .w(px(super::present::gutter(width)))
         .h_full()
         .flex_none()
         .relative()
         .flex()
         .items_center()
         .justify_end()
-        .pr(px(GRID * 2.0))
+        .pr(px((width * 0.75).round()))
         .children(bar.map(|color| {
             div()
                 .absolute()
@@ -412,23 +439,30 @@ impl ReviewApp {
         )
     }
 
+    /// A code row's gutter, where annotations put their fold arrow and before their text.
+    fn gutter_width(&self) -> f32 {
+        super::present::gutter(self.fonts.code_cell())
+    }
+
+    /// A code row's gutter and sign column, which annotations indent their text past.
+    fn code_columns(&self) -> f32 {
+        self.gutter_width() + super::present::sign(self.fonts.code_cell())
+    }
+
     /// The diff row to measure for the list's width: the widest code row or the widest
     /// annotation, whichever is wider in pixels at their font sizes and indents. Both fonts are
     /// the same monospace family, so a cell is a fixed share of the font size.
     fn widest_row(&self) -> Option<usize> {
-        const CELL: f32 = 0.6;
-        let code_indent = FRAME + GRID * 13.0 + GRID * 4.0;
-        let note_indent = FRAME + GRID * 17.0;
-        let pixels =
-            |indent: f32, cells: usize, size: f32| indent + scroll::float(cells) * size * CELL;
+        let indent = FRAME + self.code_columns();
+        let pixels = |cells: usize, cell: f32| indent + scroll::float(cells) * cell;
         let code = self
             .rows
             .widest_code
-            .map(|(row, cells)| (row, pixels(code_indent, cells, self.fonts.code_size)));
+            .map(|(row, cells)| (row, pixels(cells, self.fonts.code_cell())));
         let note = self
             .rows
             .widest_annotation
-            .map(|(row, cells)| (row, pixels(note_indent, cells, self.fonts.ui_size())));
+            .map(|(row, cells)| (row, pixels(cells, self.fonts.ui_cell())));
         match (code, note) {
             (Some((code, code_width)), Some((note, note_width))) => {
                 Some(if note_width > code_width { note } else { code })
@@ -676,9 +710,9 @@ impl ReviewApp {
             && matches!(cell.kind, RowKind::Removed | RowKind::Added))
         .then(|| div().text_color(colors.faint).child("⏎"));
         let parts = CellParts {
-            gutter: gutter(cell, column, ink.bar, colors),
+            gutter: gutter(cell, column, ink.bar, self.fonts.code_cell(), colors),
             sign: div()
-                .w(px(super::present::SIGN))
+                .w(px(super::present::sign(self.fonts.code_cell())))
                 .flex_none()
                 .text_color(ink.sign_color)
                 .child(ink.sign),
@@ -740,7 +774,7 @@ impl ReviewApp {
             RowKind::Gap => base
                 .cursor_pointer()
                 .child(frame_bar(frame, colors))
-                .child(div().w(px(GRID * 17.0)).flex_none())
+                .child(div().w(px(self.code_columns())).flex_none())
                 .child(
                     self.clipped(
                         h_flex()
@@ -761,7 +795,7 @@ impl ReviewApp {
             RowKind::Note => base
                 .bg(colors.band)
                 .child(frame_bar(frame, colors))
-                .child(div().w(px(GRID * 13.0)).flex_none())
+                .child(div().w(px(self.gutter_width())).flex_none())
                 .child(div().w(px(3.0)).h_full().flex_none().bg(colors.accent))
                 .child(
                     self.clipped(
@@ -789,7 +823,7 @@ impl ReviewApp {
                 };
                 base.bg(colors.band)
                     .child(frame_bar(frame, colors))
-                    .child(div().w(px(GRID * 17.0)).flex_none())
+                    .child(div().w(px(self.code_columns())).flex_none())
                     .child(
                         self.clipped(
                             h_flex()
@@ -925,16 +959,16 @@ impl ReviewApp {
             .child(frame_bar(frame, colors))
             .child(
                 div()
-                    .w(px(GRID * 13.0))
+                    .w(px(self.gutter_width()))
                     .flex_none()
-                    .pr(px(GRID * 2.0))
+                    .pr(px((self.fonts.code_cell() * 0.75).round()))
                     .text_right()
                     .text_color(colors.faint)
                     .child(if folded { "▸" } else { "▾" }),
             )
             .child(
                 div()
-                    .w(px(GRID * 4.0))
+                    .w(px(self.code_columns() - self.gutter_width()))
                     .flex_none()
                     .text_color(colors.badge(badge))
                     .child(glyph),
@@ -953,6 +987,13 @@ impl ReviewApp {
             .iter()
             .filter(|node| node.kind == NodeKind::File)
             .count();
+        let counts = count_width(&[(files_done, files), (reviewed, total)]);
+        let parts = progress_parts(
+            width - GRID * 6.0,
+            self.fonts.ui_cell(),
+            PROGRESS_LABEL_CELLS,
+            counts,
+        );
         let visible = self.visible_tree();
         let count = visible.len();
         let filter = self.filter_query().map(|query| {
@@ -977,7 +1018,7 @@ impl ReviewApp {
             .bg(colors.surface)
             .child(
                 h_flex()
-                    .h(px(BAR))
+                    .h(px(self.fonts.bar()))
                     .flex_none()
                     .px(px(GRID * 3.0))
                     .gap(px(GRID * 2.0))
@@ -986,6 +1027,7 @@ impl ReviewApp {
                     .child(
                         div()
                             .flex_none()
+                            .whitespace_nowrap()
                             .text_color(if focused { colors.text } else { colors.dim })
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
@@ -1007,8 +1049,12 @@ impl ReviewApp {
                     .gap(px(GRID))
                     .border_b_1()
                     .border_color(colors.hairline)
-                    .child(progress_line("files", files_done, files, &colors))
-                    .child(progress_line("hunks", reviewed, total, &colors)),
+                    .child(progress_line(
+                        "files", files_done, files, counts, parts, &colors,
+                    ))
+                    .child(progress_line(
+                        "hunks", reviewed, total, counts, parts, &colors,
+                    )),
             )
             .child(
                 div()
@@ -1041,6 +1087,8 @@ impl ReviewApp {
         let visible = self.visible_tree();
         let focused = self.mode == Mode::Tree && self.overlay.is_none();
         let row_height = self.fonts.row_height();
+        // The chevron, change-kind and state columns, and each level's indent, in cells.
+        let column = (self.fonts.ui_cell() * 1.75).round();
         let cursor = self.tree_cursor.min(visible.len().saturating_sub(1));
         range
             .filter_map(|position| {
@@ -1076,7 +1124,7 @@ impl ReviewApp {
                         .h(px(row_height))
                         .w_full()
                         .pr(px(GRID * 3.0))
-                        .pl(px(GRID * 2.0 + scroll::float(node.depth) * GRID * 4.0))
+                        .pl(px(GRID * 2.0 + scroll::float(node.depth) * column))
                         .gap(px(GRID))
                         .cursor_pointer()
                         .when(is_cursor && focused, |row| row.bg(colors.raised))
@@ -1089,7 +1137,7 @@ impl ReviewApp {
                         .hover(|row| row.bg(colors.hairline))
                         .child(
                             div()
-                                .w(px(GRID * 4.0))
+                                .w(px(column))
                                 .flex_none()
                                 .text_color(colors.faint)
                                 .child(match (directory, collapsed) {
@@ -1100,7 +1148,7 @@ impl ReviewApp {
                         )
                         .child(
                             div()
-                                .w(px(GRID * 4.0))
+                                .w(px(column))
                                 .flex_none()
                                 .text_color(kind.map_or(colors.faint, |(_, color, _)| color))
                                 .children(
@@ -1131,7 +1179,7 @@ impl ReviewApp {
                         )
                         .child(
                             div()
-                                .w(px(GRID * 4.0))
+                                .w(px(column))
                                 .flex_none()
                                 .text_center()
                                 .text_color(glyph_color)
@@ -1200,27 +1248,14 @@ impl ReviewApp {
             )
     }
 
-    /// The selected file's header: its change kind, path and details, and its progress.
-    fn render_file_header(&self) -> impl IntoElement + use<> {
-        let colors = self.palette();
-        let Some(section) = self.rows.files.first() else {
-            return h_flex()
-                .h(px(BAR))
-                .flex_none()
-                .px(px(GRID * 3.0))
-                .border_b_1()
-                .border_color(colors.hairline)
-                .text_color(colors.faint)
-                .child("No file selected");
-        };
-        let (dir, name) = split_path(&section.path);
-        let change = section.change.as_ref();
-        let kind_color = change.map_or(colors.text, |change| colors.tone(change.tone()));
+    /// What the file header says about `section` after its path: a rename, entry changes,
+    /// what kind of change it is, and why side by side shows unified.
+    fn file_details(&self, section: &crate::rows::FileSection) -> Vec<String> {
         let mut details: Vec<String> = Vec::new();
         if let Some(old) = &section.old_path {
             details.push(format!("renamed from {old}"));
         }
-        if let Some(change) = change {
+        if let Some(change) = &section.change {
             details.extend(
                 change
                     .entry_changes
@@ -1240,6 +1275,26 @@ impl ReviewApp {
         if self.look().layout == crate::config::DiffLayout::SideBySide && !self.side_by_side() {
             details.push("unified · too narrow for side by side".to_owned());
         }
+        details
+    }
+
+    /// The selected file's header: its change kind, path and details, and its progress.
+    fn render_file_header(&self) -> impl IntoElement + use<> {
+        let colors = self.palette();
+        let Some(section) = self.rows.files.first() else {
+            return h_flex()
+                .h(px(self.fonts.bar()))
+                .flex_none()
+                .px(px(GRID * 3.0))
+                .border_b_1()
+                .border_color(colors.hairline)
+                .text_color(colors.faint)
+                .child("No file selected");
+        };
+        let (dir, name) = split_path(&section.path);
+        let change = section.change.as_ref();
+        let kind_color = change.map_or(colors.text, |change| colors.tone(change.tone()));
+        let details = self.file_details(section);
         let units: Vec<_> = self.rows.hunks.concat();
         let approved = self
             .view()
@@ -1250,11 +1305,25 @@ impl ReviewApp {
                     .count()
             })
             .unwrap_or(0);
+        // When the pane is narrow, the line counts make way first, then the meter; the path
+        // keeps some room and truncates from its start.
+        let cell = self.fonts.ui_cell();
+        let gap = GRID * 3.0;
+        let text = |text: &str| scroll::float(crate::rows::display_width(text)) * cell;
+        let added = format!("+{}", section.added);
+        let removed = format!("−{}", section.removed);
+        let room = self.diff_width - GRID * 6.0;
+        let lead = change.map_or(0.0, |_| cell + gap) + text(&section.path).min(cell * 16.0);
+        let meter = gap + meter_width(units.len(), cell);
+        let counts = gap + text(&added) + gap + text(&removed);
+        let show_meter = lead + meter <= room;
+        let show_counts = show_meter && lead + meter + counts <= room;
         h_flex()
-            .h(px(BAR))
+            .h(px(self.fonts.bar()))
             .flex_none()
             .px(px(GRID * 3.0))
-            .gap(px(GRID * 3.0))
+            .gap(px(gap))
+            .whitespace_nowrap()
             .bg(colors.surface)
             .border_b_1()
             .border_color(colors.hairline)
@@ -1267,11 +1336,19 @@ impl ReviewApp {
             .child(
                 h_flex()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(div().text_color(colors.dim).child(dir.to_owned()))
                     .child(
                         div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis_start()
+                            .text_color(colors.dim)
+                            .child(dir.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w_full()
+                            .truncate()
                             .text_color(colors.text)
                             .font_weight(FontWeight::BOLD)
                             .child(name.to_owned()),
@@ -1285,21 +1362,18 @@ impl ReviewApp {
                     .text_color(colors.faint)
                     .child(details.join(" · ")),
             )
-            .child(
-                div()
-                    .text_color(colors.added_sign)
-                    .child(format!("+{}", section.added)),
-            )
-            .child(
-                div()
-                    .text_color(colors.removed_sign)
-                    .child(format!("−{}", section.removed)),
-            )
-            .child(progress_meter(approved, units.len(), &colors))
+            .when(show_counts, |header| {
+                header
+                    .child(div().text_color(colors.added_sign).child(added))
+                    .child(div().text_color(colors.removed_sign).child(removed))
+            })
+            .when(show_meter, |header| {
+                header.child(progress_meter(approved, units.len(), cell, &colors))
+            })
     }
 
     /// The diff list of the selected file, with its scrollbars, or a loading or empty state.
-    fn render_diff(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let colors = self.palette();
         let row_height = self.fonts.row_height();
         let side_by_side = self.side_by_side();
@@ -1312,10 +1386,8 @@ impl ReviewApp {
         // Side by side, the halves move their text by the shared offset instead; see `pairs`.
         let list = if side_by_side {
             let viewport = gpui_component::scroll::ScrollbarHandle::viewport_bounds(&self.list);
-            self.text_scroll.update(
-                self.text_extent(window, f32::from(viewport.size.width)),
-                viewport,
-            );
+            self.text_scroll
+                .update(self.text_extent(f32::from(viewport.size.width)), viewport);
             list.with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
         } else {
             list.with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
@@ -1414,11 +1486,18 @@ impl ReviewApp {
         let longest = lines.longest;
         // The scopes around the cursor stay in the header as the buffer scrolls.
         let scope = buffer.scope();
+        // The line numbers' column holds the last line's number, four digits at least, and a
+        // cell of room.
+        let code_cell = self.fonts.code_cell();
+        let digits = lines.lines.len().to_string().len().max(4);
+        let number_width = (code_cell * (scroll::float(digits) + 1.25)).round();
+        let number_pad = code_cell.round();
         let header = h_flex()
-            .h(px(BAR))
+            .h(px(self.fonts.bar()))
             .flex_none()
             .px(px(GRID * 3.0))
             .gap(px(GRID * 3.0))
+            .whitespace_nowrap()
             .bg(colors.surface)
             .border_b_1()
             .border_color(colors.hairline)
@@ -1427,7 +1506,9 @@ impl ReviewApp {
                     .min_w_0()
                     .child(
                         div()
-                            .flex_none()
+                            .flex_shrink_0()
+                            .max_w_full()
+                            .truncate()
                             .text_color(colors.text)
                             .font_weight(FontWeight::BOLD)
                             .child(buffer.title().to_owned()),
@@ -1442,7 +1523,9 @@ impl ReviewApp {
             )
             .child(
                 div()
-                    .flex_none()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_color(colors.faint)
                     .child(match &buffer.origin {
                         super::buffer::Origin::Review(_) => "whole file, read-only".to_owned(),
@@ -1454,8 +1537,7 @@ impl ReviewApp {
                         }
                     }),
             )
-            .child(div().flex_1())
-            .child(div().text_color(colors.dim).child(format!(
+            .child(div().flex_none().text_color(colors.dim).child(format!(
                 "{}:{}",
                 cursor.row + 1,
                 cursor.col + 1
@@ -1530,9 +1612,9 @@ impl ReviewApp {
                             )
                             .child(
                                 div()
-                                    .w(px(GRID * 13.0))
+                                    .w(px(number_width))
                                     .flex_none()
-                                    .pr(px(GRID * 3.0))
+                                    .pr(px(number_pad))
                                     .text_right()
                                     .text_color(if index == cursor.row {
                                         colors.text
@@ -1617,16 +1699,22 @@ impl ReviewApp {
             h_flex()
                 .key_context(Area::Find.context())
                 .on_action(cx.listener(Self::close_find))
-                .h(px(BAR))
+                .h(px(self.fonts.bar()))
                 .flex_none()
                 .px(px(GRID * 3.0))
                 .gap(px(GRID * 2.0))
+                .whitespace_nowrap()
                 .bg(colors.surface)
                 .border_b_1()
                 .border_color(colors.hairline)
-                .child(div().text_color(colors.accent).child("/"))
-                .child(div().flex_1().child(Input::new(&input).appearance(false)))
-                .child(div().text_color(colors.dim).child(count))
+                .child(div().flex_none().text_color(colors.accent).child("/"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(text_field(&input, self.fonts.ui_size())),
+                )
+                .child(div().flex_none().text_color(colors.dim).child(count))
         })
     }
 
@@ -1698,11 +1786,7 @@ impl ReviewApp {
             "ToggleDiffStyle" => style.clone(),
             _ => hint.label.to_owned(),
         };
-        let small = self.fonts.ui_size();
-        let text_system = window.text_system();
-        let cell = text_system
-            .em_advance(text_system.resolve_font(&self.fonts.code), px(small))
-            .map_or(small * 0.6, f32::from);
+        let cell = self.fonts.ui_cell();
         let cells = |text: &str| scroll::float(crate::rows::display_width(text)) * cell;
         // The padding, the target's reserved width and the divider; a little slack covers
         // glyphs a fallback font draws wider.
@@ -1743,9 +1827,10 @@ impl ReviewApp {
             .text_size(px(small))
             .child(
                 h_flex()
-                    .h(px(BAR - GRID))
+                    .h(px(self.fonts.strip()))
                     .px(px(GRID * 3.0))
                     .gap(px(GRID * 4.0))
+                    .whitespace_nowrap()
                     .bg(match failing {
                         Some(glow) => Hsla {
                             a: 0.25 * glow.max(0.0),
@@ -1769,6 +1854,7 @@ impl ReviewApp {
                     )
                     .children(newer.map(|newer| {
                         div()
+                            .flex_none()
                             .px(px(GRID * 2.0))
                             .bg(colors.accent)
                             .text_color(colors.background)
@@ -1777,9 +1863,10 @@ impl ReviewApp {
             )
             .child(
                 h_flex()
-                    .h(px(BAR - GRID))
+                    .h(px(self.fonts.strip()))
                     .px(px(GRID * 3.0))
                     .gap(px(GRID * 4.0))
+                    .whitespace_nowrap()
                     .bg(colors.surface)
                     .child(
                         div()
@@ -1789,7 +1876,13 @@ impl ReviewApp {
                             .text_color(colors.text)
                             .child(self.target_label()),
                     )
-                    .child(div().w(px(1.0)).h(px(GRID * 4.0)).bg(colors.hairline))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(1.0))
+                            .h(relative(0.5))
+                            .bg(colors.hairline),
+                    )
                     .children(hints.into_iter().map(|(hint, label)| {
                         let (key_color, label_color) = if hint.available {
                             (colors.accent, colors.dim)
@@ -1806,10 +1899,25 @@ impl ReviewApp {
     }
 
     /// The `?` cheat sheet: every bound action by section, from the keymap in effect.
-    fn render_help(&self) -> impl IntoElement + use<> {
+    fn render_help(&self, window: &Window) -> impl IntoElement + use<> {
         let colors = self.palette();
         let small = self.fonts.ui_size();
-        let columns = super::keymap::columns(super::keymap::sheet(&self.settings.keymap), 4);
+        let cell = self.fonts.ui_cell();
+        // As many columns, up to four, as leave each one its keys and room for their help.
+        let (width, padding, gap) = (GRID * 360.0, GRID * 6.0, GRID * 8.0);
+        let inner = width.min(f32::from(window.viewport_size().width) * 0.94) - padding * 2.0;
+        let fit = ((inner + gap) / (cell * 26.0 + gap)).floor();
+        let count = if fit >= 4.0 {
+            4
+        } else if fit >= 3.0 {
+            3
+        } else if fit >= 2.0 {
+            2
+        } else {
+            1
+        };
+        let keys_width = (cell * 11.0).round();
+        let columns = super::keymap::columns(super::keymap::sheet(&self.settings.keymap), count);
         div()
             .absolute()
             .inset_0()
@@ -1823,19 +1931,22 @@ impl ReviewApp {
             .child(
                 v_flex()
                     .id("help-sheet")
-                    .w(px(GRID * 360.0))
+                    .w(px(width))
                     .max_w(relative(0.94))
                     .max_h_full()
                     .overflow_y_scroll()
-                    .p(px(GRID * 6.0))
+                    .p(px(padding))
                     .gap(px(GRID * 4.0))
                     .bg(colors.surface)
                     .border_1()
                     .border_color(colors.hairline)
                     .text_size(px(small))
                     .child(
+                        // A narrow sheet puts the note under the title.
                         h_flex()
+                            .flex_wrap()
                             .justify_between()
+                            .gap_x(px(GRID * 4.0))
                             .child(
                                 div()
                                     .text_color(colors.text)
@@ -1848,46 +1959,49 @@ impl ReviewApp {
                                     .child("[keys] in config.toml rebinds · Esc closes"),
                             ),
                     )
-                    .child(h_flex().items_start().gap(px(GRID * 8.0)).children(
-                        columns.into_iter().map(|column| {
-                            v_flex().flex_1().min_w_0().gap(px(GRID * 4.0)).children(
-                                column.into_iter().map(|(group, entries)| {
-                                    v_flex()
-                                        .child(
-                                            div()
-                                                .h(px(GRID * 6.0))
-                                                .mb(px(GRID))
-                                                .border_b_1()
-                                                .border_color(colors.hairline)
-                                                .text_color(colors.dim)
-                                                .child(group.to_uppercase()),
-                                        )
-                                        .children(entries.into_iter().map(|(keys, help)| {
-                                            // Help wraps rather than hiding its end.
-                                            h_flex()
-                                                .items_start()
-                                                .min_h(px(GRID * 6.0))
-                                                .gap(px(GRID * 2.0))
-                                                .child(
-                                                    div()
-                                                        .w(px(GRID * 26.0))
-                                                        .flex_none()
-                                                        .truncate()
-                                                        .text_color(colors.accent)
-                                                        .child(keys),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .text_color(colors.text)
-                                                        .child(help),
-                                                )
-                                        }))
-                                }),
-                            )
-                        }),
-                    )),
+                    .child(
+                        h_flex()
+                            .items_start()
+                            .gap(px(gap))
+                            .children(columns.into_iter().map(|column| {
+                                v_flex().flex_1().min_w_0().gap(px(GRID * 4.0)).children(
+                                    column.into_iter().map(|(group, entries)| {
+                                        v_flex()
+                                            .child(
+                                                div()
+                                                    .pb(px(GRID * 0.5))
+                                                    .mb(px(GRID))
+                                                    .truncate()
+                                                    .border_b_1()
+                                                    .border_color(colors.hairline)
+                                                    .text_color(colors.dim)
+                                                    .child(group.to_uppercase()),
+                                            )
+                                            .children(entries.into_iter().map(|(keys, help)| {
+                                                // Help wraps rather than hiding its end.
+                                                h_flex()
+                                                    .items_start()
+                                                    .gap(px(GRID * 2.0))
+                                                    .child(
+                                                        div()
+                                                            .w(px(keys_width))
+                                                            .flex_none()
+                                                            .truncate()
+                                                            .text_color(colors.accent)
+                                                            .child(keys),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .text_color(colors.text)
+                                                            .child(help),
+                                                    )
+                                            }))
+                                    }),
+                                )
+                            })),
+                    ),
             )
     }
 }
@@ -1952,79 +2066,174 @@ fn header_background(selected: bool, colors: &Palette) -> Hsla {
     }
 }
 
-/// A reviewed/total meter with tabular counts, so it never shifts as numbers change.
-pub fn progress_meter(reviewed: usize, total: usize, colors: &Palette) -> Div {
+/// The cells of a progress meter's bar.
+const METER_BAR_CELLS: f32 = 5.0;
+
+/// The pixels a progress meter of `total` takes with text cells `cell` pixels wide.
+fn meter_width(total: usize, cell: f32) -> f32 {
+    let counts = format!("{total}/{total}").len();
+    (cell * METER_BAR_CELLS).round() + GRID * 2.0 + scroll::float(counts) * cell
+}
+
+/// A reviewed/total meter, for text cells `cell` pixels wide.
+///
+/// The counts are padded to the width of `total/total`, so it never shifts as numbers change.
+pub fn progress_meter(reviewed: usize, total: usize, cell: f32, colors: &Palette) -> Div {
     let fraction = if total == 0 {
         0.0
     } else {
         scroll::float(reviewed) / scroll::float(total)
     };
-    let width = 48.0;
+    let counts = format!("{total}/{total}").len();
     h_flex()
         .flex_none()
         .gap(px(GRID * 2.0))
+        .whitespace_nowrap()
         .child(
-            div().w(px(width)).h(px(GRID)).bg(colors.hairline).child(
-                div()
-                    .h_full()
-                    .w(px(width * fraction))
-                    .bg(if reviewed == total && total > 0 {
+            div()
+                .w(px((cell * METER_BAR_CELLS).round()))
+                .h(px(GRID))
+                .bg(colors.hairline)
+                .child(div().h_full().w(relative(fraction)).bg(
+                    if reviewed == total && total > 0 {
                         colors.accepted
                     } else {
                         colors.accent
-                    }),
-            ),
+                    },
+                )),
         )
         .child(
             div()
-                .min_w(px(GRID * 12.0))
-                .text_right()
                 .text_color(colors.dim)
-                .child(format!("{reviewed}/{total}")),
+                .child(format!("{:>counts$}", format!("{reviewed}/{total}"))),
         )
+}
+
+/// The cells of the files pane's progress labels, `files` and `hunks`.
+const PROGRESS_LABEL_CELLS: usize = 5;
+
+/// The cells of a progress line's percent, up to `100%`.
+const PERCENT_CELLS: usize = 4;
+
+/// The fewest cells a progress line's bar takes before it makes way.
+const PROGRESS_BAR_CELLS: usize = 3;
+
+/// Which parts of the files pane's progress lines show; the counts always do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressParts {
+    label: bool,
+    bar: bool,
+    percent: bool,
+}
+
+/// The parts of a progress line that fit `room` pixels with text cells `cell` pixels wide, a
+/// label of `label` cells and counts of `counts` cells: the bar makes way first, then the
+/// percent, then the label.
+fn progress_parts(room: f32, cell: f32, label: usize, counts: usize) -> ProgressParts {
+    let candidates = [
+        ProgressParts {
+            label: true,
+            bar: true,
+            percent: true,
+        },
+        ProgressParts {
+            label: true,
+            bar: false,
+            percent: true,
+        },
+        ProgressParts {
+            label: true,
+            bar: false,
+            percent: false,
+        },
+    ];
+    let width = |parts: &ProgressParts| {
+        let cells = [
+            Some(counts),
+            parts.label.then_some(label),
+            parts.bar.then_some(PROGRESS_BAR_CELLS),
+            parts.percent.then_some(PERCENT_CELLS),
+        ];
+        let shown: Vec<usize> = cells.into_iter().flatten().collect();
+        scroll::float(shown.iter().sum::<usize>()) * cell
+            + GRID * 2.0 * scroll::float(shown.len().saturating_sub(1))
+    };
+    candidates
+        .into_iter()
+        .find(|parts| width(parts) <= room)
+        .unwrap_or(ProgressParts {
+            label: false,
+            bar: false,
+            percent: false,
+        })
 }
 
 /// One labeled progress line of the files pane: a bar across the pane, the done and total
 /// counts, and the share done in whole percent, rounded down so 100% means all of it.
-fn progress_line(label: &str, done: usize, total: usize, colors: &Palette) -> Div {
+///
+/// Its text never wraps and is padded to `count_width` characters, so in the monospace font the
+/// bars of lines with equally long labels line up at any font size.
+/// Only `parts` show, so a narrow pane drops whole parts instead of clipping them.
+fn progress_line(
+    label: &str,
+    done: usize,
+    total: usize,
+    count_width: usize,
+    parts: ProgressParts,
+    colors: &Palette,
+) -> Div {
     let percent = (done * 100).checked_div(total).unwrap_or(0);
     let fraction = scroll::float(percent) / 100.0;
     let complete = total > 0 && done >= total;
     h_flex()
+        .whitespace_nowrap()
         .gap(px(GRID * 2.0))
         .text_color(colors.dim)
-        .child(div().w(px(GRID * 12.0)).flex_none().child(label.to_owned()))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(GRID * 6.0))
-                .h(px(GRID))
-                .bg(colors.hairline)
-                .child(div().h_full().w(relative(fraction)).bg(if complete {
-                    colors.accepted
-                } else {
-                    colors.accent
-                })),
-        )
-        .child(
-            div()
-                .flex_none()
-                .min_w(px(GRID * 14.0))
-                .text_right()
-                .child(format!("{done}/{total}")),
-        )
+        .when(parts.label, |line| {
+            line.child(div().flex_none().child(label.to_owned()))
+        })
+        .when(parts.bar, |line| {
+            line.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(GRID))
+                    .bg(colors.hairline)
+                    .child(div().h_full().w(relative(fraction)).bg(if complete {
+                        colors.accepted
+                    } else {
+                        colors.accent
+                    })),
+            )
+        })
         .child(
             div()
                 .flex_none()
-                .min_w(px(GRID * 10.0))
-                .text_right()
-                .text_color(if complete {
-                    colors.accepted
-                } else {
-                    colors.text
-                })
-                .child(format!("{percent}%")),
+                // Without the bar, the counts and the percent keep to the right edge.
+                .when(!parts.bar, gpui::Styled::ml_auto)
+                .child(format!("{:>count_width$}", format!("{done}/{total}"))),
         )
+        .when(parts.percent, |line| {
+            line.child(
+                div()
+                    .flex_none()
+                    .text_color(if complete {
+                        colors.accepted
+                    } else {
+                        colors.text
+                    })
+                    .child(format!("{percent:>3}%")),
+            )
+        })
+}
+
+/// The characters the longest of `counts` takes as `done/total`.
+fn count_width(counts: &[(usize, usize)]) -> usize {
+    counts
+        .iter()
+        .map(|(done, total)| format!("{done}/{total}").len())
+        .max()
+        .unwrap_or(0)
 }
 
 /// A centered card for loading, empty and error states.
@@ -2097,13 +2306,13 @@ impl Render for ReviewApp {
                 .min_w_0()
                 .h_full()
                 .child(self.render_file_header())
-                .child(self.render_diff(window, cx))
+                .child(self.render_diff(cx))
                 .into_any_element()
         };
         let bars = self.render_bars(window);
         let find_bar = self.render_find_bar(cx);
         let overlay = match self.overlay {
-            Some(Overlay::Help) => Some(self.render_help().into_any_element()),
+            Some(Overlay::Help) => Some(self.render_help(window).into_any_element()),
             Some(Overlay::Overview) => Some(
                 div()
                     .absolute()
@@ -2151,6 +2360,7 @@ impl Render for ReviewApp {
             .when(client_decorated, |content| {
                 content.child(super::chrome::title_bar(
                     self.title().into(),
+                    self.fonts.ui_size(),
                     window,
                     &self.regions,
                     &colors,
@@ -2303,6 +2513,35 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A narrowing files pane drops the bar first, then the percent, then the label; the
+    /// counts always show.
+    #[test]
+    fn progress_lines_drop_parts_by_priority() {
+        let parts = |label, bar, percent| ProgressParts {
+            label,
+            bar,
+            percent,
+        };
+        // Cells 10 px wide and 8 px gaps: `files`, `12/34` and `100%` take 156 px, and the
+        // bar's 30 px and its gap make 194.
+        let cell = 10.0;
+        let fits = |room| progress_parts(room, cell, PROGRESS_LABEL_CELLS, 5);
+        assert_eq!(fits(400.0), parts(true, true, true));
+        assert_eq!(fits(194.0), parts(true, true, true));
+        assert_eq!(fits(193.0), parts(true, false, true));
+        assert_eq!(fits(156.0), parts(true, false, true));
+        assert_eq!(fits(155.0), parts(true, false, false));
+        assert_eq!(fits(108.0), parts(true, false, false));
+        assert_eq!(fits(107.0), parts(false, false, false));
+    }
+
+    /// The meter's counts are padded to the widest they get, so its width never changes as
+    /// hunks are approved.
+    #[test]
+    fn meters_keep_their_width() {
+        assert_eq!(meter_width(12, 10.0), 50.0 + GRID * 2.0 + 50.0);
     }
 
     #[test]

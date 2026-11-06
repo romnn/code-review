@@ -31,11 +31,11 @@ use crate::rows::{Layout, Presentation, Row, RowKind};
 /// The accent bar along a row's left edge, in logical pixels.
 pub const FRAME: f32 = 5.0;
 
-/// A code row's line-number gutter.
-pub const GUTTER: f32 = GRID * 13.0;
+/// A code row's line-number gutter, in cells: four digits and the room after them.
+const GUTTER_CELLS: f32 = 5.0;
 
-/// A code row's sign column.
-pub const SIGN: f32 = GRID * 4.0;
+/// A code row's sign column, in cells.
+const SIGN_CELLS: f32 = 1.5;
 
 /// The line between the halves of the side-by-side diff.
 pub const DIVIDER: f32 = 1.0;
@@ -43,9 +43,6 @@ pub const DIVIDER: f32 = 1.0;
 /// The fewest cells of code each half must show for the side-by-side layout; narrower, the
 /// diff shows unified until the window is wide enough again.
 pub const MIN_HALF_CELLS: f32 = 40.0;
-
-/// A monospace cell's width as a share of the font size, for deciding what fits.
-const CELL: f32 = 0.6;
 
 /// Where a list is, by row: the row at its top, and how far into that row.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -144,15 +141,27 @@ pub struct Places {
     pub buffer: Anchor,
 }
 
-/// The layout that shows for `requested` in a diff `width` pixels wide with code `code_size`
-/// pixels tall: side by side only while each half fits [`MIN_HALF_CELLS`] after its gutter.
+/// A code row's line-number gutter, for code cells `cell` pixels wide.
 #[must_use]
-pub fn effective_layout(requested: DiffLayout, width: f32, code_size: f32) -> DiffLayout {
+pub fn gutter(cell: f32) -> f32 {
+    (cell * GUTTER_CELLS).round()
+}
+
+/// A code row's sign column, for code cells `cell` pixels wide.
+#[must_use]
+pub fn sign(cell: f32) -> f32 {
+    (cell * SIGN_CELLS).round()
+}
+
+/// The layout that shows for `requested` in a diff `width` pixels wide with code cells `cell`
+/// pixels wide: side by side only while each half fits [`MIN_HALF_CELLS`] after its gutter.
+#[must_use]
+pub fn effective_layout(requested: DiffLayout, width: f32, cell: f32) -> DiffLayout {
     match requested {
         DiffLayout::Unified => DiffLayout::Unified,
         DiffLayout::SideBySide => {
-            let half = (width - FRAME - DIVIDER) / 2.0 - GUTTER - SIGN;
-            if half / (code_size * CELL) >= MIN_HALF_CELLS {
+            let half = (width - FRAME - DIVIDER) / 2.0 - gutter(cell) - sign(cell);
+            if half / cell >= MIN_HALF_CELLS {
                 DiffLayout::SideBySide
             } else {
                 DiffLayout::Unified
@@ -171,12 +180,14 @@ pub fn opening(
     let look = settings.appearance.shown();
     fonts.line_height = look::line_height(look.density);
     let diff_width = if settings.layout.sidebar_visible {
-        window - panes::sidebar_width(settings.layout.sidebar, window) - (GRID + 1.0)
+        window
+            - panes::sidebar_width(settings.layout.sidebar, window, fonts.ui_cell())
+            - (GRID + 1.0)
     } else {
         window
     };
     let presentation = Presentation {
-        layout: effective_layout(look.layout, diff_width, fonts.code_size),
+        layout: effective_layout(look.layout, diff_width, fonts.code_cell()),
         density: look.density,
     };
     (presentation, diff_width)
@@ -209,7 +220,7 @@ impl ReviewApp {
     pub(super) fn presentation(&self) -> Presentation {
         let look = self.look();
         Presentation {
-            layout: effective_layout(look.layout, self.diff_width, self.fonts.code_size),
+            layout: effective_layout(look.layout, self.diff_width, self.fonts.code_cell()),
             density: look.density,
         }
     }
@@ -217,7 +228,9 @@ impl ReviewApp {
     /// The diff pane's width in a window `window` wide, beside the sidebar when it shows.
     pub(super) fn diff_width_in(&self, window: f32) -> f32 {
         if self.sidebar_shown() {
-            window - panes::sidebar_width(self.layout.sidebar, window) - (GRID + 1.0)
+            window
+                - panes::sidebar_width(self.layout.sidebar, window, self.fonts.ui_cell())
+                - (GRID + 1.0)
         } else {
             window
         }
@@ -278,6 +291,9 @@ impl ReviewApp {
             buffer,
         } = places;
         let approved_before = self.folds.approved;
+        // The bars around the lists follow the font size, so the viewports the next frame lays
+        // out differ from the last frame's by as much as the bars change.
+        let chrome_before = (self.list_chrome(), self.tree_chrome());
 
         // Motion aimed at the old rows' pixels stops.
         self.list_animation = None;
@@ -309,10 +325,12 @@ impl ReviewApp {
         let clamp = |offset: f32, rows: usize, viewport: f32| {
             offset.clamp(0.0, (scroll::float(rows) * height - viewport).max(0.0))
         };
-        let viewport = f32::from(self.list.viewport_bounds().size.height);
+        let list_grown = chrome_before.0 - self.list_chrome();
+        let viewport = f32::from(self.list.viewport_bounds().size.height) + list_grown;
         let offset = diff_offset(&self.rows, diff, height);
         scroll::set_offset_of(&self.list, clamp(offset, self.rows.rows.len(), viewport));
-        let viewport = f32::from(self.tree_list.viewport_bounds().size.height);
+        let viewport = f32::from(self.tree_list.viewport_bounds().size.height) + chrome_before.1
+            - self.tree_chrome();
         let offset = tree.offset(tree.row, height);
         scroll::set_offset_of(
             &self.tree_list,
@@ -322,10 +340,21 @@ impl ReviewApp {
             .buffer
             .as_ref()
             .map_or(0, |buffer| buffer.lines.lines.len());
-        let viewport = f32::from(self.buffer_list.viewport_bounds().size.height);
+        let viewport = f32::from(self.buffer_list.viewport_bounds().size.height) + list_grown;
         let offset = buffer.offset(buffer.row, height);
         scroll::set_offset_of(&self.buffer_list, clamp(offset, lines, viewport));
         self.text_scroll.clamp_to_extent();
+    }
+
+    /// The height of the bars above and below the diff and the buffer that follow the font
+    /// size: the pane header and the two bottom bars.
+    fn list_chrome(&self) -> f32 {
+        self.fonts.bar() + 2.0 * self.fonts.strip()
+    }
+
+    /// The same for the tree, whose pane also has its two progress lines above it.
+    fn tree_chrome(&self) -> f32 {
+        self.list_chrome() + 2.0 * self.fonts.ui_size() * super::render::LINE
     }
 
     /// Where the buffer is, or is heading.
@@ -356,7 +385,8 @@ mod tests {
     /// Side by side needs room for both halves after their gutters; a larger font needs more.
     #[test]
     fn side_by_side_falls_back_when_narrow() {
-        let size = crate::config::points_to_pixels(13.0);
+        // A 13 pt cell of a font whose advance is 0.6 of its size.
+        let size = crate::config::points_to_pixels(13.0) * 0.6;
         assert_eq!(
             effective_layout(DiffLayout::SideBySide, 1300.0, size),
             DiffLayout::SideBySide
