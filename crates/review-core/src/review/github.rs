@@ -82,6 +82,7 @@ fn pr_view<T: DeserializeOwned>(repo: &Repo, spec: Option<&str>, fields: &str) -
     if let Some(work_tree) = repo.work_tree() {
         command.current_dir(work_tree);
     }
+    repo.apply_env(&mut command);
     let args: Vec<&str> = ["pr", "view"]
         .into_iter()
         .chain(spec)

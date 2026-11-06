@@ -8,7 +8,7 @@ mod diff_tree;
 mod snapshot;
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -45,6 +45,9 @@ pub struct Repo {
     git_dir: PathBuf,
     /// The directory holding objects and refs, shared by all worktrees of one clone.
     common_dir: PathBuf,
+    /// Variables added to the environment of every command run for the repository; see
+    /// [`Self::set_command_env`].
+    env: Vec<(OsString, OsString)>,
 }
 
 /// A ref and the object it points to.
@@ -81,6 +84,7 @@ impl Repo {
             work_tree: Some(path.to_path_buf()),
             git_dir: PathBuf::new(),
             common_dir: PathBuf::new(),
+            env: Vec::new(),
         };
         let git_dir = probe.run_text(["rev-parse", "--absolute-git-dir"])?;
         let common_dir =
@@ -97,6 +101,7 @@ impl Repo {
             work_tree,
             git_dir: PathBuf::from(git_dir),
             common_dir: PathBuf::from(common_dir),
+            env: Vec::new(),
         })
     }
 
@@ -119,6 +124,28 @@ impl Repo {
         &self.git_dir
     }
 
+    /// Sets `vars` in the environment of every `git` and `gh` command run for the repository
+    /// from now on, replacing the variables set before, on top of the process's own
+    /// environment.
+    ///
+    /// A front end that draws on the terminal sets the variables that keep `ssh` and credential
+    /// helpers from prompting on it, once the review is open.
+    pub fn set_command_env<K, V>(&mut self, vars: impl IntoIterator<Item = (K, V)>)
+    where
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        self.env = vars
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+    }
+
+    /// Adds the variables of [`Self::set_command_env`] to `command`'s environment.
+    pub(crate) fn apply_env(&self, command: &mut Command) {
+        command.envs(self.env.iter().map(|(key, value)| (key, value)));
+    }
+
     /// Returns a `git` command bound to this repository.
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new("git");
@@ -128,6 +155,7 @@ impl Repo {
         };
         // Never prompt for credentials and keep messages parseable.
         command.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
+        self.apply_env(&mut command);
         command
     }
 
@@ -669,6 +697,21 @@ impl Repo {
                 })
             })
             .collect())
+    }
+
+    /// Returns the value of the git configuration `key` for the repository, such as
+    /// `core.sshCommand`, or `None` when it is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run.
+    pub fn config_value(&self, key: &str) -> Result<Option<String>, Error> {
+        match self.run_text(["config", "--get", key]) {
+            Ok(value) => Ok(Some(value)),
+            // `git config --get` fails for a key that is not set.
+            Err(Error::CommandFailed { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Returns the current branch name, or `None` on a detached HEAD.

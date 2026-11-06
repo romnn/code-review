@@ -389,6 +389,16 @@ impl Review {
         &self.repo
     }
 
+    /// Sets `vars` in the environment of every `git` and `gh` command the review runs from now
+    /// on; see [`Repo::set_command_env`].
+    pub fn set_command_env<K, V>(&mut self, vars: impl IntoIterator<Item = (K, V)>)
+    where
+        K: Into<std::ffi::OsString>,
+        V: Into<std::ffi::OsString>,
+    {
+        self.repo.set_command_env(vars);
+    }
+
     /// Returns the review's storage paths.
     #[must_use]
     pub fn dir(&self) -> &ReviewDir {

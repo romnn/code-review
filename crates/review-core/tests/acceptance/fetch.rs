@@ -183,3 +183,45 @@ fn shallow_review_with_unpublished_head_finds_merge_base() -> eyre::Result<()> {
         },
     )
 }
+
+/// Variables set for the repository's commands reach every git it runs, such as the fetch's
+/// `ssh`: here they configure a remote that only those commands see.
+#[test]
+fn command_env_reaches_git() -> eyre::Result<()> {
+    let local = TestRepo::new()?;
+    let mut repo = Repo::discover(local.path())?;
+    assert_that!(repo.remotes()?, is_empty());
+
+    repo.set_command_env([
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "remote.elsewhere.url"),
+        ("GIT_CONFIG_VALUE_0", "https://example.com/elsewhere.git"),
+    ]);
+    let remotes = repo.remotes()?;
+    assert_that!(
+        remotes
+            .iter()
+            .map(|remote| (remote.name.as_str(), remote.url.as_str()))
+            .collect::<Vec<_>>(),
+        elements_are![eq(&("elsewhere", "https://example.com/elsewhere.git"))]
+    );
+
+    // Setting them again replaces them.
+    repo.set_command_env(Vec::<(String, String)>::new());
+    assert_that!(repo.remotes()?, is_empty());
+    Ok(())
+}
+
+/// A configuration value reads as git resolves it, and an unset key as nothing.
+#[test]
+fn config_values_read_as_git_resolves_them() -> eyre::Result<()> {
+    let local = TestRepo::new()?;
+    local.git(&["config", "core.sshCommand", "ssh -i review-key"])?;
+    let repo = Repo::discover(local.path())?;
+    assert_that!(
+        repo.config_value("core.sshCommand")?,
+        some(eq("ssh -i review-key"))
+    );
+    assert_that!(repo.config_value("review.unset")?, none());
+    Ok(())
+}
