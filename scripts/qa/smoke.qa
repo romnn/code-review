@@ -9,6 +9,7 @@ expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
+expect "progress":\{"files":\[4,17\],"hunks":\[7,27\]\}
 shot 01-open
 
 # Moving through the files previews each one's diff.

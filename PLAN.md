@@ -916,6 +916,8 @@ it, muted, so it never reads as code.
   4 px grid with 12 px side padding; pane headers line up on one hairline. The files pane resizes
   by dragging its divider (double click resets, limits keep the diff at least 400 px wide),
   `Ctrl+B` hides it, and the width is remembered in the `[layout]` table of the configuration.
+  Under its header, two progress lines show the files and the hunks reviewed: a bar, done of
+  total, and the whole percent, rounded down so 100% means all of it.
 - **Scrolling.** `review-lite --bench-scroll` scrolls every row of every file of the review once,
   file after file, 30 rows per frame, and prints frame-interval and per-frame build-time
   percentiles. On the perf fixture (25 files, 90,000 rows) the app's work per frame is about

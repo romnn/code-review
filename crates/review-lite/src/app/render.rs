@@ -162,6 +162,28 @@ impl Palette {
         }
     }
 
+    /// The colors of a selected hunk header's text on the accent's solid blue: one ink that
+    /// reads on it, with quieter parts softened rather than tinted.
+    fn on_accent(&self) -> Self {
+        let ink = if self.accent.l > 0.5 {
+            self.background
+        } else {
+            self.text
+        };
+        let soft = Hsla { a: 0.75, ..ink };
+        Self {
+            text: ink,
+            dim: ink,
+            faint: soft,
+            kind_quiet: soft,
+            open: ink,
+            accepted: ink,
+            flagged: ink,
+            changed: ink,
+            ..*self
+        }
+    }
+
     /// The color of a hunk badge.
     pub fn badge(&self, badge: Badge) -> Hsla {
         match badge {
@@ -415,35 +437,40 @@ impl ReviewApp {
         }
     }
 
-    /// Whether diff row `index` is in a hunk, from its header to its last row.
-    fn in_hunk(&self, index: usize) -> bool {
+    /// The hunk that diff row `index` belongs to for its band and bar: from the hunk's header
+    /// through its last row and the unchanged lines right after it, up to the next gap or
+    /// header.
+    fn hunk_at(&self, index: usize) -> Option<usize> {
         // Hunks are in row order, so the one that may hold the row is the last starting at or
         // before it.
-        let after = self.hunk_rows.partition_point(|rows| rows.start <= index);
-        after
-            .checked_sub(1)
-            .and_then(|hunk| self.hunk_rows.get(hunk))
-            .is_some_and(|rows| rows.contains(&index))
+        let hunk = self
+            .hunk_rows
+            .partition_point(|rows| rows.start <= index)
+            .checked_sub(1)?;
+        let rows = self.hunk_rows.get(hunk)?;
+        let trailing = |row: &Row| row.hunk.is_none() && !matches!(row.body, Body::Note(_));
+        let within = rows.contains(&index)
+            || (index >= rows.end
+                && self
+                    .rows
+                    .rows
+                    .get(rows.end..=index)
+                    .is_some_and(|after| after.iter().all(trailing)));
+        within.then_some(hunk)
     }
 
     /// The rows of the diff list, built on demand by the virtualized list.
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = self.palette();
         let row_height = self.fonts.row_height();
-        let selected = self
-            .hunk_rows
-            .get(self.hunk)
-            .cloned()
-            .filter(|_| self.mode == Mode::Diff);
+        let selected = (self.mode == Mode::Diff).then_some(self.hunk);
         let rows: Vec<AnyElement> = range
             .filter_map(|index| {
                 let row = self.rows.rows.get(index)?;
-                let frame = if selected.as_ref().is_some_and(|rows| rows.contains(&index)) {
-                    Frame::Selected
-                } else if self.in_hunk(index) {
-                    Frame::Hunk
-                } else {
-                    Frame::Outside
+                let frame = match self.hunk_at(index) {
+                    Some(hunk) if Some(hunk) == selected => Frame::Selected,
+                    Some(_) => Frame::Hunk,
+                    None => Frame::Outside,
                 };
                 let element = match &row.body {
                     Body::Code(cell) => self
@@ -680,6 +707,7 @@ impl ReviewApp {
         h_flex()
             .min_w_full()
             .whitespace_nowrap()
+            .when(frame != Frame::Outside, |row| row.bg(colors.band))
             .when_some(parts.background, gpui::Styled::bg)
             .when_some(parts.text_color, gpui::Styled::text_color)
             .child(frame_bar(frame, colors))
@@ -791,6 +819,24 @@ impl ReviewApp {
         })
     }
 
+    /// One small muted part of a hunk header with chips, such as its tag.
+    fn header_chip(&self, text: String, color: Hsla, selected: bool, colors: &Palette) -> Div {
+        div()
+            .flex_none()
+            .px(px(GRID * 1.5))
+            .line_height(px(self.fonts.ui_size() * 1.45))
+            .bg(if selected {
+                Hsla {
+                    a: 0.15,
+                    ..colors.text
+                }
+            } else {
+                colors.surface
+            })
+            .text_color(color)
+            .child(text)
+    }
+
     /// A hunk's header: one quiet line with its state glyph, the scopes around it, what kind of
     /// change it is, and where it is when its code is folded away or no scope names it.
     ///
@@ -818,13 +864,18 @@ impl ReviewApp {
             .view()
             .is_some_and(|view| units.iter().all(|&unit| self.folds.is_folded(&view, unit)));
         let selected = frame == Frame::Selected;
+        let background = header_background(selected, colors);
+        let colors = &if selected {
+            colors.on_accent()
+        } else {
+            *colors
+        };
         let label = if folded && badge == Badge::Accepted {
             colors.faint
         } else {
             colors.dim
         };
         let chips = self.look().style.headers == Headers::Chips;
-        let background = header_background(selected, colors);
         // What the hunk changes leads: the scopes around it, innermost brightest. Where it is
         // matters only when its code is folded away or no scope names it, since the gutter
         // numbers the lines that show; a file unit's text says what changed, so it stays.
@@ -841,19 +892,7 @@ impl ReviewApp {
             label
         };
         let content = if chips {
-            let chip = |text: String, color: Hsla| {
-                div()
-                    .flex_none()
-                    .px(px(GRID * 1.5))
-                    .line_height(px(self.fonts.ui_size() * 1.45))
-                    .bg(if selected {
-                        colors.band
-                    } else {
-                        colors.surface
-                    })
-                    .text_color(color)
-                    .child(text)
-            };
+            let chip = |text: String, color: Hsla| self.header_chip(text, color, selected, colors);
             h_flex()
                 .min_w_0()
                 .gap(px(GRID * 2.0))
@@ -907,6 +946,7 @@ impl ReviewApp {
     fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let colors = self.palette();
         let (reviewed, total) = self.totals();
+        let (files_done, _) = self.file_totals();
         let focused = self.mode == Mode::Tree && self.overlay.is_none();
         let files = self
             .tree
@@ -957,8 +997,18 @@ impl ReviewApp {
                             .truncate()
                             .text_color(colors.accent)
                             .children(filter.map(|(query, _)| query)),
-                    )
-                    .child(progress_meter(reviewed, total, &colors)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_none()
+                    .px(px(GRID * 3.0))
+                    .py(px(GRID * 2.0))
+                    .gap(px(GRID))
+                    .border_b_1()
+                    .border_color(colors.hairline)
+                    .child(progress_line("files", files_done, files, &colors))
+                    .child(progress_line("hunks", reviewed, total, &colors)),
             )
             .child(
                 div()
@@ -1844,7 +1894,7 @@ impl ReviewApp {
 
 use std::rc::Rc;
 
-/// A hunk header's scopes, such as `impl Ledger › fn apply`: the outer ones faint and cut first
+/// A hunk header's scopes, such as `impl Ledger › fn apply`, in bold: the outer ones faint and cut first
 /// when space runs out, the innermost bright, or dim once the hunk is approved and folded.
 fn scope_title(scope: &str, receding: bool, colors: &Palette) -> Div {
     let (outer, inner) = match scope.rsplit_once(" › ") {
@@ -1854,6 +1904,7 @@ fn scope_title(scope: &str, receding: bool, colors: &Palette) -> Div {
     h_flex()
         .min_w_0()
         .whitespace_nowrap()
+        .font_weight(FontWeight::BOLD)
         .children(outer.map(|outer| {
             div()
                 .min_w_0()
@@ -1874,7 +1925,8 @@ fn scope_title(scope: &str, receding: bool, colors: &Palette) -> Div {
 pub(super) enum Frame {
     /// Between hunks: no bar.
     Outside,
-    /// In a hunk that is not selected: a gray bar, so every hunk's extent shows.
+    /// In a hunk that is not selected: a gray bar on the hunk's gray band, so every hunk's
+    /// extent shows.
     Hunk,
     /// In the selected hunk: the accent's bar.
     Selected,
@@ -1890,16 +1942,13 @@ pub(super) fn frame_bar(frame: Frame, colors: &Palette) -> Div {
     }
 }
 
-/// A hunk header's background: a gray band, so each hunk's start shows at a glance, and the
-/// accent's blue on the selected one.
+/// A hunk header's background: a gray a step above its hunk's band, so each hunk's start shows
+/// at a glance, and on the selected one the same blue as its bar.
 fn header_background(selected: bool, colors: &Palette) -> Hsla {
     if selected {
-        Hsla {
-            a: 0.3,
-            ..colors.accent
-        }
+        colors.accent
     } else {
-        colors.band
+        colors.raised
     }
 }
 
@@ -1932,6 +1981,49 @@ pub fn progress_meter(reviewed: usize, total: usize, colors: &Palette) -> Div {
                 .text_right()
                 .text_color(colors.dim)
                 .child(format!("{reviewed}/{total}")),
+        )
+}
+
+/// One labeled progress line of the files pane: a bar across the pane, the done and total
+/// counts, and the share done in whole percent, rounded down so 100% means all of it.
+fn progress_line(label: &str, done: usize, total: usize, colors: &Palette) -> Div {
+    let percent = (done * 100).checked_div(total).unwrap_or(0);
+    let fraction = scroll::float(percent) / 100.0;
+    let complete = total > 0 && done >= total;
+    h_flex()
+        .gap(px(GRID * 2.0))
+        .text_color(colors.dim)
+        .child(div().w(px(GRID * 12.0)).flex_none().child(label.to_owned()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(GRID * 6.0))
+                .h(px(GRID))
+                .bg(colors.hairline)
+                .child(div().h_full().w(relative(fraction)).bg(if complete {
+                    colors.accepted
+                } else {
+                    colors.accent
+                })),
+        )
+        .child(
+            div()
+                .flex_none()
+                .min_w(px(GRID * 14.0))
+                .text_right()
+                .child(format!("{done}/{total}")),
+        )
+        .child(
+            div()
+                .flex_none()
+                .min_w(px(GRID * 10.0))
+                .text_right()
+                .text_color(if complete {
+                    colors.accepted
+                } else {
+                    colors.text
+                })
+                .child(format!("{percent}%")),
         )
 }
 

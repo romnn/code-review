@@ -153,6 +153,7 @@ impl ReviewApp {
             .w_full()
             .h(px(self.fonts.row_height()))
             .whitespace_nowrap()
+            .when(frame != Frame::Outside, |row| row.bg(colors.band))
             .child(frame_bar(frame, colors))
             .child(left)
             .child(

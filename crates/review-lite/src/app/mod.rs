@@ -700,6 +700,18 @@ impl ReviewApp {
         )
     }
 
+    /// Files whose every unit is reviewed, and all files, pending marks included.
+    fn file_totals(&self) -> (usize, usize) {
+        self.tree
+            .iter()
+            .filter(|node| node.kind == NodeKind::File)
+            .fold((0, 0), |(done, total), node| {
+                let counts = &node.counts;
+                let reviewed = counts.reviewed + counts.accepted + counts.flagged;
+                (done + usize::from(reviewed >= counts.units), total + 1)
+            })
+    }
+
     /// Reviewed and total units over every file, pending marks included.
     fn totals(&self) -> (usize, usize) {
         self.tree

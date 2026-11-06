@@ -822,7 +822,12 @@ impl ReviewApp {
                 "head": [selection.head.row, selection.head.col],
             })
         });
-        json!({
+        // Added apart, as one more key would pass `json!`'s recursion limit.
+        let progress = json!({
+            "files": self.file_totals(),
+            "hunks": self.totals(),
+        });
+        let mut state = json!({
             "phase": match &self.phase {
                 Phase::Loading(_) => "loading".to_owned(),
                 Phase::Ready => "ready".to_owned(),
@@ -879,6 +884,10 @@ impl ReviewApp {
             "metrics": metrics,
             "first_hunk_ms": self.first_hunk.map(|elapsed| elapsed.as_secs_f64() * 1000.0),
             "status": self.status.to_string(),
-        })
+        });
+        if let Some(object) = state.as_object_mut() {
+            object.insert("progress".to_owned(), progress);
+        }
+        state
     }
 }
