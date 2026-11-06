@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 review-core = { path = "crates/review-core" }
+review-ui = { path = "crates/review-ui" }
 
 # Engine dependencies. tree-sitter and its grammars follow Zed's Cargo.toml and Cargo.lock so
 # review-core links into the Zed fork without a second tree-sitter.
@@ -28,7 +29,9 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = { git = "https://github.com/zed-industries/tree-sitter-typescript", rev = "e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899" }
 
-# Desktop app dependencies (review-lite only). gpui-component pins an exact gpui-pre release.
+# Front-end dependencies: gpui and gpui-component for review-gui, the rest for review-ui and
+# review-tui.
+# gpui-component pins an exact gpui-pre release.
 # Its optional tree-sitter highlighter stays off: it wants crates.io tree-sitter 0.26, which would
 # conflict (`links = "tree-sitter"`) with the Zed tree-sitter review-core links.
 gpui = { package = "gpui-pre", version = "=0.3.9" }
@@ -43,8 +46,18 @@ toml = "1"
 # Writes choices made in the app back into the configuration, keeping its comments; the same
 # TOML 1.1 grammar as `toml`, which reads it.
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
-# Display widths of code lines, which set how far the views scroll sideways.
+# Display widths of code lines, which set how far the views scroll sideways, in the grapheme
+# clusters ratatui's buffer draws.
+unicode-segmentation = "1.13"
 unicode-width = "0.2"
+
+# Terminal front-end dependencies, of review-tui.
+# crossterm is the version ratatui's crossterm backend uses, so both share one terminal;
+# `osc52` puts copies on the clipboard through the terminal.
+crossterm = { version = "0.29", default-features = false, features = ["bracketed-paste", "events", "osc52", "windows"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "underline-color"] }
+# Signals from outside the terminal (hang-up, `kill`, job control), the version crossterm uses.
+signal-hook = "0.3.18"
 
 # CLI dependencies.
 clap = { version = "4.5", features = ["derive", "env"] }

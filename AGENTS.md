@@ -8,9 +8,15 @@ to date when a decision changes.
 
 - `crates/review-core`: the engine (MIT OR Apache-2.0).
 - `crates/review-cli`: the `cr` binary (MIT OR Apache-2.0).
-- `crates/review-lite`: the gpui + gpui-component desktop app (GPL-3.0-or-later), a
-  lazygit-style flow described under "Product direction" in PLAN.md. Its themes are TOML data in
-  `crates/review-lite/themes/`, each citing its source palette.
+- `crates/review-ui`: the front ends' shared model, free of any UI toolkit (GPL-3.0-or-later,
+  for the `highlights.scm` queries copied from Zed): the review window's state and behavior as
+  actions in and effects out, the keymap and key matcher, configuration, frame geometry and
+  scrolling, and `paint`, every drawing decision that is not geometry. Its themes are TOML data
+  in `crates/review-ui/themes/`, each citing its source palette.
+- `crates/review-gui`: the gpui + gpui-component desktop app (GPL-3.0-or-later), a view over
+  review-ui in the lazygit-style flow described under "Product direction" in PLAN.md.
+- `crates/review-tui`: the ratatui terminal app (GPL-3.0-or-later), a view over the same model
+  that works as review-gui does, within what a terminal can show.
 - The Zed-fork front end lives in a separate checkout, `~/dev/zed-review`, as the `code_review`
   crate, and depends on `review-core` by path.
 
@@ -36,7 +42,12 @@ to date when a decision changes.
   review is trusted.
 - Code copied from Zed goes only into GPL-3.0-or-later crates, with a comment naming the source
   file and Zed commit.
-- Front ends never reimplement engine logic; anything both need belongs in `review-core`.
+- Front ends never reimplement engine logic; anything every front end, the Zed fork included,
+  needs belongs in `review-core`.
+- Anything review-gui and review-tui share that is not engine logic belongs in `review-ui`: state,
+  behavior, keys, configuration, and what to draw in which colors. A front end only maps the
+  model's state onto its surface and its input onto model calls, and runs the effects the model
+  queues.
 
 ## Building and testing
 
@@ -48,19 +59,25 @@ to date when a decision changes.
 - Never build Rust under `/tmp`. Separate build trees, including the Zed fork's, go under
   `/mnt/ssd2/cargo-targets/<name>/`.
 - Tests that need repositories create small temporary git repos with the `git` CLI.
-- review-lite builds gpui for Wayland only and links only libxkbcommon; at run time it needs a
+- review-gui builds gpui for Wayland only and links only libxkbcommon; at run time it needs a
   Wayland compositor and a Vulkan driver. Check those before blaming the code.
+- review-tui needs only a terminal. It opens the review before it takes over the terminal, logs
+  diagnostics to `$XDG_STATE_HOME/code-review/review-tui.log` and prints them again on exit.
 - The built-in demo review is the shared fixture for manual and scripted checks:
-  `cargo run -p review-lite -- --demo` (or `cr --demo show`) rebuilds it under `target/demo/` and
-  opens revision 1, and `--demo-revision N` advances it to revision N, keeping marks.
-- QA harness: `task qa -- scripts/qa/smoke.qa` runs review-lite with `--qa` in a headless sway
+  `cargo run -p review-gui -- --demo`, `cargo run -p review-tui -- --demo` or `cr --demo show`
+  rebuilds it under `target/demo/` and opens revision 1, and `--demo-revision N` advances it to
+  revision N, keeping marks.
+- QA harness: `task qa -- scripts/qa/smoke.qa` runs review-gui with `--qa` in a headless sway
   (needs `sway` and `grim`), drives it with the script's commands and saves screenshots to
-  `target/qa/`. Read the screenshots to check rendering. Commands are documented in
-  `crates/review-lite/src/app/qa.rs` and `scripts/qa/run.sh`.
+  `target/qa/`. `task qa:tui -- scripts/qa/smoke-tui.qa` runs review-tui with `--qa`, drawing off
+  screen, and saves each screen as `.txt` and `.ansi` under `target/qa/tui/`. Both scripts include
+  `scripts/qa/smoke-common.qa`, the checks both front ends answer alike. Read the screenshots to
+  check rendering. Commands are documented in `crates/review-gui/src/app/qa.rs`,
+  `crates/review-tui/src/qa.rs` and `scripts/qa/run.sh`.
 - Any front-end change is QA'd interactively with the `app-qa` skill (`.claude/skills/app-qa`,
-  driven by `scripts/qa/session.sh`): drive the app, read the screenshots, and fix the UX issues you
-  find before reporting.
-- `review-lite --bench-scroll` scrolls a whole review and prints frame timing. The perf test
+  driven by `scripts/qa/session.sh` for review-gui): drive the app, read the screenshots, and fix
+  the UX issues you find before reporting. A change to review-ui is checked in both front ends.
+- `review-gui --bench-scroll` scrolls a whole review and prints frame timing. The perf test
   exports its 60,000-line fixture for it with
   `REVIEW_PERF_FIXTURE_DIR=$PWD/target/perf-fixture cargo nextest run --release --run-ignored only -E 'test(perf)'`;
   open it with the range `origin/perf-base..origin/perf-head`.

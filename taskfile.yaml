@@ -3,9 +3,9 @@ version: "3"
 
 tasks:
     deps:linux:
-        desc: "install the system libraries review-lite links against on Debian and Ubuntu"
+        desc: "install the system libraries review-gui links against on Debian and Ubuntu"
         cmds:
-            # review-lite builds gpui for Wayland only and links libxkbcommon. freetype is built from
+            # review-gui builds gpui for Wayland only and links libxkbcommon. freetype is built from
             # source unless libfreetype-dev is installed. At run time the app also needs a Wayland
             # compositor and a Vulkan driver, which it loads dynamically.
             - sudo apt-get update
@@ -58,7 +58,14 @@ tasks:
             - cargo fixit --workspace --all-features {{.CLI_ARGS}}
 
     qa:
-        desc: "drive review-lite in headless sway with a QA script, e.g. task qa -- scripts/qa/smoke.qa"
+        desc: "drive review-gui in headless sway with a QA script, e.g. task qa -- scripts/qa/smoke.qa"
+        cmds:
+            - scripts/qa/run.sh {{.CLI_ARGS}}
+
+    qa:tui:
+        desc: "drive review-tui off screen with a QA script, e.g. task qa:tui -- scripts/qa/smoke-tui.qa"
+        env:
+            QA_FRONT_END: tui
         cmds:
             - scripts/qa/run.sh {{.CLI_ARGS}}
 

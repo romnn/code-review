@@ -12,10 +12,10 @@
 #
 # QA commands are those of scripts/qa/run.sh, without launch, shot and expect: key, action,
 # click, drag, wheel, scroll, resize, find, clipboard, latency, sample, state and quit
-# (see crates/review-lite/src/app/qa.rs).
+# (see crates/review-gui/src/app/qa.rs).
 #
 # QA_SIZE=WxH sets the output size (default 1600x1000).
-# QA_BINARY replaces target/debug/review-lite, which is otherwise built first;
+# QA_BINARY replaces target/debug/review-gui, which is otherwise built first;
 # QA_BINARY=scripts/zed/launch.sh drives the Zed fork, which speaks the same protocol.
 # QA_VULKAN=lavapipe renders with Mesa's software Vulkan driver.
 # QA_SESSION=<name> keeps a separate session under target/qa/<name>, for agents working in parallel.
@@ -65,8 +65,8 @@ start() {
     mkdir -p "$dir"
     local binary=${QA_BINARY:-}
     if [[ -z $binary ]]; then
-        cargo build --quiet -p review-lite --manifest-path "$root/Cargo.toml"
-        binary="$root/target/debug/review-lite"
+        cargo build --quiet -p review-gui --manifest-path "$root/Cargo.toml"
+        binary="$root/target/debug/review-gui"
     fi
 
     # Client-side decorations, as on GNOME, so screenshots show the app's own title bar.

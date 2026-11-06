@@ -12,75 +12,8 @@ expect "token_emphasis":false,"diff_style":"bold"
 expect "progress":\{"files":\[4,17\],"hunks":\[7,27\]\}
 shot 01-open
 
-# Moving through the files previews each one's diff.
-file src/engine.rs
-state
-expect "selected":"src/engine.rs"
-expect "hunks":3
-expect "scope":"impl Ledger › fn apply_batch"
-# The brace reflow at lines 27–29 is proven formatting-only beside the file's real changes.
-expect "text":"lines 27–29","tag":"only reformatting"
-shot 02-engine
+include scripts/qa/smoke-common.qa
 
-# The diff starts at the first hunk that needs the reviewer; j/k move between hunks, and
-# space approves and moves on to the next open hunk.
-key 0
-state
-expect "mode":"Diff"
-expect "hunk":1,
-expect "hunk_badges":\["Unreviewed"\]
-key space
-state
-expect "hunk":2,
-key k
-state
-expect "hunk_badges":\["Accepted"\]
-shot 03-approved
-# Space again takes it back; ! flags and u resets.
-key space
-state
-expect "hunk_badges":\["Unreviewed"\]
-key !
-state
-expect "hunk_badges":\["Flagged"\]
-key u
-state
-expect "hunk_badges":\["Unreviewed"\]
-
-# The whole file as a read-only buffer, at the selected hunk, with vim motions and find.
-key =
-state
-expect "mode":"Buffer"
-expect "row":26,
-key j
-key w
-state
-expect "row":27,"col":12
-expect "scope":"impl Ledger › fn apply_batch"
-key /
-key b a l a n c e
-key enter
-key n
-state
-expect "query":"balance","matches":12
-expect "scope":"impl Ledger › fn balance"
-expect "editing":false
-shot 04-buffer-find
-key escape
-key escape
-state
-expect "mode":"Diff"
-expect "hunk":1,
-
-# Overlays own the keyboard: review keys under them do nothing.
-key ?
-key space
-key j
-state
-expect "overlay":"Help"
-expect "hunk":1,
-expect "hunk_badges":\["Unreviewed"\]
-shot 05-help
 # Clicks under an overlay do nothing either: hash.rs's row sits under the sheet.
 click 100 445
 state
@@ -698,3 +631,5 @@ expect "font":\{"family":"[^"]*","size":40\.0
 file src/engine.rs
 key 0
 shot 30-largest-font
+
+include scripts/qa/smoke-quit.qa

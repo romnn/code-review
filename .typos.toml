@@ -20,3 +20,7 @@ extend-ignore-re = [
   # Ignore everything between "spellcheck:ignore-start" and "spellcheck:ignore-end"
   "(?s)(#|//|--|<!--)\\s*spellcheck:ignore-start.*?\\n.*?(#|//|--|<!--)\\s*spellcheck:ignore-end",
 ]
+
+[default.extend-words]
+# The terminal UI crate review-tui draws with.
+ratatui = "ratatui"

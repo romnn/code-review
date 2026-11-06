@@ -1,0 +1,5 @@
+# A configuration with the compact density, which leaves out the blank row before each hunk;
+# review-tui's smoke script opens it to check density from the configuration.
+# The script only reads it; nothing in it remembers a setting, which would write here.
+[diff]
+density = "compact"

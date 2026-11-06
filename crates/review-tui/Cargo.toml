@@ -1,0 +1,29 @@
+[package]
+name = "review-tui"
+description = "Terminal review app built on ratatui, drawing the same model as review-gui"
+# It draws review-ui's model, which is GPL-3.0-or-later.
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+color-eyre.workspace = true
+crossterm.workspace = true
+parking_lot.workspace = true
+ratatui.workspace = true
+review-ui.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
+[dev-dependencies]
+review-core.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

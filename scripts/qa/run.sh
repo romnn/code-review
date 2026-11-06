@@ -1,26 +1,43 @@
 #!/usr/bin/env bash
-# Drives review-lite inside a headless sway session and takes screenshots.
+# Drives review-gui inside a headless sway session and takes screenshots, or review-tui off
+# screen and has it write its screen as text.
 #
 # Usage: scripts/qa/run.sh <script> [binary]
 #
 # The script has one command per line; blank lines and lines starting with `#` are skipped.
+#   include <script>  run another script's lines here, its path from the repository's root, as
+#                     scripts/qa/smoke-common.qa holds what both front ends check alike
 #   launch <args...>  start the app with `--qa <args...>`, quitting a running one first
-#   shot <name>       save a screenshot to target/qa/<name>.png
+#   shot <name>       save a screenshot to target/qa/<name>.png; review-tui writes its screen to
+#                     target/qa/tui/<name>.txt and, with its colors, <name>.ansi
 #   expect <regex>    fail unless the previous answer matches the extended regex
+#   exited            wait for the app to quit by itself, as after `key q`, and fail if it does
+#                     not within a minute; `launch` starts the next one
+#   anything else     a QA command for the app (see crates/review-gui/src/app/qa.rs and
+#                     crates/review-tui/src/qa.rs); the runner waits for its one-line answer and
+#                     fails on `error: ...`
 # Every command and its full answer are also logged to target/qa/answers.log.
-#   anything else     a QA command for the app (see crates/review-lite/src/app/qa.rs); the
-#                     runner waits for its one-line answer and fails on `error: ...`
 #
-# The binary defaults to target/debug/review-lite, built first.
-# QA_VULKAN=lavapipe makes the app render with Mesa's software Vulkan driver.
-# Needs sway and grim; sway and the app always shut down, even on failure.
+# QA_FRONT_END=tui drives review-tui instead (`task qa:tui`), without sway, keeping its
+# configuration, demo, logs and shots under target/qa/tui/ apart from review-gui's.
+# The binary defaults to target/debug/review-gui (or review-tui), built first.
+# QA_VULKAN=lavapipe makes review-gui render with Mesa's software Vulkan driver.
+# review-gui needs sway and grim; sway and the app always shut down, even on failure.
 
 set -euo pipefail
 
 script=${1:?usage: scripts/qa/run.sh <script> [binary]}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 binary=${2:-}
-out="$root/target/qa"
+front_end=${QA_FRONT_END:-gui}
+case $front_end in
+    gui) out="$root/target/qa" ;;
+    tui) out="$root/target/qa/tui" ;;
+    *)
+        echo "qa: QA_FRONT_END is gui or tui, not $front_end" >&2
+        exit 2
+        ;;
+esac
 mkdir -p "$out"
 log="$out/app.log"
 answers="$out/answers.log"
@@ -30,8 +47,8 @@ answers="$out/answers.log"
 rm -f "$out/smoke-config.toml"
 
 if [[ -z $binary ]]; then
-    cargo build --quiet -p review-lite --manifest-path "$root/Cargo.toml"
-    binary="$root/target/debug/review-lite"
+    cargo build --quiet -p "review-$front_end" --manifest-path "$root/Cargo.toml"
+    binary="$root/target/debug/review-$front_end"
 fi
 
 runtime=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}
@@ -110,7 +127,10 @@ quit_app() {
 
 launch() {
     quit_app
-    local -a env=(-u DISPLAY WAYLAND_DISPLAY="$socket" CODE_REVIEW_CONFIG="$out/smoke-config.toml" CODE_REVIEW_DEMO_DIR="$out/smoke-demo")
+    local -a env=(CODE_REVIEW_CONFIG="$out/smoke-config.toml" CODE_REVIEW_DEMO_DIR="$out/smoke-demo")
+    if [[ $front_end == gui ]]; then
+        env=(-u DISPLAY WAYLAND_DISPLAY="$socket" "${env[@]}")
+    fi
     if [[ ${QA_VULKAN:-} == lavapipe ]]; then
         env+=(VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json)
     fi
@@ -120,19 +140,55 @@ launch() {
     send state
 }
 
-start_sway
+# Prints the lines of the script `$1` with each `include <script>` line replaced by that
+# script's own lines, and a line naming a script that does not exist, which fails the run.
+expand() {
+    local line
+    if [[ ! -f $1 ]]; then
+        printf 'include-missing %s\n' "$1"
+        return
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == include\ * ]]; then
+            expand "$root/${line#include }"
+        else
+            printf '%s\n' "$line"
+        fi
+    done <"$1"
+}
+
+if [[ $front_end == gui ]]; then
+    start_sway
+fi
 answer=""
 while IFS= read -r line || [[ -n $line ]]; do
     [[ -z ${line// /} || $line == \#* ]] && continue
     echo "> $line"
     case $line in
+        include-missing\ *)
+            echo "qa: no script ${line#include-missing }" >&2
+            exit 1
+            ;;
         launch*)
             read -r -a words <<<"${line#launch}"
             launch "${words[@]}"
             ;;
         shot\ *)
-            WAYLAND_DISPLAY=$socket timeout 30 grim "$out/${line#shot }.png"
-            echo "  saved $out/${line#shot }.png"
+            if [[ $front_end == tui ]]; then
+                # The app writes its own screen, off screen as it is; an `expect` after the
+                # shot still checks the answer before it.
+                checked=$answer
+                send "shot $out/${line#shot }"
+                if [[ $answer != ok ]]; then
+                    echo "qa: $answer" >&2
+                    exit 1
+                fi
+                answer=$checked
+                echo "  saved $out/${line#shot }.txt and .ansi"
+            else
+                WAYLAND_DISPLAY=$socket timeout 30 grim "$out/${line#shot }.png"
+                echo "  saved $out/${line#shot }.png"
+            fi
             continue
             ;;
         expect\ *)
@@ -140,6 +196,20 @@ while IFS= read -r line || [[ -n $line ]]; do
                 echo "qa: expected /${line#expect }/ in: $answer" >&2
                 exit 1
             fi
+            continue
+            ;;
+        exited)
+            if [[ -z $app_pid ]]; then
+                echo "qa: 'exited' needs a running app; start one with launch" >&2
+                exit 1
+            fi
+            if ! timeout 60 tail --pid="$app_pid" -f /dev/null; then
+                echo "qa: the app did not quit" >&2
+                exit 1
+            fi
+            wait "$app_pid" || true
+            app_pid=""
+            echo "  exited"
             continue
             ;;
         *)
@@ -150,5 +220,5 @@ while IFS= read -r line || [[ -n $line ]]; do
     if [[ $answer == error:* ]]; then
         exit 1
     fi
-done <"$script"
+done < <(expand "$script")
 quit_app

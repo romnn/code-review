@@ -1,6 +1,6 @@
 ---
 name: app-qa
-description: Drive the review desktop app (review-lite, and the Zed fork once it has a QA mode) headlessly, take and read screenshots, and hunt UX and functional issues against the project's quality bar. Use when building, changing, reviewing, or QA-ing any front-end behavior, layout, keybinding, scrolling, or rendering, and before reporting UI work as done.
+description: Drive the review apps (the review-gui desktop app, the review-tui terminal app, and the Zed fork) headlessly, take and read screenshots, and hunt UX and functional issues against the project's quality bar. Use when building, changing, reviewing, or QA-ing any front-end behavior, layout, keybinding, scrolling, or rendering, and before reporting UI work as done.
 ---
 
 # App QA
@@ -26,7 +26,7 @@ scripts/qa/session.sh stop                  # always, before you report
 
 - Then read every screenshot with the Read tool, which displays the image, and look at it before
   you send the next command.
-- The app arguments after `start` are those of `review-lite`. They include `--demo`,
+- The app arguments after `start` are those of `review-gui`. They include `--demo`,
   `--demo-revision N`, a `base..head` range, `--worktree`, `--font-size`, `--decorations client`
   and `-C <repo>`.
 - `start` replaces a running session.
@@ -39,7 +39,7 @@ scripts/qa/session.sh stop                  # always, before you report
   configuration file for the defaults; it outlives restarts so remembered widths can be checked.
 - Environment:
   - `QA_SIZE=1280x800` tests a smaller window.
-  - `QA_BINARY=target/release/review-lite` tests a release build, which is the build for timing.
+  - `QA_BINARY=target/release/review-gui` tests a release build, which is the build for timing.
   - `QA_VULKAN=lavapipe` uses software rendering when the GPU path fails.
 - Every process runs under `timeout` (`QA_TTL`, 3600 s by default). Still, run `stop` when you
   are done, and never wait on a process with `pgrep -f`.
@@ -48,20 +48,20 @@ scripts/qa/session.sh stop                  # always, before you report
 
 Each command answers only after its background work has finished and a frame has rendered, so a
 screenshot taken right after the answer shows the result. The authoritative list is the module
-comment in `crates/review-lite/src/app/qa.rs`; read it when a command here fails.
+comment in `crates/review-gui/src/app/qa.rs`; read it when a command here fails.
 
 | Command | Effect |
 |---|---|
 | `key <keystrokes>` | Types through gpui's key dispatch, so the real bindings apply: `key j`, `key shift-t`, `key z a`, `key ctrl-d`. Several keystrokes are typed one after another, so `key b a l` types into the find bar. |
-| `action <name>` | Dispatches an action by name, such as `action review_lite::NextHunk`. |
+| `action <name>` | Does what one of the model's actions does, as its key would, such as `action NextHunk`. |
 | `rapid <command>` | Runs a command and answers at once, without waiting for background work or a frame; a few `rapid` lines in a row race input against saving marks and loading. `rapid state` prints the state right away. |
-| `repeat <count> <ms> <keystroke>` | Types a keystroke `count` times, one every `ms`, as a held key repeats, then prints JSON with each keystroke's handling time and the input-to-frame latency percentiles over the burst; `repeat 25 33 j` in the tree measures holding `j`. Use `QA_BINARY=target/release/review-lite` for release numbers. |
+| `repeat <count> <ms> <keystroke>` | Types a keystroke `count` times, one every `ms`, as a held key repeats, then prints JSON with each keystroke's handling time and the input-to-frame latency percentiles over the burst; `repeat 25 33 j` in the tree measures holding `j`. Use `QA_BINARY=target/release/review-gui` for release numbers. |
 | `file <path>` | Moves the files cursor to a file and shows its diff, as `j`/`k` would. |
 | `click <x> <y> [count] [ctrl] [shift] [right]` | Mouse click at window coordinates; `count` 2 or 3 makes a double or triple click. |
 | `drag <x1> <y1> <x2> <y2>` | Press, render a frame, move in steps, release; use it for selection, pane dividers and the title bar. |
 | `hover <x> <y>` | Moves the pointer there and waits long enough for a tooltip; take a `shot` to see it. |
 | `hit <x> <y>` | Names the innermost marked region there and its pointer: `close`, `maximize`, `minimize`, `title-bar`, `sidebar-divider`, `source-divider`, `tree-header`. |
-| `wheel <dy>` / `scroll <px>` | Wheel input over the hunk list, or a direct scroll. |
+| `wheel <dy> [<x> <y>]` / `scroll <px>` | Wheel input over the hunk list, or at a window position such as over the tree or a picker; or a direct scroll of the hunk list. |
 | `sample` | The scroll offset right now, without waiting; call it several times during an animation. |
 | `find <text>` | Selects the hunk of the next row containing the text. |
 | `resize <W>x<H>` | Resizes the window. |
@@ -75,9 +75,13 @@ because the window fills the output.
 ## Regression script
 
 `task qa -- scripts/qa/smoke.qa`, which runs `scripts/qa/run.sh`, plays a checked-in script with
-`launch`, `shot` and `expect <regex>` lines and fails on the first mismatch. When a feature works
-in a session, add its steps and an `expect` to `smoke.qa`, so it stays working. Keep the smoke
-script green at every report.
+`launch`, `shot` and `expect <regex>` lines and fails on the first mismatch.
+`task qa:tui -- scripts/qa/smoke-tui.qa` plays review-tui's script the same way.
+Both include `scripts/qa/smoke-common.qa`, the checks that read the same in either front end
+because they do not depend on geometry.
+When a feature works in a session, add its steps and an `expect` to `smoke-common.qa` when both
+front ends answer alike, or else to `smoke.qa` and `smoke-tui.qa`, so it stays working.
+Keep both smoke scripts green at every report.
 
 ## QA pass: find the issues yourself
 
@@ -133,7 +137,7 @@ found and fixed, and the 3-4 screenshots that best show the result.
 - The Zed fork speaks the same protocol through `CODE_REVIEW_QA=1`; drive it with
   `QA_SESSION=zed QA_BINARY=scripts/zed/launch.sh scripts/qa/session.sh start --demo` after
   `cargo build -p zed` in `~/dev/zed-review` (target dir `/mnt/ssd2/cargo-targets/zed-review`).
-  `QA_SESSION` keeps it apart from a review-lite session. Its specifics, documented in
+  `QA_SESSION` keeps it apart from a review-gui session. Its specifics, documented in
   `crates/code_review/src/qa.rs` of the fork:
   - `scroll` takes lines, not pixels, and `sample` reports `scroll_lines`.
   - `find` searches the buffer text; for text in detail blocks (interdiffs, moves, notes) it
@@ -144,3 +148,17 @@ found and fixed, and the 3-4 screenshots that best show the result.
     profile under `target/zed-profile`, wiped of Zed's workspace database at each launch.
   - Headless sway gives Zed no GNOME button layout, so the title bar shows no window controls
     there; on GNOME Zed draws its own.
+- review-tui, the terminal front end, speaks the same protocol off screen, without sway:
+  `task qa:tui -- scripts/qa/smoke-tui.qa` (`QA_FRONT_END=tui scripts/qa/run.sh`) keeps its
+  configuration, demo and shots under `target/qa/tui/`. Its specifics, documented in
+  `crates/review-tui/src/qa.rs`:
+  - Positions are terminal cells on a 160×50 screen; `resize <columns>x<rows>` changes it.
+  - `shot <name>` makes the app write its screen to `<name>.txt` and, with SGR colors,
+    `<name>.ansi`; read the `.txt` to check the layout.
+  - `paste <json string>` pastes as a terminal's bracketed paste, `click <column> <row>
+    [count]` presses a cell, and `wheel <turns> [<column> <row>]` turns the wheel three rows a
+    turn.
+  - Check the real terminal too: run `review-tui --demo` in a detached `tmux -L <socket>`
+    session under `timeout --foreground` (a background process group cannot take the
+    terminal), drive it with `send-keys`, read it with `capture-pane -e -p`, and check
+    `#{alternate_on}` and `stty` after it quits. Kill the tmux server when done.

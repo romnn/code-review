@@ -1,0 +1,24 @@
+# Quitting saves what the reviewer did first: three hunks approved and q, typed faster than the
+# marks save, are all there when the review opens again.
+# Both front ends end their smoke runs with it, since it relaunches.
+launch --demo
+file src/parser.rs
+key 0
+state
+expect "progress":\{"files":\[4,17\],"hunks":\[7,27\]\}
+rapid key space space space q
+exited
+launch --demo-revision 1
+expect "progress":\{"files":\[4,17\],"hunks":\[10,27\]\}
+
+# While quitting waits it takes no new marks, and quitting again drops nothing: of two approvals
+# before q and a third after it, then q again, both approvals before q are recorded, which
+# finishes the file.
+file src/engine.rs
+key 0
+state
+expect "progress":\{"files":\[4,17\],"hunks":\[10,27\]\}
+rapid key space space q space q
+exited
+launch --demo-revision 1
+expect "progress":\{"files":\[5,17\],"hunks":\[12,27\]\}

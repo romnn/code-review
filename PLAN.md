@@ -8,10 +8,13 @@ drowning the real edits. See [prior-work.md](prior-work.md) for the survey this 
 We build the review engine once and put two desktop front ends on it, then keep the one that is
 easier to maintain and grow:
 
-- **lite**: a standalone app on `gpui` and `gpui-component`, copying the GPL Zed code it needs
-  (LSP client and similar).
+- **review-gui**: a standalone app on `gpui` and `gpui-component`, copying the GPL Zed code it
+  needs (highlighting queries and similar).
 - **zed**: a fork of Zed with a review crate added, inheriting Zed's editor, multibuffer, LSP for
   every language, highlighting and vim mode.
+
+review-gui draws a model that knows no UI toolkit, `review-ui`, so the same review also runs in a
+terminal as **review-tui**, with the same keys, configuration and behavior.
 
 No web stack and no JavaScript: everything is Rust.
 
@@ -119,6 +122,9 @@ produces verified immutable inputs; everything after it is pure analysis over ob
   commits but never the head, which may be a synthetic working-tree capture or an unpublished
   commit; wants the remote does not know are dropped one by one. Deepening has the same isolation
   as every other fetch; when it cannot find a merge base, the review fails with an explicit error.
+- A front end can add variables to the environment of every `git` command a review runs
+  (`Review::set_command_env`); review-tui uses it to keep fetches from prompting on the terminal
+  it draws on.
 - Partial clones: analysis reads every blob it needs, which makes git fetch missing objects, and
   the analysis cache stores the review evidence (the text of each unit), so past reviews stay
   reproducible offline. Browsing an old revision needs its objects and may need the network.
@@ -575,10 +581,12 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   moves), content-addressed by its snapshot IDs, written atomically (temporary file and rename) and
   recomputable from git.
 - `review.lock`: serializes state transitions (held exclusively) and log reads (held shared).
-- `view/<front-end>.json`: each front end's own view state, such as review-lite's folded folders,
-  through `Review::view_state` and `Review::save_view_state`. It is how the review was last shown,
-  not review state: written atomically without the lock, never in the event log, and a front end
-  that cannot read it starts afresh.
+- `view/<front-end>.json`: each front end's own view state, through `Review::view_state` and
+  `Review::save_view_state`, such as the folded folders. review-gui and review-tui share theirs
+  under the name `review-lite`, review-gui's name when it first stored them, so folds made in
+  one app show in the other and folds saved before the rename keep loading. It is how the review
+  was last shown, not review state: written atomically without the lock, never in the event log,
+  and a front end that cannot read it starts afresh.
 
 Rules:
 
@@ -626,7 +634,9 @@ change what is being reviewed.
 |---|---|---|---|
 | `crates/review-core` | `review-core` | MIT OR Apache-2.0 | Engine: git layer, snapshots, units, formatting proof, moves, noise, correspondence, walkthroughs, event store, export. Synchronous API; callers run it on their own background threads. |
 | `crates/review-cli` | `review-cli` (binary `cr`) | MIT OR Apache-2.0 | CLI over the engine, with `--json` output for agents. |
-| `crates/review-lite` | `review-lite` | GPL-3.0-or-later | The standalone gpui + gpui-component app. GPL because it may copy Zed code. |
+| `crates/review-ui` | `review-ui` | GPL-3.0-or-later | The apps' shared model, free of any UI toolkit: state and behavior, keymap and key matcher, configuration, themes, rows, frame geometry and paint decisions. GPL because its highlighting queries are copied from Zed. |
+| `crates/review-gui` | `review-gui` | GPL-3.0-or-later | The standalone gpui + gpui-component app, a view over `review-ui`. |
+| `crates/review-tui` | `review-tui` | GPL-3.0-or-later | The ratatui terminal app, a view over the same model. |
 | Zed fork (separate repo) | `code_review` | GPL-3.0-or-later | Review crate inside a Zed fork, depending on `review-core` by path. |
 
 `review-core` must stay embeddable in Zed: no async runtime, no SQLite, no git library, and only
@@ -649,9 +659,9 @@ with grammar versions matching Zed's).
 Every command accepts `--review <key>`, defaulting to the review for the current repository and
 branch, and `--json`.
 
-`cr open` and `review-lite` without a target and without `--worktree` choose one in
+`cr open`, review-gui and review-tui without a target and without `--worktree` choose one in
 `review-core` (`Review::open_for_current_branch`), and say on standard error which rule fired
-(review-lite also in its status line when the review opens, after any configuration problem):
+(the apps also in their status line when the review opens, after any configuration problem):
 
 1. The review last opened for this repository and branch.
 2. Otherwise the branch's open pull request, as `gh pr view` resolves it, keyed exactly as when it
@@ -685,17 +695,20 @@ either becomes a full product:
 Notes, the new-push banner, find-references and the rest of the feature set follow once one front
 end is chosen.
 
-### lite
+### review-gui
 
 #### Product direction
 
-review-lite works like lazygit, with approving where lazygit stages. The reviewer moves through
+This direction holds for review-gui and review-tui alike; review-tui departs from it only where a
+terminal cannot follow (see [review-tui](#review-tui)).
+
+review-gui works like lazygit, with approving where lazygit stages. The reviewer moves through
 files, opens one file's diff, steps from hunk to hunk and approves each with one key; a whole
 file or folder is approved from the tree the same way. The look is a bold terminal editor's, but
 calm: code is an uninterrupted grid, and everything the tool says about the code sits apart from
 it, muted, so it never reads as code.
 
-- **Modes.** Three modes, each its own key context and focus handle, and one at a time:
+- **Modes.** Three modes, each its own key area, and one at a time:
   - *Files* (the left pane): `j`/`k` move and preview each file's diff, `h`/`l` fold and unfold
     folders, Enter folds a folder or opens a file, `0` opens the diff, Space approves or
     unapproves the file or folder, `!` flags it and `u` resets it. `/` filters the tree as
@@ -752,9 +765,10 @@ it, muted, so it never reads as code.
   goes through one function that also reveals it in the tree, clearing a filter that hides it
   and unfolding its folders. A diff search selects the hunk that holds its match, or the
   nearest one for unchanged code.
-- **Actions as data.** `app/keymap.rs` is one table of actions: their mode, default keys, group,
-  help and hint priority. Dispatch, the bottom bar, the `?` sheet and `[keys]` in the
-  configuration all read it. The bottom bar shows what the keys act on (`hunk 2/3 ·
+- **Actions as data.** Every action is a variant of `review-ui`'s `Action` enum, and
+  `review_ui::keymap` is one table of them: their areas, default keys, group, help and hint
+  priority. The shared key matcher, the bottom bar, the `?` sheet and `[keys]` in the
+  configuration all read it, so a key does the same in both apps. The bottom bar shows what the keys act on (`hunk 2/3 ·
   src/engine.rs`) at the left and every hinted key of the current mode at the right, in rank
   order with `? keys` last at the edge. Keys that cannot act now are dimmed, not removed, and a
   narrow window drops whole hints from the highest rank down, so the bar never shifts as the
@@ -810,7 +824,15 @@ it, muted, so it never reads as code.
   headers and move rows keep their rows across the width, and every row keeps its owners. Each
   half is a fixed viewport, and one text offset moves the code of every row while gutters, the
   middle divider and the tool's own rows stay put, so a hunk's header and a move's link never
-  pan out of view; another file starts back at the left edge. When a half
+  pan out of view; another file starts back at the left edge. One of the tool's own rows that
+  runs past its room moves with the code only as far as it runs past (a hunk header's outer
+  scopes make way first and count for nothing), and the pan reaches its end, so a long note,
+  such as a submodule's `before` entry or a move's description, is never cut off unreachably.
+  Both front ends move and mark such a row by one rule (`paint::annotation::note_pan`), from
+  the same width (`Note::width`) that sets how far the code pans.
+  Shift+←/→ (or `z H`/`z L`) pans the code of either layout, and a line or a row of the tool's
+  own that runs past the right edge ends in a dim `…`, so a clipped line never reads as
+  complete. When a half
   would show fewer than 40 cells, the diff shows unified and says so, without changing the
   remembered layout. A selection keeps the half it started in and copies that side's lines,
   skipping padding but keeping blank lines. `/` searches each half apart, the base's half before
@@ -842,7 +864,7 @@ it, muted, so it never reads as code.
   or else its unit's header. Places kept for other files are row identities too, so a
   density change never lands a returning reviewer on another line.
 - **Themes as data.** A theme is a TOML file of semantic roles (`[ui]`, `[review]`, `[kind]`,
-  `[diff]`, `[syntax]`). Nine are built in under `crates/review-lite/themes/`, each citing its
+  `[diff]`, `[syntax]`). Nine are built in under `crates/review-ui/themes/`, each citing its
   source palette and license: carbonfox (the default), nightfox, nordfox, terafox, duskfox,
   tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine. Files in
   `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
@@ -866,8 +888,8 @@ it, muted, so it never reads as code.
 - **One tree-sitter.** `gpui-component`'s tree-sitter highlighter is an optional feature and stays
   off, so the dependency graph has exactly one tree-sitter, the one `review-core` pins to Zed's
   revision, and no `links` conflict.
-- **Syntax highlighting.** review-lite runs Zed's `highlights.scm` queries (copied under
-  `crates/review-lite/queries/` with their source commit; TOML's comes with its grammar) on the
+- **Syntax highlighting.** `review-ui` runs Zed's `highlights.scm` queries (copied under
+  `crates/review-ui/queries/` with their source commit; TOML's comes with its grammar) on the
   grammars `review-core` exposes through `Language::grammar`. Each blob is highlighted once, in
   the background after the first frame, and cached by its object ID; added and unchanged lines
   take the head's colors and removed lines the base's.
@@ -875,17 +897,18 @@ it, muted, so it never reads as code.
   `class Parser › def parse`, `func (*Ledger) Apply`, `[package]`) for every supported language,
   and `RevisionView::scope` gives a unit's breadcrumb, read from the head, or from the base for a
   deletion-only chunk. Each hunk header shows it.
-- **Rendering.** A `uniform_list` of single-line rows for the selected file, laid out from the
+- **Rendering.** `review_ui::rows` lays out single-line rows for the selected file from the
   engine's answers: collapse reasons, moves, interdiffs, display hunks and notes. Front ends never
-  decide these themselves. `gpui-component`'s editor and its diff view are not used: a uniform
-  list of prepared rows is the simplest thing that stays smooth at 50,000 lines. Walkthrough
-  steps stay in the engine and the CLI; the app orders by files.
-- **Go to definition.** A minimal synchronous stdio JSON-RPC client (`lsp.rs`) speaks
+  decide these themselves. review-gui draws them in a `uniform_list`; `gpui-component`'s editor
+  and its diff view are not used: a uniform list of prepared rows is the simplest thing that
+  stays smooth at 50,000 lines. Walkthrough steps stay in the engine and the CLI; the apps order
+  by files.
+- **Go to definition.** A minimal synchronous stdio JSON-RPC client (`review_ui::lsp`) speaks
   `initialize`, `didOpen` and `textDocument/definition` to rust-analyzer (and, if installed,
-  gopls, pyright and typescript-language-server) rooted at the revision's worktree, on gpui's
-  background executor; a reader thread lets every request time out. Zed's `lsp` crate was the
-  alternative, but it is async on Zed's executor and pulls in its settings, fs and http layers;
-  one request type does not justify that. Build scripts, proc macros and `cargo check` stay off in
+  gopls, pyright and typescript-language-server) rooted at the revision's worktree, as a
+  background job of the model; a reader thread lets every request time out. Zed's `lsp` crate was
+  the alternative, but it is async on Zed's executor and pulls in its settings, fs and http
+  layers; one request type does not justify that. Build scripts, proc macros and `cargo check` stay off in
   rust-analyzer, but `cargo metadata` and `rustc` still run under the reviewed tree's Cargo
   configuration, which can name any program as a `rustc` wrapper. Running a language server on a
   reviewed head is therefore arbitrary code execution, and it is gated on trust (below). The
@@ -895,12 +918,12 @@ it, muted, so it never reads as code.
   in the review's log, so every front end shares it. Without a decision, the working tree and a
   range whose head is a local branch are trusted, and pull requests and other ranges, such as a
   remote-tracking ref or a bare commit, are not. A local branch can still hold someone else's
-  code, for example one made by `gh pr checkout`; revoke trust for it. In review-lite, `gd` on an
+  code, for example one made by `gh pr checkout`; revoke trust for it. In both apps, `gd` on an
   untrusted review shows a one-line hint, and `Ctrl+T` explains what will run and trusts on a
   second press, or revokes trust and stops the language servers. The demo's head is a local
   branch, so it is trusted.
 - **Window chrome.** gpui asks for server-side decorations; GNOME has no `xdg-decoration`, so
-  the window falls back to client decorations and review-lite draws its own square title bar
+  the window falls back to client decorations and review-gui draws its own square title bar
   (`app/chrome.rs`): the title, a drag area, minimize, maximize and close. As in Zed's
   `platform_title_bar` on Linux, a press arms a move and the first motion calls
   `start_window_move`; the armed state lives on the app, not in the frame's closures, because a
@@ -928,10 +951,167 @@ it, muted, so it never reads as code.
   header, two progress lines show the files and the hunks reviewed: a bar, done of total, and the
   whole percent, rounded down so 100% means all of it; in a narrow pane the bar makes way first,
   then the percent, then the label.
-- **Scrolling.** `review-lite --bench-scroll` scrolls every row of every file of the review once,
+- **Scrolling.** `review-gui --bench-scroll` scrolls every row of every file of the review once,
   file after file, 30 rows per frame, and prints frame-interval and per-frame build-time
   percentiles. On the perf fixture (25 files, 90,000 rows) the app's work per frame is about
   1.4 ms at the median and 3.6 ms at p99 in a release build.
+
+### review-ui: the shared model
+
+review-gui began as one gpui crate. To run the same review in a terminal without a second
+implementation of its behavior, everything that is not drawing or platform input moved into
+`review-ui`, which knows no UI toolkit. review-gui and review-tui are views over it: each maps the
+model's state onto its surface and its input onto model calls, and runs the effects the model
+queues. Anything the two apps share that is not engine logic belongs here; engine logic still
+belongs in `review-core`, which the Zed fork uses too.
+
+- **License.** `review-ui` is GPL-3.0-or-later because Zed's `highlights.scm` queries are copied
+  into `crates/review-ui/queries/`. Both apps link it, so they are GPL too; `review-core` and
+  `cr` stay MIT OR Apache-2.0.
+- **Model.** `model::Model` is the whole review window apart from its drawing: the snapshot on
+  screen, the selected file and hunk, the mode, marks waiting for the engine, folds, find,
+  pickers, settings and the file buffer. It is shaped like model-view-update: input arrives as an
+  `Action` (`Model::dispatch`) or a typed call, and a front end changes the model only through
+  `Driver::update`, which runs the model's after-update step (saving folded folders when they
+  changed, and quitting once nothing is left to save) so no change can skip it.
+- **Quitting.** `Model::quit` queues the `Quit` effect only once the marks queued and in
+  flight and the folded folders are saved, saying so on the status line meanwhile, and while it
+  waits it refuses new marks with a note, so what it waits for only shrinks. Who asks decides
+  what a failure does. The reviewer (`QuitKind::Interactive`: `Quit` or `CloseWindow` from a
+  key, a window's close button or the compositor's close request) sees the status line, so a
+  mark that fails to save stops the quitting and its failure stays in view. Nothing the
+  reviewer marked is ever dropped: asking again while the app waits changes nothing, so a held
+  `q` or a double click on the close button cannot lose an approval just made. Asking again
+  after a failure stopped the quitting, which the status line offers, waits for the marks still
+  queued as an unattended quit does, so however many marks fail, two quits leave. A shorter
+  wait is not worth a mark lost to a key pressed twice, and a save is never cut short anyway,
+  since it holds `review.lock` and appends to the event log. A new mark after a failure makes
+  the next quit an ordinary one again. Nobody sees an unattended quit (`QuitKind::Unattended`:
+  a terminal's signal, hang-up or lost input, or QA mode's input ending), so no failure stops
+  it: every queued mark is still tried, the log keeps each failure, and the app leaves once
+  they settle. QA mode's `quit` quits as the reviewer
+  does, answering the command that made it quit first.
+- **Text as it shows.** `paint::display` is the one definition of how a line of text shows on
+  a grid of cells, which every width the model computes (pan extents, the buffer cursor's cell,
+  the widest row) follows and both front ends draw: grapheme clusters in the cells
+  `unicode-width` gives the whole cluster, as ratatui's buffer assumes; tabs as four spaces; C0
+  controls and DEL in caret notation and C1 controls as `<9b>`; and the characters a renderer
+  may draw as nothing (bidi controls, zero-width characters, variation selectors, tag
+  characters, Hangul fillers, line and paragraph separators) as their code points, such as
+  `<U+202E>`, so no code can hide or reorder itself (Trojan Source). An emoji keeps the joiners
+  inside it and an emoji presentation selector (VS16) right after a pictograph or inside a
+  keycap such as `1️⃣`; every other joiner and VS16, so `isAdmin` followed by a selector never
+  looks like `isAdmin`, the tags of subdivision flags and ideographic variation selectors show
+  their codes. The text presentation selector (VS15) always shows its code: all it can change
+  is how wide an emoji draws, where `unicode-width` gives one cell and most terminals two. review-tui draws
+  everything through it; review-gui draws code, notes, paths and pull-request text through it,
+  mapping highlights and the mouse between the source's bytes and the shown text.
+- **Effects instead of async.** The model never runs anything itself. It queues `Effect`s, which
+  `Driver::update` hands back for the front end to run: `Spawn` a background job, `After` a
+  delay, `Copy` and `CopyPrimary`, the window `Title`, `Fullscreen`, `Quit`, `Log` a diagnostic, and `ScrollSheet` for the overlays each front end lays out itself.
+  review-gui runs jobs on gpui's executor, review-tui each on a thread of its own, and the
+  model's tests run them in place. So the model needs no async runtime and no executor of either
+  toolkit.
+- **Completions.** A job (a `Send` closure) or a timer hands back a `Completion`: a typed
+  outcome and the subject it was computed for, which the front end gives back to
+  `Model::complete` on the UI thread. `spawn` and `after` take the subject, so no job or timer
+  can start without naming it: a preview's number, a picker search's generation, a picker, the
+  buffer and revision of a definition lookup (while the review stays trusted), or a revision.
+  `Model::complete` first ends what marks the job as running, then checks the subject against
+  what shows in one place, and only a current outcome reaches its handler, so no handler sees a
+  stale one. An outcome that must land whatever changed says so by name, `Always` with its
+  reason: the opening, a save of marks or folded folders, whose failure must reach the reviewer
+  and which quitting waits for, a refresh, which only adds newer history, and blob texts and
+  highlights, keyed by content.
+- **Geometry and scrolling.** The model owns every list's offset, in rows. Each frame the front
+  end measures a `frame::Geometry` once, plain data in its units (logical pixels or cells): the
+  diff pane's and lists' widths, the narrower half of a side-by-side row, each list's height and
+  the code size the lists were laid out at. It hands it to the layout phase (`Model::layout`),
+  which resolves pending scroll requests against the real viewports; the front end mirrors the
+  offsets into its own scrolling and turns wheel and scrollbar input into calls on the model.
+  The model never asks the front end for anything: it works out its `Grid` (row height, cell
+  width, half cells, viewports), the rooms and the pan extents from the last geometry and the
+  `frame::Sizes` of a `Scale`, a pure function of the code size, density and settings text size
+  that the front end hands it once (the rows, cells, gutters and the bars around each list).
+  So a zoom or a font size's preview keeps the reviewer's place against the viewports the next
+  frame will have: each viewport grows by as much as its bars shrink. gpui lays its lists out
+  only after a frame is built, so review-gui measures the lists' bounds of the frame before and
+  checks after gpui's layout whether they changed (a resize, a bar coming or going, a list's
+  first layout); if so it lays the frame out once more. review-tui lays out its panes itself
+  before the layout phase, so it never needs that second pass. What needs a list's width waits
+  for it rather than working against none: the buffer's cursor, shown sideways before the buffer
+  list's first layout, is revealed by the first layout phase that has its width. Keeping places
+  as rows is what lets presentation changes, side by side and both front ends share one scroll
+  arithmetic.
+- **Keys.** `keymap` is the one table of actions and default keys, with `[keys]` overrides.
+  `keys::Matcher` is a port of gpui-pre 0.3.9's keystroke grammar (`Keystroke::parse`), typed-key
+  matching (`Keystroke::should_match`) and key dispatch over a context stack, so multi-key
+  sequences, pending timeouts and precedence behave the same in a terminal as they did when
+  review-gui bound its keys in gpui; review-gui's tests run gpui and the port over the same keys.
+  `line_edit` gives a terminal's text fields the editing keys of gpui-component's input.
+- **Drawing decisions.** `paint` decides what every piece shows and in which colors (palettes,
+  hunk headers, gutters, bars, the tree, pickers, settings, the overview), with colors that keep
+  their alpha; the front ends decide only placement. So the same review looks the same in both,
+  and a terminal composites translucent layers itself (`paint::flatten`).
+- **What a front end can do.** `front_end::FrontEnd` (`Window` or `Terminal`) states its
+  `Capabilities`: a code size that can change, a window of its own and smooth scrolling. The
+  model offers only what the front end can honor: an action it cannot (zoom, fullscreen and
+  closing the window in a terminal) is left out of the keymap and does nothing when dispatched,
+  and the settings list has no font sizes in a terminal.
+- **Starting and QA.** `launch` holds the command line both apps take to name a review, loads
+  the configuration and opens the review; `qa` writes QA mode's `state` answer from the model
+  and asks the front end only for its geometry, so a QA script's expectations read the same in
+  both apps apart from the numbers.
+- **Shared configuration.** One configuration file serves both apps; each keeps only the files
+  pane's width apart (`[layout] sidebar` in logical pixels, `tui_sidebar` in cells). Saved view
+  state is shared under the name `review-lite` (see "Storage").
+
+### review-tui
+
+`review-tui` draws `review-ui`'s model in a terminal and works as review-gui does: the same keys
+and `[keys]` overrides, configuration file, marks, folded folders, themes, diff styles, pickers,
+settings, find, file buffer, overview and `?` sheet, and mouse selection with copies through OSC
+52, which also works over ssh.
+
+- **Stack.** ratatui 0.30 with its crossterm 0.29 backend. ratatui was chosen over lower-level
+  crates such as crossterm alone or termwiz because it already gives a cell buffer and diffs
+  frames, so only changed cells reach the terminal; none of its widgets are used. Each frame is
+  written cell by cell into ratatui's buffer from `paint`'s pieces, only the rows on screen,
+  every cell with opaque colors composited as gpui blends them. Without 24-bit color
+  (`COLORTERM`), cells get their nearest of xterm's 256 colors.
+- **Terminal.** While the review shows, the terminal is in raw mode on its alternate screen,
+  with the mouse, bracketed paste and, where supported, the kitty keyboard protocol's
+  disambiguation; every frame is wrapped in synchronized output. Quitting, panics and a failed
+  take-over give back exactly what was taken, ending synchronized output first. On Unix,
+  signals come only from outside, since raw mode keeps the terminal's keys from sending any, so
+  Ctrl+Z does nothing: `SIGHUP`, `SIGINT` and `SIGTERM` quit unattended (see "Quitting" under
+  review-ui), once the marks queued and in flight are saved or have failed, and a second one
+  exits at once. Its signal thread never writes to the terminal itself: it gives the terminal
+  back and replays the log on a thread of its own and exits after at most half a second
+  whether or not they finished, without flushing, so a stalled terminal cannot keep the
+  process alive. The app has no suspend of its own: stopping a program from inside it freezes
+  it for good when its process group is orphaned (as when a terminal, `tmux` or `ssh` starts it
+  directly), and could stop it while a save holds `review.lock`. A stop from outside
+  (`SIGTSTP` or `SIGSTOP`) is left to its default action and stops the app as it is; when it
+  continues (`SIGCONT`), it takes the terminal again, raw mode included, and redraws it whole.
+  A terminal that can no longer be drawn to, and input that ended, quit unattended too.
+- **Where a terminal differs.** No zoom, font size, fullscreen or smooth scrolling, and no
+  scrollbars. The files pane's width is its own `[layout] tui_sidebar`, in cells. A paste goes
+  only into a text field taking typing, never in as keys.
+- **Fetches.** The review opens before the terminal goes raw, so the first fetch can still ask
+  for credentials. Later fetches (`R`) run non-interactively through `Review::set_command_env`,
+  because the app owns the terminal: `GIT_TERMINAL_PROMPT=0`, no ssh askpass helper, and the
+  ssh git would run (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `GIT_SSH`, else `ssh`) in
+  batch mode when git takes it for OpenSSH, by `GIT_SSH_VARIANT` or `ssh.variant`, else by its
+  name, as git's `connect.c` decides. plink and other ssh programs are left as they are, since
+  they take no `-o`; a program of another name, which git probes with `-G`, is left as it is too.
+  The children still inherit the terminal: a program that opens `/dev/tty` itself, such as a
+  credential helper or `gpg`'s pinentry through `GPG_TTY`, could still draw over the screen. Its
+  environment is left alone because review-core can only add variables, not remove them, and
+  language servers share their environment with review-gui.
+- **Diagnostics.** Nothing may be written over the screen, so diagnostics go to
+  `$XDG_STATE_HOME/code-review/review-tui.log` and are printed again on standard error once the
+  terminal is back.
 
 ### Demo review
 
@@ -942,20 +1122,30 @@ changes and adds units; revision 3 returns one hunk to its revision-1 form), a w
 few marks. It covers every feature the front ends render: formatting-only files, a re-wrap with a
 real edit, a plain move and a move with edits, a rename with edits, mode, symlink and binary
 changes, deletion-only chunks and noise. `--demo` rebuilds it and opens revision 1, and
-`--demo-revision N` advances to revision N keeping marks, in `cr` and `review-lite` alike. It is
-the shared fixture for both front ends; the Zed fork opens the same review.
+`--demo-revision N` advances to revision N keeping marks, in `cr`, review-gui and review-tui
+alike. It is the shared fixture for every front end; the Zed fork opens the same review.
 
 ### QA harness
 
-`review-lite --qa` reads line commands on standard input (`key`, `action`, `click`, `drag`,
-`hover`, `hit`, `file`, `find`, `scroll`, `resize`, `state`, `quit` and more; see `app/qa.rs`)
-and answers each with one line once its background work is done and a frame has rendered;
-`rapid <command>` answers without waiting, so a script can race input against background work.
-`state` prints the visible UI state as JSON. `scripts/qa/run.sh` (`task qa --
-<script>`) runs the app inside a headless sway, feeds it a script, checks answers with `expect`
-lines and saves `grim` screenshots to `target/qa/`. `scripts/qa/smoke.qa` walks the demo. QA runs
-keep their configuration and demo under `target/qa/`, so they never touch the user's settings or
-race another front end's demo. The Zed fork reuses the runner with its own QA mode.
+`review-gui --qa` reads line commands on standard input (`key`, `action`, `click`, `drag`,
+`hover`, `hit`, `file`, `find`, `scroll`, `pan`, `resize`, `state`, `quit` and more; see
+`crates/review-gui/src/app/qa.rs`) and answers each with one line once its background work is
+done and a frame has rendered; `rapid <command>` answers without waiting, so a script can race
+input against background work. `state` prints the visible UI state as JSON, written by
+`review_ui::qa` so both apps answer alike apart from their geometry's units.
+`quit` quits the way `q` does, once what the reviewer did is saved, after answering.
+`scripts/qa/run.sh` (`task qa -- <script>`) runs the app inside a headless sway, feeds it a
+script, checks answers with `expect` lines, waits with `exited` for an app that quits by itself
+(as after `key q`) and saves `grim` screenshots to `target/qa/`.
+`review-tui --qa` speaks the same protocol (with `paste` for a bracketed paste, and positions in
+cells; see `crates/review-tui/src/qa.rs`), drawing into ratatui's off-screen `TestBackend`
+without sway; `QA_FRONT_END=tui` (`task qa:tui -- <script>`) makes the runner drive it, and `shot`
+then has the app write its screen as text and as SGR-colored `.ansi` under `target/qa/tui/`.
+An `include <script>` line runs another script in place: `scripts/qa/smoke.qa` and
+`scripts/qa/smoke-tui.qa` walk the demo in each app and share `scripts/qa/smoke-common.qa`, the
+checks that do not depend on geometry. QA runs keep their configuration and demo under
+`target/qa/`, so they never touch the user's settings or race another front end's demo. The Zed
+fork reuses the runner with its own QA mode.
 
 ### zed
 
@@ -991,12 +1181,12 @@ As built for M3 in `~/dev/zed-review` (remote `upstream`, Zed `main` at c7bea343
 - **Snapshot hygiene:** rust-analyzer's default `cargo check` on save writes a `target/` directory
   into the head worktree, which Zed then rescans on its main thread (multi-second hangs) and which
   runs the reviewed code. The launch profile turns off check on save, build scripts and proc
-  macros, as review-lite does; the fork should enforce this per review worktree rather than rely
+  macros, as review-gui does; the fork should enforce this per review worktree rather than rely
   on the profile.
 - **Trust:** the engine's trust decision maps onto Zed's restricted mode (`TrustedWorktrees`):
   trusted reviews trust the head worktree, untrusted ones restrict it, and trusting it in Zed's
   prompt records the trust in the engine.
-- **QA:** `CODE_REVIEW_QA=1` speaks the same stdin protocol as review-lite's `--qa`;
+- **QA:** `CODE_REVIEW_QA=1` speaks the same stdin protocol as review-gui's `--qa`;
   `scripts/qa/zed-smoke.qa` walks the demo, and `QA_BINARY=scripts/zed/launch.sh` drives the fork
   with `scripts/qa/session.sh`.
 
@@ -1004,7 +1194,9 @@ As built for M3 in `~/dev/zed-review` (remote `upstream`, Zed `main` at c7bea343
 
 1. **M0: research and plan.** This file and [prior-work.md](prior-work.md).
 2. **M1: engine and CLI.** `review-core` and `cr`, done when the acceptance tests below pass.
-3. **M2: lite slice.** The thin slice on gpui + gpui-component; built, see [lite](#lite).
+3. **M2: gpui slice.** The thin slice on gpui + gpui-component; built, see
+   [review-gui](#review-gui). Its model since moved into `review-ui`, and review-tui draws it in
+   a terminal (see [review-tui](#review-tui)).
 4. **M3: zed slice.** The same slice as a Zed fork crate.
 5. **M4: compare and choose.** Measure both, then grow the chosen one to the full feature set.
 6. **Later:** post comments and reviews to GitHub; import historical PR pushes from GitHub's
@@ -1060,8 +1252,9 @@ Each runs against temporary git repositories built in the test:
 ## Choosing between the front ends (M4)
 
 Compare on: clean and incremental build time, binary size, startup time, scrolling a 50,000-line
-diff, LSP quality, lines of code we own, upstream churn (lite: gpui and gpui-component releases;
-zed: rebase conflicts per month), and how easy the walkthrough and marking UI were to build.
+diff, LSP quality, lines of code we own, upstream churn (review-gui: gpui and gpui-component
+releases; zed: rebase conflicts per month), and how easy the walkthrough and marking UI were to
+build.
 
 ## Open questions
 
