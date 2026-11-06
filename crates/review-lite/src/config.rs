@@ -27,13 +27,6 @@
 //! [theme]
 //! name = "carbonfox"  # or tokyonight-night, nightfox, one-dark, …; T opens the settings
 //!
-//! [presets.mine]    # a named look the settings list offers beside the built-in ones
-//! theme = "nordfox"     # fields left out take their defaults
-//! style = "soft"
-//! density = "comfortable"
-//! layout = "side-by-side"
-//! token_emphasis = false
-//!
 //! [keys]            # replace an action's keys; `?` in the app lists the actions
 //! NextUnit = ["n", "ctrl-j"]
 //! ToggleOverview = []   # unbound
@@ -45,7 +38,7 @@
 //! ```
 //!
 //! Choices made in the app are written back with [`remember`], which edits the file as TOML and
-//! keeps everything else in it: comments, presets, keys and settings it does not change.
+//! keeps everything else in it: comments, styles, keys and settings it does not change.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -124,11 +117,11 @@ struct File {
     keys: BTreeMap<String, KeyList>,
     #[serde(default)]
     theme: ThemeSection,
-    /// Read table by table, so a mistake in one style or preset leaves the others usable.
+    /// Read table by table, so a mistake in one style leaves the others usable.
     #[serde(default)]
     styles: BTreeMap<String, toml::Value>,
-    #[serde(default)]
-    presets: BTreeMap<String, toml::Value>,
+    /// Read only to say that presets are gone, rather than reject an older file whole.
+    presets: Option<serde::de::IgnoredAny>,
 }
 
 /// One key or several, as `[keys]` accepts them.
@@ -205,17 +198,6 @@ struct StyleSection {
     change_bar: Option<bool>,
     /// Read only to say where it belongs now: a style never changes the spacing.
     density: Option<serde::de::IgnoredAny>,
-}
-
-/// A `[presets.<name>]` table as written; every field is optional.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PresetSection {
-    theme: Option<String>,
-    style: Option<String>,
-    density: Option<Density>,
-    layout: Option<DiffLayout>,
-    token_emphasis: Option<bool>,
 }
 
 /// How a file's diff is laid out.
@@ -371,21 +353,6 @@ pub struct StyleConfig {
     pub change_bar: Option<bool>,
 }
 
-/// A user preset as the configuration file sets it; fields it leaves out take their defaults.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PresetConfig {
-    /// The theme's name, checked against the themes once they are loaded.
-    pub theme: Option<String>,
-    /// The diff style's name, checked against the styles.
-    pub style: Option<String>,
-    /// How much air the rows have.
-    pub density: Option<Density>,
-    /// How the diff is laid out.
-    pub layout: Option<DiffLayout>,
-    /// Whether changed tokens within a line are emphasized.
-    pub token_emphasis: Option<bool>,
-}
-
 /// Everything the configuration file sets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -417,8 +384,6 @@ pub struct Config {
     /// User diff styles by name, in name order; one the file gets wrong is left out and
     /// named in `problems`.
     pub styles: BTreeMap<String, StyleConfig>,
-    /// User presets by name, in name order, or why one cannot be used.
-    pub presets: BTreeMap<String, Result<PresetConfig, String>>,
     /// What the file gets wrong that only costs the entries it is in.
     pub problems: Vec<String>,
 }
@@ -439,7 +404,6 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
             styles: BTreeMap::new(),
-            presets: BTreeMap::new(),
             problems: Vec::new(),
         }
     }
@@ -489,7 +453,7 @@ pub enum RememberError {
 }
 
 /// Remembers settings changed in the app in the configuration file at `path`, all in one write,
-/// keeping the rest of the file as it is: comments, formatting, presets and other settings.
+/// keeping the rest of the file as it is: comments, formatting, styles and other settings.
 ///
 /// # Errors
 ///
@@ -630,6 +594,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
             Err(problem) => problems.push(format!("[styles.{name}] cannot be used: {problem}")),
         }
     }
+    if file.presets.is_some() {
+        problems.push("presets are no longer supported; use the individual settings".to_owned());
+    }
     let color = |value: Option<String>| match value {
         None => Ok(None),
         Some(text) => hex_color(&text)
@@ -668,11 +635,6 @@ pub fn parse(text: &str) -> Result<Config, String> {
             })
             .collect(),
         styles,
-        presets: file
-            .presets
-            .into_iter()
-            .map(|(name, preset)| (name, parse_preset(preset)))
-            .collect(),
         problems,
     })
 }
@@ -690,9 +652,7 @@ fn parse_style(value: toml::Value) -> Result<StyleConfig, String> {
         .map_err(|err: toml::de::Error| err.message().to_owned())?;
     if density.is_some() {
         return Err(
-            "it sets density, but a diff style is colors only; set density under \
-                    [diff] or in a preset"
-                .to_owned(),
+            "it sets density, but a diff style is colors only; set density under [diff]".to_owned(),
         );
     }
     Ok(StyleConfig {
@@ -700,26 +660,6 @@ fn parse_style(value: toml::Value) -> Result<StyleConfig, String> {
         background,
         headers,
         change_bar,
-    })
-}
-
-/// A `[presets.<name>]` table, or what is wrong with it.
-fn parse_preset(value: toml::Value) -> Result<PresetConfig, String> {
-    let PresetSection {
-        theme,
-        style,
-        density,
-        layout,
-        token_emphasis,
-    } = value
-        .try_into()
-        .map_err(|err: toml::de::Error| err.message().to_owned())?;
-    Ok(PresetConfig {
-        theme,
-        style,
-        density,
-        layout,
-        token_emphasis,
     })
 }
 
@@ -856,7 +796,7 @@ mod tests {
     }
 
     /// A header with a comment is the same table, so remembering a value never appends a
-    /// second `[diff]`, which would make the file invalid; comments, user presets and other
+    /// second `[diff]`, which would make the file invalid; comments, user styles and other
     /// settings survive, and several values land in one edit.
     #[test]
     fn commented_headers_keep_one_table_and_every_comment() {
@@ -866,8 +806,8 @@ mod tests {
 style = \"syntax\"  # delta's look
 token_emphasis = false
 
-[presets.mine]
-theme = \"nordfox\" # a calm one
+[styles.mine]
+background = \"muted\" # a calm one
 
 [keys]
 NextHunk = [\"j\"]
@@ -886,7 +826,7 @@ NextHunk = [\"j\"]
             "# My review settings.",
             "[diff] # colors",
             "style = \"plain\"  # delta's look",
-            "theme = \"nordfox\" # a calm one",
+            "background = \"muted\" # a calm one",
             "NextHunk = [\"j\"]",
         ] {
             assert!(updated.contains(kept), "lost {kept:?} in:\n{updated}");
@@ -896,9 +836,9 @@ NextHunk = [\"j\"]
         assert_eq!(config.diff_layout, DiffLayout::SideBySide);
         assert_eq!(config.theme.as_deref(), Some("nordfox"));
         assert_eq!(
-            config.presets["mine"].as_ref().unwrap().theme.as_deref(),
-            Some("nordfox"),
-            "the user's preset is untouched"
+            config.styles["mine"].background,
+            Some(Background::Muted),
+            "the user's style is untouched"
         );
         assert!(!config.token_emphasis);
     }
@@ -948,14 +888,13 @@ NextHunk = [\"j\"]
         );
     }
 
-    /// Layouts, styles and presets parse by the names the file uses.
+    /// Layouts and styles parse by the names the file uses.
     #[test]
-    fn looks_styles_and_presets_parse() {
+    fn looks_and_styles_parse() {
         let config = parse(
             "[diff]\nlayout = \"side-by-side\"\nstyle = \"calm\"\ndensity = \"compact\"\n\
              [styles.calm]\nsyntax = true\nbackground = \"muted\"\nheaders = \"chips\"\n\
-             change_bar = true\n\
-             [presets.calm]\ntheme = \"nordfox\"\nstyle = \"plain\"\ndensity = \"comfortable\"\n",
+             change_bar = true\n",
         )
         .unwrap();
         assert_eq!(config.diff_layout, DiffLayout::SideBySide);
@@ -969,15 +908,6 @@ NextHunk = [\"j\"]
                 headers: Some(Headers::Chips),
                 change_bar: Some(true),
             }
-        );
-        assert_eq!(
-            config.presets["calm"],
-            Ok(PresetConfig {
-                theme: Some("nordfox".to_owned()),
-                style: Some("plain".to_owned()),
-                density: Some(Density::Comfortable),
-                ..PresetConfig::default()
-            })
         );
         assert_eq!(
             parse("").unwrap().density,
@@ -1001,23 +931,37 @@ NextHunk = [\"j\"]
             "{:?}",
             config.problems
         );
-        // A mistake in a preset or a style costs only that entry, never the whole file.
+        // A mistake in a style costs only that style, never the whole file.
         let config = parse(
-            "[font]\nsize = 15\n[presets.calm]\ncolour = \"red\"\n[presets.fine]\n\
-             theme = \"nordfox\"\n[styles.calm]\nbackground = \"loud\"\n",
+            "[font]\nsize = 15\n[styles.calm]\nbackground = \"loud\"\n[styles.fine]\n\
+             syntax = false\n",
         )
         .unwrap();
         assert_eq!(config.font.size_points, Some(15.0));
-        let calm = config.presets["calm"].as_ref().unwrap_err();
-        assert!(calm.contains("colour"), "{calm}");
-        assert!(config.presets["fine"].is_ok());
-        assert!(config.styles.is_empty());
+        assert!(!config.styles.contains_key("calm"));
+        assert!(config.styles.contains_key("fine"));
         assert!(
             config.problems[0].starts_with("[styles.calm] cannot be used:"),
             "{:?}",
             config.problems
         );
         assert!(parse("[diff]\nlayout = \"split\"\n").is_err());
+    }
+
+    /// Presets are gone: an older file's `[presets]` costs nothing else and is named once,
+    /// however many presets it has.
+    #[test]
+    fn presets_are_noted_once_and_ignored() {
+        let config = parse(
+            "[diff]\ndensity = \"compact\"\n[presets.mine]\ntheme = \"nordfox\"\n\
+             [presets.other]\ncolour = \"red\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.density, Density::Compact);
+        assert_eq!(
+            config.problems,
+            ["presets are no longer supported; use the individual settings"]
+        );
     }
 
     /// Approved hunks fold unless the file says to show them.

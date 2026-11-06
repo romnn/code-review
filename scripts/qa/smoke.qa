@@ -1,6 +1,6 @@
 # Walks the built-in demo the lazygit way: files, one file's diff, hunks approved and flagged,
 # the whole file as a buffer, overlays, input racing background work, window chrome, diff
-# styles, the settings list with its previews and presets, side by side, and a force-push. Run
+# styles, the settings list with its previews, side by side, and a force-push. Run
 # with `task qa -- scripts/qa/smoke.qa`; screenshots land in target/qa/.
 
 launch --demo
@@ -357,18 +357,36 @@ expect "overlay":null
 key escape
 
 # A file's place is kept by row, not pixels: scrolled in one density, it shows the same line at
-# the top after the zed preset below changes the density.
+# the top after the settings below change the density.
 file src/parser.rs
 scroll 300
 state
 expect "rows":\[\{"row":10,"source":10,
 file src/engine.rs
 
-# The zed preset, found by name and applied as a whole: One Dark with the soft style and
-# comfortable rows.
+# Zed's look, a setting at a time, each found by search and applied with Enter: One Dark, the
+# soft style and comfortable rows.
 key ,
 key tab
-key z e d
+key o n e space d a r k
+state
+expect "cursor":"Theme: One Dark"
+key enter
+key escape
+key escape
+key ,
+key tab
+key s o f t
+state
+expect "cursor":"Diff style: soft"
+key enter
+key escape
+key escape
+key ,
+key tab
+key c o m f o r t a b l e
+state
+expect "cursor":"Density: comfortable"
 key enter
 key escape
 key escape

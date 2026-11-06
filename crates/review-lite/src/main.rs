@@ -204,9 +204,9 @@ fn choose_theme(
     Ok((std::sync::Arc::new(chosen), themes))
 }
 
-/// The window's settings from `config`: its themes, diff styles and presets, and the look it
-/// opens with. `problems` are the configuration's problems found so far; the ones found here
-/// join them, and all of them are printed and kept for the window to show.
+/// The window's settings from `config`: its themes and diff styles, and the look it opens
+/// with. `problems` are the configuration's problems found so far; the ones found here join
+/// them, and all of them are printed and kept for the window to show.
 fn settings(
     config: &config::Config,
     config_path: Option<PathBuf>,
@@ -227,15 +227,6 @@ fn settings(
             look::find_style(&styles, look::DEFAULT_STYLE)
         })
         .map_err(|problem| eyre::eyre!(problem))?;
-    let presets = look::presets(&config.presets, &themes, &styles);
-    for preset in &presets {
-        if let Err(problem) = &preset.look {
-            problems.push(format!(
-                "preset {:?} cannot be used: {problem}",
-                preset.name
-            ));
-        }
-    }
     for problem in &problems {
         eprintln!("review-lite: {problem}");
     }
@@ -253,7 +244,6 @@ fn settings(
         },
         themes,
         styles,
-        presets,
         context: config.context,
         approved: config.approved,
         removed: config.removed,

@@ -216,8 +216,6 @@ pub struct Settings {
     pub themes: Vec<crate::theme::Theme>,
     /// Every diff style, in the order `|` cycles them.
     pub styles: Vec<crate::look::DiffStyle>,
-    /// The built-in and user presets, resolved against the themes.
-    pub presets: Vec<crate::look::Preset>,
     /// The pane widths remembered from the last session.
     pub layout: PaneLayout,
     /// The keymap, after the configuration's overrides.

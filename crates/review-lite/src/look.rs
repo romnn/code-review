@@ -1,5 +1,5 @@
 //! How the review looks: the theme, the diff style, the density, the layout and token
-//! emphasis, and the named presets that bundle them.
+//! emphasis.
 //!
 //! A diff style says how a diff is colored whatever the theme: syntax colors or not, what
 //! changed lines are drawn on, how hunk headers are drawn, and whether changed lines have a bar
@@ -10,18 +10,12 @@
 //!
 //! The window keeps the look the reviewer applied and, while the settings list's cursor rests
 //! on an entry, a preview of it; what shows is the preview when there is one.
-//! A preset is resolved against the loaded themes and styles as a whole before any of it shows,
-//! so a preset naming a theme or a style that does not exist is reported, never applied with a
-//! fallback.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::config::{
-    Background, Density, DiffLayout, Headers, PresetConfig, Remembered, StyleConfig,
-    points_to_pixels,
-};
-use crate::theme::{self, Theme};
+use crate::config::{Background, Density, DiffLayout, Headers, StyleConfig, points_to_pixels};
+use crate::theme::Theme;
 
 /// How a diff is colored, whatever the theme; nothing in it moves a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +150,7 @@ pub fn next_style<'a>(styles: &'a [DiffStyle], current: &str) -> Option<&'a Diff
     styles.get(next)
 }
 
-/// Everything a preset sets: the look of the diff apart from the font.
+/// The look of the diff apart from the font.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Look {
     /// The theme.
@@ -169,55 +163,6 @@ pub struct Look {
     pub layout: DiffLayout,
     /// Whether changed tokens within a line are underlined.
     pub token_emphasis: bool,
-}
-
-impl Look {
-    /// A one-line summary, such as `One Dark · soft · comfortable · unified`.
-    #[must_use]
-    pub fn summary(&self) -> String {
-        let mut parts = vec![
-            self.theme.title.clone(),
-            self.style.name.clone(),
-            self.density.name().to_owned(),
-            self.layout.name().to_owned(),
-        ];
-        if self.token_emphasis {
-            parts.push("token emphasis".to_owned());
-        }
-        parts.join(" · ")
-    }
-
-    /// The settings that remember this whole look, written together.
-    #[must_use]
-    pub fn remembered(&self) -> Vec<Remembered> {
-        vec![
-            Remembered {
-                table: "theme",
-                key: "name",
-                value: self.theme.name.as_str().into(),
-            },
-            Remembered {
-                table: "diff",
-                key: "style",
-                value: self.style.name.as_str().into(),
-            },
-            Remembered {
-                table: "diff",
-                key: "density",
-                value: self.density.name().into(),
-            },
-            Remembered {
-                table: "diff",
-                key: "layout",
-                value: self.layout.name().into(),
-            },
-            Remembered {
-                table: "diff",
-                key: "token_emphasis",
-                value: self.token_emphasis.into(),
-            },
-        ]
-    }
 }
 
 /// The look the reviewer applied, and the one previewed over it.
@@ -250,119 +195,13 @@ pub fn line_height(density: Density) -> f32 {
 /// How far muted line backgrounds move from the theme's toward the editor background.
 pub const MUTED_SHARE: f32 = 0.5;
 
-/// Where a style or a preset comes from.
+/// Where a style comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// Shipped with the app.
     BuiltIn,
     /// A table of the configuration.
     User,
-}
-
-/// A named look, resolved against the loaded themes and styles.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Preset {
-    /// The name the settings list and the configuration use.
-    pub name: String,
-    /// Where it comes from.
-    pub origin: Origin,
-    /// The complete look, or why the preset cannot be used.
-    pub look: Result<Look, String>,
-}
-
-/// The built-in presets, in the order the settings list shows them.
-fn built_in_presets() -> Vec<(&'static str, PresetConfig)> {
-    let carbonfox = Some(theme::DEFAULT.to_owned());
-    let preset = |theme: &Option<String>, style: &str, density, layout| PresetConfig {
-        theme: theme.clone(),
-        style: Some(style.to_owned()),
-        density: Some(density),
-        layout: Some(layout),
-        token_emphasis: Some(false),
-    };
-    vec![
-        (
-            "delta",
-            preset(&carbonfox, "bold", Density::Normal, DiffLayout::Unified),
-        ),
-        (
-            "delta side-by-side",
-            preset(&carbonfox, "bold", Density::Normal, DiffLayout::SideBySide),
-        ),
-        (
-            "lazygit",
-            preset(&carbonfox, "plain", Density::Compact, DiffLayout::Unified),
-        ),
-        // Zed's own default theme with its quieter colors and roomier rows.
-        (
-            "zed",
-            preset(
-                &Some("one-dark".to_owned()),
-                "soft",
-                Density::Comfortable,
-                DiffLayout::Unified,
-            ),
-        ),
-    ]
-}
-
-/// Resolves `preset` against `themes` and `styles` into a complete look; fields it leaves out
-/// take their defaults.
-///
-/// # Errors
-///
-/// Returns why the preset cannot be used: it names a theme or a style that is not loaded.
-pub fn resolve(
-    preset: &PresetConfig,
-    themes: &[Theme],
-    styles: &[DiffStyle],
-) -> Result<Look, String> {
-    let wanted = preset.theme.as_deref().unwrap_or(theme::DEFAULT);
-    let theme = themes
-        .iter()
-        .find(|theme| theme.name == wanted)
-        .ok_or_else(|| format!("there is no theme {wanted:?}"))?;
-    let style = find_style(styles, preset.style.as_deref().unwrap_or(DEFAULT_STYLE))?;
-    Ok(Look {
-        theme: Arc::new(theme.clone()),
-        style,
-        density: preset.density.unwrap_or_default(),
-        layout: preset.layout.unwrap_or_default(),
-        token_emphasis: preset.token_emphasis.unwrap_or(false),
-    })
-}
-
-/// Every preset: the built-in ones, then the user's in name order; a user preset of a built-in
-/// one's name takes its place.
-#[must_use]
-pub fn presets(
-    user: &BTreeMap<String, Result<PresetConfig, String>>,
-    themes: &[Theme],
-    styles: &[DiffStyle],
-) -> Vec<Preset> {
-    let mut presets: Vec<Preset> = built_in_presets()
-        .into_iter()
-        .map(|(name, preset)| Preset {
-            name: name.to_owned(),
-            origin: Origin::BuiltIn,
-            look: resolve(&preset, themes, styles),
-        })
-        .collect();
-    for (name, preset) in user {
-        let preset = Preset {
-            name: name.clone(),
-            origin: Origin::User,
-            look: preset
-                .as_ref()
-                .map_err(Clone::clone)
-                .and_then(|preset| resolve(preset, themes, styles)),
-        };
-        match presets.iter_mut().find(|known| known.name == *name) {
-            Some(known) => *known = preset,
-            None => presets.push(preset),
-        }
-    }
-    presets
 }
 
 /// The font sizes the settings list offers, in points.
@@ -421,100 +260,5 @@ mod tests {
         assert_eq!(cycle, ["bold", "soft", "calm", "plain", "plain"]);
         assert_eq!(find_style(&styles, "syntax").unwrap().name, "bold");
         assert!(find_style(&styles, "loud").is_err());
-    }
-
-    /// The built-in presets resolve with the built-in themes and styles, "zed" is the soft one,
-    /// and a user preset replaces a built-in one of its name.
-    #[test]
-    fn presets_resolve_and_user_presets_replace_built_in_ones() {
-        let (themes, _) = theme::all(None);
-        let styles = styles(&BTreeMap::new());
-        let presets = presets(&BTreeMap::new(), &themes, &styles);
-        let names: Vec<&str> = presets.iter().map(|preset| preset.name.as_str()).collect();
-        assert_eq!(names, ["delta", "delta side-by-side", "lazygit", "zed"]);
-        assert!(presets.iter().all(|preset| preset.look.is_ok()));
-        let zed = presets[3].look.as_ref().unwrap();
-        assert_eq!(zed.style.name, "soft");
-        assert_eq!(zed.theme.name, "one-dark");
-        assert_eq!(zed.density, Density::Comfortable);
-        let lazygit = presets[2].look.as_ref().unwrap();
-        assert_eq!(lazygit.style.name, "plain");
-        assert_eq!(lazygit.density, Density::Compact);
-        assert_eq!(presets[0].look.as_ref().unwrap().density, Density::Normal);
-
-        let user = BTreeMap::from([
-            (
-                "zed".to_owned(),
-                Ok(PresetConfig {
-                    theme: Some("nordfox".to_owned()),
-                    ..PresetConfig::default()
-                }),
-            ),
-            (
-                "mine".to_owned(),
-                Ok(PresetConfig {
-                    layout: Some(DiffLayout::SideBySide),
-                    ..PresetConfig::default()
-                }),
-            ),
-        ]);
-        let presets = super::presets(&user, &themes, &styles);
-        assert_eq!(presets.len(), 5);
-        let zed = presets.iter().find(|preset| preset.name == "zed").unwrap();
-        assert_eq!(zed.origin, Origin::User);
-        let look = zed.look.as_ref().unwrap();
-        assert_eq!(look.theme.name, "nordfox");
-        // Fields a preset leaves out take their defaults, not the built-in preset's.
-        assert_eq!(look.style.name, DEFAULT_STYLE);
-        assert_eq!(look.density, Density::Normal);
-        let mine = presets.last().unwrap();
-        assert_eq!(mine.look.as_ref().unwrap().theme.name, theme::DEFAULT);
-    }
-
-    /// A preset naming a missing theme or style is an error as a whole, never a fallback with
-    /// the rest of the preset applied.
-    #[test]
-    fn unknown_themes_and_styles_make_the_preset_unusable() {
-        let (themes, _) = theme::all(None);
-        let styles = styles(&BTreeMap::new());
-        let preset = PresetConfig {
-            theme: Some("solarized".to_owned()),
-            style: Some("soft".to_owned()),
-            ..PresetConfig::default()
-        };
-        assert_eq!(
-            resolve(&preset, &themes, &styles),
-            Err("there is no theme \"solarized\"".to_owned())
-        );
-        let preset = PresetConfig {
-            style: Some("loud".to_owned()),
-            ..PresetConfig::default()
-        };
-        assert_eq!(
-            resolve(&preset, &themes, &styles),
-            Err("there is no diff style \"loud\"".to_owned())
-        );
-    }
-
-    /// A preset is remembered as all of its fields together.
-    #[test]
-    fn a_look_remembers_every_field() {
-        let (themes, _) = theme::all(None);
-        let look = resolve(&PresetConfig::default(), &themes, &styles(&BTreeMap::new())).unwrap();
-        let keys: Vec<(&str, &str)> = look
-            .remembered()
-            .iter()
-            .map(|setting| (setting.table, setting.key))
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                ("theme", "name"),
-                ("diff", "style"),
-                ("diff", "density"),
-                ("diff", "layout"),
-                ("diff", "token_emphasis"),
-            ]
-        );
     }
 }

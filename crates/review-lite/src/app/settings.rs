@@ -1,6 +1,5 @@
-//! The settings list, opened with `T` or `,`: presets, themes, diff styles, density, layout,
-//! token emphasis, approved hunks and font size, keyboard first, with a search over every
-//! entry.
+//! The settings list, opened with `T` or `,`: themes, diff styles, density, layout, token
+//! emphasis, approved hunks and font size, keyboard first, with a search over every entry.
 //!
 //! The list and its search field own the keyboard apart, as two key contexts: the list takes
 //! `j`/`k`, Space and `q`, the field takes everything typed, and Tab switches between them.
@@ -11,9 +10,8 @@
 //! exact geometry; when the files pane is hidden or too narrow, it covers the left of the diff
 //! instead. It keeps the text size and row height it opened with, so previewing a density or
 //! a font size changes the diff beside it and never the panel itself.
-//! Applying moves the applied look and writes it to the configuration, a preset all its fields
-//! at once; when that write fails, the look stays applied and the status line says it could not
-//! be saved.
+//! Applying moves the applied look and writes the entry's setting to the configuration; when
+//! that write fails, the look stays applied and the status line says it could not be saved.
 
 use gpui::prelude::*;
 use gpui::{
@@ -64,8 +62,6 @@ const PANEL_LINE_HEIGHT: f32 = 1.75;
 /// What an entry of the list sets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
-    /// A named look, by name.
-    Preset(String),
     /// A theme, by name.
     Theme(String),
     /// A diff style, by name.
@@ -104,14 +100,11 @@ pub struct Entry {
     pub keywords: String,
     /// What applying it sets.
     pub choice: Choice,
-    /// Why it cannot be applied, for a preset naming a missing theme.
-    pub problem: Option<String>,
 }
 
 impl Entry {
     /// Whether every word of `query` appears in the entry's section, label or keywords; the
-    /// detail only describes, so searching "compact" finds the density, not every preset that
-    /// happens to be compact.
+    /// detail only describes, so searching "head" finds no layout that merely mentions it.
     fn matches(&self, query: &str) -> bool {
         let haystack = format!("{} {} {}", self.section, self.label, self.keywords).to_lowercase();
         query
@@ -164,23 +157,9 @@ pub struct Panel {
     _subscription: Subscription,
 }
 
-/// Every entry of the list, in order: presets, themes, then each setting's options.
+/// Every entry of the list, in order: themes, then each setting's options.
 fn entries(app: &ReviewApp) -> Vec<Entry> {
     let mut entries = Vec::new();
-    for preset in &app.settings.presets {
-        let (detail, problem) = match &preset.look {
-            Ok(look) => (look.summary(), None),
-            Err(problem) => (format!("unusable: {problem}"), Some(problem.clone())),
-        };
-        entries.push(Entry {
-            section: "Presets",
-            label: preset.name.clone(),
-            detail,
-            keywords: "preset".to_owned(),
-            choice: Choice::Preset(preset.name.clone()),
-            problem,
-        });
-    }
     for theme in &app.settings.themes {
         entries.push(Entry {
             section: "Theme",
@@ -188,7 +167,6 @@ fn entries(app: &ReviewApp) -> Vec<Entry> {
             detail: String::new(),
             keywords: theme.name.clone(),
             choice: Choice::Theme(theme.name.clone()),
-            problem: None,
         });
     }
     for style in &app.settings.styles {
@@ -198,7 +176,6 @@ fn entries(app: &ReviewApp) -> Vec<Entry> {
             detail: style.summary(),
             keywords: "|".to_owned(),
             choice: Choice::Style(style.name.clone()),
-            problem: None,
         });
     }
     let mut option = |section: &'static str, label: &str, detail: &str, choice: Choice| {
@@ -208,7 +185,6 @@ fn entries(app: &ReviewApp) -> Vec<Entry> {
             detail: detail.to_owned(),
             keywords: String::new(),
             choice,
-            problem: None,
         });
     };
     for density in Density::ALL {
@@ -438,7 +414,6 @@ impl ReviewApp {
     fn preview_of(&self, choice: &Choice) -> Option<Look> {
         let applied = &self.settings.appearance.applied;
         let look = match choice {
-            Choice::Preset(name) => self.preset_look(name)?.ok()?,
             Choice::Theme(name) => Look {
                 theme: std::sync::Arc::new(self.find_theme(name)?.clone()),
                 ..applied.clone()
@@ -535,32 +510,10 @@ impl ReviewApp {
         self.settings.styles.iter().find(|style| style.name == name)
     }
 
-    /// The resolved look of the preset `name`, or why it cannot be used.
-    fn preset_look(&self, name: &str) -> Option<Result<Look, String>> {
-        self.settings
-            .presets
-            .iter()
-            .find(|preset| preset.name == name)
-            .map(|preset| preset.look.clone())
-    }
-
-    /// The preset whose look is the applied one, if any.
-    fn applied_preset(&self) -> Option<&str> {
-        let applied = &self.settings.appearance.applied;
-        self.settings
-            .presets
-            .iter()
-            .find(|preset| preset.look.as_ref().is_ok_and(|look| look == applied))
-            .map(|preset| preset.name.as_str())
-    }
-
     /// Whether `choice` is what the review uses now, for the list's marker.
     fn is_applied(&self, choice: &Choice) -> bool {
         let applied = &self.settings.appearance.applied;
         match choice {
-            Choice::Preset(name) => {
-                matches!(self.preset_look(name), Some(Ok(look)) if look == *applied)
-            }
             Choice::Theme(name) => applied.theme.name == *name,
             Choice::Style(name) => applied.style.name == *name,
             Choice::Density(density) => applied.density == *density,
@@ -644,18 +597,6 @@ impl ReviewApp {
     fn apply_choice(&mut self, choice: &Choice) {
         let applied = self.settings.appearance.applied.clone();
         let (look, remembered, what) = match choice {
-            Choice::Preset(name) => match self.preset_look(name) {
-                Some(Ok(look)) => {
-                    let what = format!("Preset {name}: {}", look.summary());
-                    let remembered = look.remembered();
-                    (look, remembered, what)
-                }
-                Some(Err(problem)) => {
-                    self.fail(format!("Preset {name} cannot be used: {problem}."));
-                    return;
-                }
-                None => return,
-            },
             Choice::Theme(name) => {
                 let Some(theme) = self.find_theme(name).cloned() else {
                     return;
@@ -896,7 +837,7 @@ impl ReviewApp {
             .border_r_1()
             .border_color(colors.hairline)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(self.render_settings_title(&colors))
+            .child(Self::render_settings_title(&colors))
             .child(
                 search.capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                     // A click into the field gives it the keys, as Tab does.
@@ -963,11 +904,11 @@ impl ReviewApp {
             .as_ref()
             .and_then(|panel| shown.iter().find(|entry| entry.choice == panel.cursor));
         let detail = entry.map(|entry| {
-            let (text, color) = match &entry.problem {
-                Some(problem) => (format!("unusable: {problem}"), colors.error),
-                None => (entry.detail.clone(), colors.faint),
-            };
-            div().min_w_0().truncate().text_color(color).child(text)
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(colors.faint)
+                .child(entry.detail.clone())
         });
         h_flex()
             .h(px(BAR))
@@ -983,35 +924,19 @@ impl ReviewApp {
             .children(detail)
     }
 
-    /// The panel's title row: its name, and the preset whose look is applied.
-    fn render_settings_title(&self, colors: &Palette) -> gpui::Div {
+    /// The panel's title row.
+    fn render_settings_title(colors: &Palette) -> gpui::Div {
         h_flex()
             .h(px(BAR))
             .flex_none()
             .px(px(GRID * 3.0))
             .border_b_1()
             .border_color(colors.hairline)
-            .gap(px(GRID * 3.0))
             .child(
                 div()
-                    .flex_none()
                     .text_color(colors.text)
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Settings"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_right()
-                    .text_color(colors.faint)
-                    .child(
-                        self.applied_preset().map_or_else(
-                            || "custom look".to_owned(),
-                            |name| format!("preset {name}"),
-                        ),
-                    ),
             )
     }
 
@@ -1124,10 +1049,6 @@ impl ReviewApp {
         let applied = self.is_applied(&entry.choice);
         let swatch = match &entry.choice {
             Choice::Theme(name) => self.find_theme(name).map(swatch),
-            Choice::Preset(name) => match self.preset_look(name) {
-                Some(Ok(look)) => Some(swatch(&look.theme)),
-                Some(Err(_)) | None => None,
-            },
             Choice::Style(_)
             | Choice::Density(_)
             | Choice::Layout(_)
@@ -1139,9 +1060,7 @@ impl ReviewApp {
         let label = div()
             .min_w_0()
             .truncate()
-            .text_color(if entry.problem.is_some() {
-                colors.faint
-            } else if applied || under_cursor {
+            .text_color(if applied || under_cursor {
                 colors.text
             } else {
                 colors.dim
@@ -1188,11 +1107,7 @@ impl ReviewApp {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_color(if entry.problem.is_some() {
-                        colors.error
-                    } else {
-                        colors.faint
-                    })
+                    .text_color(colors.faint)
                     .child(entry.detail.clone())
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1277,7 +1192,6 @@ mod tests {
             detail: "base on the left, head on the right · s".to_owned(),
             keywords: "split".to_owned(),
             choice: Choice::Layout(DiffLayout::SideBySide),
-            problem: None,
         };
         assert!(entry.matches(""));
         assert!(entry.matches("Side LAYOUT"));
@@ -1296,7 +1210,6 @@ mod tests {
             detail: String::new(),
             keywords: String::new(),
             choice: Choice::Emphasis(false),
-            problem: None,
         };
         let entries = [entry("A", "1"), entry("A", "2"), entry("B", "3")];
         assert_eq!(

@@ -815,28 +815,25 @@ it, muted, so it never reads as code.
   remembered layout. A selection keeps the half it started in and copies that side's lines,
   skipping padding but keeping blank lines. `/` searches each half apart, the base's half before
   the head's in each row, and highlights a match only in its own half.
-- **Settings and presets.** `T` or `,` opens a keyboard-first settings list in the files pane's
-  place (over the left of the diff when the files pane is hidden or narrower than 260 px), so
-  the diff keeps its exact geometry: presets, themes, diff styles, density, layout, token
-  emphasis, approved hunks (folded or shown, not part of a preset) and font size, with a search over every entry and the cursor's detail in a footer.
-  The list and its search field are two key contexts (Tab or a click into the field switches;
-  the field takes everything typed). Every entry under the cursor previews over what is
-  applied, through the presentation transition, always from where the lists were when the
-  list opened, so a preview that had to move a list never moves the place for good; moving off
-  it or closing the list drops the preview, Space or Enter applies and writes it to the
-  configuration (a preset all its fields in one edit), and a failed write says the look was
-  applied but not saved. Measured on the 60,000-line fixture in a release build, a preview
-  that rebuilds the rows takes under 4 ms, so previews need no debounce. The panel keeps the
-  text size and row height it opened with, so previewing a density or a font size never moves
-  the panel. Opening
-  the settings closes a picker and opening a picker closes the settings, so one overlay owns the
-  keys. A preset bundles theme, diff style, density, layout and token emphasis: built in are
-  `delta` and `delta side-by-side` (normal), `lazygit` (compact) and `zed` (One Dark with `soft`,
-  comfortable), and `[presets.<name>]` adds more; one naming a missing theme or style is listed
-  as unusable, never applied with a fallback. A mistake in one `[styles.<name>]` or
-  `[presets.<name>]` table costs only that entry; any configuration problem shows in the status
-  line when the review opens, not only on stderr. The configuration is edited as TOML
-  (`toml_edit`), keeping comments and everything it does not change.
+- **Settings.** `T` or `,` opens a keyboard-first settings list in the files pane's place (over the
+  left of the diff when the files pane is hidden or narrower than 260 px), so the diff keeps its
+  exact geometry: themes, diff styles, density, layout, token emphasis, approved hunks (folded or
+  shown) and font size, with a search over every entry and the cursor's detail in a footer. The list
+  and its search field are two key contexts (Tab or a click into the field switches; the field takes
+  everything typed). Every entry under the cursor previews over what is applied, through the
+  presentation transition, always from where the lists were when the list opened, so a preview that
+  had to move a list never moves the place for good; moving off it or closing the list drops the
+  preview, Space or Enter applies and writes it to the configuration, and a failed write says the
+  look was applied but not saved. Measured on the 60,000-line fixture in a release build, a preview
+  that rebuilds the rows takes under 4 ms, so previews need no debounce. The panel keeps the text
+  size and row height it opened with, so previewing a density or a font size never moves the panel.
+  Opening the settings closes a picker and opening a picker closes the settings, so one overlay owns
+  the keys. There are no presets bundling several settings: the individual settings reach every look
+  a preset did and say plainly what each one changes, so presets were removed; an older
+  configuration's `[presets]` is ignored with one note. A mistake in one `[styles.<name>]` table
+  costs only that style; any configuration problem shows in the status line when the review opens,
+  not only on stderr. The configuration is edited as TOML (`toml_edit`), keeping comments and
+  everything it does not change.
 - **Presentation changes.** The layout, the density, the font size, the narrow fallback and
   whether approved hunks fold, and previews of them, go through one transition that notes where
   every list is by row identity, stops scroll animations, drops a selection whose rows changed,

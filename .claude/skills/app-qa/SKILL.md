@@ -94,8 +94,8 @@ the feature you changed:
 4. Open the whole file with `=`, use the vim motions, `/` with `n`/`N`, and `gd` on a trusted
    and on an untrusted review; expand context and follow a move. Cycle the diff styles with `|`
    (plain, bold, soft), toggle side by side with `s` and pan it with `pan <px>`, and open the
-   settings list with `T`: preview themes and presets with `j`/`k`, search with Tab, apply with
-   Space, and check every theme's contrast in every style.
+   settings list with `T`: preview themes, styles and densities with `j`/`k`, search with Tab,
+   apply with Space, and check every theme's contrast in every style.
 5. Select text with the mouse, copy it, and check `clipboard`.
 6. Scroll with the wheel and with the keys, sampling during the animation, and check `latency`.
 7. Run `start --demo-revision 2` on the same data and check that carried marks, changed since
