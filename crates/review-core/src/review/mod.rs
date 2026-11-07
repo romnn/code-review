@@ -302,6 +302,32 @@ pub struct Recorded {
     /// Why the pull request's metadata or the range's commits could not be refreshed, if they
     /// could not; the revision is recorded regardless.
     pub info_error: Option<String>,
+    /// Why when the review synced could not be stored for [`Review::synced`], if it could not;
+    /// the revision is recorded regardless.
+    pub sync_error: Option<String>,
+}
+
+/// When a review last read its target's state and recorded it, which [`Review::refresh`]
+/// writes each time it succeeds, unless storing it fails ([`Recorded::sync_error`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Synced {
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+    /// The revision that was current then: the one recorded, or the current one found
+    /// unchanged.
+    pub revision: RevisionNumber,
+}
+
+/// A step of [`Review::refresh_reporting`], for a front end to show while it waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshStep {
+    /// Reading the target's state, which fetches a pull request.
+    Fetching,
+    /// Analyzing the changes of a snapshot pair the cache does not hold yet.
+    Analyzing,
+    /// Fetching the pull request's metadata or reading the range's commits.
+    Describing,
 }
 
 /// Who writes a freshly computed analysis to the cache.
@@ -417,9 +443,51 @@ impl Review {
     ///
     /// Returns an error when the target cannot be resolved or fetched, or recording fails.
     pub fn refresh(&self) -> Result<Recorded, Error> {
-        let mut recorded = self.record_target()?;
+        self.refresh_reporting(&mut |_| {})
+    }
+
+    /// Does what [`Self::refresh`] does, calling `progress` on the calling thread as each
+    /// [`RefreshStep`] starts; a step that is not needed, such as analyzing a snapshot pair the
+    /// cache holds, is not reported.
+    ///
+    /// Once the target's state is recorded, when the review last synced is stored for
+    /// [`Self::synced`].
+    /// That record only informs the reader, so failing to store it never fails the refresh:
+    /// [`Recorded::sync_error`] says why instead, as [`Recorded::info_error`] does for the
+    /// metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::refresh`].
+    pub fn refresh_reporting(
+        &self,
+        progress: &mut dyn FnMut(RefreshStep),
+    ) -> Result<Recorded, Error> {
+        progress(RefreshStep::Fetching);
+        let mut recorded = self.record_target(progress)?;
+        recorded.sync_error = store::write_json_atomic(
+            &self.dir.synced(),
+            &Synced {
+                at: store::now_seconds(),
+                revision: recorded.number,
+            },
+            "sync record",
+        )
+        .err()
+        .map(|err| with_causes(&err));
+        progress(RefreshStep::Describing);
         recorded.info_error = self.refresh_info().err().map(|err| err.to_string());
         Ok(recorded)
+    }
+
+    /// Returns when the review last synced with its target, or `None` before its first
+    /// [`refresh`](Self::refresh).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stored record cannot be read.
+    pub fn synced(&self) -> Result<Option<Synced>, Error> {
+        store::read_json(&self.dir.synced())
     }
 
     /// Returns what the review is about, as last fetched, or `None` before the first refresh.
@@ -492,19 +560,19 @@ impl Review {
     }
 
     /// Records the current state of the target as a revision.
-    fn record_target(&self) -> Result<Recorded, Error> {
+    fn record_target(&self, progress: &mut dyn FnMut(RefreshStep)) -> Result<Recorded, Error> {
         match &self.meta.target {
             ReviewTarget::Range { base, head } => {
                 let target = self.repo.resolve_commit(base)?;
                 let head = self.repo.resolve_commit(head)?;
                 let remote = self.repo.default_remote()?;
-                self.record_snapshots(target, head, remote.as_deref())
+                self.record_snapshots(target, head, remote.as_deref(), progress)
             }
             ReviewTarget::Worktree { base } => {
                 let target = self.repo.resolve_commit(base)?;
                 let head = self.repo.capture_worktree()?;
                 let remote = self.repo.default_remote()?;
-                self.record_snapshots(target, head, remote.as_deref())
+                self.record_snapshots(target, head, remote.as_deref(), progress)
             }
             ReviewTarget::PullRequest {
                 host,
@@ -521,6 +589,7 @@ impl Review {
                     fetched.target.clone(),
                     fetched.head.clone(),
                     Some(&fetched.remote),
+                    progress,
                 );
                 drop(fetched);
                 recorded
@@ -534,6 +603,7 @@ impl Review {
         target: ObjectId,
         head: ObjectId,
         deepen_from: Option<&str>,
+        progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Recorded, Error> {
         let merge_bases = self.repo.merge_bases(&target, &head, deepen_from)?;
         let base = merge_bases
@@ -543,12 +613,15 @@ impl Review {
                 target: target.clone(),
                 head: head.clone(),
             })?;
-        self.record_revision(RevisionInput {
-            base,
-            head,
-            target: Some(target),
-            merge_bases,
-        })
+        self.record_revision_reporting(
+            RevisionInput {
+                base,
+                head,
+                target: Some(target),
+                merge_bases,
+            },
+            progress,
+        )
     }
 
     /// Records the revision `(base, head)` as the new current revision, unless it already is the
@@ -569,7 +642,17 @@ impl Review {
     ///
     /// Returns an error when analysis, pinning or the log append fails.
     pub fn record_revision(&self, input: RevisionInput) -> Result<Recorded, Error> {
-        let analysis = self.analysis(&input.base, &input.head, Publish::UnderLock)?;
+        self.record_revision_reporting(input, &mut |_| {})
+    }
+
+    /// Does what [`Self::record_revision`] does, reporting [`RefreshStep::Analyzing`] to
+    /// `progress` when the snapshot pair has to be analyzed.
+    fn record_revision_reporting(
+        &self,
+        input: RevisionInput,
+        progress: &mut dyn FnMut(RefreshStep),
+    ) -> Result<Recorded, Error> {
+        let analysis = self.analysis(&input.base, &input.head, Publish::UnderLock, progress)?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
         let mut log = LogWriter::open(&self.dir.events(), &lock)?;
         let revisions = revision_events(&self.dir.events(), log.events())?;
@@ -584,6 +667,7 @@ impl Review {
                 head: existing.head.clone(),
                 merge_bases: existing.merge_bases.clone(),
                 info_error: None,
+                sync_error: None,
             });
         }
         let number = match revisions.last() {
@@ -616,16 +700,19 @@ impl Review {
             head: input.head,
             merge_bases: input.merge_bases,
             info_error: None,
+            sync_error: None,
         })
     }
 
-    /// Loads the analysis of `(base, head)` from the cache, or computes it and publishes it
-    /// unless the caller publishes it itself.
+    /// Loads the analysis of `(base, head)` from the cache, or computes it, reporting
+    /// [`RefreshStep::Analyzing`] to `progress` first, and publishes it unless the caller
+    /// publishes it itself.
     fn analysis(
         &self,
         base: &ObjectId,
         head: &ObjectId,
         publish: Publish,
+        progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Arc<Analysis>, Error> {
         let path = self.dir.analysis(base, head);
         // A cache file that fails to decode is recomputed rather than trusted.
@@ -636,6 +723,7 @@ impl Review {
         {
             return Ok(Arc::new(cached));
         }
+        progress(RefreshStep::Analyzing);
         let analysis = analyze(&self.repo, base, head)?;
         if publish == Publish::Now {
             store::write_json_atomic(&path, &analysis, "analysis")?;
@@ -668,7 +756,9 @@ impl Review {
         let revisions = revision_events(&self.dir.events(), &events)?;
         let analyses = revisions
             .iter()
-            .map(|revision| self.analysis(&revision.base, &revision.head, Publish::Now))
+            .map(|revision| {
+                self.analysis(&revision.base, &revision.head, Publish::Now, &mut |_| {})
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let correspondences = analyses
             .windows(2)
@@ -938,4 +1028,17 @@ fn revision_events(path: &Path, events: &[Event]) -> Result<Vec<RevisionEvent>, 
         }
     }
     Ok(revisions)
+}
+
+/// Renders `err` with its causes, `failed to rename …: Is a directory`, for a note that is not
+/// an error value of its own.
+fn with_causes(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }

@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::history::{History, UnitState};
+use crate::history::History;
 use crate::ids::{ReviewKey, RevisionNumber, UnitId, UnitIndex};
+use crate::standing::Standing;
 use crate::store::events::{StoredStep, StoredUnit, WalkthroughEvent};
 use crate::view::RevisionView;
 
@@ -224,7 +225,7 @@ impl Partition {
                 reviewed: step
                     .units
                     .iter()
-                    .filter(|&&unit| view.state(unit).is_ok_and(UnitState::is_reviewed))
+                    .filter(|&&unit| view.standing(unit).is_ok_and(Standing::is_reviewed))
                     .count(),
                 total: step.units.len(),
             })
@@ -258,7 +259,7 @@ impl Partition {
         let len = order.len();
         (0..len)
             .filter_map(|step| order.get((start + step) % len).copied())
-            .find(|&unit| view.state(unit).is_ok_and(|state| !state.is_reviewed()))
+            .find(|&unit| view.standing(unit).is_ok_and(Standing::needs_review))
     }
 }
 

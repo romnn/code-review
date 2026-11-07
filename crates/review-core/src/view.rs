@@ -12,12 +12,15 @@ use crate::git::{Blob, BlobReader, ChangeStatus};
 use crate::history::{History, RevisionData, RevisionRecord, UnitState, Verdict};
 use crate::ids::{MoveId, RevisionNumber, UnitId, UnitIndex};
 use crate::scope::{Scope, ScopeMap};
+use crate::standing::{ReviewPolicy, Standing};
 use crate::text::{diff_lines, split_lines};
 
-/// A view of one revision of a review.
+/// A view of one revision of a review, deciding under its [`ReviewPolicy`] which units still
+/// need the reviewer.
 pub struct RevisionView<'h> {
     history: &'h History,
     number: RevisionNumber,
+    policy: ReviewPolicy,
 }
 
 /// Where a unit is, for display: the path and one-based line numbers in the head file, or in the
@@ -229,7 +232,7 @@ impl MoveView {
 pub struct Counts {
     /// All units.
     pub units: usize,
-    /// Never reviewed, or explicitly marked unseen.
+    /// Never reviewed and not approved automatically, or explicitly marked unseen.
     pub new: usize,
     /// Reviewed before, but changed since.
     pub changed: usize,
@@ -239,6 +242,8 @@ pub struct Counts {
     pub accepted: usize,
     /// Reviewed and flagged.
     pub flagged: usize,
+    /// Approved automatically as proven formatting-only, without a mark; see [`Standing`].
+    pub auto_approved: usize,
     /// In generated, lockfile or snapshot files.
     pub noise: usize,
     /// Proven formatting-only.
@@ -248,17 +253,9 @@ pub struct Counts {
 }
 
 impl Counts {
-    fn add(&mut self, state: UnitState, unit: &Unit, file: Option<&FileChange>) {
+    fn add(&mut self, standing: Standing, unit: &Unit, file: Option<&FileChange>) {
         self.units += 1;
-        match state {
-            UnitState::New | UnitState::Unseen { .. } => self.new += 1,
-            UnitState::ChangedSinceReviewed { .. } => self.changed += 1,
-            UnitState::Reviewed { verdict, .. } => match verdict {
-                Verdict::Seen => self.reviewed += 1,
-                Verdict::Accepted => self.accepted += 1,
-                Verdict::Flagged => self.flagged += 1,
-            },
-        }
+        *self.slot(standing) += 1;
         self.noise += usize::from(file.is_some_and(|file| file.noise.is_some()));
         self.formatting_only += usize::from(unit.formatting_only);
         self.moved += usize::from(unit.moved);
@@ -272,6 +269,7 @@ impl Counts {
         self.reviewed += other.reviewed;
         self.accepted += other.accepted;
         self.flagged += other.flagged;
+        self.auto_approved += other.auto_approved;
         self.noise += other.noise;
         self.formatting_only += other.formatting_only;
         self.moved += other.moved;
@@ -281,6 +279,32 @@ impl Counts {
     #[must_use]
     pub fn unreviewed(&self) -> usize {
         self.new + self.changed
+    }
+
+    /// Returns the number of units that count as reviewed: marked with any verdict, flagged
+    /// included, or approved automatically.
+    #[must_use]
+    pub fn done(&self) -> usize {
+        self.reviewed + self.accepted + self.flagged + self.auto_approved
+    }
+
+    /// Returns the number of units that count as approved: seen, accepted or approved
+    /// automatically.
+    #[must_use]
+    pub fn approved(&self) -> usize {
+        self.reviewed + self.accepted + self.auto_approved
+    }
+
+    /// Returns the count a unit that stands at `standing` falls under.
+    pub fn slot(&mut self, standing: Standing) -> &mut usize {
+        match standing {
+            Standing::Open => &mut self.new,
+            Standing::AutoApproved => &mut self.auto_approved,
+            Standing::Reviewed(Verdict::Seen) => &mut self.reviewed,
+            Standing::Reviewed(Verdict::Accepted) => &mut self.accepted,
+            Standing::Reviewed(Verdict::Flagged) => &mut self.flagged,
+            Standing::Changed => &mut self.changed,
+        }
     }
 }
 
@@ -479,8 +503,19 @@ pub struct Status {
 }
 
 impl<'h> RevisionView<'h> {
-    pub(crate) fn new(history: &'h History, number: RevisionNumber) -> Self {
-        Self { history, number }
+    pub(crate) fn new(history: &'h History, number: RevisionNumber, policy: ReviewPolicy) -> Self {
+        Self {
+            history,
+            number,
+            policy,
+        }
+    }
+
+    /// Returns the policy this view decides under: the one given to [`History::view_under`],
+    /// or [`ReviewPolicy::MARKS_ONLY`] for [`History::view`].
+    #[must_use]
+    pub fn policy(&self) -> ReviewPolicy {
+        self.policy
     }
 
     fn data(&self) -> Option<&'h RevisionData> {
@@ -583,6 +618,19 @@ impl<'h> RevisionView<'h> {
         self.data()
             .and_then(|data| data.states.get(index.get()).copied())
             .ok_or(Error::UnknownUnit(id))
+    }
+
+    /// Returns where unit `id` stands with the reviewer under this view's policy: its
+    /// [state](Self::state), with a proven formatting-only unit that no mark decides approved
+    /// automatically when the policy says so.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::unit`].
+    pub fn standing(&self, id: UnitId) -> Result<Standing, Error> {
+        let state = self.state(id)?;
+        let unit = self.unit(id)?;
+        Ok(Standing::of(state, unit.formatting_only, self.policy))
     }
 
     /// Returns whether unit `id` belongs to a noise category, a formatting-only change or a
@@ -1060,7 +1108,7 @@ impl<'h> RevisionView<'h> {
         Ok(FileChangeSummary::of(analysis, index, file))
     }
 
-    /// Returns progress counts per file and in total.
+    /// Returns progress counts per file and in total, under this view's policy.
     #[must_use]
     pub fn status(&self) -> Status {
         let mut status = Status {
@@ -1075,11 +1123,11 @@ impl<'h> RevisionView<'h> {
             let mut counts = Counts::default();
             for &index in &file.units {
                 let id = self.id(index);
-                let (Ok(unit), Ok(state)) = (self.unit(id), self.state(id)) else {
+                let (Ok(unit), Ok(standing)) = (self.unit(id), self.standing(id)) else {
                     continue;
                 };
-                counts.add(state, unit, Some(file));
-                status.total.add(state, unit, Some(file));
+                counts.add(standing, unit, Some(file));
+                status.total.add(standing, unit, Some(file));
             }
             let renamed_from = match (&file.old, &file.new) {
                 (Some(old), Some(new)) if old.path != new.path => Some(old.path.clone()),

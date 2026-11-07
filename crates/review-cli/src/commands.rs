@@ -9,8 +9,8 @@ use clap::ValueEnum;
 use color_eyre::eyre::{self, OptionExt as _, WrapErr as _};
 use review_core::walkthrough::{partition, prompt};
 use review_core::{
-    History, MarkVerdict, MoveId, Repo, Review, ReviewKey, ReviewTarget, RevisionNumber,
-    RevisionView, UnitId,
+    History, MarkVerdict, MoveId, Repo, Review, ReviewKey, ReviewPolicy, ReviewTarget,
+    RevisionNumber, RevisionView, Standing, UnitId,
 };
 use serde::Serialize;
 
@@ -37,6 +37,8 @@ pub struct Context {
     review: Option<String>,
     json: bool,
     painter: Painter,
+    /// Which units still need review in every view the commands read.
+    policy: ReviewPolicy,
 }
 
 impl Context {
@@ -55,6 +57,7 @@ impl Context {
                 painter: Painter {
                     color: color_enabled(options),
                 },
+                policy: policy(options),
             });
         }
         let data_dir = match &options.data_dir {
@@ -72,6 +75,7 @@ impl Context {
             review: options.review.clone(),
             json: options.json,
             painter: Painter { color },
+            policy: policy(options),
         })
     }
 
@@ -94,6 +98,31 @@ impl Context {
         };
         Ok(Review::load(&self.data_dir, &key)?)
     }
+}
+
+/// The policy the global options ask for: marks only with `--no-auto-approve`, and otherwise
+/// what the configuration file the apps share says, which is automatic approval when there is
+/// no such file, as in the apps.
+///
+/// A configuration file `cr` cannot read decides by marks alone, with a warning, so a broken
+/// file never approves units the reviewer may have asked to review.
+fn policy(options: &GlobalOptions) -> ReviewPolicy {
+    if options.no_auto_approve {
+        return ReviewPolicy::MARKS_ONLY;
+    }
+    let path = options.config.clone().or_else(|| {
+        review_core::store::default_config_file(
+            options.xdg_config_home.as_deref(),
+            options.home.as_deref(),
+        )
+    });
+    let Some(path) = path else {
+        return crate::config::UNCONFIGURED;
+    };
+    crate::config::review_policy(&path).unwrap_or_else(|err| {
+        eprintln!("warning: {err:#}; formatting-only units need review");
+        ReviewPolicy::MARKS_ONLY
+    })
 }
 
 fn color_enabled(options: &GlobalOptions) -> bool {
@@ -122,14 +151,19 @@ fn print_json<T: Serialize>(value: &T) -> eyre::Result<()> {
     Ok(())
 }
 
-fn pick_view(history: &History, revision: Option<u32>) -> eyre::Result<RevisionView<'_>> {
-    match revision {
+fn pick_view<'h>(
+    context: &Context,
+    history: &'h History,
+    revision: Option<u32>,
+) -> eyre::Result<RevisionView<'h>> {
+    let view = match revision {
         Some(number) => {
             let number = RevisionNumber::new(number).ok_or_eyre("revisions are numbered from 1")?;
-            Ok(history.view(number)?)
+            history.view_under(number, context.policy)?
         }
-        None => Ok(history.current_view()?),
-    }
+        None => history.current_view_under(context.policy)?,
+    };
+    Ok(view)
 }
 
 fn print_warnings(history: &History) {
@@ -159,7 +193,9 @@ pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> 
     context.remember(&review)?;
     let history = review.history()?;
     print_warnings(&history);
-    let status = history.view(recorded.number)?.status();
+    let status = history
+        .view_under(recorded.number, context.policy)?
+        .status();
     if context.json {
         return print_json(&OpenOutput {
             review: review.key().as_str(),
@@ -175,7 +211,7 @@ pub fn status(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
     let review = context.load()?;
     let history = review.history()?;
     print_warnings(&history);
-    let status = pick_view(&history, revision)?.status();
+    let status = pick_view(context, &history, revision)?.status();
     if context.json {
         return print_json(&status);
     }
@@ -196,7 +232,7 @@ pub fn show(context: &Context, options: &ShowOptions) -> eyre::Result<()> {
     let review = context.load()?;
     let history = review.history()?;
     print_warnings(&history);
-    let view = pick_view(&history, options.revision)?;
+    let view = pick_view(context, &history, options.revision)?;
     let mut parts = partition(&view);
     if let Some(step) = options.step {
         let index = step
@@ -212,7 +248,7 @@ pub fn show(context: &Context, options: &ShowOptions) -> eyre::Result<()> {
                     .is_ok_and(|file| file.display_path() == path)
             });
             let needs_review =
-                !options.unreviewed || view.state(unit).is_ok_and(|state| !state.is_reviewed());
+                !options.unreviewed || view.standing(unit).is_ok_and(Standing::needs_review);
             in_file && needs_review
         });
     }
@@ -250,7 +286,8 @@ pub fn mark(
             ids.is_empty() && category.is_none(),
             "pass either unit IDs, --category or --file"
         );
-        let marked = review.mark_files(&history.current_view()?, files, verdict)?;
+        let marked =
+            review.mark_files(&history.current_view_under(context.policy)?, files, verdict)?;
         return print_marked(context, verdict, marked);
     }
     let mut by_revision: BTreeMap<RevisionNumber, Vec<UnitId>> = BTreeMap::new();
@@ -259,7 +296,7 @@ pub fn mark(
             ids.is_empty(),
             "pass either unit IDs or --category, not both"
         );
-        let view = history.current_view()?;
+        let view = history.current_view_under(context.policy)?;
         for unit in view.unit_ids() {
             let record = view.unit(unit)?;
             let noise = view.noise(unit)?.is_some();
@@ -281,7 +318,7 @@ pub fn mark(
             let found: MoveId = id
                 .parse()
                 .wrap_err_with(|| format!("{id:?} is neither a unit nor a move ID"))?;
-            let view = history.view(found.revision())?;
+            let view = history.view_under(found.revision(), context.policy)?;
             by_revision
                 .entry(found.revision())
                 .or_default()
@@ -290,7 +327,7 @@ pub fn mark(
     }
     let mut marked = Vec::new();
     for (revision, units) in by_revision {
-        let view = history.view(revision)?;
+        let view = history.view_under(revision, context.policy)?;
         review.mark(&view, &units, verdict)?;
         marked.extend(units);
     }
@@ -312,7 +349,11 @@ pub fn note(context: &Context, unit: &str, text: &str) -> eyre::Result<()> {
     let unit: UnitId = unit.parse()?;
     let review = context.load()?;
     let history = review.history()?;
-    review.note(&history.view(unit.revision())?, unit, text)?;
+    review.note(
+        &history.view_under(unit.revision(), context.policy)?,
+        unit,
+        text,
+    )?;
     if context.json {
         return print_json(&serde_json::json!({ "unit": unit, "note": text }));
     }
@@ -324,7 +365,7 @@ pub fn export(context: &Context, format: ExportFormat, revision: Option<u32>) ->
     let review = context.load()?;
     let history = review.history()?;
     print_warnings(&history);
-    let view = pick_view(&history, revision)?;
+    let view = pick_view(context, &history, revision)?;
     let exported = review_core::export::export(&view, review.key().as_str());
     if context.json || format == ExportFormat::Json {
         return print_json(&exported);
@@ -336,7 +377,7 @@ pub fn export(context: &Context, format: ExportFormat, revision: Option<u32>) ->
 pub fn walkthrough_prompt(context: &Context) -> eyre::Result<()> {
     let review = context.load()?;
     let history = review.history()?;
-    let text = prompt(&history.current_view()?, review.key());
+    let text = prompt(&history.current_view_under(context.policy)?, review.key());
     if context.json {
         return print_json(&serde_json::json!({ "prompt": text }));
     }
@@ -366,7 +407,7 @@ pub fn walkthrough_import(context: &Context, file: &Path) -> eyre::Result<()> {
 pub fn walkthrough_show(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
     let review = context.load()?;
     let history = review.history()?;
-    let view = pick_view(&history, revision)?;
+    let view = pick_view(context, &history, revision)?;
     let parts = partition(&view);
     if context.json {
         return print_json(&parts);
@@ -382,7 +423,9 @@ pub fn watch(context: &Context, interval: u64, count: Option<u64>) -> eyre::Resu
         match review.refresh() {
             Ok(recorded) if recorded.created => {
                 let history = review.history()?;
-                let status = history.view(recorded.number)?.status();
+                let status = history
+                    .view_under(recorded.number, context.policy)?
+                    .status();
                 if context.json {
                     println!(
                         "{}",
@@ -411,7 +454,7 @@ pub fn watch(context: &Context, interval: u64, count: Option<u64>) -> eyre::Resu
 pub fn worktree(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
     let review = context.load()?;
     let history = review.history()?;
-    let view = pick_view(&history, revision)?;
+    let view = pick_view(context, &history, revision)?;
     let record = view.record().ok_or_eyre("revision has no record")?;
     let path = review.worktree(record)?;
     if context.json {

@@ -1,6 +1,7 @@
 //! The `cr` command-line interface to the review engine.
 
 mod commands;
+mod config;
 mod render;
 
 use std::path::PathBuf;
@@ -42,6 +43,17 @@ pub struct GlobalOptions {
     /// When to color text output.
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
+    /// Count proven formatting-only units as needing review, whatever the configuration file
+    /// says; otherwise `cr` follows `[review] auto_approve_formatting` there, as the apps do,
+    /// and approves them automatically, without a mark, unless it is false.
+    #[arg(long, global = true)]
+    no_auto_approve: bool,
+    /// The configuration file the apps share with `cr`, instead of
+    /// `$XDG_CONFIG_HOME/code-review/config.toml`.
+    #[arg(long, env = "CODE_REVIEW_CONFIG", hide = true, global = true)]
+    config: Option<PathBuf>,
+    #[arg(long, env = "XDG_CONFIG_HOME", hide = true, global = true)]
+    xdg_config_home: Option<PathBuf>,
     #[arg(long, env = "XDG_DATA_HOME", hide = true, global = true)]
     xdg_data_home: Option<PathBuf>,
     #[arg(long, env = "HOME", hide = true, global = true)]

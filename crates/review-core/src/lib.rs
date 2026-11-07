@@ -12,7 +12,10 @@
 //! - [`Review::history`] loads a [`History`]: every revision with its [`analysis`], the
 //!   [`correspond`]ences between consecutive revisions, and derived unit states.
 //! - [`History::view`] gives a [`RevisionView`] with unit states, interdiffs, notes, moves and
-//!   progress counts.
+//!   progress counts; under its [`ReviewPolicy`], a unit's [`Standing`] says whether it still
+//!   needs the reviewer.
+//!   It decides by marks alone; a front end that approves proven formatting-only units
+//!   automatically passes its policy to [`History::view_under`].
 //! - [`walkthrough::partition`] orders a revision's units into steps, and [`export::export`]
 //!   collects flagged, accepted and annotated units for an agent.
 //!
@@ -34,7 +37,7 @@
 //! let unreviewed: Vec<_> = view
 //!     .unit_ids()
 //!     .into_iter()
-//!     .filter(|&unit| view.state(unit).is_ok_and(|state| !state.is_reviewed()))
+//!     .filter(|&unit| view.standing(unit).is_ok_and(|standing| standing.needs_review()))
 //!     .collect();
 //! review.mark(&view, &unreviewed, MarkVerdict::Seen)?;
 //! # Ok(())
@@ -51,6 +54,7 @@ mod history;
 mod ids;
 mod review;
 pub mod scope;
+mod standing;
 pub mod store;
 pub mod syntax;
 mod text;
@@ -63,9 +67,10 @@ pub use git::Repo;
 pub use history::{History, RevisionRecord, UnitState, Verdict};
 pub use ids::{MoveId, ObjectId, ParseIdError, ReviewKey, RevisionNumber, UnitId, UnitIndex};
 pub use review::{
-    Commit, Detected, PullRequest, Recorded, Review, ReviewInfo, ReviewMeta, ReviewTarget,
-    RevisionInput, Trust,
+    Commit, Detected, PullRequest, Recorded, RefreshStep, Review, ReviewInfo, ReviewMeta,
+    ReviewTarget, RevisionInput, Synced, Trust,
 };
+pub use standing::{ReviewPolicy, Standing};
 pub use store::events::MarkVerdict;
 pub use view::{
     ChangeKind, Collapse, Counts, DiffLine, DiffLineKind, FileChangeSummary, FileStatus, FileTone,

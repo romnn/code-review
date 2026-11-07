@@ -3,6 +3,7 @@
 //! - `events.jsonl`: the append-only event log ([`log`]).
 //! - `review.json`: what the review targets and in which repository.
 //! - `review.lock`: serializes state transitions.
+//! - `synced.json`: when the review last read its target's state, written atomically.
 //! - `analysis/<base>-<head>.json`: content-addressed analyses, written atomically.
 //! - `analysis/<base>-<head>--<base>-<head>.json`: content-addressed correspondences.
 //! - `worktrees/<head>`: detached worktrees for browsing a revision.
@@ -60,6 +61,12 @@ impl ReviewDir {
         self.root.join("info.json")
     }
 
+    /// Returns the path of when the review last synced with its target.
+    #[must_use]
+    pub fn synced(&self) -> PathBuf {
+        self.root.join("synced.json")
+    }
+
     /// Returns the metadata file's path.
     #[must_use]
     pub fn meta(&self) -> PathBuf {
@@ -106,6 +113,21 @@ impl ReviewDir {
     pub fn worktree(&self, head: &ObjectId) -> PathBuf {
         self.root.join("worktrees").join(head.as_str())
     }
+}
+
+/// Returns the default configuration file the front ends and `cr` share,
+/// `$XDG_CONFIG_HOME/code-review/config.toml` or `$HOME/.config/code-review/config.toml`, from
+/// those variables' values, which the caller reads at its process boundary.
+///
+/// A relative `$XDG_CONFIG_HOME` is ignored, as the XDG base directory specification asks.
+/// Returns `None` when neither variable gives a directory.
+#[must_use]
+pub fn default_config_file(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    let base = match xdg_config_home.filter(|dir| dir.is_absolute()) {
+        Some(dir) => dir.to_path_buf(),
+        None => home?.join(".config"),
+    };
+    Some(base.join("code-review").join("config.toml"))
 }
 
 /// Returns the default data directory, `$XDG_DATA_HOME/code-review` or

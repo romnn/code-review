@@ -1,5 +1,6 @@
 //! Acceptance tests for the review engine, each against temporary git repositories.
 
+mod auto_approval;
 mod carry;
 mod common;
 mod current_branch;
@@ -14,6 +15,7 @@ mod perf;
 mod scope;
 mod search;
 mod storage;
+mod sync;
 mod trust;
 mod view_state;
 mod walkthrough;

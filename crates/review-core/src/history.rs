@@ -14,6 +14,7 @@ use crate::analysis::Analysis;
 use crate::correspond::{Correspondence, Link, LinkKind};
 use crate::error::Error;
 use crate::ids::{ObjectId, RevisionNumber, UnitId, UnitIndex};
+use crate::standing::ReviewPolicy;
 use crate::store::events::{
     Event, MarkEvent, MarkVerdict, NoteEvent, RevisionEvent, WalkthroughEvent,
 };
@@ -316,25 +317,54 @@ impl History {
         &self.warnings
     }
 
-    /// Returns a view of revision `number`.
+    /// Returns a view of revision `number` that decides by marks alone, under
+    /// [`ReviewPolicy::MARKS_ONLY`].
+    ///
+    /// A front end that approves anything automatically builds its views with
+    /// [`Self::view_under`] instead, so no embedder approves units it never asked to.
     ///
     /// # Errors
     ///
     /// Returns [`Error::UnknownRevision`] when the revision does not exist.
     pub fn view(&self, number: RevisionNumber) -> Result<RevisionView<'_>, Error> {
+        self.view_under(number, ReviewPolicy::MARKS_ONLY)
+    }
+
+    /// Returns a view of revision `number` that decides under `policy` which units still need
+    /// the reviewer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownRevision`] when the revision does not exist.
+    pub fn view_under(
+        &self,
+        number: RevisionNumber,
+        policy: ReviewPolicy,
+    ) -> Result<RevisionView<'_>, Error> {
         if number.index() >= self.revisions.len() {
             return Err(Error::UnknownRevision(number));
         }
-        Ok(RevisionView::new(self, number))
+        Ok(RevisionView::new(self, number, policy))
     }
 
-    /// Returns a view of the [current](Self::current) revision.
+    /// Returns a view of the [current](Self::current) revision that decides by marks alone, as
+    /// [`Self::view`] does.
     ///
     /// # Errors
     ///
     /// Returns [`Error::NoRevisions`] when nothing was recorded yet.
     pub fn current_view(&self) -> Result<RevisionView<'_>, Error> {
-        self.view(self.current().ok_or(Error::NoRevisions)?)
+        self.current_view_under(ReviewPolicy::MARKS_ONLY)
+    }
+
+    /// Returns a view of the [current](Self::current) revision that decides under `policy`, as
+    /// [`Self::view_under`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoRevisions`] when nothing was recorded yet.
+    pub fn current_view_under(&self, policy: ReviewPolicy) -> Result<RevisionView<'_>, Error> {
+        self.view_under(self.current().ok_or(Error::NoRevisions)?, policy)
     }
 
     pub(crate) fn revision(&self, number: RevisionNumber) -> Option<&RevisionData> {

@@ -1,6 +1,6 @@
 //! End-to-end tests of the `cr` binary against a temporary repository.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use color_eyre::eyre::{self, WrapErr as _};
@@ -26,6 +26,12 @@ fn git(repo: &Path, args: &[&str]) -> eyre::Result<()> {
     Ok(())
 }
 
+/// The configuration directory, `$XDG_CONFIG_HOME`, of a `cr` storing reviews under `data`, so
+/// the user's own configuration never decides a test's outcome.
+fn config_home(data: &Path) -> PathBuf {
+    data.join("config")
+}
+
 /// Runs `cr` with `args` in `repo`, storing reviews under `data`, and returns standard output.
 fn cr(repo: &Path, data: &Path, args: &[&str]) -> eyre::Result<String> {
     let output = Command::new(env!("CARGO_BIN_EXE_cr"))
@@ -33,6 +39,8 @@ fn cr(repo: &Path, data: &Path, args: &[&str]) -> eyre::Result<String> {
         .arg("-C")
         .arg(repo)
         .env("CR_DATA_DIR", data)
+        .env("XDG_CONFIG_HOME", config_home(data))
+        .env_remove("CODE_REVIEW_CONFIG")
         .envs(GIT_ENV)
         .output()
         .wrap_err("failed to run cr")?;
@@ -180,6 +188,51 @@ fn repo_with_change(
         &["commit", "--quiet", "--allow-empty", "-m", "change"],
     )?;
     Ok(repo_dir)
+}
+
+/// `cr` approves proven formatting-only units automatically unless the configuration file the
+/// apps share turns it off, and `--no-auto-approve` turns it off whatever the file says.
+#[test]
+fn status_follows_the_shared_configuration() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(
+        &[(
+            "lib.rs",
+            "fn main() {\n    let total = compute(alpha, beta, gamma);\n    let other = 0;\n    let limit = 1;\n}\n",
+        )],
+        &[(
+            "lib.rs",
+            "fn main() {\n    let total = compute(\n        alpha,\n        beta,\n        gamma\n    );\n    let other = 0;\n    let limit = 2;\n}\n",
+        )],
+    )?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    cr_json(repo, data, &["open", "main..feature"])?;
+
+    // Without a configuration file, the re-wrap is approved automatically and the edit is open.
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["total"]["units"], 2);
+    assert_eq!(status["total"]["auto_approved"], 1);
+    assert_eq!(status["total"]["new"], 1);
+
+    // The apps' setting turns it off for `cr` too: both units are open.
+    let file = config_home(data).join("code-review").join("config.toml");
+    std::fs::create_dir_all(file.parent().unwrap_or(data))?;
+    std::fs::write(
+        &file,
+        "[theme]\nname = \"nightfox\"\n\n[review]\nauto_approve_formatting = false\n",
+    )?;
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["total"]["auto_approved"], 0);
+    assert_eq!(status["total"]["new"], 2);
+
+    // The flag wins over a file that leaves it on.
+    std::fs::write(&file, "[review]\nauto_approve_formatting = true\n")?;
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["total"]["auto_approved"], 1);
+    let status = cr_json(repo, data, &["status", "--no-auto-approve"])?;
+    assert_eq!(status["total"]["auto_approved"], 0);
+    assert_eq!(status["total"]["new"], 2);
+    Ok(())
 }
 
 /// `cr show` renders a move with edits expanded, with the inner diff showing the edited line.
@@ -382,6 +435,8 @@ mod open_without_target {
             .arg("-C")
             .arg(repo)
             .env("CR_DATA_DIR", data)
+            .env("XDG_CONFIG_HOME", super::config_home(data))
+            .env_remove("CODE_REVIEW_CONFIG")
             .env("PATH", path)
             .envs(GIT_ENV)
             .output()

@@ -8,7 +8,7 @@ use review_core::analysis::{EntrySide, NoiseCategory, UnitKind};
 use review_core::walkthrough::{Partition, StepKind};
 use review_core::{
     Collapse, DiffLineKind, Interdiff, LineEnding, Location, NoteAttachment, Recorded, ReviewKey,
-    RevisionView, SideDiff, SplitLine, Status, UnitId, UnitState, split_line_ending,
+    RevisionView, SideDiff, SplitLine, Standing, Status, UnitId, UnitState, split_line_ending,
 };
 use serde::Serialize;
 
@@ -80,13 +80,14 @@ pub fn open_summary(key: &ReviewKey, recorded: &Recorded, status: &Status) -> St
 fn totals(status: &Status) -> String {
     let total = &status.total;
     format!(
-        "{} units: {} new, {} changed since reviewed, {} reviewed, {} accepted, {} flagged; collapsed: {} noise, {} formatting-only, {} moved\n",
+        "{} units: {} new, {} changed since reviewed, {} reviewed, {} accepted, {} flagged, {} approved automatically as formatting-only; collapsed: {} noise, {} formatting-only, {} moved\n",
         total.units,
         total.new,
         total.changed,
         total.reviewed,
         total.accepted,
         total.flagged,
+        total.auto_approved,
         total.noise,
         total.formatting_only,
         total.moved
@@ -105,21 +106,22 @@ pub fn status(status: &Status) -> String {
     // Writing to a `String` cannot fail.
     writeln!(
         out,
-        "\n{:<width$}  {:>5} {:>7} {:>8} {:>8} {:>7} {:>5}",
-        "file", "new", "changed", "reviewed", "accepted", "flagged", "noise"
+        "\n{:<width$}  {:>5} {:>7} {:>8} {:>8} {:>7} {:>4} {:>5}",
+        "file", "new", "changed", "reviewed", "accepted", "flagged", "auto", "noise"
     )
     .ok();
     for file in &status.files {
         let counts = &file.counts;
         writeln!(
             out,
-            "{:<width$}  {:>5} {:>7} {:>8} {:>8} {:>7} {:>5}",
+            "{:<width$}  {:>5} {:>7} {:>8} {:>8} {:>7} {:>4} {:>5}",
             file.path,
             counts.new,
             counts.changed,
             counts.reviewed,
             counts.accepted,
             counts.flagged,
+            counts.auto_approved,
             counts.noise
         )
         .ok();
@@ -139,7 +141,7 @@ pub fn partition(view: &RevisionView<'_>, parts: &Partition) -> String {
         let reviewed = step
             .units
             .iter()
-            .filter(|&&unit| view.state(unit).is_ok_and(UnitState::is_reviewed))
+            .filter(|&&unit| view.standing(unit).is_ok_and(Standing::is_reviewed))
             .count();
         writeln!(
             out,
@@ -157,6 +159,15 @@ pub fn partition(view: &RevisionView<'_>, parts: &Partition) -> String {
         writeln!(out, "warning: {warning}").ok();
     }
     out
+}
+
+/// A unit's standing as its line shows it: its review state, or that it was approved
+/// automatically, which no mark records.
+fn standing_label(view: &RevisionView<'_>, unit: UnitId) -> eyre::Result<String> {
+    Ok(match view.standing(unit)? {
+        Standing::AutoApproved => "approved automatically · reformatted only".to_owned(),
+        _ => state_label(view.state(unit)?),
+    })
 }
 
 fn state_label(state: UnitState) -> String {
@@ -209,11 +220,15 @@ pub fn show(
             writeln!(out, "{}", painter.dim(&step.why)).ok();
         }
         let mut hidden_formatting = 0;
+        let mut hidden_approved = 0;
         let mut hidden_noise: Vec<NoiseCategory> = Vec::new();
         for &unit in &step.units {
             match view.collapse(unit)? {
                 Some(Collapse::Noise(category)) if !expand => hidden_noise.push(category),
-                Some(Collapse::FormattingOnly) if !expand => hidden_formatting += 1,
+                Some(Collapse::FormattingOnly) if !expand => {
+                    hidden_formatting += 1;
+                    hidden_approved += usize::from(view.standing(unit)? == Standing::AutoApproved);
+                }
                 Some(Collapse::Moved(_)) if !expand => {
                     render_move_line(&mut out, view, unit, painter)?;
                 }
@@ -221,10 +236,17 @@ pub fn show(
             }
         }
         if hidden_formatting > 0 {
+            let approved = match hidden_approved {
+                0 => String::new(),
+                all if all == hidden_formatting => ", approved automatically".to_owned(),
+                some => format!(", {some} approved automatically"),
+            };
             writeln!(
                 out,
                 "  {}",
-                painter.dim(&format!("{hidden_formatting} formatting-only units hidden"))
+                painter.dim(&format!(
+                    "{hidden_formatting} formatting-only units hidden{approved}"
+                ))
             )
             .ok();
         }
@@ -256,7 +278,7 @@ fn render_move_line(
     unit: UnitId,
     painter: Painter,
 ) -> eyre::Result<()> {
-    let state = state_label(view.state(unit)?);
+    let state = standing_label(view, unit)?;
     let description = match view.collapse(unit)? {
         Some(Collapse::Moved(found)) => found.describe_for(unit),
         _ => None,
@@ -280,9 +302,8 @@ fn render_unit(
     painter: Painter,
 ) -> eyre::Result<()> {
     let record = view.unit(unit)?;
-    let state = view.state(unit)?;
-    let label = state_label(state);
-    let label = if state.is_reviewed() {
+    let label = standing_label(view, unit)?;
+    let label = if view.standing(unit)?.is_reviewed() {
         painter.dim(&label)
     } else {
         painter.yellow(&label)
@@ -470,6 +491,8 @@ fn highlighted_lines(
 pub struct UnitJson {
     id: UnitId,
     state: UnitState,
+    /// Where the unit stands under the policy: its state, or approved automatically.
+    standing: Standing,
     location: Location,
     /// `chunk`, or the file unit's kind such as `symlink` or `type`.
     kind: String,
@@ -529,6 +552,7 @@ pub fn show_json(view: &RevisionView<'_>, parts: &Partition) -> eyre::Result<Sho
                     Ok(UnitJson {
                         id: unit,
                         state: view.state(unit)?,
+                        standing: view.standing(unit)?,
                         location: view.location(unit)?,
                         kind,
                         description: view.describe(unit)?,
