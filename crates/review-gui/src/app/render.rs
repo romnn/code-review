@@ -9,7 +9,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use gpui::prelude::*;
 use gpui::{
@@ -23,7 +23,7 @@ use review_ui::frame::List;
 use review_ui::keymap::Area;
 use review_ui::model::buffer::Marker;
 use review_ui::model::{Mode, Overlay, Phase, Updated};
-use review_ui::paint::annotation::{Annotation, HunkHeader, NotePan, Scope};
+use review_ui::paint::annotation::{self, Annotation, HunkHeader, NotePan, Scope};
 use review_ui::paint::bars::{self, HintRoom};
 use review_ui::paint::code::{self, At, BufferLines, Frame};
 use review_ui::paint::display::display_width;
@@ -358,22 +358,26 @@ impl ReviewApp {
                     chips,
                     ..
                 } = header;
-                // The innermost scope and each part, a chip with its padding on both sides,
-                // with a gap between each two in either style.
+                // The innermost scope and the location, a chip with its padding on both
+                // sides, with a gap between them in either style, then the tag after its own
+                // wider gap.
                 let padding = if chips.is_some() { GRID * 3.0 } else { 0.0 };
                 let widths: Vec<f32> = scope
                     .as_ref()
                     .map(|scope| cells(&scope.inner))
                     .into_iter()
-                    .chain(
-                        [tag.as_ref(), location.as_ref()]
-                            .into_iter()
-                            .flatten()
-                            .map(|piece| padding + cells(piece)),
-                    )
+                    .chain(location.as_ref().map(|piece| padding + cells(piece)))
                     .collect();
                 let gaps = scroll::float(widths.len().saturating_sub(1)) * GRID * 2.0;
-                widths.iter().sum::<f32>() + gaps
+                let tag = tag.as_ref().map_or(0.0, |tag| {
+                    let gap = if widths.is_empty() {
+                        0.0
+                    } else {
+                        self.tag_gap()
+                    };
+                    gap + cells(tag)
+                });
+                widths.iter().sum::<f32>() + gaps + tag
             }
             // The note's area starts after its accent bar, which takes the sign's place.
             Annotation::Note { text, tag, .. } => {
@@ -472,7 +476,12 @@ impl ReviewApp {
             )
     }
 
-    /// One small muted part of a hunk header with chips, such as its tag.
+    /// The space before a hunk header's tag, which sets it apart as an aside.
+    fn tag_gap(&self) -> f32 {
+        (self.sizes().ui_cell() * f32::from(annotation::TAG_GAP_CELLS)).round()
+    }
+
+    /// One small muted part of a hunk header with chips, such as its location.
     fn header_chip(&self, piece: &Piece, background: Hsla) -> Div {
         div()
             .flex_none()
@@ -483,11 +492,12 @@ impl ReviewApp {
             .child(ink::shown(&piece.text))
     }
 
-    /// A hunk's header: one quiet line with its state glyph, the scopes around it, what kind of
-    /// change it is, and where it is when its code is folded away or no scope names it.
+    /// A hunk's header: one quiet line with its state glyph, the scopes around it, where it is
+    /// when its code is folded away or no scope names it, and what kind of change it is.
     ///
-    /// It is a gray band, blue when selected; with chips headers its tag and location are small
-    /// muted chips.
+    /// It is a gray band, blue when selected; with chips headers its location is a small muted
+    /// chip. The tag is an italic aside on the band itself in either style, so the band stays
+    /// whole.
     fn hunk_header(
         &self,
         header: HunkHeader,
@@ -506,38 +516,34 @@ impl ReviewApp {
             chips,
         } = header;
         let has_scope = scope.is_some();
-        let has_tag = tag.is_some();
+        let first_tag = !has_scope && location.is_none();
         let behind = super::pairs::line_background(colors, &[Some(background)]);
         let scope = scope.map(scope_title);
         let content = if let Some(chip_background) = chips {
-            let chip = |piece: Piece| self.header_chip(&piece, to_gpui(chip_background));
             h_flex()
                 .min_w_0()
                 .gap(px(GRID * 2.0))
                 .children(scope)
-                .children(tag.map(chip))
-                .children(location.map(chip))
+                .children(location.map(|piece| self.header_chip(&piece, to_gpui(chip_background))))
         } else {
-            let after = |first: bool| if first { 0.0 } else { GRID * 2.0 };
             h_flex()
                 .min_w_0()
                 .children(scope)
-                .children(tag.map(|tag| {
-                    div()
-                        .ml(px(after(!has_scope)))
-                        .flex_none()
-                        .text_color(to_gpui(tag.color))
-                        .child(ink::shown(&tag.text))
-                }))
                 .children(location.map(|location| {
-                    let first = !has_scope && !has_tag;
                     div()
-                        .ml(px(after(first)))
+                        .when(has_scope, |location| location.ml(px(GRID * 2.0)))
                         .flex_none()
                         .text_color(to_gpui(location.color))
                         .child(ink::shown(&location.text))
                 }))
         };
+        // The tag, an aside on the band whichever style the header has.
+        let tag_gap = self.tag_gap();
+        let content = content.children(tag.map(|tag| {
+            ink::shown_piece(tag)
+                .when(!first_tag, |tag| tag.ml(px(tag_gap)))
+                .flex_none()
+        }));
         base.bg(to_gpui(background))
             .child(frame_bar(frame, colors))
             .child(
@@ -559,10 +565,11 @@ impl ReviewApp {
             .child(self.noted(content, pan, behind, colors))
     }
 
-    /// The files pane: a header with the totals, and the tree.
+    /// The files pane: the review's progress, the filter while one narrows the tree, and the
+    /// tree. The window's title names the review, so the pane has no header of its own.
     fn render_sidebar(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let colors = self.palette();
-        let header = files::files_header(self, &colors);
+        let filter = files::filter_line(self, &colors);
         let [files_line, hunks_line] = files::progress_lines(
             self,
             &colors,
@@ -579,24 +586,6 @@ impl ReviewApp {
             .flex_none()
             .bg(to_gpui(colors.surface))
             .child(
-                h_flex()
-                    .h(px(self.sizes().bar()))
-                    .flex_none()
-                    .px(px(GRID * 3.0))
-                    .gap(px(GRID * 2.0))
-                    .border_b_1()
-                    .border_color(to_gpui(colors.hairline))
-                    .child(ink::piece(header.title).flex_none().whitespace_nowrap())
-                    .child(
-                        div().flex_1().min_w_0().truncate().when_some(
-                            header.filter,
-                            |filter, query| {
-                                filter.text_color(to_gpui(query.color)).child(query.text)
-                            },
-                        ),
-                    ),
-            )
-            .child(
                 v_flex()
                     .flex_none()
                     .px(px(GRID * 3.0))
@@ -607,6 +596,18 @@ impl ReviewApp {
                     .child(progress_line(files_line))
                     .child(progress_line(hunks_line)),
             )
+            .children(filter.map(|filter| {
+                h_flex()
+                    .h(px(self.sizes().bar()))
+                    .flex_none()
+                    .px(px(GRID * 3.0))
+                    .gap(px(GRID * 2.0))
+                    .whitespace_nowrap()
+                    .border_b_1()
+                    .border_color(to_gpui(colors.hairline))
+                    .child(ink::piece(filter.query).flex_1().min_w_0().truncate())
+                    .child(ink::piece(filter.count).flex_none())
+            }))
             .child(
                 div()
                     .relative()
@@ -628,13 +629,20 @@ impl ReviewApp {
             )
     }
 
-    /// The visible tree rows in `range`: indent, a folder chevron, the change kind, the name
-    /// colored by review state, and one state glyph.
+    /// The visible tree rows in `range`, as lazygit draws its file tree: the indent, one
+    /// marker cell (a folder's arrow or a file's change kind), a cell of space and the name
+    /// colored by review state, with one state glyph at the right.
     fn render_tree_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = self.palette();
         let row_height = self.sizes().row_height();
-        // The chevron, change-kind and state columns, and each level's indent, in cells.
-        let column = (self.sizes().ui_cell() * 1.75).round();
+        let cell = self.sizes().ui_cell();
+        // The marker's cell, and the space after it, which lines a folder's children up under
+        // its name.
+        let marker = cell.round();
+        let marker_room = (cell * scroll::float(files::TREE_MARKER_CELLS)).round();
+        let indent = cell * scroll::float(files::TREE_INDENT_CELLS);
+        // The state column at the right.
+        let column = (cell * 1.75).round();
         range
             .filter_map(|position| {
                 let row = files::tree_row(self, &colors, position)?;
@@ -645,26 +653,18 @@ impl ReviewApp {
                         .h(px(row_height))
                         .w_full()
                         .pr(px(GRID * 3.0))
-                        .pl(px(GRID * 2.0 + scroll::float(row.depth) * column))
-                        .gap(px(GRID))
+                        .pl(px(GRID * 2.0 + (scroll::float(row.depth) * indent).round()))
                         .cursor_pointer()
                         .when_some(row.background.map(to_gpui), gpui::Styled::bg)
                         .hover(|hovered| hovered.bg(to_gpui(colors.hairline)))
                         .child(
-                            div()
-                                .w(px(column))
-                                .flex_none()
-                                .text_color(to_gpui(row.chevron.color))
-                                .child(row.chevron.text),
+                            div().w(px(marker_room)).flex_none().child(
+                                div()
+                                    .w(px(marker))
+                                    .text_color(to_gpui(row.marker.color))
+                                    .child(SharedString::from(row.marker.text)),
+                            ),
                         )
-                        .child(div().w(px(column)).flex_none().when_some(
-                            row.kind,
-                            |kind_column, kind| {
-                                kind_column
-                                    .text_color(to_gpui(kind.color))
-                                    .child(SharedString::from(kind.text))
-                            },
-                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -1059,13 +1059,30 @@ impl ReviewApp {
         )
     }
 
-    /// The bottom bars: the status, then what the keys act on at the left and the keys of
-    /// this mode at the right, `? keys` last at the edge.
+    /// The bottom bars: the status, then which revision shows and how fresh it is at the left
+    /// and the keys of this mode at the right, `? keys` last at the edge.
     fn render_bars(&self, window: &mut Window) -> impl IntoElement + use<> {
         let colors = self.palette();
         let small = self.sizes().ui_size();
         let hints = self.bar_hints(window, &colors);
         let status = bars::status(self, &colors, Instant::now());
+        // What the hints leave the label: the bar's padding, the gaps and the divider apart.
+        let cell = self.sizes().ui_cell();
+        let cells = |text: &str| scroll::float(display_width(text)) * cell;
+        let hints_width = hints
+            .iter()
+            .map(|hint| cells(&hint.keys.text) + GRID * 1.5 + cells(&hint.label.text))
+            .sum::<f32>()
+            + GRID * 4.0 * scroll::float(hints.len());
+        // Three cells of slack cover glyphs a fallback font draws wider, as the hints keep some.
+        let label_budget = f32::from(window.viewport_size().width)
+            - GRID * 6.0
+            - GRID * 4.0
+            - 1.0
+            - hints_width
+            - cell * 3.0;
+        let label = bars::sync_label(self, &colors, SystemTime::now(), label_budget, cells);
+        let last = label.len().saturating_sub(1);
         v_flex()
             .flex_none()
             .text_size(px(small))
@@ -1093,14 +1110,16 @@ impl ReviewApp {
                     .gap(px(GRID * 4.0))
                     .whitespace_nowrap()
                     .bg(to_gpui(colors.surface))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(to_gpui(colors.text))
-                            .child(bars::target_label(self)),
-                    )
+                    .child(h_flex().flex_1().min_w_0().overflow_hidden().children(
+                        label.into_iter().enumerate().map(|(index, piece)| {
+                            // Only the last part gives way, cut with an ellipsis.
+                            if index == last {
+                                ink::piece(piece).min_w_0().truncate()
+                            } else {
+                                ink::piece(piece).flex_none()
+                            }
+                        }),
+                    ))
                     .child(
                         div()
                             .flex_none()
@@ -1264,7 +1283,8 @@ fn progress_line(line: ProgressLine) -> Div {
         .gap(px(GRID * 2.0))
         .children(label.map(|label| ink::piece(label).flex_none()))
         .children(bar.map(|bar| {
-            div()
+            // The share marked by the reviewer, then the share approved automatically.
+            h_flex()
                 .flex_1()
                 .min_w_0()
                 .h(px(GRID))
@@ -1272,8 +1292,14 @@ fn progress_line(line: ProgressLine) -> Div {
                 .child(
                     div()
                         .h_full()
-                        .w(relative(bar.fraction))
+                        .w(relative(bar.fraction - bar.auto))
                         .bg(to_gpui(bar.fill)),
+                )
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(bar.auto))
+                        .bg(to_gpui(bar.auto_fill)),
                 )
         }))
         .child(

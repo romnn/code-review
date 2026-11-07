@@ -174,6 +174,8 @@ impl Palette {
         match badge {
             Badge::Unreviewed => self.open,
             Badge::Seen | Badge::Accepted => self.accepted,
+            // Approval without a mark reads quieter than the reviewer's own.
+            Badge::Auto => self.accepted.alpha(0.6),
             Badge::Flagged => self.flagged,
             Badge::Changed => self.changed,
         }

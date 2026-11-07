@@ -11,8 +11,7 @@ use super::{first_row, opaque};
 use crate::color::over;
 use crate::measure::Sidebar;
 
-/// The cells each of the tree's chevron, change-kind and state columns takes, and each level's
-/// indent: the symbol and a space.
+/// The cells the tree's state column takes: the glyph and a space.
 const COLUMN: u16 = 2;
 
 /// The files pane in `sidebar`.
@@ -35,7 +34,9 @@ pub fn draw(painter: &mut Painter<'_>, model: &Model, palette: &Palette, sidebar
     tree(painter, model, palette, sidebar, surface);
 }
 
-/// `Files 17`, and the filter while one narrows the tree.
+/// What the review is of, such as `#128 feature/reconcile`, and at the right the filter with
+/// how many files it leaves while one narrows the tree; the branch makes way first, then the
+/// query, and the number always shows.
 fn header(
     painter: &mut Painter<'_>,
     model: &Model,
@@ -48,14 +49,42 @@ fn header(
         return;
     }
     let header = files::files_header(model, palette);
-    let room = area.width.saturating_sub(2);
-    let mut x = area.x + 1;
-    x += painter.piece(x, area.y, room, &header.title, surface);
-    if let Some(filter) = &header.filter {
-        let left = (area.x + 1 + room).saturating_sub(x + 1);
-        let shown = ellipsize_end(&filter.text, left);
-        painter.text(x + 1, area.y, left, &shown, Brush::piece(filter, surface));
+    let y = area.y;
+    let right = area.right().saturating_sub(1);
+    let mut at = area.x + 1;
+    if let Some(number) = &header.number {
+        at += painter.piece(at, y, right.saturating_sub(at), number, surface) + 1;
     }
+    let mut name_end = right;
+    if let Some(filter) = &header.filter {
+        let count_width = width(&filter.count.text);
+        let count_at = right.saturating_sub(count_width).max(at);
+        painter.piece(
+            count_at,
+            y,
+            right.saturating_sub(count_at),
+            &filter.count,
+            surface,
+        );
+        let query = ellipsize_end(&filter.query.text, count_at.saturating_sub(at + 1));
+        let query_at = count_at.saturating_sub(width(&query) + 1).max(at);
+        painter.text(
+            query_at,
+            y,
+            count_at.saturating_sub(query_at),
+            &query,
+            Brush::piece(&filter.query, surface),
+        );
+        name_end = query_at.saturating_sub(2);
+    }
+    let name = ellipsize_end(&header.name.text, name_end.saturating_sub(at));
+    painter.text(
+        at,
+        y,
+        name_end.saturating_sub(at),
+        &name,
+        Brush::piece(&header.name, surface),
+    );
 }
 
 /// The files and hunks progress lines, with the parts that fit.
@@ -120,12 +149,20 @@ fn progress_line(
     }
 }
 
-/// A progress bar `cells` wide from `x` on row `y`: its filled share in the fill color and
-/// the rest of its track, as heavy rules.
+/// A progress bar `cells` wide from `x` on row `y`: its filled share in the fill color, the
+/// part of it approved automatically at its end in the quieter color, and the rest of its
+/// track, as heavy rules.
 pub fn meter_bar(painter: &mut Painter<'_>, x: u16, y: u16, cells: u16, bar: &Bar, bg: Rgba) {
     let filled = filled_cells(bar.fraction, cells);
+    let marked = filled_cells(bar.fraction - bar.auto, cells).min(filled);
     for offset in 0..cells {
-        let color = if offset < filled { bar.fill } else { bar.track };
+        let color = if offset < marked {
+            bar.fill
+        } else if offset < filled {
+            bar.auto_fill
+        } else {
+            bar.track
+        };
         painter.symbol(x + offset, y, "━", Brush::new(color, bg));
     }
 }
@@ -161,29 +198,27 @@ fn tree(
     }
 }
 
-/// A tree row: its indent, chevron, change kind, name and state glyph, on the cursor's or the
-/// shown file's background.
+/// A tree row as lazygit draws one: its indent, its marker (a folder's arrow or a file's change
+/// kind), a space and the name, with the state glyph at the right, on the cursor's or the shown
+/// file's background.
 fn tree_row(painter: &mut Painter<'_>, row: &TreeRow, x: u16, y: u16, cells: u16, surface: Rgba) {
     let bg = row
         .background
         .map_or(surface, |background| over(surface, background));
     painter.fill(ratatui::layout::Rect::new(x, y, cells, 1), bg);
     let right = x + cells;
-    let indent = u16::try_from(row.depth)
-        .unwrap_or(u16::MAX)
-        .saturating_mul(COLUMN);
-    let mut at = x.saturating_add(1).saturating_add(indent);
+    let indent = row.depth.saturating_mul(files::TREE_INDENT_CELLS);
+    let mut at = x
+        .saturating_add(1)
+        .saturating_add(u16::try_from(indent).unwrap_or(u16::MAX));
     // The glyph's column at the right, with a cell of room after it.
     let glyph_at = right.saturating_sub(1 + COLUMN);
-    if at + COLUMN * 2 >= glyph_at {
+    let marker_cells = u16::try_from(files::TREE_MARKER_CELLS).unwrap_or(u16::MAX);
+    if at + marker_cells + 1 >= glyph_at {
         return;
     }
-    painter.piece(at, y, 1, &row.chevron, bg);
-    at += COLUMN;
-    if let Some(kind) = &row.kind {
-        painter.piece(at, y, 1, kind, bg);
-    }
-    at += COLUMN;
+    painter.piece(at, y, 1, &row.marker, bg);
+    at += marker_cells;
     let room = glyph_at.saturating_sub(at + 1);
     let name = ellipsize_end(&row.name.text, room);
     let mut brush = Brush::piece(&row.name, bg);

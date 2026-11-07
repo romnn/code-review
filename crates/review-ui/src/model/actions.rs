@@ -46,6 +46,9 @@ actions! {
     Activate,
     /// Opens the diff of the file under the tree cursor.
     FocusDiff,
+    /// Switches between the files and the code: from the tree to the diff, and from the diff
+    /// or the buffer back to the tree.
+    SwitchPane,
     /// Folds every folder.
     CloseAllFolds,
     /// Unfolds every folder.
@@ -69,8 +72,12 @@ actions! {
     PanLeft,
     /// Folds or unfolds the selected hunk.
     ToggleFold,
-    /// Steps to the next match of a diff search, or else opens the next file to review.
+    /// Moves to the next file in the visible tree, past folded folders, or steps to the next
+    /// match of a diff search.
     NextFile,
+    /// Moves to the previous file in the visible tree, past folded folders, or steps to the
+    /// previous match of a diff search.
+    PreviousFile,
     /// Goes back from the diff to the files.
     FocusTree,
     /// Opens the whole file at the selected hunk, or goes back to the diff.
@@ -219,6 +226,10 @@ impl Model {
                 Mode::Buffer => {}
             },
             Action::FocusDiff => self.open_diff(),
+            Action::SwitchPane => match self.mode {
+                Mode::Tree => self.open_diff(),
+                Mode::Diff | Mode::Buffer => self.focus_tree(),
+            },
             Action::CloseAllFolds => self.tree_fold_all(true),
             Action::OpenAllFolds => self.tree_fold_all(false),
             Action::NextHunk => self.select_hunk(self.hunk + 1),
@@ -230,7 +241,8 @@ impl Model {
             Action::PanRight => self.pan(true),
             Action::PanLeft => self.pan(false),
             Action::ToggleFold => self.toggle_fold(),
-            Action::NextFile => self.next_file(),
+            Action::NextFile => self.step_file(true),
+            Action::PreviousFile => self.step_file(false),
             Action::FocusTree => self.focus_tree(),
             Action::ToggleBuffer => self.toggle_buffer(),
             Action::ToggleApprove => self.review(MarkVerdict::Accepted),

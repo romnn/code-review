@@ -238,17 +238,51 @@ impl Model {
     /// Moves the tree cursor by `offset`, previewing the file it lands on.
     pub(super) fn tree_move(&mut self, offset: isize) {
         let count = self.visible_tree().len();
-        self.tree_cursor = self
+        let position = self
             .tree_cursor
             .saturating_add_signed(offset)
             .min(count.saturating_sub(1));
+        self.tree_move_to(position);
+    }
+
+    /// Moves the tree cursor to `position` among the visible nodes, previewing the file it
+    /// lands on.
+    pub(super) fn tree_move_to(&mut self, position: usize) {
+        self.tree_cursor = position;
         if let Some(node) = self.tree_node().filter(|node| node.kind == NodeKind::File) {
             let path = node.path.clone();
-            let cursor = self.tree_cursor;
             self.preview_file(&path);
-            self.tree_cursor = cursor;
+            self.tree_cursor = position;
         }
         self.reveal_tree_cursor();
+    }
+
+    /// The position among the visible nodes of the file after (`forward`) or before the one
+    /// the keys act on: the tree cursor's node in the tree, elsewhere the shown file, or the
+    /// folded folder that holds it.
+    ///
+    /// Folders are no stops, and a folded folder's files are not visible, so they are skipped
+    /// whole. `None` at either end, or when the tree has no other file.
+    #[must_use]
+    pub fn adjacent_file(&self, forward: bool) -> Option<usize> {
+        let visible = self.visible_tree();
+        let from = match self.mode {
+            Mode::Tree => Some(self.tree_cursor.min(visible.len().saturating_sub(1))),
+            Mode::Diff | Mode::Buffer => self.selected.as_deref().and_then(|path| {
+                state::cursor_position(&self.tree, &visible, path, NodeKind::File)
+            }),
+        };
+        let is_file = |position: &usize| {
+            visible
+                .get(*position)
+                .and_then(|&index| self.tree.get(index))
+                .is_some_and(|node| node.kind == NodeKind::File)
+        };
+        match (from, forward) {
+            (Some(from), true) => (from + 1..visible.len()).find(is_file),
+            (Some(from), false) => (0..from).rev().find(is_file),
+            (None, _) => (0..visible.len()).find(is_file),
+        }
     }
 
     /// Folds the folder under the tree cursor (`Some(true)`), unfolds it (`Some(false)`) or

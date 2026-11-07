@@ -83,7 +83,8 @@ pub struct Configured {
 }
 
 /// Loads the configuration the options name; a file that cannot be read gives the defaults
-/// and a problem.
+/// and a problem, except for `[review] auto_approve_formatting`, which is read on its own as
+/// `cr` reads it (see [`config::fallback`]).
 #[must_use]
 pub fn load_config(options: &Options) -> Configured {
     let path = options
@@ -94,7 +95,7 @@ pub fn load_config(options: &Options) -> Configured {
     let config = match &path {
         Some(path) => config::load(path).unwrap_or_else(|err| {
             problems.push(format!("{err}; using the defaults"));
-            Config::default()
+            config::fallback(path)
         }),
         None => Config::default(),
     };
@@ -171,6 +172,10 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
         styles,
         context: config.context,
         approved: config.approved,
+        policy: review_core::ReviewPolicy {
+            auto_approve_formatting: config.auto_approve_formatting,
+        },
+        language_servers: config.language_servers,
         removed: config.removed,
         added: config.added,
         layout: PaneLayout {

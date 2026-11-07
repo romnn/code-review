@@ -24,7 +24,8 @@ No web stack and no JavaScript: everything is Rust.
    changed hunks are unreviewed; changed hunks show what changed since you last reviewed them.
 2. **Format-independent diff.** Changes that provably only touch whitespace, indentation or line
    wrapping are classified as formatting-only and hidden behind a visible count; real edits inside
-   reformatted code are highlighted.
+   reformatted code are highlighted. Proven formatting-only units count as approved automatically
+   (see "Approving reformatting automatically").
 3. **Move detection.** Code moved within or across files is shown as one line, "moved from
    `a.rs:120-160`"; moves with edits show their edits.
 4. **Guided walkthrough.** An ordered list of steps, each showing its own hunks and why it matters.
@@ -472,6 +473,43 @@ review finds a construct it cannot justify. Unsupported languages and parse erro
 formatting-only; lines whose only difference is whitespace may be dimmed there, but they stay
 visible and unreviewed.
 
+### Approving reformatting automatically
+
+A unit whose change is proven formatting-only, and that no mark on its chain decides, counts as
+approved without a mark: `RevisionView::standing` derives a `Standing` (open, approved
+automatically, reviewed with a verdict, or changed since reviewed) from the unit's state, its
+proof and the view's `ReviewPolicy`. Counts gain `auto_approved`, and progress, folding,
+next-open navigation, the tree's glyphs, walkthrough progress and `cr show --unreviewed` all read
+the standing, so every front end and `cr` agree.
+
+The policy is explicit, never an engine default. `ReviewPolicy` has no `Default`; a front end
+that approves automatically builds its views with `History::view_under` (or
+`current_view_under`) and its policy, while `History::view` and `current_view` decide by marks
+alone (`ReviewPolicy::MARKS_ONLY`). An embedder that never opted in, such as the Zed fork,
+therefore counts every unmarked unit as open, matching the badges it draws from `UnitState`.
+The apps and `cr` opt in by default and share one setting,
+`[review] auto_approve_formatting` in `$XDG_CONFIG_HOME/code-review/config.toml`
+(`review_core::store::default_config_file`, or `CODE_REVIEW_CONFIG`): the apps read the whole
+file and offer the setting in the settings list, which saves it there; `cr` reads only the
+`[review]` section and ignores the rest. `cr --no-auto-approve` turns it off whatever the file
+says; a file `cr` cannot read decides by marks alone, with a warning.
+
+This keeps the overriding safety rule:
+
+- Nothing is written on the reviewer's behalf: the event log holds only the reviewer's own
+  marks, and `cr export` lists only those.
+- It is decided again for every revision from that revision's proof, never carried as a mark,
+  so a unit that stops being formatting-only in a later revision needs review.
+- Any mark on the unit's chain decides instead: a flag keeps it flagged, an `unseen` mark (`u`,
+  or Space on an automatically approved hunk) makes it need review, and a change since a review
+  shows that change. Only a unit with no mark at all is approved automatically.
+- The proof is the same conservative one that labels the unit `reformatted only`;
+  unsupported languages, parse errors and unproven whitespace changes (`whitespace changed ·
+  not proven equivalent`) are never approved automatically.
+- It shows apart from a human approval: the hunk's header says `(reformatted only ·
+  auto-approved)`, its `✓` is quieter, the status line counts them (`13 of 27 hunks reviewed ·
+  6 auto-approved`) and the hunks bar fills their share in a quieter color.
+
 ### Move detection
 
 Moves are a presentation over review units, not units of their own:
@@ -581,6 +619,12 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   moves), content-addressed by its snapshot IDs, written atomically (temporary file and rename) and
   recomputable from git.
 - `review.lock`: serializes state transitions (held exclusively) and log reads (held shared).
+- `synced.json`: when the review last read its target's state and which revision was current
+  then, written atomically by every successful refresh (`Review::synced`). Like the view state
+  it is not review state: no lock, never in the event log, and the last writer of two
+  concurrent refreshes wins, either being a true sync time. Writing it is best-effort: a
+  refresh that recorded its revision succeeds even when the record cannot be stored, and
+  `Recorded::sync_error` says why.
 - `view/<front-end>.json`: each front end's own view state, through `Review::view_state` and
   `Review::save_view_state`, such as the folded folders. review-gui and review-tui share theirs
   under the name `review-lite`, review-gui's name when it first stored them, so folds made in
@@ -648,8 +692,8 @@ with grammar versions matching Zed's).
 | Command | Purpose |
 |---|---|
 | `cr open [pr-number \| pr-url \| base..head \| --worktree [ref]]` | Start or refresh a review; records a revision if anything changed and prints a summary. Without a target, see below. |
-| `cr status` | Counts per file and in total: new, changed since reviewed, reviewed, accepted, flagged, noise. |
-| `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts. |
+| `cr status` | Counts per file and in total: new, changed since reviewed, reviewed, accepted, flagged, approved automatically, noise. |
+| `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts, saying how many of them were approved automatically. |
 | `cr mark <unit>... seen \| accepted \| flagged \| unseen` | Set review state. |
 | `cr note <unit> <text>` | Add a note. |
 | `cr export [--format md \| json]` | Numbered list of flagged and annotated units with `file:line`, unit ID and excerpt, for an agent. |
@@ -657,7 +701,8 @@ with grammar versions matching Zed's).
 | `cr watch` | Poll for new revisions and print what changed. |
 
 Every command accepts `--review <key>`, defaulting to the review for the current repository and
-branch, and `--json`.
+branch, `--json`, and `--no-auto-approve`, which counts proven formatting-only units as needing
+review, whatever the shared configuration's `[review] auto_approve_formatting` says.
 
 `cr open`, review-gui and review-tui without a target and without `--worktree` choose one in
 `review-core` (`Review::open_for_current_branch`), and say on standard error which rule fired
@@ -709,8 +754,9 @@ calm: code is an uninterrupted grid, and everything the tool says about the code
 it, muted, so it never reads as code.
 
 - **Modes.** Three modes, each its own key area, and one at a time:
-  - *Files* (the left pane): `j`/`k` move and preview each file's diff, `h`/`l` fold and unfold
-    folders, Enter folds a folder or opens a file, `0` opens the diff, Space approves or
+  - *Files* (the left pane): `j`/`k` move and preview each file's diff, `n`/`N` move to the
+    next and previous file, past folders and a folded folder's files, `h`/`l` fold and unfold
+    folders, Enter folds a folder or opens a file, Tab or `0` opens the diff, Space approves or
     unapproves the file or folder, `!` flags it and `u` resets it. `/` filters the tree as
     lazygit does: typing narrows it to the files whose path contains the query (and their
     folders), Enter keeps the filter and returns to the list, Esc clears it. A filtered folder
@@ -720,15 +766,19 @@ it, muted, so it never reads as code.
     them, and unfolds one only when every such file is folded away.
   - *Diff*: a file opens at its first hunk that needs the reviewer. `j`/`k` move between hunks,
     `Ctrl+D`/`Ctrl+U` scroll, Space approves the hunk and moves to the next open one (and, at the
-    end of a file, names the next file, which `n` opens), `!` flags, `za` folds, Esc or `h` goes
-    back to the files. `/` searches the diff's code as vim does, without leaving the diff:
-    matches are highlighted, `n`/`N` step through them (while a search is active `n` steps
-    rather than opening the next file), and the selected hunk follows the match, so Space acts
-    on the hunk that holds it. Leaving the diff ends the search.
+    end of a file, names the next file to review), `!` flags, `za` folds, Tab, Esc or `h` goes
+    back to the files. `n`/`N` show the next and previous file in the tree's visible order, at
+    its first hunk that needs the reviewer, as the tree's cursor moves: folders are no stops, a
+    folded folder's files are skipped, and at either end it stays and says so. `/` searches the
+    diff's code as vim does, without leaving the diff: matches are highlighted, `n`/`N` step
+    through them (while a search is active they step rather than moving to another file), and
+    the selected hunk follows the match, so Space acts on the hunk that holds it. Leaving the
+    diff ends the search.
   - *File* (`=`): the whole head version as a read-only buffer at the selected hunk, with the
     changed lines marked in the gutter and syntax everywhere; vim motions (`j`/`k`, `gg`, `G`,
     `Ctrl+D`/`Ctrl+U`, `w`/`b`), `/` with `n`/`N`, `gd` when trusted, and Space approves the hunk
-    under the cursor. `=` or Esc goes back to the diff at the same place.
+    under the cursor. `=` or Esc goes back to the diff at the same place; Tab goes to the files,
+    as it does from the diff, since Tab switches between the files and the code.
   - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
     request overview and `?` the keys, both overlays that own the keyboard until closed.
   - `s` shows the diff side by side or unified, `zA` shows or folds approved hunks, `|` cycles
@@ -768,18 +818,28 @@ it, muted, so it never reads as code.
 - **Actions as data.** Every action is a variant of `review-ui`'s `Action` enum, and
   `review_ui::keymap` is one table of them: their areas, default keys, group, help and hint
   priority. The shared key matcher, the bottom bar, the `?` sheet and `[keys]` in the
-  configuration all read it, so a key does the same in both apps. The bottom bar shows what the keys act on (`hunk 2/3 ·
-  src/engine.rs`) at the left and every hinted key of the current mode at the right, in rank
-  order with `? keys` last at the edge. Keys that cannot act now are dimmed, not removed, and a
+  configuration all read it, so a key does the same in both apps. The bottom bar shows the
+  review's freshness at the left and every hinted key of the current mode at the right, in rank
+  order with `? keys` last at the edge. The left side says which revision shows and its head
+  commit, a newer revision waiting, and when the review last synced (`rev 1 · 08990e0 · synced
+  4m ago`); while a fetch runs it says what it does (`syncing…`, `analyzing rev 4…`, `carrying
+  marks…`) with a spinner, and a failed fetch says so for five seconds before the last good
+  sync shows again. The engine records each sync in `synced.json` (`Review::synced`) and reports
+  a refresh's steps through `Review::refresh_reporting`; a minute timer keeps the time current
+  and the spinner turns only while something runs. When room runs out the commit makes way
+  first, then the time, then the newer revision. The file shown and the selected hunk are in
+  the file's header, so the bar does not repeat them. Keys that cannot act now are dimmed, not removed, and a
   narrow window drops whole hints from the highest rank down, so the bar never shifts as the
   selection changes.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
-  changes), at most one tag (`only reformatting`, `whitespace changed · not proven equivalent`,
-  `changed since revision 1`), and the lines it covers only when its code is folded away or no
-  scope names it, since the gutter numbers the shown lines (unit IDs stay out; `y i` copies
-  one); unchanged lines left out are one rule (`15 unchanged lines`, Enter shows more); a note is
+  changes), the lines it covers only when its code is folded away or no scope names it, since
+  the gutter numbers the shown lines (unit IDs stay out; `y i` copies one), and last at most
+  one tag (`reformatted only`, `reformatted only · auto-approved`, `whitespace changed · not
+  proven equivalent`, `changed since revision 1`): an aside in parentheses, faint and italic,
+  four cells apart, on the header's own background in both header styles, so it never breaks
+  the band as a chip would; unchanged lines left out are one rule (`15 unchanged lines`, Enter shows more); a note is
   a bounded block with an accent bar; every hunk header is a gray band and every hunk has a gray bar
   along its left edge, both in the accent's blue for the selected hunk, so each hunk's start and
   extent show at a glance. Approved hunks fold to
@@ -787,10 +847,14 @@ it, muted, so it never reads as code.
   show nothing, not even a gap rule or a blank row, so a run of folded hunks reads as a list of
   headers; `zA` (`[diff] approved = "folded"` or `"shown"`) shows approved hunks like any other,
   and fully reviewed files then stay open too. Formatting-only hunks still show, on a neutral background without red and green,
-  labeled `only reformatting`; an unproven whitespace change keeps red and green and reads
-  `whitespace changed · not proven equivalent`. Tree rows are an indent, a change-kind letter
-  colored by kind, and the name colored by review state; only state that needs action or confirms
-  done carries a glyph (`✓` done, `◐` partly reviewed, `!` flagged, `↻` changed since reviewed), so
+  labeled `reformatted only`, and once approved automatically they fold like approved hunks;
+  an unproven whitespace change keeps red and green and reads
+  `whitespace changed · not proven equivalent`. The tree draws as lazygit's file tree does
+  (`pkg/gui/presentation/files.go`): two cells of indent per depth, then one marker cell, a
+  space and the name, so a folder's children start under its name; the marker is lazygit's
+  `▼`/`▶` for an open or folded folder and the change-kind letter, colored by kind, for a file,
+  and folder names have no trailing `/`, as lazygit's tree directories have none. Names are
+  colored by review state; only state that needs action or confirms done carries a glyph (`✓` done, `◐` partly reviewed, `!` flagged, `↻` changed since reviewed), so
   unreviewed files are just bright names. Change details and counts live in the diff's header. Moves
   are one quiet line naming the other end (Enter follows it); a move with edits also shows its edits
   where the code arrives. The file buffer's header names the scopes around the cursor
@@ -912,7 +976,9 @@ it, muted, so it never reads as code.
   rust-analyzer, but `cargo metadata` and `rustc` still run under the reviewed tree's Cargo
   configuration, which can name any program as a `rustc` wrapper. Running a language server on a
   reviewed head is therefore arbitrary code execution, and it is gated on trust (below). The
-  definition opens in the file buffer; `Ctrl+O` goes back.
+  definition opens in the file buffer; `Ctrl+O` goes back. `[lsp] enabled = false` keeps every
+  language server from starting, trusted or not, for reviewers who would rather not give
+  rust-analyzer the memory; `g d` then says it is off.
 - **Trust.** No tool that can execute reviewed code starts unless the review is trusted.
   `Review::trust` and `Review::set_trusted` in `review-core` store the decision as a `trust` event
   in the review's log, so every front end shares it. Without a decision, the working tree and a
@@ -939,7 +1005,8 @@ it, muted, so it never reads as code.
   4 px grid with 12 px side padding; pane headers line up on one hairline. Nothing that holds
   text has a fixed pixel size: columns are sized in cells of the monospace font, whose advance is
   measured at startup (the line-number gutter is five code cells, the sign column one and a half,
-  the tree's chevron, kind and state columns one and three quarters each), bars are one line of
+  the tree's indent two cells a depth and its marker one cell and a cell of space, as in a
+  terminal, and its state column one and three quarters), bars are one line of
   their text plus a grid step, and counts are padded to their widest, so nothing overlaps, clips
   or wraps at any font size from 9 to 40 px (zoom and `--font-size` clamp to that range). Where
   room runs out, long text truncates with an ellipsis (paths from their start) and whole
@@ -947,10 +1014,12 @@ it, muted, so it never reads as code.
   title bar and its buttons keep the platform's fixed size, so previewing a font size never moves
   the settings panel. The files pane resizes by dragging its divider (double click resets, limits
   keep it at least 180 px and 16 text cells wide and the diff at least 400 px wide), `Ctrl+B`
-  hides it, and the width is remembered in the `[layout]` table of the configuration. Under its
-  header, two progress lines show the files and the hunks reviewed: a bar, done of total, and the
-  whole percent, rounded down so 100% means all of it; in a narrow pane the bar makes way first,
-  then the percent, then the label.
+  hides it, and the width is remembered in the `[layout]` table of the configuration. The pane
+  has no header, since the window's title names the review: at its top two progress lines show
+  the files and the hunks reviewed, each a bar, done of total, and the whole percent, rounded
+  down so 100% means all of it; in a narrow pane the bar makes way first, then the percent, then
+  the label. While a filter narrows the tree, a line under them shows it and how many files it
+  leaves (`/engine  3/17`).
 - **Scrolling.** `review-gui --bench-scroll` scrolls every row of every file of the review once,
   file after file, 30 rows per frame, and prints frame-interval and per-frame build-time
   percentiles. On the perf fixture (25 files, 90,000 rows) the app's work per frame is about
@@ -1097,7 +1166,12 @@ settings, find, file buffer, overview and `?` sheet, and mouse selection with co
   A terminal that can no longer be drawn to, and input that ended, quit unattended too.
 - **Where a terminal differs.** No zoom, font size, fullscreen or smooth scrolling, and no
   scrollbars. The files pane's width is its own `[layout] tui_sidebar`, in cells. A paste goes
-  only into a text field taking typing, never in as keys.
+  only into a text field taking typing, never in as keys. A terminal has no title bar the app
+  can count on, so the files pane keeps a header naming the review: a pull request's number and
+  head branch (`#128 feature/reconcile`), or the range (`main..feature`, `main..working tree`);
+  in a narrow pane the branch is cut first and the number always shows, and while a filter
+  narrows the tree it shows at the header's right with how many files it leaves
+  (`/engine 3/17`), taking room from the branch.
 - **Fetches.** The review opens before the terminal goes raw, so the first fetch can still ask
   for credentials. Later fetches (`R`) run non-interactively through `Review::set_command_env`,
   because the app owns the terminal: `GIT_TERMINAL_PROMPT=0`, no ssh askpass helper, and the

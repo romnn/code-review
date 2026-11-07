@@ -56,6 +56,7 @@ mod quit;
 mod search;
 mod select;
 pub mod settings;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 mod tree;
@@ -66,6 +67,7 @@ pub use effects::{Completion, Driver, Effect, Job, SheetStep, Updated};
 pub use fields::{Field, FieldState};
 pub use quit::{QuitKind, Quitting};
 pub use select::{TextPress, list_of};
+pub use sync::{Sync, SyncStep};
 
 /// How many unchanged lines each expansion of a gap reveals.
 const GAP_STEP: usize = 20;
@@ -92,6 +94,11 @@ pub struct Settings {
     pub context: usize,
     /// Whether approved hunks fold, as the configuration sets it.
     pub approved: crate::config::Approved,
+    /// Which units still need the reviewer, as the configuration sets it: whether proven
+    /// formatting-only units count as approved without a mark.
+    pub policy: review_core::ReviewPolicy,
+    /// Whether a language server may start for go to definition, as `[lsp] enabled` sets it.
+    pub language_servers: bool,
     /// The removed-line background, as `0xRRGGBB`, when the configuration overrides the
     /// theme's.
     pub removed: Option<u32>,
@@ -351,6 +358,8 @@ pub struct Model {
     pub pending: HashMap<UnitId, MarkVerdict>,
     /// Whether a fetch of the latest changes runs.
     pub(crate) refreshing: bool,
+    /// When the review last synced, and what a running fetch is doing.
+    pub sync: Sync,
     /// Whether the app was asked to quit, and whether it may.
     pub quitting: Quitting,
     /// What the status line last said about quitting, so a note about a refused mark stays
@@ -443,6 +452,7 @@ impl Model {
             marking: false,
             pending: HashMap::new(),
             refreshing: false,
+            sync: Sync::default(),
             quitting: Quitting::No,
             quit_said: String::new(),
             layout: settings.layout,
@@ -467,6 +477,7 @@ impl Model {
         self.spawn(Subject::Always(Because::Opening), move || {
             Outcome::Opened(open(opener).map(Box::new))
         });
+        self.spin();
     }
 
     /// Shows the opened review, or why it could not be opened.
@@ -478,11 +489,18 @@ impl Model {
                     self.effect(Effect::Log(ignored));
                 }
                 self.info = opened.info;
+                self.sync.synced = opened.synced;
                 self.trusted = opened.trusted;
                 self.review = Some(Arc::new(opened.review));
                 self.blobs.texts.extend(opened.texts);
-                self.revisions = overview::summarize(&opened.snapshot.history);
-                self.snapshot = Some(opened.snapshot);
+                self.revisions = overview::summarize(&opened.history, self.settings.policy);
+                // The policy in use when the review shows, which the settings list may have
+                // changed while it opened.
+                self.snapshot = Some(Snapshot {
+                    history: opened.history,
+                    revision: opened.revision,
+                    policy: self.settings.policy,
+                });
                 self.effect(Effect::Title(self.title()));
                 self.phase = Phase::Ready;
                 self.refresh_tree();
@@ -499,6 +517,7 @@ impl Model {
                     self.set_status(status);
                 }
                 self.request_syntax();
+                self.start_clock();
             }
             Err(err) => {
                 self.effect(Effect::Log(err.clone()));
@@ -547,20 +566,26 @@ impl Model {
         }
     }
 
-    /// One line on where the review stands.
+    /// One line on where the review stands, with how many of the reviewed hunks were approved
+    /// automatically as proven formatting-only.
     #[must_use]
     pub(crate) fn summary(&self) -> String {
         let (reviewed, total) = self.totals();
         let revision = self.snapshot.as_ref().map_or_else(String::new, |snapshot| {
             format!("Revision {}", snapshot.revision)
         });
+        let auto = match self.auto_approved() {
+            0 => String::new(),
+            auto => format!(" · {auto} auto-approved"),
+        };
         format!(
-            "{revision} · {reviewed} of {} reviewed",
+            "{revision} · {reviewed} of {} reviewed{auto}",
             plural(total, "hunk")
         )
     }
 
-    /// Files whose every unit is reviewed, and all files, pending marks included.
+    /// Files whose every unit is reviewed, approved automatically included, and all files,
+    /// pending marks included.
     #[must_use]
     pub fn file_totals(&self) -> (usize, usize) {
         self.tree
@@ -568,24 +593,32 @@ impl Model {
             .filter(|node| node.kind == NodeKind::File)
             .fold((0, 0), |(done, total), node| {
                 let counts = &node.counts;
-                let reviewed = counts.reviewed + counts.accepted + counts.flagged;
-                (done + usize::from(reviewed >= counts.units), total + 1)
+                (done + usize::from(counts.done() >= counts.units), total + 1)
             })
     }
 
-    /// Reviewed and total units over every file, pending marks included.
+    /// Reviewed and total units over every file, approved automatically and pending marks
+    /// included.
     #[must_use]
     pub fn totals(&self) -> (usize, usize) {
+        self.top_counts().fold((0, 0), |(reviewed, total), counts| {
+            (reviewed + counts.done(), total + counts.units)
+        })
+    }
+
+    /// The units over every file approved automatically as proven formatting-only, pending
+    /// marks included.
+    #[must_use]
+    pub fn auto_approved(&self) -> usize {
+        self.top_counts().map(|counts| counts.auto_approved).sum()
+    }
+
+    /// The counts of the tree's top-level nodes, which together cover every file once.
+    fn top_counts(&self) -> impl Iterator<Item = &review_core::Counts> {
         self.tree
             .iter()
             .filter(|node| node.depth == 0)
-            .fold((0, 0), |(reviewed, total), node| {
-                let counts = &node.counts;
-                (
-                    reviewed + counts.reviewed + counts.accepted + counts.flagged,
-                    total + counts.units,
-                )
-            })
+            .map(|node| &node.counts)
     }
 
     fn set_status(&mut self, status: impl Into<String>) {
@@ -629,6 +662,29 @@ impl Model {
     #[must_use]
     pub fn view(&self) -> Option<review_core::RevisionView<'_>> {
         self.snapshot.as_ref()?.view()
+    }
+
+    /// Which units need the reviewer now: the shown revision's policy, a preview's included,
+    /// or the configured one before the review opens.
+    #[must_use]
+    pub fn policy(&self) -> review_core::ReviewPolicy {
+        self.snapshot
+            .as_ref()
+            .map_or(self.settings.policy, |snapshot| snapshot.policy)
+    }
+
+    /// Decides under `policy` which units need the reviewer: the tree, the totals and the
+    /// overview follow at once, and the diff once its rows are laid out again.
+    fn set_policy(&mut self, policy: review_core::ReviewPolicy) {
+        let Some(snapshot) = &mut self.snapshot else {
+            return;
+        };
+        if snapshot.policy == policy {
+            return;
+        }
+        snapshot.policy = policy;
+        self.revisions = overview::summarize(&snapshot.history, policy);
+        self.refresh_tree();
     }
 
     /// The area whose keys apply now, and which the front end gives the keyboard.
@@ -950,7 +1006,11 @@ pub(super) struct Opened {
     found: Option<String>,
     trusted: bool,
     info: Option<review_core::ReviewInfo>,
-    snapshot: Snapshot,
+    /// When the review last synced with its target.
+    synced: Option<review_core::Synced>,
+    history: Arc<History>,
+    /// The revision to show first, the current one.
+    revision: RevisionNumber,
     texts: HashMap<ObjectId, Arc<rows::FullText>>,
 }
 
@@ -964,6 +1024,7 @@ fn open(opener: Opener) -> Result<Opened, String> {
     } = opener()?;
     let trust = review.trust().map_err(|err| err.to_string())?;
     let info = review.info().ok().flatten();
+    let synced = review.synced().ok().flatten();
     let revision = history.current().ok_or("the review has no revision yet")?;
     let history = Arc::new(history);
     let texts = read_texts(&review, &history, revision);
@@ -978,7 +1039,9 @@ fn open(opener: Opener) -> Result<Opened, String> {
         found,
         trusted: trust.trusted,
         info,
-        snapshot: Snapshot { history, revision },
+        synced,
+        history,
+        revision,
         texts,
     })
 }

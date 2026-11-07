@@ -48,11 +48,12 @@ impl Brush {
         }
     }
 
-    /// `piece`'s color and weight over the opaque `bg`.
+    /// `piece`'s color, weight and slant over the opaque `bg`.
     #[must_use]
     pub fn piece(piece: &Piece, bg: Rgba) -> Self {
         Self {
             bold: piece.weight != Weight::Regular,
+            italic: piece.italic,
             ..Self::new(piece.color, bg)
         }
     }

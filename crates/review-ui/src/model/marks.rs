@@ -11,7 +11,7 @@ use std::sync::Arc;
 use review_core::{History, MarkVerdict, Recorded, UnitId};
 
 use super::effects::{Because, Outcome, Subject};
-use super::{Effect, Mode, Model, QuitKind, Quitting, overview, plural};
+use super::{Effect, Mode, Model, QuitKind, Quitting, SyncStep, overview, plural};
 use crate::rows;
 use crate::state::{self, MarkJob};
 
@@ -135,7 +135,7 @@ impl Model {
         }
         let next = self.next_open_file();
         self.set_status(match next {
-            Some(path) => format!("This file is done. n opens the next file to review: {path}"),
+            Some(path) => format!("This file is done; {path} is next to review."),
             None => "This file is done, and so is every other file.".to_owned(),
         });
     }
@@ -287,7 +287,7 @@ impl Model {
             return;
         }
         snapshot.history = Arc::new(history);
-        self.revisions = overview::summarize(&snapshot.history);
+        self.revisions = overview::summarize(&snapshot.history, snapshot.policy);
         if let Some(newer) = snapshot.newer() {
             self.set_status(format!(
                 "Revision {newer} is available; press R to switch to it."
@@ -309,20 +309,43 @@ impl Model {
             return;
         }
         self.refreshing = true;
+        self.sync.failed_at = None;
         self.set_status("Fetching the latest changes…");
+        let step = Arc::clone(&self.sync.step);
+        *step.lock() = Some(SyncStep::Refresh(review_core::RefreshStep::Fetching));
         self.spawn(Subject::Always(Because::Refresh), move || {
-            let recorded = review.refresh();
+            let recorded =
+                review.refresh_reporting(&mut |done| *step.lock() = Some(SyncStep::Refresh(done)));
+            *step.lock() = Some(SyncStep::Carrying);
             let history = review.history();
-            Outcome::Refreshed(Refreshed { recorded, history })
+            let synced = review.synced();
+            Outcome::Refreshed(Refreshed {
+                recorded,
+                history,
+                synced,
+            })
         });
+        self.spin();
     }
 
     /// Takes in a fetch of the latest changes: the history it read, and whether it recorded a
     /// new revision.
     pub(super) fn refreshed(&mut self, refreshed: Refreshed) {
+        match refreshed.synced {
+            Ok(Some(synced)) => self.sync.synced = Some(synced),
+            Ok(None) => {}
+            Err(err) => self.effect(Effect::Log(format!(
+                "could not read when the review synced: {err:#}"
+            ))),
+        }
         match (refreshed.recorded, refreshed.history) {
             (Ok(recorded), Ok(history)) => {
                 self.take_history(history);
+                if let Some(err) = &recorded.sync_error {
+                    self.effect(Effect::Log(format!(
+                        "could not store when the review synced: {err}"
+                    )));
+                }
                 if recorded.created {
                     self.set_status(format!(
                         "Revision {} recorded; press R to switch to it.",
@@ -339,6 +362,7 @@ impl Model {
             }
             (Err(err), _) | (_, Err(err)) => {
                 self.fail(format!("Could not refresh: {err}"));
+                self.sync_failed();
             }
         }
     }
@@ -440,4 +464,6 @@ pub(super) struct Refreshed {
     pub(super) recorded: Result<Recorded, review_core::Error>,
     /// The history read after it.
     pub(super) history: Result<History, review_core::Error>,
+    /// When the review last synced, read after it.
+    pub(super) synced: Result<Option<review_core::Synced>, review_core::Error>,
 }

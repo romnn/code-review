@@ -28,6 +28,12 @@
 //! [theme]
 //! name = "carbonfox"  # or tokyonight-night, nightfox, one-dark, …; T opens the settings
 //!
+//! [review]
+//! auto_approve_formatting = true  # proven formatting-only hunks count as approved, unmarked
+//!
+//! [lsp]
+//! enabled = true    # false never starts a language server; `g d` then says it is off
+//!
 //! [keys]            # replace an action's keys; `?` in the app lists the actions
 //! NextUnit = ["n", "ctrl-j"]
 //! ToggleOverview = []   # unbound
@@ -51,6 +57,31 @@ use serde::Deserialize;
 /// are 1/96 inch before the display scale factor, which gpui applies itself.
 const POINTS_PER_INCH: f32 = 72.0;
 const PIXELS_PER_INCH: f32 = 96.0;
+
+/// The defaults for a configuration file that cannot be read whole, keeping its
+/// `[review] auto_approve_formatting` as `cr` reads it: that section alone, so a mistake
+/// elsewhere leaves it standing, and automatic approval off when even that cannot be read.
+///
+/// A broken file thus never approves units the reviewer may have asked to review, and the apps
+/// and `cr`, which reads only that section, agree on which units need the reviewer.
+#[must_use]
+pub fn fallback(path: &Path) -> Config {
+    let auto_approve_formatting = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|file| match file.get("review") {
+            None => Some(true),
+            Some(review) => match review.as_table()?.get("auto_approve_formatting") {
+                None => Some(true),
+                Some(value) => value.as_bool(),
+            },
+        })
+        .unwrap_or(false);
+    Config {
+        auto_approve_formatting,
+        ..Config::default()
+    }
+}
 
 /// The default code size in points, matching a 13-point terminal font.
 pub const DEFAULT_SIZE_POINTS: f32 = 13.0;
@@ -119,6 +150,10 @@ struct File {
     keys: BTreeMap<String, KeyList>,
     #[serde(default)]
     theme: ThemeSection,
+    #[serde(default)]
+    review: ReviewSection,
+    #[serde(default)]
+    lsp: LspSection,
     /// Read table by table, so a mistake in one style leaves the others usable.
     #[serde(default)]
     styles: BTreeMap<String, toml::Value>,
@@ -181,6 +216,18 @@ struct ViewSection {
 #[serde(deny_unknown_fields)]
 struct ThemeSection {
     name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ReviewSection {
+    auto_approve_formatting: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LspSection {
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -384,6 +431,12 @@ pub struct Config {
     pub theme: Option<String>,
     /// Whether changed tokens within a line are emphasized.
     pub token_emphasis: bool,
+    /// Whether proven formatting-only units count as approved without a mark; see
+    /// [`review_core::Standing`].
+    pub auto_approve_formatting: bool,
+    /// Whether language servers may start, for go to definition; off keeps them from ever
+    /// running, at the cost of that lookup.
+    pub language_servers: bool,
     /// The pane widths.
     pub layout: LayoutConfig,
     /// Key overrides: an action's name and the keys that replace its defaults.
@@ -408,6 +461,8 @@ impl Default for Config {
             added: None,
             theme: None,
             token_emphasis: false,
+            auto_approve_formatting: true,
+            language_servers: true,
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
             styles: BTreeMap::new(),
@@ -683,13 +738,11 @@ enum Weight {
 }
 
 /// Returns the configuration file's path, or `None` without a configuration directory.
+///
+/// `cr` reads its `[review]` section from the same file.
 #[must_use]
 pub fn path(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
-    let base = match xdg_config_home.filter(|dir| dir.is_absolute()) {
-        Some(dir) => dir.to_path_buf(),
-        None => home?.join(".config"),
-    };
-    Some(base.join("code-review").join("config.toml"))
+    review_core::store::default_config_file(xdg_config_home, home)
 }
 
 /// Reads the settings from `path`; a missing file gives the defaults.
@@ -752,6 +805,11 @@ pub fn parse(text: &str) -> Result<Config, String> {
         added: color(file.diff.added)?,
         theme: file.theme.name,
         token_emphasis: file.diff.token_emphasis.unwrap_or(defaults.token_emphasis),
+        auto_approve_formatting: file
+            .review
+            .auto_approve_formatting
+            .unwrap_or(defaults.auto_approve_formatting),
+        language_servers: file.lsp.enabled.unwrap_or(defaults.language_servers),
         layout: LayoutConfig {
             sidebar: file
                 .layout
@@ -1243,5 +1301,48 @@ NextHunk = [\"j\"]
             Some(PathBuf::from("/h/.config/code-review/config.toml"))
         );
         assert_eq!(path(Some(Path::new("relative")), None), None);
+    }
+
+    /// Proven formatting-only hunks are approved automatically unless `[review]` turns it off;
+    /// a misspelled key is an error rather than silently keeping the default.
+    #[test]
+    fn formatting_is_approved_automatically_by_default() {
+        assert!(parse("").unwrap().auto_approve_formatting);
+        assert!(
+            !parse("[review]\nauto_approve_formatting = false\n")
+                .unwrap()
+                .auto_approve_formatting
+        );
+        assert!(parse("[review]\nauto_approve = false\n").is_err());
+    }
+
+    /// A file the apps cannot read whole keeps `[review] auto_approve_formatting` as `cr` reads
+    /// it: a mistake in another section leaves it standing, and a file that is not TOML turns
+    /// automatic approval off.
+    #[test]
+    fn a_broken_file_keeps_the_review_setting_as_cr_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let fallback = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            assert!(load(&path).is_err(), "{text:?} is broken for the apps");
+            fallback(&path).auto_approve_formatting
+        };
+        assert!(!fallback(
+            "[review]\nauto_approve_formatting = false\n[diff]\ncontex = 5\n"
+        ));
+        assert!(fallback("[diff]\ncontex = 5\n"));
+        assert!(!fallback("[review\nauto_approve_formatting = true\n"));
+        assert!(!fallback(
+            "[review]\nauto_approve_formatting = 1\n[diff]\ncontex = 5\n"
+        ));
+    }
+
+    /// Language servers may start unless `[lsp] enabled = false`; a misspelled key is an error.
+    #[test]
+    fn language_servers_are_on_unless_turned_off() {
+        assert!(parse("").unwrap().language_servers);
+        assert!(!parse("[lsp]\nenabled = false\n").unwrap().language_servers);
+        assert!(parse("[lsp]\nenable = false\n").is_err());
     }
 }

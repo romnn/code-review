@@ -9,7 +9,7 @@ expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[4,17\],"hunks":\[7,27\]\}
+expect "progress":\{"files":\[6,17\],"hunks":\[13,27\],"auto_approved":6\}
 shot 01-open
 
 include scripts/qa/smoke-common.qa
@@ -292,11 +292,11 @@ key escape
 
 # A file's place is kept by row, not pixels: scrolled in one density, it shows the same line at
 # the top after the settings below change the density.
-file src/parser.rs
+file src/engine.rs
 scroll 300
 state
-expect "rows":\[\{"row":10,"source":10,
-file src/engine.rs
+expect "rows":\[\{"row":16,"source":15,
+file src/compat.rs
 
 # Zed's look, a setting at a time, each found by search and applied with Enter: One Dark, the
 # soft style and comfortable rows.
@@ -329,9 +329,9 @@ expect "diff_style":"soft","theme":"one-dark"
 expect "density":"comfortable"
 expect "applied_theme":"one-dark"
 shot 10-zed
-file src/parser.rs
+file src/engine.rs
 state
-expect "rows":\[\{"row":[0-9]+,"source":10,
+expect "rows":\[\{"row":[0-9]+,"source":15,
 expect "row_height":30.0
 file src/engine.rs
 
@@ -531,13 +531,20 @@ state
 expect "selected":"src/parser.rs"
 expect "highlighted":true
 
-# However a file comes to show, the tree reveals it, so the tree's keys act on what shows: n
-# from a filtered tree opens the next file to review and clears the filter that hid it.
+# However a file comes to show, the tree reveals it, so the tree's keys act on what shows: the
+# file finder opens a file a filter hides and clears that filter; n and N stay within what the
+# filter shows.
 key /
 key p a r s e r
 key enter
 key 0
 key n
+state
+expect "selected":"src/parser.rs"
+expect "status":"This is the last file\."
+key ctrl-p
+key r e p o r t
+key enter
 state
 expect "filter":null
 expect "selected":"src/report.rs"

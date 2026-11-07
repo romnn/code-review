@@ -72,6 +72,8 @@ struct Host {
     driver: Driver,
     jobs: VecDeque<Job>,
     timers: Vec<Completion>,
+    /// The minute clock's ticks, which only a test fires.
+    clocks: Vec<Completion>,
     copied: Vec<String>,
     /// How the model asked the front end to scroll its sheets.
     sheet_steps: Vec<SheetStep>,
@@ -85,15 +87,17 @@ impl Host {
     /// The window over `review`, opened and settled: the review read, its texts and highlights
     /// in, and every save done.
     fn open(review: Review) -> Self {
+        Self::open_with(review, settings())
+    }
+
+    /// The window over `review` with `settings`, opened and settled.
+    fn open_with(review: Review, settings: Settings) -> Self {
         let history = review.history().unwrap();
         let mut host = Self {
-            driver: Driver::new(Model::new(
-                settings(),
-                Scale::fixed(cells()),
-                fixed_window(),
-            )),
+            driver: Driver::new(Model::new(settings, Scale::fixed(cells()), fixed_window())),
             jobs: VecDeque::new(),
             timers: Vec::new(),
+            clocks: Vec::new(),
             copied: Vec::new(),
             sheet_steps: Vec::new(),
             quits: 0,
@@ -125,6 +129,16 @@ impl Host {
         for effect in effects {
             match effect {
                 Effect::Spawn(job) => self.jobs.push_back(job),
+                // The minute clock keeps itself going, so it waits apart from the timers that
+                // settle.
+                Effect::After(_, completion)
+                    if matches!(
+                        *completion.outcome,
+                        Outcome::Tick(super::sync::Tick::Minute)
+                    ) =>
+                {
+                    self.clocks.push(completion);
+                }
                 Effect::After(_, completion) => self.timers.push(completion),
                 Effect::Copy(text) | Effect::CopyPrimary(text) => self.copied.push(text),
                 Effect::ScrollSheet(step) => self.sheet_steps.push(step),
@@ -196,6 +210,10 @@ fn settings() -> Settings {
         code_size: 17.0,
         context: config.context,
         approved: config.approved,
+        policy: review_core::ReviewPolicy {
+            auto_approve_formatting: config.auto_approve_formatting,
+        },
+        language_servers: true,
         removed: None,
         added: None,
         appearance: Appearance {
@@ -217,6 +235,15 @@ fn settings() -> Settings {
         keymap,
         front_end: FrontEnd::Window,
         problems: Vec::new(),
+    }
+}
+
+/// The defaults, with every unit needing a mark: for scenarios built on the demo's
+/// formatting-only hunks still needing review.
+fn marks_only() -> Settings {
+    Settings {
+        policy: review_core::ReviewPolicy::MARKS_ONLY,
+        ..settings()
     }
 }
 
@@ -549,6 +576,32 @@ fn a_preview_read_for_a_closed_picker_is_dropped_centrally() {
     assert!(picker.unreadable.contains("assets/logo.bin"));
 }
 
+/// With language servers turned off, go to definition says so and starts nothing, even in a
+/// trusted review.
+#[test]
+fn go_to_definition_is_off_without_language_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(
+        demo(dir.path()),
+        Settings {
+            language_servers: false,
+            ..settings()
+        },
+    );
+    assert!(host.model().trusted, "the demo's head is a local branch");
+    buffer_on_a_name(&mut host);
+    host.dispatch(Action::GoToDefinition);
+    let model = host.model();
+    assert!(!model.looking_up);
+    assert!(host.jobs.is_empty(), "no lookup runs");
+    assert!(model.servers.lock().is_empty());
+    assert!(
+        model.status.contains("[lsp] enabled = false"),
+        "{}",
+        model.status
+    );
+}
+
 /// The central check drops a definition once the review is no longer trusted, saying nothing,
 /// though the lookup still ends.
 #[test]
@@ -735,7 +788,7 @@ fn a_definition_lands_only_where_it_was_asked() {
 #[test]
 fn quitting_waits_for_queued_marks() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
     host.update(|model| model.show_file("src/engine.rs"));
     host.dispatch(Action::FocusDiff);
     // The engine's last two hunks are approved, the third press resetting the last again,
@@ -842,7 +895,7 @@ fn marks_are_refused_while_quitting_waits() {
 #[test]
 fn a_second_quit_while_waiting_drops_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
     host.update(|model| model.show_file("src/parser.rs"));
     host.dispatch(Action::FocusDiff);
     for _ in 0..3 {
@@ -1313,7 +1366,7 @@ fn notes_move_by_what_they_draw() {
 #[test]
 fn the_pan_keys_move_code_half_its_room() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
     host.update(|model| model.show_file("src/engine.rs"));
     host.dispatch(Action::FocusDiff);
     lay_out(&mut host);
@@ -1462,4 +1515,249 @@ fn the_sheet_keys_scroll_the_front_ends_sheet() {
             SheetStep::HalfPages(-1),
         ]
     );
+}
+
+/// The badges of hunk `hunk` of the shown file, pending verdicts included.
+fn hunk_badges(model: &Model, hunk: usize) -> Vec<rows::Badge> {
+    let view = model.view().unwrap();
+    let units = model.rows.hunks.get(hunk).cloned().unwrap_or_default();
+    state::badges(&view, &units, &model.pending)
+}
+
+/// Proven formatting-only hunks that no mark decides count as done without a mark: the diff
+/// opens at the first hunk that needs one, past the engine's brace reflow, and approving that
+/// hunk finishes the file. Space on the reflow records an explicit reset, which makes it need
+/// review; the setting turned off reopens every other such hunk.
+#[test]
+fn formatting_only_hunks_are_approved_automatically() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    // The demo accepted the first hunk; the reflow, the second, needs no mark.
+    assert_eq!(host.model().hunk, 2, "the diff opens past the reflow");
+    assert_eq!(hunk_badges(host.model(), 1), [rows::Badge::Auto]);
+    let (reviewed, _) = host.model().totals();
+    assert_eq!(host.model().auto_approved(), 6);
+
+    // Approving the one open hunk finishes the file.
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert!(!host.model().file_open(), "the file needs nothing more");
+    assert_eq!(host.model().totals().0, reviewed + 1);
+
+    // Space on the reflow resets it explicitly, and it needs review again.
+    host.dispatch(Action::PreviousHunk);
+    host.dispatch(Action::ToggleApprove);
+    assert!(
+        host.model()
+            .pending
+            .values()
+            .all(|&verdict| verdict == MarkVerdict::Unseen)
+    );
+    host.settle();
+    assert_eq!(hunk_badges(host.model(), 1), [rows::Badge::Unreviewed]);
+    assert!(host.model().file_open());
+    assert_eq!(host.model().auto_approved(), 5);
+
+    // Turned off, the other formatting-only hunks need review too; nothing was marked.
+    host.update(Model::open_settings);
+    host.update(|model| model.click_setting(settings::Choice::AutoApprove(false)));
+    host.update(Model::close_settings);
+    assert_eq!(host.model().auto_approved(), 0);
+    assert_eq!(host.model().totals().0, reviewed + 1 - 6);
+    let parser = host
+        .model()
+        .tree
+        .iter()
+        .find(|node| node.path == "src/parser.rs")
+        .unwrap();
+    assert_eq!(state::Progress::of(&parser.counts), state::Progress::Open);
+}
+
+/// The path of the shown file.
+fn shown(model: &Model) -> &str {
+    model.selected.as_deref().unwrap_or_default()
+}
+
+/// `n` and `N` step through the files in the visible tree's order: a folded folder's files are
+/// skipped whole and folders are no stops, the diff shows each file at its first open hunk,
+/// either end stays put with a note, and while a search is in the diff they step its matches.
+#[test]
+fn n_and_shift_n_step_through_the_visible_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    let position = |model: &Model, path: &str| {
+        model
+            .visible_tree()
+            .iter()
+            .position(|&index| model.tree[index].path == path)
+            .unwrap()
+    };
+
+    // In the tree, past the folded `src/` from the file before it to the one after.
+    host.update(|model| {
+        model.tree_collapsed.insert("src".to_owned());
+        model.update_visible_tree();
+        model.tree_cursor = position(model, "scripts/release.sh");
+    });
+    host.dispatch(Action::NextFile);
+    host.settle();
+    assert_eq!(
+        path_at(host.model(), host.model().tree_cursor),
+        "tools/stats.py"
+    );
+    assert_eq!(shown(host.model()), "tools/stats.py", "the file previews");
+    host.dispatch(Action::PreviousFile);
+    host.settle();
+    assert_eq!(
+        path_at(host.model(), host.model().tree_cursor),
+        "scripts/release.sh"
+    );
+
+    // In the diff, the next and previous files show, each at its first open hunk.
+    host.update(|model| model.tree_collapsed.clear());
+    host.update(Model::update_visible_tree);
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextFile);
+    assert_eq!(shown(host.model()), "src/format.rs");
+    assert_eq!(host.model().mode, Mode::Diff);
+    host.dispatch(Action::PreviousFile);
+    assert_eq!(shown(host.model()), "src/engine.rs");
+    assert_eq!(
+        host.model().hunk,
+        2,
+        "at its first hunk that needs the reviewer"
+    );
+
+    // The ends stay put.
+    host.update(|model| model.show_file("Cargo.toml"));
+    host.dispatch(Action::NextFile);
+    assert_eq!(shown(host.model()), "Cargo.toml");
+    assert_eq!(host.model().status, "This is the last file.");
+
+    // A search in the diff takes `n` and `N` for its matches.
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::OpenFind);
+    host.update(|model| model.edit_field(Field::Find, "balance"));
+    host.update(|model| model.submit_field(Field::Find));
+    let current = host.model().find.as_ref().unwrap().current;
+    host.dispatch(Action::NextFile);
+    assert_eq!(shown(host.model()), "src/engine.rs");
+    assert_ne!(host.model().find.as_ref().unwrap().current, current);
+    host.dispatch(Action::PreviousFile);
+    assert_eq!(host.model().find.as_ref().unwrap().current, current);
+}
+
+/// Tab and Shift+Tab switch between the files and the code: the tree focuses the diff, and the
+/// diff and the buffer go back to the tree.
+#[test]
+fn tab_switches_between_the_files_and_the_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    assert_eq!(host.model().mode, Mode::Tree);
+    host.dispatch(Action::SwitchPane);
+    assert_eq!(host.model().mode, Mode::Diff);
+    host.dispatch(Action::SwitchPane);
+    assert_eq!(host.model().mode, Mode::Tree);
+    assert_eq!(
+        path_at(host.model(), host.model().tree_cursor),
+        "src/engine.rs"
+    );
+    host.dispatch(Action::SwitchPane);
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().mode, Mode::Buffer);
+    host.dispatch(Action::SwitchPane);
+    assert_eq!(host.model().mode, Mode::Tree);
+
+    // Both keys are bound in each mode, Shift+Tab as Tab.
+    for area in [keymap::Area::Tree, keymap::Area::Diff, keymap::Area::Buffer] {
+        let keys: Vec<&str> = host
+            .model()
+            .settings
+            .keymap
+            .iter()
+            .filter(|binding| binding.area == area && binding.action == "SwitchPane")
+            .flat_map(|binding| binding.keys.iter().map(String::as_str))
+            .collect();
+        assert_eq!(keys, ["tab", "shift-tab"], "{area:?}");
+    }
+}
+
+/// The bottom bar's left side as text, given `budget` cells.
+fn sync_text(model: &Model, budget: f32) -> String {
+    let palette = crate::paint::Palette::of(model);
+    crate::paint::bars::sync_label(
+        model,
+        &palette,
+        std::time::SystemTime::now(),
+        budget,
+        |text| scroll::float(text.chars().count()),
+    )
+    .into_iter()
+    .map(|piece| piece.text)
+    .collect()
+}
+
+/// The bar names the revision on screen, its head commit and when the review last synced; a
+/// narrow bar drops the commit first, then the time; a fetch shows what it is doing until it
+/// ends, a failed one says so for a moment, and the minute clock keeps going by itself.
+#[test]
+fn the_bar_says_which_revision_shows_and_how_fresh_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    let head = host
+        .model()
+        .view()
+        .and_then(|view| {
+            view.record()
+                .map(|record| record.head.as_str()[..7].to_owned())
+        })
+        .unwrap();
+    assert_eq!(
+        sync_text(host.model(), 100.0),
+        format!("rev 1 · {head} · synced just now")
+    );
+    assert_eq!(sync_text(host.model(), 24.0), "rev 1 · synced just now");
+    assert_eq!(sync_text(host.model(), 10.0), "rev 1");
+
+    // A fetch says what it does while it runs, and when it synced once it ends.
+    host.dispatch(Action::Refresh);
+    assert!(sync_text(host.model(), 100.0).ends_with("syncing…"));
+    let fetched = host.run_job();
+    host.complete(fetched);
+    host.settle();
+    assert!(sync_text(host.model(), 100.0).ends_with("synced just now"));
+
+    // A failure shows for a moment, then the last good sync again.
+    host.update(Model::sync_failed);
+    assert!(sync_text(host.model(), 100.0).ends_with("sync failed"));
+    host.update(|model| {
+        model.sync.failed_at =
+            Some(std::time::SystemTime::now() - sync::FAILURE_SHOWS - Duration::from_secs(1));
+    });
+    assert!(sync_text(host.model(), 100.0).ends_with("synced just now"));
+
+    // The minute clock asks for its next tick each time it ticks.
+    assert_eq!(host.clocks.len(), 1);
+    let tick = host.clocks.remove(0);
+    host.complete(tick);
+    assert_eq!(host.clocks.len(), 1);
+
+    // A newer revision recorded elsewhere waits on the bar until the reviewer switches to it.
+    prepare(
+        &DemoPaths::under(dir.path()),
+        &fixture_dir(),
+        DemoRequest::UpTo(RevisionNumber::new(2).unwrap()),
+    )
+    .unwrap();
+    host.dispatch(Action::Refresh);
+    host.settle();
+    assert_eq!(
+        sync_text(host.model(), 100.0),
+        format!("rev 1 · {head} · rev 2 available · synced just now")
+    );
+    assert_eq!(sync_text(host.model(), 30.0), "rev 1 · rev 2 available");
 }

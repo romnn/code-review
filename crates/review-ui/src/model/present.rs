@@ -118,7 +118,7 @@ impl RowKey {
 
 /// Where every list is, by row: the diff by its unified row, the tree and the buffer by their
 /// own rows.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Places {
     /// The diff, by its unified row.
     pub(crate) diff: Anchor,
@@ -126,6 +126,8 @@ pub(crate) struct Places {
     pub(crate) diff_key: Option<RowKey>,
     /// Whether approved hunks folded in the rows the diff's place was taken on.
     pub(crate) approved: Approved,
+    /// Which units counted as approved in those rows, which decides which of them folded.
+    pub(crate) policy: review_core::ReviewPolicy,
     /// The file tree.
     pub(crate) tree: Anchor,
     /// The file buffer.
@@ -209,6 +211,7 @@ impl Model {
             diff: diff_anchor(&self.rows, offset),
             diff_key: self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of),
             approved: self.folds.approved,
+            policy: self.policy(),
             tree: Anchor::at(self.tree_scroll.offset()),
             buffer: Anchor::at(self.buffer_scroll.target()),
         }
@@ -235,10 +238,12 @@ impl Model {
             diff,
             diff_key,
             approved,
+            policy,
             tree,
             buffer,
         } = places;
         let approved_before = self.folds.approved;
+        let policy_before = self.policy();
 
         // Motion aimed at offsets in the old rows stops.
         self.diff_scroll.stop();
@@ -251,7 +256,10 @@ impl Model {
         // density.
         let grid = self.grid();
         let presentation = self.presentation_in(&grid);
-        if presentation != self.presented || self.folds.approved != approved_before {
+        if presentation != self.presented
+            || self.folds.approved != approved_before
+            || self.policy() != policy_before
+        {
             self.presented = presentation;
             // The diff's rows are new, so row and column of a selection in it mean other text.
             self.selection = self
@@ -262,7 +270,7 @@ impl Model {
 
         // Every list back at its row, within the new extent.
         let diff = match diff_key {
-            Some(key) if self.folds.approved != approved => key
+            Some(key) if self.folds.approved != approved || self.policy() != policy => key
                 .find(&self.rows)
                 .map_or(diff, |row| Anchor { row, ..diff }),
             _ => diff,

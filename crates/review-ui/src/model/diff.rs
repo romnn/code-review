@@ -160,21 +160,40 @@ impl Model {
         self.rebuild();
     }
 
-    /// `n`: the next match while a `/` search is in the diff, else the next file to review.
-    pub(super) fn next_file(&mut self) {
-        if self.diff_search_active() {
-            self.find_step(true, false);
+    /// `n` and `N`: the next (or previous) file in the visible tree, or the next (or previous)
+    /// match while a `/` search is in the diff.
+    ///
+    /// In the tree the cursor moves there and previews it, as `j` and `k` do; in the diff the
+    /// file shows at its first hunk that needs the reviewer. At either end of the tree it
+    /// stays, as the tree's cursor does, and says so.
+    pub(super) fn step_file(&mut self, forward: bool) {
+        if self.mode == Mode::Diff && self.diff_search_active() {
+            self.find_step(forward, false);
             return;
         }
-        match self.next_open_file() {
-            Some(path) => {
-                self.show_file(&path);
-                self.select_first_open_hunk();
-                self.reveal_hunk();
-                self.set_status(format!("Reviewing {path}."));
-            }
-            None => self.set_status("Every file is reviewed."),
+        let Some(position) = self.adjacent_file(forward) else {
+            self.set_status(if forward {
+                "This is the last file."
+            } else {
+                "This is the first file."
+            });
+            return;
+        };
+        if self.mode == Mode::Tree {
+            self.tree_move_to(position);
+            return;
         }
+        let Some(path) = self
+            .visible_tree()
+            .get(position)
+            .and_then(|&index| self.tree.get(index))
+            .map(|node| node.path.clone())
+        else {
+            return;
+        };
+        self.show_file(&path);
+        self.select_first_open_hunk();
+        self.reveal_hunk();
     }
 
     /// Selects the first hunk that still needs the reviewer, or keeps the selection.

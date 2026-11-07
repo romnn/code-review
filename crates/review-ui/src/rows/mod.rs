@@ -19,7 +19,7 @@ use review_core::analysis::{Chunk, FileUnit, UnitKind};
 use review_core::scope::breadcrumb;
 use review_core::{
     Collapse, DiffLineKind, LineEnding, MoveView, NoteAttachment, RevisionView, Side, SideDiff,
-    UnitId, UnitState, Verdict, split_line_ending,
+    Standing, UnitId, UnitState, Verdict, split_line_ending,
 };
 
 mod present;
@@ -138,8 +138,8 @@ pub struct Note {
     /// For a unit header, the named scopes around the unit, such as `impl Ledger › fn apply`.
     pub scope: Option<String>,
     /// For a unit header, a short label of what kind of change it is, such as
-    /// "only reformatting", "whitespace changed · not proven equivalent" or "changed since
-    /// revision 1".
+    /// "reformatted only", "reformatted only · auto-approved", "whitespace changed · not
+    /// proven equivalent" or "changed since revision 1".
     pub tag: Option<String>,
     /// For a hunk header, whether the hunk shows its header alone.
     pub folded: bool,
@@ -285,6 +285,8 @@ pub enum Badge {
     Seen,
     /// Accepted, possibly carried.
     Accepted,
+    /// Approved automatically as proven formatting-only, without a mark.
+    Auto,
     /// Flagged, possibly carried.
     Flagged,
     /// Reviewed in an earlier revision, but changed since.
@@ -292,24 +294,29 @@ pub enum Badge {
 }
 
 impl Badge {
-    /// The badge of a unit in `state`.
+    /// The badge of a unit that stands at `standing`.
     #[must_use]
-    pub fn of(state: UnitState) -> Self {
-        match state {
-            UnitState::New | UnitState::Unseen { .. } => Self::Unreviewed,
-            UnitState::Reviewed { verdict, .. } => match verdict {
+    pub fn of(standing: Standing) -> Self {
+        match standing {
+            Standing::Open => Self::Unreviewed,
+            Standing::AutoApproved => Self::Auto,
+            Standing::Reviewed(verdict) => match verdict {
                 Verdict::Seen => Self::Seen,
                 Verdict::Accepted => Self::Accepted,
                 Verdict::Flagged => Self::Flagged,
             },
-            UnitState::ChangedSinceReviewed { .. } => Self::Changed,
+            Standing::Changed => Self::Changed,
         }
     }
 
-    /// Whether the badge counts as reviewed.
+    /// Whether the badge counts as reviewed: marked with any verdict or approved
+    /// automatically.
     #[must_use]
     pub fn is_reviewed(self) -> bool {
-        matches!(self, Self::Seen | Self::Accepted | Self::Flagged)
+        matches!(
+            self,
+            Self::Seen | Self::Accepted | Self::Auto | Self::Flagged
+        )
     }
 }
 
@@ -404,8 +411,8 @@ pub struct Folds {
 
 impl Folds {
     /// Whether `unit`'s body is folded: when the reviewer folded it, or when it is approved
-    /// (seen or accepted, and unchanged since), approved units fold, and the reviewer has not
-    /// unfolded it. Flagged and unreviewed units always show.
+    /// (seen, accepted or approved automatically, and unchanged since), approved units fold,
+    /// and the reviewer has not unfolded it. Flagged and unreviewed units always show.
     #[must_use]
     pub fn is_folded(&self, view: &RevisionView<'_>, unit: UnitId) -> bool {
         if self.units.contains(&unit) {
@@ -414,13 +421,7 @@ impl Folds {
         if self.approved == Approved::Shown {
             return false;
         }
-        let approved = matches!(
-            view.state(unit),
-            Ok(UnitState::Reviewed {
-                verdict: Verdict::Seen | Verdict::Accepted,
-                ..
-            })
-        );
+        let approved = view.standing(unit).is_ok_and(Standing::is_approved);
         approved && !self.opened.contains(&unit)
     }
 }
@@ -595,7 +596,7 @@ fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> Fil
                 removed += chunk.removed.lines().count();
             }
         }
-        match view.state(unit).map(Badge::of) {
+        match view.standing(unit).map(Badge::of) {
             Ok(Badge::Flagged) => {
                 reviewed += 1;
                 flagged += 1;
@@ -888,7 +889,7 @@ fn hunk_header(
         .unwrap_or_default();
     let path = layout.files.get(file).map(|section| section.path.clone());
     let note = Note {
-        badge: view.state(first).ok().map(Badge::of),
+        badge: view.standing(first).ok().map(Badge::of),
         tag: hunk_tag(units.iter().map(|&unit| header_tag(view, unit)).collect()),
         scope: view.scope_anchor(first).ok().flatten().and_then(|anchor| {
             let syntax = folds.syntax.get(path.as_deref()?)?;
@@ -911,9 +912,15 @@ fn note_lines(text: &str) -> Vec<&str> {
     if lines.is_empty() { vec![""] } else { lines }
 }
 
+/// The label of a proven formatting-only unit.
+const REFORMATTED: &str = "reformatted only";
+
+/// The label of a proven formatting-only unit that no mark decides, approved automatically.
+const AUTO_APPROVED: &str = "reformatted only · auto-approved";
+
 /// The label of a hunk from its units' labels. A label the units share speaks for the hunk; when
 /// they differ, each says only that the hunk includes it, so one proven reflow never labels a
-/// real edit beside it "only reformatting".
+/// real edit beside it "reformatted only".
 fn hunk_tag(tags: Vec<Option<String>>) -> Option<String> {
     let first = tags.first()?.clone();
     if tags.iter().all(|tag| *tag == first) {
@@ -922,7 +929,7 @@ fn hunk_tag(tags: Vec<Option<String>>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for tag in tags.into_iter().flatten() {
         let part = match tag.as_str() {
-            "only reformatting" => "includes reformatting".to_owned(),
+            REFORMATTED | AUTO_APPROVED => "includes reformatting".to_owned(),
             "whitespace changed · not proven equivalent" => {
                 "includes unproven whitespace changes".to_owned()
             }
@@ -1005,7 +1012,10 @@ fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
         return Some(format!("changed since revision {}", reviewed.revision()));
     }
     match view.collapse(unit) {
-        Ok(Some(Collapse::FormattingOnly)) => return Some("only reformatting".to_owned()),
+        Ok(Some(Collapse::FormattingOnly)) => {
+            let auto = matches!(view.standing(unit), Ok(Standing::AutoApproved));
+            return Some(if auto { AUTO_APPROVED } else { REFORMATTED }.to_owned());
+        }
         Ok(Some(Collapse::Noise(category))) => return Some(category.name().to_owned()),
         _ => {}
     }
@@ -1538,14 +1548,72 @@ mod tests {
         (dir, review)
     }
 
-    /// Builds the demo's layout with `folds`.
+    /// Builds the demo's layout with `folds`, with formatting-only hunks needing review like
+    /// any other, so these tests see every hunk the demo's marks leave open.
     fn demo_layout(folds: &Folds) -> (tempfile::TempDir, Layout) {
+        demo_layout_under(folds, review_core::ReviewPolicy::MARKS_ONLY)
+    }
+
+    /// The apps' default policy: proven formatting-only units are approved automatically.
+    const AUTO_APPROVE: review_core::ReviewPolicy = review_core::ReviewPolicy {
+        auto_approve_formatting: true,
+    };
+
+    /// Builds the demo's layout with `folds`, deciding under `policy` which units need review.
+    fn demo_layout_under(
+        folds: &Folds,
+        policy: review_core::ReviewPolicy,
+    ) -> (tempfile::TempDir, Layout) {
         let (dir, review) = demo_review(1);
         let history = review.history().unwrap();
-        let view = history.current_view().unwrap();
+        let view = history.current_view_under(policy).unwrap();
         let order = review_core::walkthrough::partition(&view).order();
         let layout = present(build(&view, &order, folds), Presentation::default());
         (dir, layout)
+    }
+
+    /// Under the apps' default policy, the engine's proven brace reflow is approved automatically: it
+    /// folds to its header like an approved hunk, says so in its label, and shows its code
+    /// again when approved hunks show; nothing else in the file changes.
+    #[test]
+    fn formatting_only_hunks_fold_as_approved_automatically() {
+        let hunk_of = |layout: &Layout| {
+            let file = layout
+                .files
+                .iter()
+                .position(|section| section.path == "src/engine.rs")
+                .unwrap();
+            layout
+                .rows
+                .iter()
+                .filter(|row| row.file == file && row.kind() == RowKind::Header)
+                .filter_map(|row| row.note())
+                .find(|note| note.text == "lines 27–29")
+                .cloned()
+                .unwrap()
+        };
+        let folds = Folds::default();
+        let (_dir, automatic) = demo_layout_under(&folds, AUTO_APPROVE);
+        let header = hunk_of(&automatic);
+        assert!(header.folded, "approved automatically, it folds");
+        assert_eq!(header.badge, Some(Badge::Auto));
+        assert_eq!(header.tag.as_deref(), Some(AUTO_APPROVED));
+
+        let (_dir, manual) = demo_layout(&folds);
+        let header = hunk_of(&manual);
+        assert!(!header.folded, "needing review, it shows");
+        assert_eq!(header.badge, Some(Badge::Unreviewed));
+        assert_eq!(header.tag.as_deref(), Some(REFORMATTED));
+
+        let shown = Folds {
+            approved: Approved::Shown,
+            ..Folds::default()
+        };
+        let (_dir, unfolded) = demo_layout_under(&shown, AUTO_APPROVE);
+        assert!(
+            !hunk_of(&unfolded).folded,
+            "approved hunks shown show it too"
+        );
     }
 
     /// Which units a hunk holds never depends on whether the file's text has arrived, nor on
@@ -1658,11 +1726,11 @@ mod tests {
         assert!(info.contains(&"after   docs/current symlink (120000) to \"v2.md\""));
     }
 
-    /// A hunk is "only reformatting" only when every unit is; otherwise it says what it
-    /// includes.
+    /// A hunk is "reformatted only" only when every unit is; otherwise it says what it
+    /// includes, whether or not its reformatting was approved automatically.
     #[test]
     fn hunk_labels_need_every_unit() {
-        let reflow = Some("only reformatting".to_owned());
+        let reflow = Some(REFORMATTED.to_owned());
         assert_eq!(
             hunk_tag(vec![reflow.clone(), reflow.clone()]),
             reflow,
@@ -1680,6 +1748,10 @@ mod tests {
             ])
             .as_deref(),
             Some("partly changed since revision 1 · includes reformatting")
+        );
+        assert_eq!(
+            hunk_tag(vec![Some(AUTO_APPROVED.to_owned()), None]).as_deref(),
+            Some("includes reformatting")
         );
         assert_eq!(hunk_tag(vec![None, None]), None);
     }

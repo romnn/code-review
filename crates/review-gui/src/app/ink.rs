@@ -93,24 +93,28 @@ pub fn shown_piece(piece: Piece) -> Div {
         text,
         color,
         weight,
+        italic,
     } = piece;
     self::piece(Piece {
         text: DisplayLine::new(&text).text().to_owned(),
         color,
         weight,
+        italic,
     })
 }
 
-/// A div holding `piece` in its color and weight.
+/// A div holding `piece` in its color, weight and slant.
 pub fn piece(piece: Piece) -> Div {
     let Piece {
         text,
         color,
         weight: piece_weight,
+        italic,
     } = piece;
     div()
         .text_color(to_gpui(color))
         .when_some(weight(piece_weight), gpui::Styled::font_weight)
+        .when(italic, gpui::Styled::italic)
         .child(text)
 }
 

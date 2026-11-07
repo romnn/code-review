@@ -370,6 +370,13 @@ impl Model {
     /// is defined, and moves there, opening another file as a buffer when it is elsewhere.
     pub(super) fn go_to_definition(&mut self) {
         self.trust_pending = false;
+        if !self.settings.language_servers {
+            self.set_status(
+                "Go to definition is off: language servers never start while [lsp] enabled = \
+                 false in config.toml.",
+            );
+            return;
+        }
         if !self.trusted {
             self.set_status(
                 "Go to definition needs a language server, which runs code from this review. \

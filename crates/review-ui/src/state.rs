@@ -10,8 +10,8 @@ use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use review_core::{
-    Counts, FileStatus, History, MarkVerdict, ObjectId, RevisionNumber, RevisionView, UnitId,
-    UnitState, Verdict,
+    Counts, FileStatus, History, MarkVerdict, ObjectId, ReviewPolicy, RevisionNumber, RevisionView,
+    Standing, UnitId, Verdict,
 };
 
 use review_core::tree::{NodeKind, TreeNode};
@@ -25,13 +25,18 @@ pub struct Snapshot {
     pub history: Arc<History>,
     /// The revision shown; switching to a newer one is the reviewer's decision.
     pub revision: RevisionNumber,
+    /// Which units still need the reviewer in every view of it.
+    ///
+    /// The engine decides by it, and `cr` reads the same `[review] auto_approve_formatting`
+    /// setting from the configuration file, so the window and `cr` agree.
+    pub policy: ReviewPolicy,
 }
 
 impl Snapshot {
-    /// The shown revision's view.
+    /// The shown revision's view, deciding under [`Self::policy`].
     #[must_use]
     pub fn view(&self) -> Option<RevisionView<'_>> {
-        self.history.view(self.revision).ok()
+        self.history.view_under(self.revision, self.policy).ok()
     }
 
     /// The newest revision in the history, when it is newer than the one shown.
@@ -157,19 +162,20 @@ pub fn is_file(tree: &[TreeNode], path: &str) -> bool {
         .any(|node| node.kind == NodeKind::File && node.path == path)
 }
 
-/// The badge a pending verdict shows until the engine has recorded it.
+/// Where a unit stands once a pending verdict is recorded: a mark always decides, so an
+/// `unseen` one leaves it open even when it would be approved automatically.
 #[must_use]
-pub fn pending_badge(verdict: MarkVerdict) -> Badge {
+pub fn pending_standing(verdict: MarkVerdict) -> Standing {
     match verdict {
-        MarkVerdict::Seen => Badge::Seen,
-        MarkVerdict::Accepted => Badge::Accepted,
-        MarkVerdict::Flagged => Badge::Flagged,
-        MarkVerdict::Unseen => Badge::Unreviewed,
+        MarkVerdict::Seen => Standing::Reviewed(Verdict::Seen),
+        MarkVerdict::Accepted => Standing::Reviewed(Verdict::Accepted),
+        MarkVerdict::Flagged => Standing::Reviewed(Verdict::Flagged),
+        MarkVerdict::Unseen => Standing::Open,
     }
 }
 
-/// The badges of `units`, with the latest pending verdict of each in place of its recorded
-/// state.
+/// The badges of `units`, with the latest pending verdict of each in place of where the engine
+/// says it stands.
 #[must_use]
 pub fn badges<S: BuildHasher>(
     view: &RevisionView<'_>,
@@ -179,16 +185,17 @@ pub fn badges<S: BuildHasher>(
     units
         .iter()
         .map(|unit| match pending.get(unit) {
-            Some(&verdict) => pending_badge(verdict),
-            None => view.state(*unit).map_or(Badge::Unreviewed, Badge::of),
+            Some(&verdict) => Badge::of(pending_standing(verdict)),
+            None => view.standing(*unit).map_or(Badge::Unreviewed, Badge::of),
         })
         .collect()
 }
 
-/// Whether a badge counts as approved: seen or accepted, and not changed since.
+/// Whether a badge counts as approved: seen, accepted or approved automatically, and not
+/// changed since.
 #[must_use]
 pub fn is_approved(badge: Badge) -> bool {
-    matches!(badge, Badge::Seen | Badge::Accepted)
+    matches!(badge, Badge::Seen | Badge::Accepted | Badge::Auto)
 }
 
 /// The verdict that toggles `badges` towards `toward`: back to unreviewed when every unit
@@ -221,7 +228,7 @@ pub fn statuses<S: BuildHasher>(
         .map(|(position, file)| (file.path.clone(), position))
         .collect();
     for (&unit, &verdict) in pending {
-        let (Ok(state), Ok(file)) = (view.state(unit), view.file(unit)) else {
+        let (Ok(standing), Ok(file)) = (view.standing(unit), view.file(unit)) else {
             continue;
         };
         let Some(counts) = index
@@ -231,51 +238,11 @@ pub fn statuses<S: BuildHasher>(
         else {
             continue;
         };
-        *slot(counts, from_state(state)) = slot(counts, from_state(state)).saturating_sub(1);
-        *slot(counts, from_verdict(verdict)) += 1;
+        let before = counts.slot(standing);
+        *before = before.saturating_sub(1);
+        *counts.slot(pending_standing(verdict)) += 1;
     }
     files
-}
-
-/// The count a unit's state falls under.
-#[derive(Clone, Copy)]
-enum Category {
-    New,
-    Changed,
-    Seen,
-    Accepted,
-    Flagged,
-}
-
-fn from_state(state: UnitState) -> Category {
-    match state {
-        UnitState::New | UnitState::Unseen { .. } => Category::New,
-        UnitState::ChangedSinceReviewed { .. } => Category::Changed,
-        UnitState::Reviewed { verdict, .. } => match verdict {
-            Verdict::Seen => Category::Seen,
-            Verdict::Accepted => Category::Accepted,
-            Verdict::Flagged => Category::Flagged,
-        },
-    }
-}
-
-fn from_verdict(verdict: MarkVerdict) -> Category {
-    match verdict {
-        MarkVerdict::Seen => Category::Seen,
-        MarkVerdict::Accepted => Category::Accepted,
-        MarkVerdict::Flagged => Category::Flagged,
-        MarkVerdict::Unseen => Category::New,
-    }
-}
-
-fn slot(counts: &mut Counts, category: Category) -> &mut usize {
-    match category {
-        Category::New => &mut counts.new,
-        Category::Changed => &mut counts.changed,
-        Category::Seen => &mut counts.reviewed,
-        Category::Accepted => &mut counts.accepted,
-        Category::Flagged => &mut counts.flagged,
-    }
 }
 
 /// How much of a file or folder still needs the reviewer, for coloring its name.
@@ -294,10 +261,10 @@ pub enum Progress {
 }
 
 impl Progress {
-    /// The progress that `counts` describe.
+    /// The progress that `counts` describe; units approved automatically count as approved.
     #[must_use]
     pub fn of(counts: &Counts) -> Self {
-        let reviewed = counts.reviewed + counts.accepted;
+        let reviewed = counts.approved();
         if counts.flagged > 0 {
             Self::Flagged
         } else if counts.changed > 0 {
@@ -381,6 +348,9 @@ mod tests {
         let newer = Snapshot {
             history: Arc::new(review.history().unwrap()),
             revision,
+            policy: ReviewPolicy {
+                auto_approve_formatting: true,
+            },
         };
         assert_eq!(newer.newer(), Some(second));
         assert_eq!(
@@ -548,13 +518,16 @@ mod tests {
         let snapshot = Snapshot {
             revision: history.current().unwrap(),
             history: Arc::clone(&history),
+            policy: ReviewPolicy {
+                auto_approve_formatting: true,
+            },
         };
         assert!(snapshot.newer().is_none());
         let view = snapshot.view().unwrap();
         let unit = view
             .unit_ids()
             .into_iter()
-            .find(|&unit| matches!(view.state(unit), Ok(UnitState::New)))
+            .find(|&unit| matches!(view.standing(unit), Ok(Standing::Open)))
             .unwrap();
         let path = view.file(unit).unwrap().display_path().to_owned();
         let counts = |files: &[FileStatus]| {

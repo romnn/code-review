@@ -7,10 +7,12 @@
 //! review-gui reports logical pixels, review-tui terminal cells.
 
 use std::ops::Range;
+use std::time::SystemTime;
 
 use serde_json::{Map, Value, json};
 
 use crate::model::{Model, Phase};
+use crate::paint::{Palette, bars, files};
 use crate::rows::{Body, Cell};
 use crate::state::{self, Progress};
 
@@ -60,8 +62,28 @@ pub fn state(model: &Model, screen: &dyn Screen) -> Value {
         json!({
             "files": model.file_totals(),
             "hunks": model.totals(),
+            "auto_approved": model.auto_approved(),
         }),
     );
+    let palette = Palette::of(model);
+    let header = files::files_header(model, &palette);
+    let review = header
+        .number
+        .iter()
+        .map(|number| number.text.as_str())
+        .chain([header.name.text.as_str()])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    answer.insert("files_header".to_owned(), json!(review));
+    // The bottom bar's left side, whole, as a bar with room for all of it shows it.
+    let sync: String = bars::sync_label(model, &palette, SystemTime::now(), f32::MAX, |text| {
+        crate::scroll::float(text.chars().count())
+    })
+    .into_iter()
+    .map(|piece| piece.text)
+    .collect();
+    answer.insert("sync".to_owned(), json!(sync));
     Value::Object(answer)
 }
 

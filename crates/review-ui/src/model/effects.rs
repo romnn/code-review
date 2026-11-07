@@ -20,6 +20,7 @@ use review_core::{ObjectId, RevisionNumber};
 use super::buffer::{Definition, Lookup};
 use super::marks::{Marked, Refreshed};
 use super::picker::{Found, PreviewText, Query, Unchanged};
+use super::sync::Tick;
 use super::{Model, Opened};
 use crate::rows::FullText;
 use crate::state::Product;
@@ -72,6 +73,9 @@ pub(super) enum Because {
     Refresh,
     /// It fills caches keyed by blob, whose content an object ID never lets go stale.
     Content,
+    /// It only marks the passing of time, for what shows how long ago something happened or
+    /// that something runs.
+    Clock,
 }
 
 /// What a job or a timer produced.
@@ -98,6 +102,8 @@ pub(super) enum Outcome {
     Rested,
     /// Typing paused in the content search, so its search can start.
     Paused(Query),
+    /// A tick of the clock, for what shows the time.
+    Tick(Tick),
 }
 
 /// File texts and highlights read in the background, by blob.
@@ -123,8 +129,8 @@ pub enum Effect {
     /// UI thread.
     Spawn(Job),
     /// Hands the completion to [`Model::complete`] after the delay, as a timer: the tree
-    /// cursor's rest before a previewed diff is built, or the content search's pause for
-    /// typing.
+    /// cursor's rest before a previewed diff is built, the content search's pause for typing,
+    /// or a tick of the clock for what shows the time.
     After(Duration, Completion),
     /// Puts the text on the clipboard.
     Copy(String),
@@ -260,7 +266,10 @@ impl Model {
             }
             Outcome::Unchanged(_) => self.highlighting = self.highlighting.saturating_sub(1),
             Outcome::Marked(_) => self.marking = false,
-            Outcome::Refreshed(_) => self.refreshing = false,
+            Outcome::Refreshed(_) => {
+                self.refreshing = false;
+                *self.sync.step.lock() = None;
+            }
             Outcome::FoldersSaved(_) => self.folders.saving = false,
             Outcome::Definition(_) => {
                 self.looking_up = false;
@@ -275,6 +284,7 @@ impl Model {
             | Outcome::Found(_)
             | Outcome::PreviewText(_)
             | Outcome::Paused(_)
+            | Outcome::Tick(_)
             | Outcome::Rested => {}
         }
     }
@@ -328,6 +338,7 @@ impl Model {
             Outcome::Unchanged(unchanged) => self.unchanged_read(unchanged),
             Outcome::Rested => self.finish_preview(),
             Outcome::Paused(query) => self.search_picker(query),
+            Outcome::Tick(tick) => self.ticked(tick),
         }
     }
 }

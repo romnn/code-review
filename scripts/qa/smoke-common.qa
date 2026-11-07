@@ -11,17 +11,31 @@ state
 expect "selected":"src/engine.rs"
 expect "hunks":3
 expect "scope":"impl Ledger › fn apply_batch"
-# The brace reflow at lines 27–29 is proven formatting-only beside the file's real changes.
-expect "text":"lines 27–29","tag":"only reformatting"
+# The brace reflow at lines 27–29 is proven formatting-only beside the file's real changes, so
+# it is approved automatically, without a mark, and folds like an approved hunk.
+expect "text":"lines 27–29","tag":"reformatted only · auto-approved"
+expect "sync":"rev 1 · [0-9a-f]{7} · synced just now"
+expect "files_header":"#128 feature/reconcile"
 shot 02-engine
 
-# The diff starts at the first hunk that needs the reviewer; j/k move between hunks, and
-# space approves and moves on to the next open hunk.
+# The diff starts at the first hunk that needs the reviewer, past the reflow; j/k move
+# between hunks.
 key 0
 state
 expect "mode":"Diff"
-expect "hunk":1,
+expect "hunk":2,
 expect "hunk_badges":\["Unreviewed"\]
+key k
+state
+expect "hunk":1,
+expect "hunk_badges":\["Auto"\]
+shot 03-auto-approved
+# Space on the reflow records an explicit reset, so it needs review; space then approves it
+# by hand and moves on to the next open hunk.
+key space
+state
+expect "hunk_badges":\["Unreviewed"\]
+expect "tag":"reformatted only"
 key space
 state
 expect "hunk":2,
@@ -61,6 +75,54 @@ expect "editing":false
 shot 04-buffer-find
 key escape
 key escape
+state
+expect "mode":"Diff"
+expect "hunk":1,
+
+# Tab and Shift+Tab switch between the files and the code, and the buffer's Tab goes to the
+# files too.
+key tab
+state
+expect "mode":"Tree"
+expect "area":"Tree"
+key shift-tab
+state
+expect "mode":"Diff"
+expect "hunk":1,
+key =
+key tab
+state
+expect "mode":"Tree"
+key tab
+state
+expect "mode":"Diff"
+
+# n and N step through the files in the tree's order: from the diff each file shows at its
+# first hunk that needs the reviewer, and in the tree the cursor moves and previews it.
+key n
+state
+expect "selected":"src/format.rs"
+expect "mode":"Diff"
+key shift-n
+state
+expect "selected":"src/engine.rs"
+expect "hunk":1,
+# A folded folder's files are skipped whole: around the folded src/, N and n go from the file
+# before it to the file after it.
+key tab
+key h h
+state
+expect "collapsed":\["src"\]
+key shift-n
+state
+expect "selected":"scripts/release.sh"
+key n
+state
+expect "selected":"tools/stats.py"
+shot 06-next-file-past-folded
+key z shift-r
+file src/engine.rs
+key 0
 state
 expect "mode":"Diff"
 expect "hunk":1,

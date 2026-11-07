@@ -1,5 +1,6 @@
 //! The settings list, opened with `T` or `,`: themes, diff styles, density, layout, token
-//! emphasis, approved hunks and font size, keyboard first, with a search over every entry.
+//! emphasis, approved hunks, approving reformatting automatically and font size, keyboard
+//! first, with a search over every entry.
 //!
 //! The list and its search field own the keyboard apart, as two key contexts: the list takes
 //! `j`/`k`, Space and `q`, the field takes everything typed, and Tab switches between them.
@@ -10,6 +11,8 @@
 //! font size changes the diff beside it and never the panel itself.
 //! Applying moves the applied look and writes the entry's setting to the configuration; when
 //! that write fails, the look stays applied and the status line says it could not be saved.
+
+use review_core::ReviewPolicy;
 
 use super::{Model, Overlay, present::Places};
 use crate::config::{Approved, Density, DiffLayout, Remembered, points_to_pixels};
@@ -33,6 +36,8 @@ pub enum Choice {
     Emphasis(bool),
     /// Whether approved hunks fold to their header.
     Approved(Approved),
+    /// Whether proven formatting-only hunks count as approved without a mark.
+    AutoApprove(bool),
     /// A code size in points.
     FontSize(u8),
 }
@@ -46,6 +51,8 @@ struct Preview {
     code_size: Option<f32>,
     /// Approved hunks folded or shown, over what is in use.
     approved: Option<Approved>,
+    /// Which units need the reviewer, over the policy in use.
+    policy: Option<ReviewPolicy>,
 }
 
 /// One entry of the list.
@@ -101,6 +108,8 @@ pub struct Panel {
     code_size: f32,
     /// Whether approved hunks fold apart from a preview.
     approved: Approved,
+    /// Which units need the reviewer apart from a preview.
+    policy: ReviewPolicy,
     /// Where the lists were when the panel opened; every preview starts from there, so one
     /// that moved a list to fit it never moves the place for good.
     places: Places,
@@ -182,6 +191,18 @@ pub fn entries(app: &Model) -> Vec<Entry> {
         "shown",
         "with their code · zA",
         Choice::Approved(Approved::Shown),
+    );
+    option(
+        "Reformatting",
+        "approved automatically",
+        "proven formatting-only hunks need no mark",
+        Choice::AutoApprove(true),
+    );
+    option(
+        "Reformatting",
+        "needs review",
+        "every hunk needs a mark",
+        Choice::AutoApprove(false),
     );
     // A front end without a code size, such as a terminal, offers no font sizes.
     let sizes = if app.settings.front_end.capabilities().code_size {
@@ -275,6 +296,7 @@ impl Model {
             scroll: ListScroll::default(),
             code_size: self.code_size,
             approved: self.folds.approved,
+            policy: self.policy(),
             places,
             text_code_size: self.code_size,
         });
@@ -324,6 +346,12 @@ impl Model {
                 Some(Choice::Approved(approved)) => Some(approved),
                 _ => None,
             },
+            policy: match cursor {
+                Some(Choice::AutoApprove(on)) => Some(ReviewPolicy {
+                    auto_approve_formatting: on,
+                }),
+                _ => None,
+            },
         };
         self.preview(preview);
     }
@@ -352,7 +380,7 @@ impl Model {
                 token_emphasis: *on,
                 ..applied.clone()
             },
-            Choice::Approved(_) | Choice::FontSize(_) => return None,
+            Choice::Approved(_) | Choice::AutoApprove(_) | Choice::FontSize(_) => return None,
         };
         (look != *applied).then_some(look)
     }
@@ -380,12 +408,20 @@ impl Model {
             .map_or(self.folds.approved, |panel| panel.approved)
     }
 
+    /// Which units need the reviewer apart from a preview.
+    fn policy_in_use(&self) -> ReviewPolicy {
+        self.settings_panel
+            .as_ref()
+            .map_or_else(|| self.policy(), |panel| panel.policy)
+    }
+
     /// Whether the diff shows a preview rather than what was applied.
     #[must_use]
     pub fn previewing(&self) -> bool {
         self.settings.appearance.preview.is_some()
             || (self.code_size - self.code_size_in_use()).abs() > 0.01
             || self.folds.approved != self.approved_in_use()
+            || self.policy() != self.policy_in_use()
     }
 
     /// Shows `preview` over what is applied and in use, dropping each part that is `None`,
@@ -396,12 +432,15 @@ impl Model {
             look,
             code_size,
             approved,
+            policy,
         } = preview;
         let size = code_size.unwrap_or_else(|| self.code_size_in_use());
         let approved = approved.unwrap_or_else(|| self.approved_in_use());
+        let policy = policy.unwrap_or_else(|| self.policy_in_use());
         if self.settings.appearance.preview == look
             && (self.code_size - size).abs() < 0.01
             && self.folds.approved == approved
+            && self.policy() == policy
         {
             return;
         }
@@ -409,6 +448,7 @@ impl Model {
             this.settings.appearance.preview = look;
             this.code_size = size;
             this.folds.approved = approved;
+            this.set_policy(policy);
         });
     }
 
@@ -442,6 +482,7 @@ impl Model {
             Choice::Layout(layout) => applied.layout == *layout,
             Choice::Emphasis(on) => applied.token_emphasis == *on,
             Choice::Approved(approved) => self.approved_in_use() == *approved,
+            Choice::AutoApprove(on) => self.policy_in_use().auto_approve_formatting == *on,
             Choice::FontSize(size) => {
                 (look::points_of(self.code_size_in_use()) - f32::from(*size)).abs() < 0.5
             }
@@ -542,6 +583,11 @@ impl Model {
             }
             Choice::Approved(approved) => {
                 return self.apply_approved(*approved);
+            }
+            Choice::AutoApprove(on) => {
+                return self.apply_policy(ReviewPolicy {
+                    auto_approve_formatting: *on,
+                });
             }
             Choice::Emphasis(on) => (
                 Look {
@@ -650,6 +696,29 @@ impl Model {
                 table: "diff",
                 key: "approved",
                 value: approved.name().into(),
+            }],
+            what,
+        );
+    }
+
+    /// Decides under `policy` which units need the reviewer, keeping the reviewer's place, and
+    /// remembers it.
+    pub(super) fn apply_policy(&mut self, policy: ReviewPolicy) {
+        if let Some(panel) = &mut self.settings_panel {
+            panel.policy = policy;
+        }
+        self.settings.policy = policy;
+        self.settings_transition(|this| this.set_policy(policy));
+        let what = if policy.auto_approve_formatting {
+            "Proven formatting-only hunks approved automatically"
+        } else {
+            "Formatting-only hunks need review"
+        };
+        self.remember(
+            &[Remembered {
+                table: "review",
+                key: "auto_approve_formatting",
+                value: policy.auto_approve_formatting.into(),
             }],
             what,
         );

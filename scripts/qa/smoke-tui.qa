@@ -16,7 +16,7 @@ expect "revision":"1"
 expect "mode":"Tree"
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[4,17\],"hunks":\[7,27\]\}
+expect "progress":\{"files":\[6,17\],"hunks":\[13,27\],"auto_approved":6\}
 expect "layout":\{"sidebar":32\}
 expect "viewport":\[33,1,127,47\]
 shot 01-open
@@ -202,18 +202,18 @@ file src/engine.rs
 key 0
 state
 expect "density":"normal"
-expect "row_count":38,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 key |
 state
 expect "diff_style":"soft"
 expect "headers":"chips","change_bar":true
-expect "row_count":38,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-soft
 key |
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
-expect "row_count":38,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-plain
 key |
 state
@@ -226,10 +226,10 @@ expect "diff_style":"bold"
 key s
 state
 expect "layout":"side-by-side","effective_layout":"side-by-side"
-expect "row_count":30,
+expect "row_count":19,
 expect "kind":"Pair"
 shot 11-side-by-side
-drag 110 20 140 22
+drag 110 12 140 14
 state
 expect "column":"Right"
 pan 10
@@ -333,7 +333,7 @@ key shift-t
 state
 expect "overlay":"Settings"
 expect "cursor":"Theme: Carbonfox"
-expect "entries":21\}
+expect "entries":23\}
 expect "geometry":\{"width":32,"list_top":3,"cursor_top":4\}
 key j
 state
@@ -441,7 +441,7 @@ click 10 17 2
 state
 expect "selected":"src/format.rs"
 expect "mode":"Diff"
-file src/parser.rs
+file src/compat.rs
 resize 160x12
 wheel 2
 state
@@ -544,7 +544,7 @@ launch --demo --config scripts/qa/compact.toml
 expect "density":"compact","effective_density":"compact"
 file src/engine.rs
 state
-expect "row_count":36,
+expect "row_count":25,
 expect "kind":"Gap".*"kind":"Header"
 shot 15-compact
 

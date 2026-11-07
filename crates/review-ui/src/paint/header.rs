@@ -38,14 +38,17 @@ pub fn meter(palette: &Palette, reviewed: usize, total: usize) -> Meter {
         float(reviewed) / float(total)
     };
     let counts = format!("{total}/{total}").len();
+    let fill = if reviewed == total && total > 0 {
+        palette.accepted
+    } else {
+        palette.accent
+    };
     Meter {
         bar: Bar {
             fraction,
-            fill: if reviewed == total && total > 0 {
-                palette.accepted
-            } else {
-                palette.accent
-            },
+            fill,
+            auto: 0.0,
+            auto_fill: fill,
             track: palette.hairline,
         },
         counts: Piece::new(
@@ -156,7 +159,7 @@ fn file_details(model: &Model, section: &FileSection) -> Vec<String> {
                 .map(|unit| format!("{unit:?}").to_lowercase()),
         );
         if change.formatting_only {
-            details.push("only reformatting".to_owned());
+            details.push("reformatted only".to_owned());
         }
         if let Some(noise) = change.noise {
             details.push(noise.name().to_owned());

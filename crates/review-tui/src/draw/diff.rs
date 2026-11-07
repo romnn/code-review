@@ -15,11 +15,11 @@ use ratatui::layout::Rect;
 use review_ui::color::{Hsla, Rgba};
 use review_ui::frame::List;
 use review_ui::model::Model;
-use review_ui::paint::annotation::{self, Annotation, HunkHeader, NotePan, Scope};
+use review_ui::paint::annotation::{self, Annotation, HunkHeader, NotePan, Scope, TAG_GAP_CELLS};
 use review_ui::paint::code::{self, At, CodeCell, Frame};
 use review_ui::paint::display::DisplayLine;
 use review_ui::paint::header::{self, FileHeader, Meter, StateCard};
-use review_ui::paint::{Ink, Palette, Piece, Room};
+use review_ui::paint::{Ink, Palette, Room};
 use review_ui::rows::{Body, Cell, Pair, Row};
 use review_ui::text::Column;
 
@@ -443,16 +443,19 @@ fn header_reach(header: &HunkHeader) -> u16 {
         .as_ref()
         .map_or(0, |scope| width(&scope.inner.text));
     let padding = if header.chips.is_some() { 2 } else { 0 };
-    let parts = [header.tag.as_ref(), header.location.as_ref()]
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(index, piece)| {
-            let before = u16::from(index > 0 || header.scope.is_some());
-            width(&piece.text).saturating_add(before + padding)
-        })
-        .fold(0, u16::saturating_add);
-    inner.saturating_add(parts).saturating_add(1)
+    let location = header.location.as_ref().map_or(0, |piece| {
+        let before = u16::from(header.scope.is_some());
+        width(&piece.text).saturating_add(before + padding)
+    });
+    let tag = header.tag.as_ref().map_or(0, |tag| {
+        let first = header.scope.is_none() && header.location.is_none();
+        let before = if first { 0 } else { TAG_GAP_CELLS };
+        width(&tag.text).saturating_add(before)
+    });
+    inner
+        .saturating_add(location)
+        .saturating_add(tag)
+        .saturating_add(1)
 }
 
 /// Where the text of one of the tool's own rows goes, and how it moves with the code.
@@ -493,9 +496,9 @@ fn note_text(
 }
 
 /// A hunk's header: its fold arrow in the gutter, its state glyph in the sign column, then its
-/// scopes (the outer ones cut first when room runs out), its tag and its lines, as text on the
-/// band or as chips; it moves with the code as `pan` says, as every one of the tool's own rows
-/// does.
+/// scopes (the outer ones cut first when room runs out) and its lines, as text on the band or
+/// as a chip, and its tag last, an italic aside on the band; it moves with the code as `pan`
+/// says, as every one of the tool's own rows does.
 fn hunk_header(
     painter: &mut Painter<'_>,
     palette: &Palette,
@@ -522,14 +525,16 @@ fn hunk_header(
     painter.piece(row.x + FRAME + GUTTER, y, 1, glyph, bg);
     let x = row.x + FRAME + GUTTER + SIGN;
     let right = row.right().saturating_sub(1);
-    // The parts after the scopes, each with the cell before it.
+    // The parts after the scopes: the location with the cell before it, and the tag with its
+    // gap.
     let chip_bg = chips.map(|chip| over(bg, chip));
-    let parts: Vec<&Piece> = [tag.as_ref(), location.as_ref()]
-        .into_iter()
-        .flatten()
-        .collect();
-    let part_width = |piece: &Piece| width(&piece.text) + 1 + if chip_bg.is_some() { 2 } else { 0 };
-    let after: u16 = parts.iter().map(|piece| part_width(piece)).sum();
+    let location_width = location.as_ref().map_or(0, |piece| {
+        width(&piece.text) + 1 + if chip_bg.is_some() { 2 } else { 0 }
+    });
+    let tag_width = tag
+        .as_ref()
+        .map_or(0, |tag| width(&tag.text) + TAG_GAP_CELLS);
+    let after = location_width + tag_width;
     // The outer scopes make way first, so what the header needs is the rest.
     let inner_width = scope.as_ref().map_or(0, |scope| width(&scope.inner.text));
     let at = NoteAt {
@@ -552,8 +557,8 @@ fn hunk_header(
             }
             x += painter.piece(x, 0, right.saturating_sub(x), inner, bg);
         }
-        for (index, piece) in parts.into_iter().enumerate() {
-            if index > 0 || scope.is_some() {
+        if let Some(piece) = location {
+            if scope.is_some() {
                 x += 1;
             }
             if x >= right {
@@ -566,6 +571,16 @@ fn hunk_header(
                 }
                 None => x += painter.piece(x, 0, right - x, piece, bg),
             }
+        }
+        // The tag is an aside on the band itself, never a chip, so the band stays whole.
+        if let Some(tag) = tag {
+            if x > 0 {
+                x += TAG_GAP_CELLS;
+            }
+            if x >= right {
+                return;
+            }
+            painter.piece(x, 0, right - x, tag, bg);
         }
     });
 }
@@ -738,6 +753,7 @@ pub fn border(painter: &mut Painter<'_>, color: Hsla, area: Rect, bg: Rgba) {
 mod tests {
     use ratatui::buffer::Buffer;
     use review_ui::config::Background;
+    use review_ui::paint::Piece;
 
     use super::*;
     use crate::color::Colors;
@@ -806,13 +822,13 @@ mod tests {
             glyph: Piece::new("○", palette.faint),
             scope: Some(Scope {
                 outer: None,
-                inner: Piece::new("fn ab", palette.text),
+                inner: Piece::new("fn", palette.text),
             }),
-            tag: Some(Piece::new("tag", palette.faint)),
             location: None,
+            tag: Some(Piece::new("tag", palette.faint)),
             chips: None,
         });
         assert_eq!(reach(&header), room);
-        assert_eq!(draw(&header, 3.0), "fn ab tag ");
+        assert_eq!(draw(&header, 3.0), "fn    tag ", "the tag stands apart");
     }
 }

@@ -1,56 +1,144 @@
 //! The bottom bars, the `/` bar and the `?` cheat sheet.
 //!
-//! The lower bottom bar shows what the keys act on at the left and the current mode's keys at
-//! the right, in rank order with `? keys` last at the edge.
+//! The lower bottom bar shows which revision shows and how fresh it is at the left and the
+//! current mode's keys at the right, in rank order with `? keys` last at the edge.
 //! Keys that cannot act now are dimmed, not removed, and a narrow window drops whole hints
 //! from the highest rank down, so the bar never shifts as the selection changes.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use review_core::RefreshStep;
 use review_core::tree::NodeKind;
 
 use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
 use crate::keymap::{self, Area, Section};
-use crate::model::{Field, Mode, Model, plural};
-use crate::scroll::ease_out;
+use crate::model::sync::ago;
+use crate::model::{Field, Mode, Model, Phase, SyncStep, plural};
+use crate::scroll::{self, ease_out};
 use crate::state;
 
 /// How long the status line's tint lasts after a failure.
 pub const FLASH: Duration = Duration::from_millis(450);
 
-/// What the review keys act on now, such as `hunk 2/3 · src/engine.rs`.
+/// The braille spinner's frames, a tenth of a second each.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// What the bottom bar's left side says: which revision shows and how fresh it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncPart {
+    /// What it says.
+    piece: Piece,
+    /// The first to make way when room runs out is the highest; 0 never does.
+    rank: u8,
+}
+
+/// The bottom bar's left side at `now`, with the parts that fit `budget` when `width` measures
+/// a text, and ` · ` between them: the revision on screen and its head commit, a newer
+/// revision waiting, and when the review last synced, or what a running fetch is doing, or
+/// for a moment that it failed.
+///
+/// When room runs out, the commit makes way first, then the time since the sync, then the
+/// newer revision; the revision and what a fetch is doing stay.
 #[must_use]
-pub fn target_label(model: &Model) -> String {
-    let file = model.selected.clone().unwrap_or_default();
-    match model.mode {
-        Mode::Tree => model
-            .tree_node()
-            .map(|node| match node.kind {
-                NodeKind::Directory => format!("{}/", node.path),
-                NodeKind::File => node.path.clone(),
-            })
-            .unwrap_or_default(),
-        Mode::Diff if model.rows.hunks.is_empty() => file,
-        Mode::Diff => format!(
-            "hunk {}/{} · {file}",
-            model.hunk + 1,
-            model.rows.hunks.len()
-        ),
-        Mode::Buffer => {
-            let line = model
-                .buffer
+pub fn sync_label(
+    model: &Model,
+    palette: &Palette,
+    now: SystemTime,
+    budget: f32,
+    width: impl Fn(&str) -> f32,
+) -> Vec<Piece> {
+    let mut parts = Vec::new();
+    let part = |piece: Piece, rank: u8| SyncPart { piece, rank };
+    if let Some(snapshot) = &model.snapshot {
+        parts.push(part(
+            Piece::new(format!("rev {}", snapshot.revision), palette.text),
+            0,
+        ));
+        if let Some(record) = snapshot.view().and_then(|view| view.record()) {
+            // Seven digits, as git abbreviates a commit.
+            let head = record.head.as_str().get(..7).unwrap_or_default();
+            parts.push(part(Piece::new(head, palette.faint), 3));
+        }
+        if let Some(newer) = snapshot.newer() {
+            parts.push(part(
+                Piece::new(format!("rev {newer} available"), palette.accent),
+                1,
+            ));
+        }
+    }
+    let spinner = SPINNER.get(spin_frame(now)).copied().unwrap_or_default();
+    let activity = match (&model.phase, model.sync.step()) {
+        (Phase::Loading(_), _) => Some(format!("{spinner} opening…")),
+        (_, Some(step)) => Some(format!("{spinner} {}", step_label(model, step))),
+        (_, None) => None,
+    };
+    if let Some(activity) = activity {
+        parts.push(part(Piece::new(activity, palette.dim), 0));
+    } else if model.sync.failing(now) {
+        parts.push(part(Piece::new("sync failed", palette.error), 0));
+    } else if let Some(synced) = &model.sync.synced {
+        parts.push(part(
+            Piece::new(format!("synced {}", ago(synced, now)), palette.faint),
+            2,
+        ));
+    }
+    let separator = " · ";
+    let total = |parts: &[SyncPart]| {
+        parts
+            .iter()
+            .map(|part| width(&part.piece.text))
+            .sum::<f32>()
+            + width(separator) * scroll::float(parts.len().saturating_sub(1))
+    };
+    while total(&parts) > budget {
+        let Some(position) = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| part.rank > 0)
+            .max_by_key(|(_, part)| part.rank)
+            .map(|(position, _)| position)
+        else {
+            break;
+        };
+        parts.remove(position);
+    }
+    let mut pieces = Vec::new();
+    for (index, SyncPart { piece, .. }) in parts.into_iter().enumerate() {
+        if index > 0 {
+            pieces.push(Piece::new(separator, palette.faint));
+        }
+        pieces.push(piece);
+    }
+    pieces
+}
+
+/// The spinner's frame at `now`, which turns every tenth of a second.
+fn spin_frame(now: SystemTime) -> usize {
+    let tenths = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() / 100);
+    usize::try_from(tenths % 10).unwrap_or(0)
+}
+
+/// What a running fetch's `step` is doing, as the bar says it.
+fn step_label(model: &Model, step: SyncStep) -> String {
+    match step {
+        SyncStep::Refresh(RefreshStep::Fetching) => "syncing…".to_owned(),
+        SyncStep::Refresh(RefreshStep::Analyzing) => {
+            // A new revision is the one after the newest recorded.
+            let next = model
+                .snapshot
                 .as_ref()
-                .map_or(0, |buffer| buffer.cursor.row + 1);
-            match model.buffer_hunk() {
-                Some(hunk) => format!(
-                    "hunk {}/{} · line {line} · {file}",
-                    hunk + 1,
-                    model.rows.hunks.len()
-                ),
-                None => format!("line {line} · {file}"),
+                .and_then(|snapshot| snapshot.history.current())
+                .and_then(review_core::RevisionNumber::next);
+            match next {
+                Some(next) => format!("analyzing rev {next}…"),
+                None => "analyzing…".to_owned(),
             }
         }
+        SyncStep::Refresh(RefreshStep::Describing) => "reading the pull request…".to_owned(),
+        SyncStep::Carrying => "carrying marks…".to_owned(),
     }
 }
 
@@ -58,7 +146,7 @@ pub fn target_label(model: &Model) -> String {
 #[must_use]
 pub fn hint_available(model: &Model, action: &str) -> bool {
     match action {
-        "NextFile" => !model.file_open() && model.next_open_file().is_some(),
+        "NextFile" => model.adjacent_file(true).is_some() || model.adjacent_file(false).is_some(),
         "GoToDefinition" => model.trusted,
         "ToggleApprove" | "ToggleFlag" => match model.mode {
             Mode::Buffer => model.buffer_hunk().is_some(),
@@ -106,10 +194,10 @@ pub fn bar_hints(
     let mut hints = keymap::hints(&model.settings.keymap, area, |action| {
         hint_available(model, action)
     });
-    // While a search is in the diff, `n` steps through its matches.
+    // While a search is in the diff, `n` and `N` step through its matches.
     if area == Area::Diff && model.diff_search_active() {
         for hint in hints.iter_mut().filter(|hint| hint.action == "NextFile") {
-            hint.label = "next match";
+            hint.label = "match";
             hint.available = true;
         }
     }

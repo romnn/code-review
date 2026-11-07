@@ -174,7 +174,43 @@ const DEFAULTS: &[Default] = &[
         TREE,
         "Files",
         "focus the diff",
+        None,
+        None,
+    ),
+    (
+        "SwitchPane",
+        &["tab", "shift-tab"],
+        TREE,
+        "Files",
+        "files ⇄ code",
         Some((4, "diff")),
+        None,
+    ),
+    (
+        "SwitchPane",
+        &["tab", "shift-tab"],
+        REVIEW,
+        "Files",
+        "",
+        Some((8, "files")),
+        None,
+    ),
+    (
+        "NextFile",
+        &["n"],
+        &[Area::Tree, Area::Diff],
+        "Files",
+        "next file · next match",
+        Some((7, "file")),
+        Some("PreviousFile"),
+    ),
+    (
+        "PreviousFile",
+        &["shift-n"],
+        &[Area::Tree, Area::Diff],
+        "Files",
+        "previous file · previous match",
+        None,
         None,
     ),
     (
@@ -296,21 +332,12 @@ const DEFAULTS: &[Default] = &[
         None,
     ),
     (
-        "NextFile",
-        &["n"],
-        DIFF,
-        "Diff",
-        "next file to review",
-        Some((7, "next file")),
-        None,
-    ),
-    (
         "FocusTree",
         &["escape", "h", "left"],
         DIFF,
         "Diff",
         "back to the files",
-        Some((8, "files")),
+        None,
         None,
     ),
     (
@@ -453,7 +480,7 @@ const DEFAULTS: &[Default] = &[
     (
         "FindPrevious",
         &["shift-n"],
-        REVIEW,
+        BUFFER,
         "Search",
         "previous match",
         None,
@@ -1155,7 +1182,7 @@ mod tests {
         assert!(
             shown
                 .iter()
-                .any(|hint| hint.label == "next file" && !hint.available),
+                .any(|hint| hint.keys == "n/N" && hint.label == "file" && !hint.available),
             "an unavailable action keeps its place, dimmed"
         );
         for label in ["files", "grep", "style", "split", "settings"] {

@@ -178,16 +178,20 @@ pub struct Piece {
     pub color: Hsla,
     /// How heavy it is.
     pub weight: Weight,
+    /// Whether it is italic, as an aside about what is beside it; a terminal that cannot show
+    /// italics shows it upright.
+    pub italic: bool,
 }
 
 impl Piece {
-    /// `text` in `color`, at the body's weight.
+    /// `text` in `color`, upright at the body's weight.
     #[must_use]
     pub fn new(text: impl Into<String>, color: Hsla) -> Self {
         Self {
             text: text.into(),
             color,
             weight: Weight::Regular,
+            italic: false,
         }
     }
 
@@ -195,6 +199,15 @@ impl Piece {
     #[must_use]
     pub fn weighted(self, weight: Weight) -> Self {
         Self { weight, ..self }
+    }
+
+    /// The piece in italics.
+    #[must_use]
+    pub fn italicized(self) -> Self {
+        Self {
+            italic: true,
+            ..self
+        }
     }
 }
 
@@ -214,6 +227,11 @@ pub struct Bar {
     pub fraction: f32,
     /// The filled part's color: the accent, or the approved color once all is done.
     pub fill: Hsla,
+    /// The part of [`Self::fraction`] approved automatically, from 0 to it, drawn at the end
+    /// of the filled part in [`Self::auto_fill`].
+    pub auto: f32,
+    /// The color of the part approved automatically, quieter than the fill.
+    pub auto_fill: Hsla,
     /// The track's color.
     pub track: Hsla,
 }

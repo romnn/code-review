@@ -1,7 +1,7 @@
-//! The bars along the bottom: the `/` bar while it takes typing, the status line, and what the
-//! keys act on with the current mode's keys.
+//! The bars along the bottom: the `/` bar while it takes typing, the status line, and the
+//! review's freshness with the current mode's keys.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use ratatui::layout::Rect;
 use review_ui::color::Rgba;
@@ -15,8 +15,8 @@ use super::opaque;
 use super::painter::{Brush, Painter, ellipsize_end, width};
 use crate::color::over;
 
-/// The cells the target label keeps before hints make way, as review-gui keeps 28 cells.
-const TARGET_CELLS: u16 = 28;
+/// The cells the sync label keeps before hints make way, as review-gui keeps 28 cells.
+const LABEL_CELLS: u16 = 28;
 
 /// The cells between two hints.
 const HINT_GAP: u16 = 2;
@@ -63,15 +63,15 @@ pub fn status(
     );
 }
 
-/// What the keys act on at the left, then a divider and the hints that fit at the right, in
-/// rank order with `? keys` last at the edge.
+/// Which revision shows and how fresh it is at the left, then a divider and the hints that
+/// fit at the right, in rank order with `? keys` last at the edge.
 pub fn hints(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area: Rect) {
     if area.height == 0 {
         return;
     }
     let surface = opaque(palette.surface);
     painter.fill(area, surface);
-    let budget = area.width.saturating_sub(2 + TARGET_CELLS + 3);
+    let budget = area.width.saturating_sub(2 + LABEL_CELLS + 3);
     let hints = bars::bar_hints(
         model,
         palette,
@@ -100,14 +100,15 @@ pub fn hints(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area: 
         divider.saturating_sub(1)
     };
     let room = label_end.saturating_sub(area.x + 1);
-    let label = ellipsize_end(&bars::target_label(model), room);
-    painter.text(
-        area.x + 1,
-        area.y,
-        room,
-        &label,
-        Brush::new(palette.text, surface),
-    );
+    let label = bars::sync_label(model, palette, SystemTime::now(), f32::from(room), |text| {
+        f32::from(width(text))
+    });
+    let mut at = area.x + 1;
+    for piece in &label {
+        let left = label_end.saturating_sub(at);
+        let shown = ellipsize_end(&piece.text, left);
+        at += painter.text(at, area.y, left, &shown, Brush::piece(piece, surface));
+    }
 }
 
 /// The `/` bar: the slash, the field's text with its cursor or its placeholder, and how many

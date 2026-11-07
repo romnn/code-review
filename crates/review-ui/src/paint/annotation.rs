@@ -50,8 +50,11 @@ pub enum Annotation {
     },
 }
 
-/// A hunk's header: one quiet line with its state glyph, the scopes around it, what kind of
-/// change it is, and where it is when its code is folded away or no scope names it.
+/// The cells of space before a hunk header's tag, which sets it apart as an aside.
+pub const TAG_GAP_CELLS: u16 = 4;
+
+/// A hunk's header: one quiet line with its state glyph, the scopes around it, where it is when
+/// its code is folded away or no scope names it, and what kind of change it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HunkHeader {
     /// The line's background: a gray a step above its hunk's band, so each hunk's start shows
@@ -63,12 +66,14 @@ pub struct HunkHeader {
     pub glyph: Piece,
     /// The scopes around the hunk, such as `impl Ledger › fn apply`.
     pub scope: Option<Scope>,
-    /// What kind of change it is, such as `only reformatting`.
-    pub tag: Option<Piece>,
     /// The lines it covers.
     pub location: Option<Piece>,
-    /// With chips headers, the background of the tag's and the location's chips; with band
-    /// headers, `None`, and each piece after the first starts with `· `.
+    /// What kind of change it is, such as `(reformatted only)`: an italic aside in the faint
+    /// color, last on the line and [`TAG_GAP_CELLS`] apart from what comes before it, on the
+    /// header's own background in either header style, so it never breaks the band.
+    pub tag: Option<Piece>,
+    /// With chips headers, the background of the location's chip; with band headers, `None`,
+    /// and the location starts with `· ` after the scopes.
     pub chips: Option<Hsla>,
 }
 
@@ -168,6 +173,8 @@ pub fn badges_glyph(badges: &[Badge]) -> (Badge, &'static str) {
         (Badge::Flagged, "!")
     } else if badges.contains(&Badge::Changed) {
         (Badge::Changed, "↻")
+    } else if all(|badge| badge == Badge::Auto) {
+        (Badge::Auto, "✓")
     } else if all(state::is_approved) {
         (Badge::Accepted, "✓")
     } else if badges.iter().copied().any(state::is_approved) {
@@ -225,7 +232,7 @@ fn hunk_header(
     // What the hunk changes leads: the scopes around it, innermost brightest.
     // Where it is matters only when its code is folded away or no scope names it, since the
     // gutter numbers the lines that show; a file unit's text says what changed, so it stays.
-    let receding = folded && badge == Badge::Accepted;
+    let receding = folded && matches!(badge, Badge::Accepted | Badge::Auto);
     let label = if receding { palette.faint } else { palette.dim };
     let lines_only = all_chunks(model, &units);
     let scope = note
@@ -252,21 +259,18 @@ fn hunk_header(
         }
     };
     let has_scope = scope.is_some();
+    let location = location.map(|text| Piece::new(separated(text, !has_scope), location_color));
     let tag = note
         .tag
-        .clone()
-        .map(|tag| Piece::new(separated(tag, !has_scope), palette.kind_quiet));
-    let location = location.map(|text| {
-        let first = !has_scope && tag.is_none();
-        Piece::new(separated(text, first), location_color)
-    });
+        .as_ref()
+        .map(|tag| Piece::new(format!("({tag})"), palette.faint).italicized());
     HunkHeader {
         background,
         fold: Piece::new(if folded { "▸" } else { "▾" }, palette.faint),
         glyph: Piece::new(glyph, palette.badge(badge)),
         scope,
-        tag,
         location,
+        tag,
         chips,
     }
 }
@@ -308,6 +312,16 @@ mod tests {
         );
         assert_eq!(
             badges_glyph(&[Badge::Accepted, Badge::Unreviewed]),
+            (Badge::Unreviewed, "◐")
+        );
+        // Approval without a mark keeps its own, quieter color, until a mark joins it.
+        assert_eq!(badges_glyph(&[Badge::Auto]), (Badge::Auto, "✓"));
+        assert_eq!(
+            badges_glyph(&[Badge::Auto, Badge::Accepted]),
+            (Badge::Accepted, "✓")
+        );
+        assert_eq!(
+            badges_glyph(&[Badge::Auto, Badge::Unreviewed]),
             (Badge::Unreviewed, "◐")
         );
     }

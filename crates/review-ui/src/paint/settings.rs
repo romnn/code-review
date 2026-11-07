@@ -179,6 +179,7 @@ fn settings_entry(
         | Choice::Layout(_)
         | Choice::Emphasis(_)
         | Choice::Approved(_)
+        | Choice::AutoApprove(_)
         | Choice::FontSize(_) => None,
     };
     SettingsEntry {

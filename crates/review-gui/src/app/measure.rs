@@ -180,9 +180,10 @@ impl Sizes {
         self.bar() + 2.0 * self.strip()
     }
 
-    /// The same for the tree, whose pane also has its two progress lines above it.
+    /// The same for the tree, whose pane has its two progress lines above it instead of a
+    /// header, and the two bottom bars below.
     fn tree_chrome(&self) -> f32 {
-        self.list_chrome() + 2.0 * self.ui_size() * LINE
+        2.0 * self.strip() + 2.0 * self.ui_size() * LINE
     }
 
     /// The same for the picker's entries: its query line and its footer.

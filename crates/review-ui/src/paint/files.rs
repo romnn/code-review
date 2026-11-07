@@ -1,7 +1,7 @@
 //! The files pane: its header, the review's progress under it, and the tree's rows.
 
-use review_core::ChangeKind;
 use review_core::tree::NodeKind;
+use review_core::{ChangeKind, ReviewInfo, ReviewTarget};
 
 use super::{Bar, Palette, Piece, Room, Weight};
 use crate::color::Hsla;
@@ -9,53 +9,87 @@ use crate::model::Model;
 use crate::scroll::float;
 use crate::state::Progress;
 
-/// The files pane's header: how many files there are and, while the tree is filtered, how
-/// many show and the filter.
+/// The files pane's header, in a front end that has no title of its own to name the review
+/// (review-tui): what the review is of, and the tree's filter while one narrows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesHeader {
-    /// `Files 12`, or `Files 3/12` while filtered; bright while the tree has the keys.
-    pub title: Piece,
-    /// The filter, such as `/engine`, in the accent.
-    pub filter: Option<Piece>,
+    /// A pull request's number, such as `#128`, bright while the tree has the keys; it never
+    /// makes way.
+    pub number: Option<Piece>,
+    /// The pull request's head branch, such as `feature/reconcile`, or the range under review,
+    /// such as `main..feature`; it is cut first when room runs out.
+    pub name: Piece,
+    /// The filter while one narrows the tree.
+    pub filter: Option<FilterLine>,
 }
 
-/// The files pane's header.
+/// The tree's filter while it narrows the tree, with how many files it leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterLine {
+    /// The query, such as `/engine`, in the accent.
+    pub query: Piece,
+    /// The files shown and all files, such as `3/17`.
+    pub count: Piece,
+}
+
+/// The files pane's header: the pull request's number and head branch, or the range under
+/// review, and the filter.
 #[must_use]
 pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
+    let focused = if tree_focused(model) {
+        palette.text
+    } else {
+        palette.dim
+    };
+    // The pull request's metadata names its branch; before it is fetched, the target its
+    // number.
+    let target = model.review.as_ref().map(|review| review.target());
+    let (number, name) = match (&model.info, target) {
+        (Some(ReviewInfo::PullRequest(pr)), _) => (Some(pr.number), pr.head_ref.clone()),
+        (_, Some(ReviewTarget::PullRequest { number, .. })) => (Some(*number), String::new()),
+        (_, Some(ReviewTarget::Range { base, head })) => (None, format!("{base}..{head}")),
+        (_, Some(ReviewTarget::Worktree { base })) => (None, format!("{base}..working tree")),
+        (_, None) => (None, String::new()),
+    };
+    FilesHeader {
+        number: number
+            .map(|number| Piece::new(format!("#{number}"), focused).weighted(Weight::Semibold)),
+        name: Piece::new(
+            name,
+            if number.is_some() {
+                palette.dim
+            } else {
+                focused
+            },
+        ),
+        filter: filter_line(model, palette),
+    }
+}
+
+/// The tree's filter while one narrows the tree: its query and how many files it leaves of
+/// all of them.
+#[must_use]
+pub fn filter_line(model: &Model, palette: &Palette) -> Option<FilterLine> {
+    let query = model.filter_query()?;
     let files = model
         .tree
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .count();
-    let filter = model.filter_query().map(|query| {
-        let shown = model
-            .visible_tree()
-            .iter()
-            .filter(|&&index| {
-                model
-                    .tree
-                    .get(index)
-                    .is_some_and(|node| node.kind == NodeKind::File)
-            })
-            .count();
-        (format!("/{query}"), shown)
-    });
-    let title = match &filter {
-        Some((_, shown)) => format!("Files {shown}/{files}"),
-        None => format!("Files {files}"),
-    };
-    FilesHeader {
-        title: Piece::new(
-            title,
-            if tree_focused(model) {
-                palette.text
-            } else {
-                palette.dim
-            },
-        )
-        .weighted(Weight::Semibold),
-        filter: filter.map(|(query, _)| Piece::new(query, palette.accent)),
-    }
+    let shown = model
+        .visible_tree()
+        .iter()
+        .filter(|&&index| {
+            model
+                .tree
+                .get(index)
+                .is_some_and(|node| node.kind == NodeKind::File)
+        })
+        .count();
+    Some(FilterLine {
+        query: Piece::new(format!("/{query}"), palette.accent),
+        count: Piece::new(format!("{shown}/{files}"), palette.dim),
+    })
 }
 
 /// Whether the tree has the keys.
@@ -63,20 +97,28 @@ fn tree_focused(model: &Model) -> bool {
     model.mode == crate::model::Mode::Tree && model.overlay.is_none()
 }
 
-/// A row of the file tree.
+/// The cells each depth of the tree indents, as lazygit's file tree does: a marker and the
+/// space after it, so a folder's children start under its name.
+pub const TREE_INDENT_CELLS: usize = 2;
+
+/// The cells before a tree row's name, after its indent: its marker and one space.
+pub const TREE_MARKER_CELLS: usize = 2;
+
+/// A row of the file tree, drawn as lazygit draws its file tree: the indent, one marker cell,
+/// a space and the name, with our review state's glyph at the right.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeRow {
     /// The node, by index into the model's tree, for a press.
     pub index: usize,
-    /// How deep the node is: its indent, in columns as wide as the chevron's.
+    /// How deep the node is; it indents [`TREE_INDENT_CELLS`] cells per depth.
     pub depth: usize,
-    /// A folder's `▸` when folded and `▾` when open; empty for a file.
-    pub chevron: Piece,
-    /// The change kind's letter, colored by kind, or a blank in the same column.
-    pub kind: Option<Piece>,
+    /// One cell: a folder's lazygit arrow, `▶` when folded and `▼` when open, or a file's
+    /// change kind letter, colored by kind.
+    pub marker: Piece,
     /// Whether the file was deleted, which strikes its name through.
     pub deleted: bool,
-    /// The name, colored by review state; a folder's ends with `/` and is a little quieter.
+    /// The name, colored by review state; a folder's is a little quieter and, as in lazygit,
+    /// has no trailing `/`.
     pub name: Piece,
     /// The review state's glyph, only for state that needs action or confirms done.
     pub glyph: Piece,
@@ -100,18 +142,23 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
     // Only what still needs the reviewer carries ink; done files recede, so the eye lands on
     // open, flagged and changed ones.
     let done = progress == Progress::Done;
-    let kind = node.change.as_ref().map(|change| {
-        let color = if done {
-            palette.faint
-        } else {
-            palette.tone(change.tone())
-        };
-        Piece::new(change.kind.letter().to_string(), color)
-    });
     let (name_color, glyph_color) = if done {
         (palette.dim, palette.faint)
     } else {
         (palette.progress(progress), palette.progress(progress))
+    };
+    let folder_color = name_color.alpha(0.8);
+    let marker = match (&node.change, directory) {
+        (_, true) => Piece::new(if collapsed { "▶" } else { "▼" }, folder_color),
+        (Some(change), false) => Piece::new(
+            change.kind.letter().to_string(),
+            if done {
+                palette.faint
+            } else {
+                palette.tone(change.tone())
+            },
+        ),
+        (None, false) => Piece::new(" ", palette.faint),
     };
     let background = if on_cursor {
         Some(palette.raised)
@@ -123,24 +170,15 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
     Some(TreeRow {
         index,
         depth: node.depth,
-        chevron: Piece::new(
-            match (directory, collapsed) {
-                (true, true) => "▸",
-                (true, false) => "▾",
-                (false, _) => "",
-            },
-            palette.faint,
-        ),
-        kind,
+        marker,
         deleted: node
             .change
             .as_ref()
             .is_some_and(|change| change.kind == ChangeKind::Deleted),
-        name: if directory {
-            Piece::new(format!("{}/", node.name), name_color.alpha(0.8))
-        } else {
-            Piece::new(node.name.clone(), name_color)
-        },
+        name: Piece::new(
+            node.name.clone(),
+            if directory { folder_color } else { name_color },
+        ),
         glyph: Piece::new(progress_glyph(progress), glyph_color),
         background,
     })
@@ -196,17 +234,41 @@ pub struct ProgressLine {
     pub percent: Option<Piece>,
 }
 
-/// The files pane's two progress lines, files then hunks, with the parts that fit `room`.
+/// The files pane's two progress lines, files then hunks, with the parts that fit `room`; the
+/// hunks approved automatically fill the end of their bar in a quieter color.
 #[must_use]
 pub fn progress_lines(model: &Model, palette: &Palette, room: Room) -> [ProgressLine; 2] {
     let (reviewed, total) = model.totals();
     let (files_done, files) = model.file_totals();
     let counts = count_width(&[(files_done, files), (reviewed, total)]);
     let parts = progress_parts(room, PROGRESS_LABEL_CELLS, counts);
+    let line = |label, done, auto, total| ProgressCounts {
+        label,
+        done,
+        auto,
+        total,
+    };
     [
-        progress_line("files", files_done, files, counts, parts, palette),
-        progress_line("hunks", reviewed, total, counts, parts, palette),
+        progress_line(&line("files", files_done, 0, files), counts, parts, palette),
+        progress_line(
+            &line("hunks", reviewed, model.auto_approved(), total),
+            counts,
+            parts,
+            palette,
+        ),
     ]
+}
+
+/// What one progress line counts.
+struct ProgressCounts {
+    /// `files` or `hunks`.
+    label: &'static str,
+    /// How many are done.
+    done: usize,
+    /// How many of those were approved automatically.
+    auto: usize,
+    /// How many there are.
+    total: usize,
 }
 
 /// The parts of a progress line that fit `room` with a label of `label` cells and counts of
@@ -254,24 +316,32 @@ pub fn progress_parts(room: Room, label: usize, counts: usize) -> ProgressParts 
 /// One progress line with only `parts` showing, so a narrow pane drops whole parts instead
 /// of clipping them.
 fn progress_line(
-    label: &str,
-    done: usize,
-    total: usize,
+    line: &ProgressCounts,
     count_width: usize,
     parts: ProgressParts,
     palette: &Palette,
 ) -> ProgressLine {
+    let &ProgressCounts {
+        label,
+        done,
+        auto,
+        total,
+    } = line;
     let percent = (done * 100).checked_div(total).unwrap_or(0);
     let complete = total > 0 && done >= total;
+    let fill = if complete {
+        palette.accepted
+    } else {
+        palette.accent
+    };
+    let fraction = float(percent) / 100.0;
     ProgressLine {
         label: parts.label.then(|| Piece::new(label, palette.dim)),
         bar: parts.bar.then_some(Bar {
-            fraction: float(percent) / 100.0,
-            fill: if complete {
-                palette.accepted
-            } else {
-                palette.accent
-            },
+            fraction,
+            fill,
+            auto: (float(auto) / float(total.max(1))).min(fraction),
+            auto_fill: fill.alpha(0.45),
             track: palette.hairline,
         }),
         counts: Piece::new(
