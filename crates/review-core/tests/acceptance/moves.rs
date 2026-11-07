@@ -2,12 +2,21 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::{formatdoc, indoc};
 use review_core::analysis::MoveKind;
 use review_core::{MoveId, UnitState};
 
 use crate::common::{TestRepo, refresh, summaries};
 
-const FUNCTION: &str = "fn moved_function(input: u32) -> u32 {\n    let doubled = input * 2;\n    let shifted = doubled + 7;\n    let masked = shifted & 0xff;\n    let scaled = masked * 3;\n    scaled - 1\n}\n";
+const FUNCTION: &str = indoc! {"
+    fn moved_function(input: u32) -> u32 {
+        let doubled = input * 2;
+        let shifted = doubled + 7;
+        let masked = shifted & 0xff;
+        let scaled = masked * 3;
+        scaled - 1
+    }
+"};
 
 /// Commits `files` on `main` and `changed` on `feature` (an empty text deletes the file).
 fn setup(
@@ -36,13 +45,31 @@ fn function_moved_to_another_file_is_one_move() -> eyre::Result<()> {
         &[
             (
                 "a.rs",
-                &format!("fn keep() {{}}\n{FUNCTION}fn tail() {{}}\n"),
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {FUNCTION}fn tail() {{}}
+                    "
+                ),
             ),
             ("b.rs", "fn other() {}\n"),
         ],
         &[
-            ("a.rs", "fn keep() {}\nfn tail() {}\n"),
-            ("b.rs", &format!("fn other() {{}}\n{FUNCTION}")),
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn other() {{}}
+                        {FUNCTION}"
+                ),
+            ),
         ],
     )?;
     let history = review.history()?;
@@ -75,15 +102,40 @@ fn copied_block_is_one_move_and_one_addition() -> eyre::Result<()> {
         &[
             (
                 "a.rs",
-                &format!("fn keep() {{}}\n{FUNCTION}fn tail() {{}}\n"),
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {FUNCTION}fn tail() {{}}
+                    "
+                ),
             ),
             ("b.rs", "fn b() {}\n"),
             ("c.rs", "fn c() {}\n"),
         ],
         &[
-            ("a.rs", "fn keep() {}\nfn tail() {}\n"),
-            ("b.rs", &format!("fn b() {{}}\n{FUNCTION}")),
-            ("c.rs", &format!("fn c() {{}}\n{FUNCTION}")),
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn b() {{}}
+                        {FUNCTION}"
+                ),
+            ),
+            (
+                "c.rs",
+                &formatdoc!(
+                    "
+                        fn c() {{}}
+                        {FUNCTION}"
+                ),
+            ),
         ],
     )?;
     let history = review.history()?;
@@ -109,13 +161,31 @@ fn moved_block_with_edit_is_expanded() -> eyre::Result<()> {
         &[
             (
                 "a.rs",
-                &format!("fn keep() {{}}\n{FUNCTION}fn tail() {{}}\n"),
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {FUNCTION}fn tail() {{}}
+                    "
+                ),
             ),
             ("b.rs", "fn other() {}\n"),
         ],
         &[
-            ("a.rs", "fn keep() {}\nfn tail() {}\n"),
-            ("b.rs", &format!("fn other() {{}}\n{edited}")),
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn other() {{}}
+                        {edited}"
+                ),
+            ),
         ],
     )?;
     let history = review.history()?;
@@ -139,15 +209,40 @@ fn moved_block_with_edit_is_expanded() -> eyre::Result<()> {
 /// A YAML block moved and re-nested is not collapsed as a plain move.
 #[test]
 fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
-    let block = "server:\n  host: example.com\n  port: 8080\n  timeout: 30\n  retries: 5\n  backoff: exponential\n";
+    let block = indoc! {"
+        server:
+          host: example.com
+          port: 8080
+          timeout: 30
+          retries: 5
+          backoff: exponential
+    "};
     let nested = block
         .lines()
         .map(|line| format!("  {line}\n"))
         .collect::<Vec<_>>()
         .concat();
     let (_repo, review) = setup(
-        &[("config.yaml", &format!("top:\n  a: 1\n{block}other: x\n"))],
-        &[("config.yaml", &format!("top:\n  a: 1\n{nested}other: x\n"))],
+        &[(
+            "config.yaml",
+            &formatdoc!(
+                "
+                    top:
+                      a: 1
+                    {block}other: x
+                "
+            ),
+        )],
+        &[(
+            "config.yaml",
+            &formatdoc!(
+                "
+                    top:
+                      a: 1
+                    {nested}other: x
+                "
+            ),
+        )],
     )?;
     let history = review.history()?;
     let view = history.current_view()?;
@@ -173,13 +268,31 @@ fn partial_move_acknowledgement_leaves_chunk_unreviewed() -> eyre::Result<()> {
         &[
             (
                 "a.rs",
-                &format!("fn keep() {{}}\n{FUNCTION}fn tail() {{}}\n"),
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {FUNCTION}fn tail() {{}}
+                    "
+                ),
             ),
             ("b.rs", "fn other() {}\n"),
         ],
         &[
-            ("a.rs", "fn keep() {}\nfn tail_renamed() {}\n"),
-            ("b.rs", &format!("fn other() {{}}\n{FUNCTION}")),
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail_renamed() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn other() {{}}
+                        {FUNCTION}"
+                ),
+            ),
         ],
     )?;
     let history = review.history()?;
@@ -213,7 +326,14 @@ fn move_source_uses_old_path_after_rename() -> eyre::Result<()> {
             ("old.rs", &format!("{filler}{FUNCTION}")),
             ("b.rs", "fn other() {}\n"),
         ],
-        &[("b.rs", &format!("fn other() {{}}\n{FUNCTION}"))],
+        &[(
+            "b.rs",
+            &formatdoc!(
+                "
+                    fn other() {{}}
+                    {FUNCTION}"
+            ),
+        )],
     )?;
     repo.git(&["mv", "old.rs", "new.rs"])?;
     repo.write("new.rs", &filler)?;
@@ -246,19 +366,50 @@ fn collapse_reasons_and_display_hunks() -> eyre::Result<()> {
         &[
             (
                 "a.rs",
-                &format!("fn keep() {{}}\n{FUNCTION}fn tail() {{}}\n"),
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {FUNCTION}fn tail() {{}}
+                    "
+                ),
             ),
             ("b.rs", "fn other() {}\n"),
             ("Cargo.lock", "version = 3\n"),
-            ("c.rs", "fn c1() {}\nfn c2() {}\nfn c3() {}\nfn c4() {}\n"),
+            (
+                "c.rs",
+                indoc! {"
+                    fn c1() {}
+                    fn c2() {}
+                    fn c3() {}
+                    fn c4() {}
+                "},
+            ),
         ],
         &[
-            ("a.rs", "fn keep() {}\nfn tail() {}\n"),
-            ("b.rs", &format!("fn other() {{}}\n{FUNCTION}")),
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn other() {{}}
+                        {FUNCTION}"
+                ),
+            ),
             ("Cargo.lock", "version = 4\n"),
             (
                 "c.rs",
-                "fn c1() { 1 }\nfn c2() {}\nfn c3() { 3 }\nfn c4() {}\n",
+                indoc! {"
+                    fn c1() { 1 }
+                    fn c2() {}
+                    fn c3() { 3 }
+                    fn c4() {}
+                "},
             ),
         ],
     )?;

@@ -6,6 +6,7 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::indoc;
 use review_core::{Detected, Error, Repo, Review, ReviewTarget};
 
 use crate::common::TestRepo;
@@ -16,7 +17,13 @@ fn feature_repo() -> eyre::Result<TestRepo> {
     test.write("lib.rs", "fn a() {}\n")?;
     test.commit("base")?;
     test.branch_at("feature", "main")?;
-    test.write("lib.rs", "fn a() {}\nfn b() {}\n")?;
+    test.write(
+        "lib.rs",
+        indoc! {"
+            fn a() {}
+            fn b() {}
+        "},
+    )?;
     test.commit("feature")?;
     Ok(test)
 }

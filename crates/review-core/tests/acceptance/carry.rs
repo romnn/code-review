@@ -2,6 +2,7 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::{formatdoc, indoc};
 use review_core::{DiffLineKind, LineEnding, MarkVerdict, NoteAttachment, UnitState, Verdict};
 
 use crate::common::{TestRepo, find, mark_all, refresh, rust_functions, summaries};
@@ -32,7 +33,12 @@ fn force_push_carry_over() -> eyre::Result<()> {
 
     // The target branch moves on, and the head is rebased onto it with one chunk amended.
     repo.switch("main")?;
-    let newer_base = format!("fn top() {{}}\n\n{base}");
+    let newer_base = formatdoc!(
+        "
+            fn top() {{}}
+
+            {base}"
+    );
     repo.write("src/lib.rs", &newer_base)?;
     repo.write("README.md", "unrelated\n")?;
     repo.commit("newer base")?;
@@ -80,8 +86,11 @@ fn line_shift_keeps_review() -> eyre::Result<()> {
 
     repo.write(
         "src/lib.rs",
-        &format!(
-            "// header\n// more\n{}",
+        &formatdoc!(
+            "
+                // header
+                // more
+                {}",
             edited.replace("let value = 0;", "let value = 1000;")
         ),
     )?;
@@ -97,7 +106,18 @@ fn line_shift_keeps_review() -> eyre::Result<()> {
 
 fn logging_functions(count: usize) -> String {
     (0..count)
-        .map(|index| format!("fn f{index}() -> u32 {{\n    log(\"enter\");\n    let value = {index};\n    value\n}}\n\n"))
+        .map(|index| {
+            formatdoc!(
+                "
+                    fn f{index}() -> u32 {{
+                        log(\"enter\");
+                        let value = {index};
+                        value
+                    }}
+
+                "
+            )
+        })
         .collect::<Vec<_>>()
         .concat()
 }
@@ -111,8 +131,12 @@ fn duplicate_edit_is_new() -> eyre::Result<()> {
     repo.commit("base")?;
     repo.branch_at("feature", "main")?;
     let in_f7 = base.replace(
-        "    log(\"enter\");\n    let value = 7;",
-        "    trace(\"enter\");\n    let value = 7;",
+        indoc! {"
+            \x20   log(\"enter\");
+                let value = 7;"},
+        indoc! {"
+            \x20   trace(\"enter\");
+                let value = 7;"},
     );
     repo.write("src/lib.rs", &in_f7)?;
     repo.commit("edit f7")?;
@@ -121,8 +145,12 @@ fn duplicate_edit_is_new() -> eyre::Result<()> {
     mark_all(&review, first, MarkVerdict::Seen)?;
 
     let also_f2 = in_f7.replace(
-        "    log(\"enter\");\n    let value = 2;",
-        "    trace(\"enter\");\n    let value = 2;",
+        indoc! {"
+            \x20   log(\"enter\");
+                let value = 2;"},
+        indoc! {"
+            \x20   trace(\"enter\");
+                let value = 2;"},
     );
     repo.write("src/lib.rs", &also_f2)?;
     repo.commit("same edit in f2")?;
@@ -274,7 +302,13 @@ fn deletion_only_chunks_carry_and_reopen() -> eyre::Result<()> {
     repo.write("src/lib.rs", &base)?;
     repo.commit("base")?;
     repo.branch_at("feature", "main")?;
-    let deleted = base.replace("    let value = 3;\n    value\n", "");
+    let deleted = base.replace(
+        indoc! {"
+            \x20   let value = 3;
+                value
+        "},
+        "",
+    );
     repo.write("src/lib.rs", &deleted)?;
     repo.commit("delete two lines")?;
     let review = repo.review()?;
@@ -379,7 +413,15 @@ fn unambiguous_base_rename_keeps_review() -> eyre::Result<()> {
 #[test]
 fn indistinguishable_repeated_edit_reopens() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
-    let block = "fn same() {\n    a();\n    b();\n    c();\n    d();\n    e();\n}\n";
+    let block = indoc! {"
+        fn same() {
+            a();
+            b();
+            c();
+            d();
+            e();
+        }
+    "};
     let base = format!("{}fn tail() {{}}\n", block.repeat(4));
     repo.write("src/lib.rs", &base)?;
     repo.commit("base")?;
@@ -471,8 +513,16 @@ fn merged_chunks_reopen_and_notes_keep_provenance() -> eyre::Result<()> {
     repo.commit("base")?;
     repo.branch_at("feature", "main")?;
     let two_chunks = base.replace(
-        "    let value = 1;\n    value\n}\n",
-        "    let value = 10;\n    value\n} // end\n",
+        indoc! {"
+                let value = 1;
+                value
+            }
+        "},
+        indoc! {"
+                let value = 10;
+                value
+            } // end
+        "},
     );
     repo.write("src/lib.rs", &two_chunks)?;
     repo.commit("two chunks")?;
@@ -488,8 +538,14 @@ fn merged_chunks_reopen_and_notes_keep_provenance() -> eyre::Result<()> {
     repo.write(
         "src/lib.rs",
         &two_chunks.replace(
-            "    let value = 10;\n    value\n",
-            "    let value = 10;\n    value + 0\n",
+            indoc! {"
+                \x20   let value = 10;
+                    value
+            "},
+            indoc! {"
+                \x20   let value = 10;
+                    value + 0
+            "},
         ),
     )?;
     repo.commit("merge the chunks")?;
@@ -520,8 +576,16 @@ fn split_chunk_reopens() -> eyre::Result<()> {
     repo.commit("base")?;
     repo.branch_at("feature", "main")?;
     let one_chunk = base.replace(
-        "    let value = 1;\n    value\n}\n",
-        "    let value = 10;\n    value + 0\n} // end\n",
+        indoc! {"
+                let value = 1;
+                value
+            }
+        "},
+        indoc! {"
+                let value = 10;
+                value + 0
+            } // end
+        "},
     );
     repo.write("src/lib.rs", &one_chunk)?;
     repo.commit("one chunk")?;

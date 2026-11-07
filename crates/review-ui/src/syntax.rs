@@ -209,6 +209,8 @@ fn runs(tones: &[Tone]) -> Vec<Span> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// Every query compiles against the grammar it is used with.
@@ -244,7 +246,13 @@ mod tests {
     /// more specific pattern overrides a generic one.
     #[test]
     fn rust_is_highlighted() {
-        let text = "// note\npub fn apply(x: u32) -> String {\n    let s = \"a\\n\";\n    42\n}\n";
+        let text = indoc! {"
+            // note
+            pub fn apply(x: u32) -> String {
+                let s = \"a\\n\";
+                42
+            }
+        "};
         let syntax = analyze("lib.rs", text);
         assert_eq!(tone_at(&syntax, 0, 0), Tone::Comment);
         assert_eq!(tone_at(&syntax, 1, 0), Tone::Keyword);
@@ -257,10 +265,22 @@ mod tests {
 
     #[test]
     fn other_languages_are_highlighted() {
-        let python = analyze("a.py", "def f():\n    return 'x'\n");
+        let python = analyze(
+            "a.py",
+            indoc! {"
+                def f():
+                    return 'x'
+            "},
+        );
         assert_eq!(tone_at(&python, 0, 0), Tone::Keyword);
         assert_eq!(tone_at(&python, 1, 11), Tone::String);
-        let toml = analyze("Cargo.toml", "[package]\nname = \"a\"\n");
+        let toml = analyze(
+            "Cargo.toml",
+            indoc! {"
+                [package]
+                name = \"a\"
+            "},
+        );
         assert_eq!(tone_at(&toml, 1, 8), Tone::String);
         let tsx = analyze("a.tsx", "const x = <div className=\"a\" />;\n");
         assert_eq!(tone_at(&tsx, 0, 0), Tone::Keyword);

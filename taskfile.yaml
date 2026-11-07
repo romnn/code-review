@@ -85,6 +85,16 @@ tasks:
         cmds:
             - cargo +nightly fc udeps --maximal-features --all-targets {{.CLI_ARGS}}
 
+    lint:ast-grep:
+        desc: "check source structure with the ast-grep rules in .ast-grep/rules"
+        aliases: [lint:ast]
+        cmds:
+            - ast-grep test
+            # Without `COLORFGBG`, ast-grep asks the terminal for its background color and stops
+            # listening after 20 ms; a terminal that answers later leaves the raw reply in the
+            # shell's input. A dark background is assumed when the terminal does not set it.
+            - COLORFGBG="${COLORFGBG:-15;0}" ast-grep scan --error {{.CLI_ARGS}}
+
     typos:
         desc: "spellcheck"
         aliases: [spellcheck]

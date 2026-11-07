@@ -590,6 +590,8 @@ pub fn show_json(view: &RevisionView<'_>, parts: &Partition) -> eyre::Result<Sho
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     fn rendered(text: &str, sign: char) -> String {
@@ -605,7 +607,10 @@ mod tests {
         assert_eq!(rendered("value\n", '-'), "    -value\n");
         assert_eq!(
             rendered("value", '+'),
-            "    +value\n    \\ No newline at end of file\n"
+            indoc! {"
+                \x20   +value
+                    \\ No newline at end of file
+            "}
         );
         assert_eq!(rendered("value\r\n", '+'), "    +value␍\n");
         assert_eq!(rendered("value\r\r\n", '+'), "    +value\r␍\n");

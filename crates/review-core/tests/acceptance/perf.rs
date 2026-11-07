@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre;
+use indoc::writedoc;
 use review_core::analysis::analyze;
 use review_core::{ObjectId, Repo};
 
@@ -22,9 +23,16 @@ fn generated_file(file: usize, lines: usize, variant: bool) -> String {
     };
     while line + 6 <= lines {
         // Writing to a `String` cannot fail.
-        write!(
+        writedoc!(
             text,
-            "pub fn file{file}_function{function}(input: u64) -> u64 {{\n    let scaled = input * {function}{extra};\n    let label = \"{label} {file} {function}\";\n    let offset = scaled + {line}{extra};\n    offset ^ label.len() as u64\n}}\n"
+            "
+                pub fn file{file}_function{function}(input: u64) -> u64 {{
+                    let scaled = input * {function}{extra};
+                    let label = \"{label} {file} {function}\";
+                    let offset = scaled + {line}{extra};
+                    offset ^ label.len() as u64
+                }}
+            "
         )
         .ok();
         line += 6;

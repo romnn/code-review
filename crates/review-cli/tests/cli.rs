@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use color_eyre::eyre::{self, WrapErr as _};
+use indoc::{formatdoc, indoc};
 use serde_json::Value;
 
 const GIT_ENV: [(&str, &str); 6] = [
@@ -61,6 +62,26 @@ fn cr_json(repo: &Path, data: &Path, args: &[&str]) -> eyre::Result<Value> {
         .wrap_err_with(|| format!("cr {} printed invalid JSON: {output}", args.join(" ")))
 }
 
+const BASE_LIB: &str = indoc! {"
+    fn a() -> u32 {
+        1
+    }
+
+    fn b() -> u32 {
+        2
+    }
+"};
+
+const FEATURE_LIB: &str = indoc! {"
+    fn a() -> u32 {
+        10
+    }
+
+    fn b() -> u32 {
+        20
+    }
+"};
+
 /// Opens a review, marks, notes, exports and imports a walkthrough through the CLI.
 #[test]
 fn every_command_works_with_json() -> eyre::Result<()> {
@@ -68,18 +89,12 @@ fn every_command_works_with_json() -> eyre::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let (repo, data) = (repo_dir.path(), data_dir.path());
     git(repo, &["init", "--quiet", "--initial-branch=main"])?;
-    std::fs::write(
-        repo.join("lib.rs"),
-        "fn a() -> u32 {\n    1\n}\n\nfn b() -> u32 {\n    2\n}\n",
-    )?;
+    std::fs::write(repo.join("lib.rs"), BASE_LIB)?;
     std::fs::write(repo.join("Cargo.lock"), "version = 3\n")?;
     git(repo, &["add", "--all"])?;
     git(repo, &["commit", "--quiet", "-m", "base"])?;
     git(repo, &["checkout", "--quiet", "-b", "feature"])?;
-    std::fs::write(
-        repo.join("lib.rs"),
-        "fn a() -> u32 {\n    10\n}\n\nfn b() -> u32 {\n    20\n}\n",
-    )?;
+    std::fs::write(repo.join("lib.rs"), FEATURE_LIB)?;
     std::fs::write(repo.join("Cargo.lock"), "version = 4\n")?;
     git(repo, &["commit", "--quiet", "--all", "-m", "feature"])?;
 
@@ -197,11 +212,27 @@ fn status_follows_the_shared_configuration() -> eyre::Result<()> {
     let repo_dir = repo_with_change(
         &[(
             "lib.rs",
-            "fn main() {\n    let total = compute(alpha, beta, gamma);\n    let other = 0;\n    let limit = 1;\n}\n",
+            indoc! {"
+                fn main() {
+                    let total = compute(alpha, beta, gamma);
+                    let other = 0;
+                    let limit = 1;
+                }
+            "},
         )],
         &[(
             "lib.rs",
-            "fn main() {\n    let total = compute(\n        alpha,\n        beta,\n        gamma\n    );\n    let other = 0;\n    let limit = 2;\n}\n",
+            indoc! {"
+                fn main() {
+                    let total = compute(
+                        alpha,
+                        beta,
+                        gamma
+                    );
+                    let other = 0;
+                    let limit = 2;
+                }
+            "},
         )],
     )?;
     let data_dir = tempfile::tempdir()?;
@@ -219,14 +250,26 @@ fn status_follows_the_shared_configuration() -> eyre::Result<()> {
     std::fs::create_dir_all(file.parent().unwrap_or(data))?;
     std::fs::write(
         &file,
-        "[theme]\nname = \"nightfox\"\n\n[review]\nauto_approve_formatting = false\n",
+        indoc! {"
+            [theme]
+            name = \"nightfox\"
+
+            [review]
+            auto_approve_formatting = false
+        "},
     )?;
     let status = cr_json(repo, data, &["status"])?;
     assert_eq!(status["total"]["auto_approved"], 0);
     assert_eq!(status["total"]["new"], 2);
 
     // The flag wins over a file that leaves it on.
-    std::fs::write(&file, "[review]\nauto_approve_formatting = true\n")?;
+    std::fs::write(
+        &file,
+        indoc! {"
+            [review]
+            auto_approve_formatting = true
+        "},
+    )?;
     let status = cr_json(repo, data, &["status"])?;
     assert_eq!(status["total"]["auto_approved"], 1);
     let status = cr_json(repo, data, &["status", "--no-auto-approve"])?;
@@ -238,19 +281,45 @@ fn status_follows_the_shared_configuration() -> eyre::Result<()> {
 /// `cr show` renders a move with edits expanded, with the inner diff showing the edited line.
 #[test]
 fn show_renders_inner_diff_of_move_with_edits() -> eyre::Result<()> {
-    let function = "fn moved_function(input: u32) -> u32 {\n    let doubled = input * 2;\n    let shifted = doubled + 7;\n    let masked = shifted & 0xff;\n    let scaled = masked * 3;\n    scaled - 1\n}\n";
+    let function = indoc! {"
+        fn moved_function(input: u32) -> u32 {
+            let doubled = input * 2;
+            let shifted = doubled + 7;
+            let masked = shifted & 0xff;
+            let scaled = masked * 3;
+            scaled - 1
+        }
+    "};
     let edited = function.replace("0xff", "0x0f");
     let repo_dir = repo_with_change(
         &[
             (
                 "a.rs",
-                &format!("fn keep() {{}}\n{function}fn tail() {{}}\n"),
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {function}fn tail() {{}}
+                    "
+                ),
             ),
             ("b.rs", "fn other() {}\n"),
         ],
         &[
-            ("a.rs", "fn keep() {}\nfn tail() {}\n"),
-            ("b.rs", &format!("fn other() {{}}\n{edited}")),
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn other() {{}}
+                        {edited}"
+                ),
+            ),
         ],
     )?;
     let data_dir = tempfile::tempdir()?;
@@ -417,6 +486,7 @@ mod open_without_target {
     use std::process::Command;
 
     use color_eyre::eyre::{self, WrapErr as _};
+    use indoc::formatdoc;
     use serde_json::Value;
 
     use super::{GIT_ENV, git, repo_with_change};
@@ -464,7 +534,17 @@ mod open_without_target {
     /// Returns a `PATH` whose `gh` prints `json` for any command, ahead of the inherited `PATH`.
     fn path_with_fake_gh(directory: &Path, json: &str) -> eyre::Result<OsString> {
         let gh = directory.join("gh");
-        std::fs::write(&gh, format!("#!/bin/sh\ncat <<'JSON'\n{json}\nJSON\n"))?;
+        std::fs::write(
+            &gh,
+            formatdoc!(
+                "
+                    #!/bin/sh
+                    cat <<'JSON'
+                    {json}
+                    JSON
+                "
+            ),
+        )?;
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
         let inherited = std::env::var_os("PATH").unwrap_or_default();
         let dirs =

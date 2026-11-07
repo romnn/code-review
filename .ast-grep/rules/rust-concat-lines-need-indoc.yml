@@ -1,0 +1,14 @@
+id: rust-concat-lines-need-indoc
+language: Rust
+severity: warning
+message: 'concat!() glues line fragments together — use indoc! {"..."} and write the lines out.'
+note:
+  "Splitting a document across concat!() arguments buys the same thing indoc! gives — source lines
+  that match the output — while forcing every line to carry its own quotes, comma, and trailing \\n.
+  The joined text is also invisible to a reader scanning for it."
+rule:
+  pattern: concat!($$$ARGS)
+  has:
+    stopBy: end
+    kind: string_literal
+    regex: '\\n'

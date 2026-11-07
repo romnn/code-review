@@ -2,6 +2,7 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::indoc;
 use review_core::tree::{NodeKind, file_tree};
 use review_core::{Error, MarkVerdict, UnitState, Verdict};
 
@@ -12,12 +13,26 @@ use crate::common::{TestRepo, refresh};
 fn repo_with_tree() -> eyre::Result<TestRepo> {
     let repo = TestRepo::new()?;
     for path in ["top.txt", "dir/b.txt", "dir/sub/c.txt", "other/d.txt"] {
-        repo.write(path, "one\ntwo\nthree\n")?;
+        repo.write(
+            path,
+            indoc! {"
+                one
+                two
+                three
+            "},
+        )?;
     }
     let base = repo.commit("base")?;
     repo.branch_at("feature", &base)?;
     for path in ["top.txt", "dir/b.txt", "dir/sub/c.txt", "other/d.txt"] {
-        repo.write(path, "one\nTWO\nthree\n")?;
+        repo.write(
+            path,
+            indoc! {"
+                one
+                TWO
+                three
+            "},
+        )?;
     }
     repo.commit("change all")?;
     Ok(repo)

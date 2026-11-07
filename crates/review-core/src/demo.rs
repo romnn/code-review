@@ -16,6 +16,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use indoc::formatdoc;
 use serde::Deserialize;
 
 use crate::error::Error;
@@ -376,8 +377,16 @@ fn fast_import_stream(fixture: &Path, manifest: &Manifest) -> Result<Vec<u8>, Er
 }
 
 fn push_file(stream: &mut Vec<u8>, mode: &str, path: &str, content: &[u8]) {
-    stream
-        .extend_from_slice(format!("M {mode} inline {path}\ndata {}\n", content.len()).as_bytes());
+    stream.extend_from_slice(
+        formatdoc!(
+            "
+                M {mode} inline {path}
+                data {}
+            ",
+            content.len()
+        )
+        .as_bytes(),
+    );
     stream.extend_from_slice(content);
     stream.push(b'\n');
 }

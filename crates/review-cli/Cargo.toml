@@ -22,6 +22,7 @@ toml.workspace = true
 
 [dev-dependencies]
 color-eyre.workspace = true
+indoc.workspace = true
 tempfile.workspace = true
 
 [lints]

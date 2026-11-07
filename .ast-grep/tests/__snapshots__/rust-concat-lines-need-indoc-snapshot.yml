@@ -1,0 +1,13 @@
+id: rust-concat-lines-need-indoc
+snapshots:
+  ? |
+    fn f() { let s = concat!("first\n", "second\n"); }
+  : labels:
+      - source: concat!("first\n", "second\n")
+        style: primary
+        start: 17
+        end: 47
+      - source: '"first\n"'
+        style: secondary
+        start: 25
+        end: 34

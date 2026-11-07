@@ -1,0 +1,35 @@
+id: rust-multiline-string-needs-indoc
+valid:
+  - |
+    fn f() { let s = "a single line"; }
+  - |
+    fn f() { let s = "one line with a trailing newline\n"; }
+  - |
+    fn f() { out.push_str("\n"); }
+  - |
+    fn f() { out.push_str("\n\n"); }
+  - |
+    fn f() { let s = r#"{"a": 1}"#; }
+  - |
+    const S: &str = indoc! {"
+        first
+        second
+    "};
+  - |
+    fn f() { user.push_str("\n\nProduce the polished check as JSON."); }
+  - |
+    fn f() { let result = analyze("   \n\t  ", None); }
+  - |
+    fn f() { let s = "trailing separators only\n\n"; }
+  - |
+    fn f() { let s = "hard break  \nnext line"; }
+invalid:
+  - |
+    fn f() { let s = "first\nsecond\n"; }
+  - |
+    fn f() { svg.push_str("</g>\n</svg>\n"); }
+  - |
+    fn f() { let s = "a\n\nb"; }
+  - |
+    #[doc = "first line\nsecond line"]
+    pub struct Documented;

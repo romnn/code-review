@@ -227,6 +227,8 @@ impl Class {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// An editor on `text` with the cursor at `cursor`.
@@ -266,7 +268,9 @@ mod tests {
     #[test]
     fn pastes_stay_on_one_line() {
         let mut edit = at("", 0);
-        edit.insert("a\nb\tc");
+        edit.insert(indoc! {"
+            a
+            b\tc"});
         assert_eq!(edit.text(), "a b c");
     }
 

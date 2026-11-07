@@ -1,0 +1,19 @@
+id: rust-indoc-format-string-needs-formatdoc
+language: Rust
+severity: warning
+message:
+  'indoc! {"..."} used as a format string — use formatdoc!, writedoc!, printdoc!, or eprintdoc!
+  instead.'
+note:
+  "indoc ships a formatting macro for each of these: formatdoc! is format!(indoc!(...)), writedoc!
+  is write!(w, indoc!(...)), and printdoc! and eprintdoc! wrap print! and eprint!. Nesting indoc!
+  inside the std macro spends a level of indentation and a closing brace on plumbing. To append to a
+  String, use writedoc! rather than push_str(&formatdoc! {...}). println! and writeln! have no indoc
+  counterpart, so they are allowed."
+rule:
+  kind: macro_invocation
+  any:
+    # The template is the first argument.
+    - regex: '^(?:(?:::)?(?:std|core|alloc)::)?(?:format_args|format|print|eprint)!\s*[(\[{]\s*(?:(?:::)?indoc::)?indoc!'
+    # The template follows the writer, whose expression never contains a top-level comma.
+    - regex: '^(?:(?:::)?(?:std|core)::)?write!\s*[(\[{]\s*[^,]+,\s*(?:(?:::)?indoc::)?indoc!'

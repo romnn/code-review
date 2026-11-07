@@ -91,6 +91,8 @@ pub fn path(xdg_state_home: Option<&Path>, home: Option<&Path>) -> Option<PathBu
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// Held lines go to the file at once and are printed only once.
@@ -102,7 +104,13 @@ mod tests {
         log.write("first");
         log.write("second");
         let text = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(text, "review-tui: first\nreview-tui: second\n");
+        assert_eq!(
+            text,
+            indoc! {"
+                review-tui: first
+                review-tui: second
+            "}
+        );
         assert_eq!(log.held.lock().len(), 2);
         log.replay();
         assert!(log.held.lock().is_empty());

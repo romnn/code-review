@@ -239,6 +239,8 @@ fn script_scope(node: Node<'_>, text: &str) -> Option<(ScopeKind, String)> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// The breadcrumb at the zero-based `line` of `text`.
@@ -248,18 +250,20 @@ mod tests {
 
     #[test]
     fn rust_scopes_name_impls_traits_and_functions() {
-        let text = "mod ledger {\n\
-                    impl Display for Ledger {\n\
-                    fn fmt(&self) {\n\
-                    let a = 1;\n\
-                    }\n\
-                    }\n\
-                    impl<T> Ledger<T> {\n\
-                    fn apply(&mut self) {\n\
-                    self.n += 1;\n\
-                    }\n\
-                    }\n\
-                    }\n";
+        let text = indoc! {"
+            mod ledger {
+            impl Display for Ledger {
+            fn fmt(&self) {
+            let a = 1;
+            }
+            }
+            impl<T> Ledger<T> {
+            fn apply(&mut self) {
+            self.n += 1;
+            }
+            }
+            }
+        "};
         assert_eq!(
             at(Language::Rust, text, 3),
             "mod ledger › impl Display for Ledger › fn fmt"
@@ -275,33 +279,75 @@ mod tests {
 
     #[test]
     fn python_scopes_are_classes_and_defs() {
-        let text =
-            "class Parser:\n    def parse(self):\n        return 1\n\ndef main():\n    pass\n";
+        let text = indoc! {"
+            class Parser:
+                def parse(self):
+                    return 1
+
+            def main():
+                pass
+        "};
         assert_eq!(at(Language::Python, text, 2), "class Parser › def parse");
         assert_eq!(at(Language::Python, text, 5), "def main");
     }
 
     #[test]
     fn go_methods_name_their_receiver() {
-        let text = "package main\n\nfunc (l *Ledger) Apply() {\n\tl.n++\n}\n\ntype T struct {\n\tA int\n}\n";
+        let text = indoc! {"
+            package main
+
+            func (l *Ledger) Apply() {
+            \tl.n++
+            }
+
+            type T struct {
+            \tA int
+            }
+        "};
         assert_eq!(at(Language::Go, text, 3), "func (*Ledger) Apply");
         assert_eq!(at(Language::Go, text, 7), "type T");
     }
 
     #[test]
     fn script_scopes_include_methods_and_function_bindings() {
-        let text = "class View {\n  render() {\n    return 1;\n  }\n}\nconst onClick = () => {\n  go();\n};\n";
+        let text = indoc! {"
+            class View {
+              render() {
+                return 1;
+              }
+            }
+            const onClick = () => {
+              go();
+            };
+        "};
         assert_eq!(at(Language::TypeScript, text, 2), "class View › render()");
         assert_eq!(at(Language::JavaScript, text, 6), "onClick()");
-        let tsx = "function App() {\n  return <div>\n  </div>;\n}\n";
+        let tsx = indoc! {"
+            function App() {
+              return <div>
+              </div>;
+            }
+        "};
         assert_eq!(at(Language::Tsx, tsx, 2), "function App");
     }
 
     #[test]
     fn json_and_toml_scopes_are_sections() {
-        let json = "{\n  \"server\": {\n    \"port\": 1\n  }\n}\n";
+        let json = indoc! {"
+            {
+              \"server\": {
+                \"port\": 1
+              }
+            }
+        "};
         assert_eq!(at(Language::Json, json, 2), "server");
-        let toml = "[package]\nname = \"a\"\n\n[[bin]]\nname = \"b\"\n";
+        let toml = indoc! {"
+            [package]
+            name = \"a\"
+
+            [[bin]]
+            name = \"b\"
+        "};
         assert_eq!(at(Language::Toml, toml, 1), "[package]");
         assert_eq!(at(Language::Toml, toml, 4), "[[bin]]");
     }
@@ -310,10 +356,23 @@ mod tests {
     #[test]
     fn unsupported_and_broken_files() {
         assert_eq!(
-            ScopeMap::for_path("notes.txt", "fn f() {\n}\n").scopes(),
+            ScopeMap::for_path(
+                "notes.txt",
+                indoc! {"
+                    fn f() {
+                    }
+                "}
+            )
+            .scopes(),
             &[] as &[Scope]
         );
-        let broken = "impl Ledger {\n    fn f(&self) {\n        let x = ;\n    }\n}\n";
+        let broken = indoc! {"
+            impl Ledger {
+                fn f(&self) {
+                    let x = ;
+                }
+            }
+        "};
         assert_eq!(at(Language::Rust, broken, 2), "impl Ledger › fn f");
     }
 }

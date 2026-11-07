@@ -535,6 +535,8 @@ fn clip_tokens(tokens: &[Range<usize>], range: &Range<usize>) -> Vec<Range<usize
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::{Side, chunk_is_formatting_only, chunks, escape_bytes};
     use crate::syntax::{self, Language};
     use crate::text;
@@ -557,16 +559,42 @@ mod tests {
     /// A brace reflow is proven on its own, beside a real change elsewhere in the file.
     #[test]
     fn a_rust_brace_reflow_is_proven_beside_a_real_change() {
-        let old = "fn f(xs: &[u32]) -> u32 {\n    for x in xs { g(*x); }\n    let a = 1;\n    let b = 2;\n    a + b\n}\n";
-        let new = "fn f(xs: &[u32]) -> u32 {\n    for x in xs {\n        g(*x);\n    }\n    let a = 1;\n    let b = 3;\n    a + b\n}\n";
+        let old = indoc! {"
+            fn f(xs: &[u32]) -> u32 {
+                for x in xs { g(*x); }
+                let a = 1;
+                let b = 2;
+                a + b
+            }
+        "};
+        let new = indoc! {"
+            fn f(xs: &[u32]) -> u32 {
+                for x in xs {
+                    g(*x);
+                }
+                let a = 1;
+                let b = 3;
+                a + b
+            }
+        "};
         assert_eq!(proofs(Language::Rust, old, new), (vec![true, false], false));
     }
 
     /// A file with one reformatted chunk and one real one proves only the first.
     #[test]
     fn only_the_reformatted_chunk_of_a_mixed_file_is_proven() {
-        let old = "export function f(a: number, b: number) { return g(a, b); }\n\nexport const limit = 100;\n";
-        let new = "export function f(a: number, b: number) {\n  return g(a, b);\n}\n\nexport const limit = 300;\n";
+        let old = indoc! {"
+            export function f(a: number, b: number) { return g(a, b); }
+
+            export const limit = 100;
+        "};
+        let new = indoc! {"
+            export function f(a: number, b: number) {
+              return g(a, b);
+            }
+
+            export const limit = 300;
+        "};
         assert_eq!(
             proofs(Language::TypeScript, old, new),
             (vec![true, false], false)
@@ -577,8 +605,22 @@ mod tests {
     /// program, so it is never proven.
     #[test]
     fn a_python_statement_moved_out_of_a_block_is_not_proven() {
-        let old = "def f(x):\n    if x:\n        a()\n        b()\n    c = 0\n    return 1\n";
-        let new = "def f(x):\n    if x:\n        a()\n    b()\n    c = 0\n    return 2\n";
+        let old = indoc! {"
+            def f(x):
+                if x:
+                    a()
+                    b()
+                c = 0
+                return 1
+        "};
+        let new = indoc! {"
+            def f(x):
+                if x:
+                    a()
+                b()
+                c = 0
+                return 2
+        "};
         assert_eq!(
             hints(Language::Python, old, new),
             [true, false],
@@ -594,8 +636,18 @@ mod tests {
     /// not parse, though both files do.
     #[test]
     fn a_hybrid_that_does_not_parse_is_not_proven() {
-        let old = "fn f() {\n    a();\n    b();\n}\n";
-        let new = "fn f() {\n    a(\n    b());\n}\n";
+        let old = indoc! {"
+            fn f() {
+                a();
+                b();
+            }
+        "};
+        let new = indoc! {"
+            fn f() {
+                a(
+                b());
+            }
+        "};
         let parsed = syntax::parse(Language::Rust, old).zip(syntax::parse(Language::Rust, new));
         let (old_side, new_side) = (Side::new(old), Side::new(new));
         // Only the first line taken as the chunk: applied alone, its open call never closes.
@@ -603,7 +655,12 @@ mod tests {
             before: 1..2,
             after: 1..2,
         };
-        let forward = "fn f() {\n    a(\n    b();\n}\n";
+        let forward = indoc! {"
+            fn f() {
+                a(
+                b();
+            }
+        "};
         assert!(
             syntax::parse(Language::Rust, forward)
                 .and_then(|parsed| parsed.canonical)
@@ -627,18 +684,53 @@ mod tests {
         let cases = [
             (
                 Language::Python,
-                "if ready:\n    a()\n    # \\\n    b()\n\nlimit = 1\n",
-                "if ready:\n    a()\n    # \\\n      b()\n\nlimit = 2\n",
+                indoc! {"
+                    if ready:
+                        a()
+                        # \\
+                        b()
+
+                    limit = 1
+                "},
+                indoc! {"
+                    if ready:
+                        a()
+                        # \\
+                          b()
+
+                    limit = 2
+                "},
             ),
             (
                 Language::JavaScript,
-                "function f() {\n  throw new Error(\"denied\");\n}\nconst a = 1;\nconst b = 2;\n",
-                "function f() {\n  throw\n  new Error(\"denied\");\n}\nconst a = 1;\nconst b = 3;\n",
+                indoc! {"
+                    function f() {
+                      throw new Error(\"denied\");
+                    }
+                    const a = 1;
+                    const b = 2;
+                "},
+                indoc! {"
+                    function f() {
+                      throw
+                      new Error(\"denied\");
+                    }
+                    const a = 1;
+                    const b = 3;
+                "},
             ),
             (
                 Language::Rust,
-                "const FLAG: bool = first_spacing!(++);\n\nconst LIMIT: u32 = 1;\n",
-                "const FLAG: bool = first_spacing!(+ +);\n\nconst LIMIT: u32 = 2;\n",
+                indoc! {"
+                    const FLAG: bool = first_spacing!(++);
+
+                    const LIMIT: u32 = 1;
+                "},
+                indoc! {"
+                    const FLAG: bool = first_spacing!(+ +);
+
+                    const LIMIT: u32 = 2;
+                "},
             ),
         ];
         for (language, old, new) in cases {
@@ -658,8 +750,22 @@ mod tests {
     /// A candidate past the budget stays unproven and spends nothing.
     #[test]
     fn candidates_past_the_budget_stay_unproven() {
-        let old = "fn f() {\n    for x in xs { g(x); }\n    let z = 0;\n    let a = 1;\n}\n";
-        let new = "fn f() {\n    for x in xs {\n        g(x);\n    }\n    let z = 0;\n    let a = 2;\n}\n";
+        let old = indoc! {"
+            fn f() {
+                for x in xs { g(x); }
+                let z = 0;
+                let a = 1;
+            }
+        "};
+        let new = indoc! {"
+            fn f() {
+                for x in xs {
+                    g(x);
+                }
+                let z = 0;
+                let a = 2;
+            }
+        "};
         let parsed = syntax::parse(Language::Rust, old).zip(syntax::parse(Language::Rust, new));
         let (old_side, new_side) = (Side::new(old), Side::new(new));
         let hunk = text::diff_lines(&old_side.lines, &new_side.lines)
@@ -689,17 +795,42 @@ mod tests {
     /// file is proven, the real change is not, and the splices keep every byte.
     #[test]
     fn a_reflow_at_a_crlf_end_of_file_is_proven() {
-        let old = "fn a() -> u32 {\r\n    1\r\n}\r\n\r\nfn b() { c(1, 2) }";
-        let new = "fn a() -> u32 {\r\n    2\r\n}\r\n\r\nfn b() {\r\n    c(1, 2)\r\n}";
+        let old = indoc! {"
+            fn a() -> u32 {\r
+                1\r
+            }\r
+            \r
+            fn b() { c(1, 2) }"};
+        let new = indoc! {"
+            fn a() -> u32 {\r
+                2\r
+            }\r
+            \r
+            fn b() {\r
+                c(1, 2)\r
+            }"};
         assert_eq!(proofs(Language::Rust, old, new), (vec![false, true], false));
     }
 
     /// A parse error in the new file leaves even a pure reflow elsewhere unproven.
     #[test]
     fn a_file_with_a_parse_error_proves_nothing() {
-        let old = "fn f() {\n    for x in xs { g(x); }\n    let a = 1;\n    let b = 2;\n}\n";
-        let new =
-            "fn f() {\n    for x in xs {\n        g(x);\n    }\n    let a = 1;\n    let b = ;\n}\n";
+        let old = indoc! {"
+            fn f() {
+                for x in xs { g(x); }
+                let a = 1;
+                let b = 2;
+            }
+        "};
+        let new = indoc! {"
+            fn f() {
+                for x in xs {
+                    g(x);
+                }
+                let a = 1;
+                let b = ;
+            }
+        "};
         assert_eq!(
             proofs(Language::Rust, old, new),
             (vec![false, false], false)
@@ -710,8 +841,21 @@ mod tests {
     /// so the grammar sees a different program.
     #[test]
     fn a_javascript_return_split_from_its_value_is_not_proven() {
-        let old = "function f(x) {\n  return x;\n}\nconst a = 1;\nconst b = 2;\n";
-        let new = "function f(x) {\n  return\n  x;\n}\nconst a = 1;\nconst b = 3;\n";
+        let old = indoc! {"
+            function f(x) {
+              return x;
+            }
+            const a = 1;
+            const b = 2;
+        "};
+        let new = indoc! {"
+            function f(x) {
+              return
+              x;
+            }
+            const a = 1;
+            const b = 3;
+        "};
         assert_eq!(
             hints(Language::JavaScript, old, new),
             [true, false],
@@ -727,8 +871,24 @@ mod tests {
     /// in the new one, so the backward hybrid rejects it.
     #[test]
     fn a_chunk_inside_a_string_another_chunk_opens_is_not_proven() {
-        let old = "fn f() {\n    let a = 1;\n    let x = 0;\n    let b = foo(2);\n    let y = 0;\n    let c = 3;\n}\n";
-        let new = "fn f() {\n    let a = \"\n    let x = 0;\n    let b = foo( 2 );\n    let y = 0;\n    \";\n}\n";
+        let old = indoc! {"
+            fn f() {
+                let a = 1;
+                let x = 0;
+                let b = foo(2);
+                let y = 0;
+                let c = 3;
+            }
+        "};
+        let new = indoc! {"
+            fn f() {
+                let a = \"
+                let x = 0;
+                let b = foo( 2 );
+                let y = 0;
+                \";
+            }
+        "};
         let (proven, formatting_only) = proofs(Language::Rust, old, new);
         assert!(!formatting_only);
         assert!(proven.iter().all(|&proven| !proven), "{proven:?}");

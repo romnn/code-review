@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use color_eyre::eyre::{self, WrapErr as _};
+use indoc::formatdoc;
 use review_core::analysis::{Analysis, Unit};
 use review_core::{
     History, MarkVerdict, Repo, Review, ReviewTarget, RevisionNumber, UnitId, UnitState,
@@ -191,7 +192,15 @@ pub fn latest_analysis(review: &Review) -> eyre::Result<Analysis> {
 pub fn rust_functions(count: usize) -> String {
     (0..count)
         .map(|index| {
-            format!("fn f{index}() -> u32 {{\n    let value = {index};\n    value\n}}\n\n")
+            formatdoc!(
+                "
+                    fn f{index}() -> u32 {{
+                        let value = {index};
+                        value
+                    }}
+
+                "
+            )
         })
         .collect::<Vec<_>>()
         .concat()

@@ -502,6 +502,8 @@ pub fn byte_column(line: &str, utf16: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// A server that never reads its input blocks neither a message nor dropping it.
@@ -561,16 +563,31 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("Cargo.toml"),
-            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            indoc! {"
+                [package]
+                name = \"probe\"
+                version = \"0.1.0\"
+                edition = \"2024\"
+            "},
         )
         .unwrap();
         std::fs::create_dir(root.path().join("src")).unwrap();
         std::fs::write(
             root.path().join("src/util.rs"),
-            "pub fn helper() -> u32 {\n    7\n}\n",
+            indoc! {"
+                pub fn helper() -> u32 {
+                    7
+                }
+            "},
         )
         .unwrap();
-        let main = "mod util;\n\nfn main() {\n    let _ = util::helper();\n}\n";
+        let main = indoc! {"
+            mod util;
+
+            fn main() {
+                let _ = util::helper();
+            }
+        "};
         let main_path = root.path().join("src/main.rs");
         std::fs::write(&main_path, main).unwrap();
 

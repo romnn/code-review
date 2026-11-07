@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::indoc;
 use review_core::git::GrepLine;
 use review_core::{ObjectId, Repo};
 
@@ -30,7 +31,14 @@ fn tree_files_lists_every_blob() -> eyre::Result<()> {
 #[gtest]
 fn grep_searches_the_commit_as_a_fixed_string() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
-    repo.write("a.txt", "alpha\nneedle (x)\nomega\n")?;
+    repo.write(
+        "a.txt",
+        indoc! {"
+            alpha
+            needle (x)
+            omega
+        "},
+    )?;
     repo.write("dir/b.txt", "Needle (x) twice\n")?;
     let commit = ObjectId::parse(&repo.commit("init")?)?;
     repo.write("a.txt", "needle (x) only in the working tree\n")?;

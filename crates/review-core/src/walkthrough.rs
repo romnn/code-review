@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use indoc::{indoc, writedoc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
@@ -583,10 +584,14 @@ pub fn prompt(view: &RevisionView<'_>, key: &ReviewKey) -> String {
     // Writing to a `String` cannot fail.
     writeln!(
         prompt,
-        "Write a guided walkthrough for reviewing this change. Order the review units so a reviewer \
-         reads foundations before what builds on them, group related units into steps, and say \
-         why each step matters. Put every unit in at most one step. Units you leave out go to a \
-         final step automatically, which suits formatting-only, moved and generated units.\n\nAnswer with only this JSON:\n"
+        indoc! {"
+            Write a guided walkthrough for reviewing this change. Order the review units so a reviewer \
+            reads foundations before what builds on them, group related units into steps, and say \
+            why each step matters. Put every unit in at most one step. Units you leave out go to a \
+            final step automatically, which suits formatting-only, moved and generated units.
+
+            Answer with only this JSON:
+        "}
     )
     .ok();
     let skeleton = serde_json::json!({
@@ -596,9 +601,13 @@ pub fn prompt(view: &RevisionView<'_>, key: &ReviewKey) -> String {
         "title": "<one-line title>",
         "steps": [{"title": "<step title>", "why": "<why it matters>", "units": [format!("u{revision}-0000")]}],
     });
-    writeln!(
+    writedoc!(
         prompt,
-        "{skeleton:#}\n\nUnits (ID, location, kind, excerpt):"
+        "
+            {skeleton:#}
+
+            Units (ID, location, kind, excerpt):
+        "
     )
     .ok();
     for id in view.unit_ids() {

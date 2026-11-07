@@ -22,6 +22,7 @@ use gpui::{
     TextLayout, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
+use indoc::formatdoc;
 use review_ui::frame::Grid;
 use review_ui::keymap::Area;
 use review_ui::model::{
@@ -624,10 +625,11 @@ impl ReviewApp {
 /// Summarizes the scroll benchmark's frame intervals and per-frame work.
 fn bench_report(bench: &Bench) -> String {
     let intervals: Vec<Duration> = bench.intervals.iter().skip(1).copied().collect();
-    format!(
-        "scrolled {} rows of {} files ({:?}) in {} frames over {:.1?} ({} rows rendered)\n\
-         frame interval: {}\n\
-         render through row building: {}",
+    formatdoc!(
+        "
+            scrolled {} rows of {} files ({:?}) in {} frames over {:.1?} ({} rows rendered)
+            frame interval: {}
+            render through row building: {}",
         bench.rows,
         bench.files,
         bench.mode,

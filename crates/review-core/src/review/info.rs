@@ -136,6 +136,8 @@ pub(crate) const LOG_FORMAT: &str = "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b%x1e";
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     #[test]
@@ -153,7 +155,11 @@ mod tests {
             (7, "ana", &["bug".to_owned()][..])
         );
 
-        let log = "abc\u{1f}Ana\u{1f}2026-01-01T00:00:00+00:00\u{1f}Fix it\u{1f}Because.\n\u{1e}\ndef\u{1f}Bo\u{1f}2026-01-02T00:00:00+00:00\u{1f}Add\u{1f}\u{1e}\n";
+        let log = indoc! {"
+            abc\u{1f}Ana\u{1f}2026-01-01T00:00:00+00:00\u{1f}Fix it\u{1f}Because.
+            \u{1e}
+            def\u{1f}Bo\u{1f}2026-01-02T00:00:00+00:00\u{1f}Add\u{1f}\u{1e}
+        "};
         let commits = parse_log(log);
         assert_eq!(commits.len(), 2);
         assert_eq!(

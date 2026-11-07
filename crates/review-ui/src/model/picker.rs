@@ -941,6 +941,8 @@ pub(crate) fn grep_texts(
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// A content hit as its line, its column, its text and its highlighted spans.
@@ -997,7 +999,12 @@ mod tests {
     /// in file order, and cut at the limit.
     #[test]
     fn content_hits_trim_and_highlight() {
-        let text = FullText::new("fn main() {\n    let needle = 1;\n}\nNEEDLE\n");
+        let text = FullText::new(indoc! {"
+            fn main() {
+                let needle = 1;
+            }
+            NEEDLE
+        "});
         let cancel = AtomicBool::new(false);
         let files = [("a.rs", change(), &text)];
         let (entries, truncated) = grep_texts(&files, "needle", true, 10, &cancel);

@@ -225,12 +225,24 @@ fn push_span(spans: &mut Vec<Range<usize>>, tokens: &[Range<usize>], hunk: &Rang
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     #[test]
     fn line_map_maps_only_unchanged_lines() {
-        let before = split_lines("a\nb\nc\nd\n");
-        let after = split_lines("x\na\nb\nd\n");
+        let before = split_lines(indoc! {"
+            a
+            b
+            c
+            d
+        "});
+        let after = split_lines(indoc! {"
+            x
+            a
+            b
+            d
+        "});
         let map = LineMap::new(&before, &after);
         assert_eq!(map.line(0), Some(1));
         assert_eq!(map.line(1), Some(2));

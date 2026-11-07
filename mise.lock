@@ -71,6 +71,29 @@ checksum_source = "mise-versions"
 url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-pc-windows-msvc-v0.22.2.zip"
 url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439294720"
 
+[[tools.ast-grep]]
+version = "0.51.1"
+backend = "aqua:ast-grep/ast-grep"
+specifiers = ["latest"]
+
+[tools.ast-grep."platforms.linux-x64"]
+checksum = "sha256:42514f77ae0c8a25d7d32154d31d3e7e16f3ab894f8ce76ce417de234ee49157"
+checksum_source = "mise-versions"
+url = "https://github.com/ast-grep/ast-grep/releases/download/0.51.1/app-x86_64-unknown-linux-gnu.zip"
+url_api = "https://api.github.com/repos/ast-grep/ast-grep/releases/assets/701823082"
+
+[tools.ast-grep."platforms.macos-arm64"]
+checksum = "sha256:a95772097b4d02bd9d45ed63b300c37041ae3c36632b3bf19250cc7c10187dc4"
+checksum_source = "mise-versions"
+url = "https://github.com/ast-grep/ast-grep/releases/download/0.51.1/app-aarch64-apple-darwin.zip"
+url_api = "https://api.github.com/repos/ast-grep/ast-grep/releases/assets/701845634"
+
+[tools.ast-grep."platforms.windows-x64"]
+checksum = "sha256:12a0cefb77498820ef6fb302ed8758cbda39be87d4c15120dc74c1dea968a50d"
+checksum_source = "mise-versions"
+url = "https://github.com/ast-grep/ast-grep/releases/download/0.51.1/app-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/ast-grep/ast-grep/releases/assets/701859070"
+
 [[tools."github:est31/cargo-udeps"]]
 version = "0.1.61"
 backend = "github:est31/cargo-udeps"

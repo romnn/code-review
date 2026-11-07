@@ -1,0 +1,43 @@
+id: rust-indoc-format-string-needs-formatdoc
+valid:
+  - |
+    fn f() { let s = indoc::formatdoc! {"
+        a {x}
+    "}; }
+  - |
+    fn f() { writedoc!(out, "
+        a {}
+    ", x).unwrap(); }
+  - |
+    fn f() { let s = format!("{}", indoc::indoc! {"
+        a
+    "}); }
+  - |
+    fn f() { println!(indoc::indoc! {"
+        a {}
+    "}, x); }
+  - |
+    fn f() { writeln!(out, indoc! {"
+        a {}
+    "}, x).unwrap(); }
+invalid:
+  - |
+    fn f() { append(&mut s, format_args!(indoc::indoc! {"
+        a {}
+    "}, x)); }
+  - |
+    fn f() { let s = format!(indoc! {"
+        a {x}
+    "}); }
+  - |
+    fn f() { let s = std::format!(indoc::indoc! {"
+        a {x}
+    "}); }
+  - |
+    fn f() { write!(&mut out, indoc::indoc! {"
+        a {}
+    "}, x).unwrap(); }
+  - |
+    fn f() { eprint!(indoc! {"
+        a {x}
+    "}); }

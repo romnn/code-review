@@ -2,6 +2,7 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::indoc;
 use review_core::ReviewInfo;
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
 
@@ -15,7 +16,10 @@ fn range_reviews_store_their_commits() -> eyre::Result<()> {
     let base = repo.commit("base")?;
     repo.branch_at("feature", &base)?;
     repo.write("a.txt", "two\n")?;
-    repo.commit("Change a\n\nBecause two is better.")?;
+    repo.commit(indoc! {"
+        Change a
+
+        Because two is better."})?;
     repo.write("b.txt", "new\n")?;
     repo.commit("Add b")?;
     let review = repo.review()?;

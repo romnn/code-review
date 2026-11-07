@@ -3,6 +3,7 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::indoc;
 use review_core::{MarkVerdict, ReviewPolicy, Standing, UnitState, Verdict};
 
 use crate::common::{TestRepo, find, refresh, summaries};
@@ -13,8 +14,26 @@ const AUTO_APPROVE: ReviewPolicy = ReviewPolicy {
 };
 
 /// A Rust file whose call re-wraps (proven formatting-only) beside one real edit.
-const BEFORE: &str = "fn main() {\n    let total = compute(alpha, beta, gamma);\n    let other = 0;\n    let limit = 1;\n    run(total, limit);\n}\n";
-const AFTER: &str = "fn main() {\n    let total = compute(\n        alpha,\n        beta,\n        gamma\n    );\n    let other = 0;\n    let limit = 2;\n    run(total, limit);\n}\n";
+const BEFORE: &str = indoc! {"
+    fn main() {
+        let total = compute(alpha, beta, gamma);
+        let other = 0;
+        let limit = 1;
+        run(total, limit);
+    }
+"};
+const AFTER: &str = indoc! {"
+    fn main() {
+        let total = compute(
+            alpha,
+            beta,
+            gamma
+        );
+        let other = 0;
+        let limit = 2;
+        run(total, limit);
+    }
+"};
 
 /// A repository whose `feature` re-wraps a call and makes one real edit, and its review at
 /// revision 1.
@@ -137,10 +156,24 @@ fn the_policy_can_turn_it_off() -> eyre::Result<()> {
 #[test]
 fn unproven_whitespace_changes_are_not_approved() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
-    repo.write("main.py", "if ready:\n    start()\n    finish()\n")?;
+    repo.write(
+        "main.py",
+        indoc! {"
+            if ready:
+                start()
+                finish()
+        "},
+    )?;
     repo.commit("base")?;
     repo.branch_at("feature", "main")?;
-    repo.write("main.py", "if ready:\n    start()\nfinish()\n")?;
+    repo.write(
+        "main.py",
+        indoc! {"
+            if ready:
+                start()
+            finish()
+        "},
+    )?;
     repo.commit("dedent")?;
     let review = repo.review()?;
     refresh(&review)?;

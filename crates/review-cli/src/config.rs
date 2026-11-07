@@ -52,6 +52,8 @@ fn parse_review_policy(text: &str) -> eyre::Result<ReviewPolicy> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     /// Only `[review] auto_approve_formatting` matters: other sections, even ones the apps
@@ -61,22 +63,37 @@ mod tests {
         let off = ReviewPolicy::MARKS_ONLY;
         assert_eq!(parse_review_policy("").unwrap(), UNCONFIGURED);
         assert_eq!(
-            parse_review_policy("[theme]\nname = \"nightfox\"\n").unwrap(),
+            parse_review_policy(indoc! {"
+                [theme]
+                name = \"nightfox\"
+            "})
+            .unwrap(),
             UNCONFIGURED
         );
         assert_eq!(
-            parse_review_policy("[review]\nauto_approve_formatting = false\n").unwrap(),
-            off
-        );
-        assert_eq!(
-            parse_review_policy(
-                "[future]\nunknown = 1\n[review]\nauto_approve_formatting = false\n"
-            )
+            parse_review_policy(indoc! {"
+                [review]
+                auto_approve_formatting = false
+            "})
             .unwrap(),
             off
         );
         assert_eq!(
-            parse_review_policy("[review]\nauto_approve_formatting = true\n").unwrap(),
+            parse_review_policy(indoc! {"
+                [future]
+                unknown = 1
+                [review]
+                auto_approve_formatting = false
+            "})
+            .unwrap(),
+            off
+        );
+        assert_eq!(
+            parse_review_policy(indoc! {"
+                [review]
+                auto_approve_formatting = true
+            "})
+            .unwrap(),
             UNCONFIGURED
         );
     }
@@ -84,7 +101,13 @@ mod tests {
     /// A value `cr` cannot read is an error rather than silently a policy.
     #[test]
     fn rejects_what_it_cannot_read() {
-        assert!(parse_review_policy("[review]\nauto_approve_formatting = \"no\"\n").is_err());
+        assert!(
+            parse_review_policy(indoc! {"
+                [review]
+                auto_approve_formatting = \"no\"
+            "})
+            .is_err()
+        );
         assert!(parse_review_policy("review = 1\n").is_err());
         assert!(parse_review_policy("[review\n").is_err());
     }

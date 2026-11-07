@@ -206,6 +206,8 @@ pub fn floor_char_boundary(text: &str, index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     fn pos(row: usize, col: usize) -> TextPos {
@@ -229,7 +231,10 @@ mod tests {
         assert_eq!(selection.range_in_row(3, 4), None);
         assert_eq!(
             selection.text(|row| rows.get(row).copied()),
-            "beta\ngamma\ndelta"
+            indoc! {"
+                beta
+                gamma
+                delta"}
         );
         assert_eq!(
             Selection::caret(Pane::Diff, Column::Whole, pos(1, 2))

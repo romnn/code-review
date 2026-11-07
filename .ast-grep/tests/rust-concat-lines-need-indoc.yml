@@ -1,0 +1,12 @@
+id: rust-concat-lines-need-indoc
+valid:
+  - |
+    fn f() { let s = concat!("a", "b"); }
+  - |
+    const S: &str = indoc! {"
+        first
+        second
+    "};
+invalid:
+  - |
+    fn f() { let s = concat!("first\n", "second\n"); }

@@ -1,0 +1,31 @@
+id: rust-multiline-string-needs-indoc
+snapshots:
+  ? |
+    #[doc = "first line\nsecond line"]
+    pub struct Documented;
+  : labels:
+      - source: '"first line\nsecond line"'
+        style: primary
+        start: 8
+        end: 33
+  ? |
+    fn f() { let s = "a\n\nb"; }
+  : labels:
+      - source: '"a\n\nb"'
+        style: primary
+        start: 17
+        end: 25
+  ? |
+    fn f() { let s = "first\nsecond\n"; }
+  : labels:
+      - source: '"first\nsecond\n"'
+        style: primary
+        start: 17
+        end: 34
+  ? |
+    fn f() { svg.push_str("</g>\n</svg>\n"); }
+  : labels:
+      - source: '"</g>\n</svg>\n"'
+        style: primary
+        start: 22
+        end: 38

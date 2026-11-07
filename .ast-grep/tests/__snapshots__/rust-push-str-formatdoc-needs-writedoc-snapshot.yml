@@ -1,0 +1,125 @@
+id: rust-push-str-formatdoc-needs-writedoc
+snapshots:
+  ? |
+    fn f() { out.push_str(&::indoc::formatdoc! {"
+        a {x}
+    "}); }
+  : labels:
+      - source: |-
+          out.push_str(&::indoc::formatdoc! {"
+              a {x}
+          "})
+        style: primary
+        start: 9
+        end: 59
+      - source: push_str
+        style: secondary
+        start: 13
+        end: 21
+      - source: out.push_str
+        style: secondary
+        start: 9
+        end: 21
+      - source: |-
+          ::indoc::formatdoc! {"
+              a {x}
+          "}
+        style: secondary
+        start: 23
+        end: 58
+      - source: |-
+          &::indoc::formatdoc! {"
+              a {x}
+          "}
+        style: secondary
+        start: 22
+        end: 58
+      - source: |-
+          &::indoc::formatdoc! {"
+              a {x}
+          "}
+        style: secondary
+        start: 22
+        end: 58
+  ? |
+    fn f() { prompt.push_str(&indoc::formatdoc! {"
+        a {x}
+    "}); }
+  : labels:
+      - source: |-
+          prompt.push_str(&indoc::formatdoc! {"
+              a {x}
+          "})
+        style: primary
+        start: 9
+        end: 60
+      - source: push_str
+        style: secondary
+        start: 16
+        end: 24
+      - source: prompt.push_str
+        style: secondary
+        start: 9
+        end: 24
+      - source: |-
+          indoc::formatdoc! {"
+              a {x}
+          "}
+        style: secondary
+        start: 26
+        end: 59
+      - source: |-
+          &indoc::formatdoc! {"
+              a {x}
+          "}
+        style: secondary
+        start: 25
+        end: 59
+      - source: |-
+          &indoc::formatdoc! {"
+              a {x}
+          "}
+        style: secondary
+        start: 25
+        end: 59
+  ? |
+    fn f() { self.block.push_str(&formatdoc!("
+        a {}
+    ", x)); }
+  : labels:
+      - source: |-
+          self.block.push_str(&formatdoc!("
+              a {}
+          ", x))
+        style: primary
+        start: 9
+        end: 58
+      - source: push_str
+        style: secondary
+        start: 20
+        end: 28
+      - source: self.block.push_str
+        style: secondary
+        start: 9
+        end: 28
+      - source: |-
+          formatdoc!("
+              a {}
+          ", x)
+        style: secondary
+        start: 30
+        end: 57
+      - source: |-
+          &formatdoc!("
+              a {}
+          ", x)
+        style: secondary
+        start: 29
+        end: 57
+      - source: |-
+          &formatdoc!("
+              a {}
+          ", x)
+        style: secondary
+        start: 29
+        end: 57

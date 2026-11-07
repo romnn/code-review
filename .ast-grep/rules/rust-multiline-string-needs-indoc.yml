@@ -1,0 +1,24 @@
+id: rust-multiline-string-needs-indoc
+language: Rust
+severity: warning
+message: 'Multi-line string built from \n — use indoc! {"..."}, or formatdoc! when it interpolates.'
+note:
+  "A literal that fakes its line breaks with \\n hides its own shape, so a reviewer has to decode
+  the escapes to see the text. indoc! keeps the lines on the page and strips the leading
+  indentation. A single trailing \\n and runs of bare \\n are separators rather than documents, so
+  they are allowed."
+rule:
+  all:
+    - kind: string_literal
+    # Two runs of real content separated by a \n escape, which is what "multi-line" means here.
+    #
+    # `(?:[^"\\]|\\[^n])*` is the load-bearing part: it spans ordinary characters and every escape
+    # except \n, so a segment can never swallow the separator the way `.*` would.
+    # Leading and trailing separators are absorbed by `(?:\\n|\s)*`, so a literal that only opens or
+    # closes with a break stays single-line, and a whitespace-only literal never reaches a content
+    # character at all.
+    - regex: '^"(?:\\n|\s)*(?:[^"\\]|\\[^n])*[^"\s\\](?:[^"\\]|\\[^n])*\\n(?:\\n|\s)*(?:[^"\\]|\\[^n])*[^"\s\\]'
+    # Significant whitespace before an escaped newline would become invisible source-line
+    # whitespace in an `indoc!` body and is likely to be stripped by an editor.
+    - not:
+        regex: '[\t ]+\\n'

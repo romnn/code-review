@@ -1,0 +1,27 @@
+id: rust-push-str-formatdoc-needs-writedoc
+language: Rust
+severity: warning
+message:
+  "push_str(&formatdoc! {...}) formats into a throwaway String — write into the target with
+  writedoc! instead."
+note:
+  "writedoc!(s, ...) is write!(s, indoc!(...)): it formats straight into the String, keeps the
+  template next to its target, and reads the same as every other append. Writing into a String
+  cannot fail, so `let _ = writedoc! {s, ...};` is enough; bring std::fmt::Write into scope with
+  `use std::fmt::Write as _;`."
+rule:
+  kind: call_expression
+  all:
+    - has:
+        field: function
+        kind: field_expression
+        has:
+          field: field
+          regex: "^push_str$"
+    - has:
+        field: arguments
+        has:
+          kind: reference_expression
+          has:
+            kind: macro_invocation
+            regex: "^(?:(?:::)?indoc::)?formatdoc!"

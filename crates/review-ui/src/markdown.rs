@@ -169,13 +169,27 @@ pub fn inline(source: &str) -> Inline {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     #[test]
     fn blocks_parse() {
-        let blocks = parse(
-            "## Summary\n\nOne\ntwo.\n\n- a `b`\n  - nested\n1. first\n\n```sh\ncargo test\n```\n---\n",
-        );
+        let blocks = parse(indoc! {"
+            ## Summary
+
+            One
+            two.
+
+            - a `b`
+              - nested
+            1. first
+
+            ```sh
+            cargo test
+            ```
+            ---
+        "});
         assert_eq!(blocks[0], Block::Heading(2, inline("Summary")));
         assert_eq!(blocks[1], Block::Paragraph(inline("One two.")));
         assert!(

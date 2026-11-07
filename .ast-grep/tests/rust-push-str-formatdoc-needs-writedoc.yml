@@ -1,0 +1,29 @@
+id: rust-push-str-formatdoc-needs-writedoc
+valid:
+  - |
+    fn f() { let _ = indoc::writedoc! {prompt, "
+        a {x}
+    "}; }
+  - |
+    fn f() { let prompt = indoc::formatdoc! {"
+        a {x}
+    "}; }
+  - |
+    fn f() { prompt.push_str(indoc::indoc! {"
+        a
+    "}); }
+  - |
+    fn f() { prompt.push_str(&rendered); }
+invalid:
+  - |
+    fn f() { prompt.push_str(&indoc::formatdoc! {"
+        a {x}
+    "}); }
+  - |
+    fn f() { self.block.push_str(&formatdoc!("
+        a {}
+    ", x)); }
+  - |
+    fn f() { out.push_str(&::indoc::formatdoc! {"
+        a {x}
+    "}); }

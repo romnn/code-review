@@ -2,6 +2,7 @@
 
 use color_eyre::eyre;
 use googletest::prelude::*;
+use indoc::indoc;
 
 use crate::common::{TestRepo, latest_analysis, refresh};
 
@@ -36,8 +37,20 @@ fn formatting_flags(analysis: &review_core::analysis::Analysis) -> Vec<bool> {
 fn rewrapped_rust_call_is_formatting_only() -> eyre::Result<()> {
     let (repo, analysis) = analyze_change(
         "src/lib.rs",
-        "fn main() {\n    let total = compute(alpha, beta, gamma);\n}\n",
-        "fn main() {\n    let total = compute(\n        alpha,\n        beta,\n        gamma\n    );\n}\n",
+        indoc! {"
+            fn main() {
+                let total = compute(alpha, beta, gamma);
+            }
+        "},
+        indoc! {"
+            fn main() {
+                let total = compute(
+                    alpha,
+                    beta,
+                    gamma
+                );
+            }
+        "},
     )?;
     assert_that!(formatting_flags(&analysis), elements_are![eq(&true)]);
     assert!(analysis.files[0].formatting_only);
@@ -50,8 +63,26 @@ fn rewrapped_rust_call_is_formatting_only() -> eyre::Result<()> {
 /// is proven, and only the edited token is highlighted.
 #[test]
 fn real_edit_keeps_the_rewrap_proven_and_is_highlighted() -> eyre::Result<()> {
-    let before = "fn main() {\n    let total = compute(alpha, beta, gamma);\n    let other = 0;\n    let limit = 1;\n    run(total, limit);\n}\n";
-    let after = "fn main() {\n    let total = compute(\n        alpha,\n        beta,\n        gamma\n    );\n    let other = 0;\n    let limit = 2;\n    run(total, limit);\n}\n";
+    let before = indoc! {"
+        fn main() {
+            let total = compute(alpha, beta, gamma);
+            let other = 0;
+            let limit = 1;
+            run(total, limit);
+        }
+    "};
+    let after = indoc! {"
+        fn main() {
+            let total = compute(
+                alpha,
+                beta,
+                gamma
+            );
+            let other = 0;
+            let limit = 2;
+            run(total, limit);
+        }
+    "};
     let (_repo, analysis) = analyze_change("src/lib.rs", before, after)?;
     assert!(!analysis.files[0].formatting_only);
     assert_that!(
@@ -94,8 +125,17 @@ fn real_edit_keeps_the_rewrap_proven_and_is_highlighted() -> eyre::Result<()> {
 fn javascript_return_line_break_is_not_formatting_only() -> eyre::Result<()> {
     let (_repo, analysis) = analyze_change(
         "auth.js",
-        "function check() {\n  return isAdmin;\n}\n",
-        "function check() {\n  return\n  isAdmin;\n}\n",
+        indoc! {"
+            function check() {
+              return isAdmin;
+            }
+        "},
+        indoc! {"
+            function check() {
+              return
+              isAdmin;
+            }
+        "},
     )?;
     assert!(analysis.units.iter().all(|unit| !unit.formatting_only));
     Ok(())
@@ -107,14 +147,32 @@ fn javascript_return_line_break_is_not_formatting_only() -> eyre::Result<()> {
 fn python_reindent_is_not_formatting_only() -> eyre::Result<()> {
     let (_repo, nested) = analyze_change(
         "main.py",
-        "if ready:\n    start()\nfor item in items:\n    handle(item)\n",
-        "if ready:\n    start()\n    for item in items:\n        handle(item)\n",
+        indoc! {"
+            if ready:
+                start()
+            for item in items:
+                handle(item)
+        "},
+        indoc! {"
+            if ready:
+                start()
+                for item in items:
+                    handle(item)
+        "},
     )?;
     assert!(nested.units.iter().all(|unit| !unit.formatting_only));
     let (_repo, dedented) = analyze_change(
         "main.py",
-        "if ready:\n    start()\n    finish()\n",
-        "if ready:\n    start()\nfinish()\n",
+        indoc! {"
+            if ready:
+                start()
+                finish()
+        "},
+        indoc! {"
+            if ready:
+                start()
+            finish()
+        "},
     )?;
     assert!(dedented.units.iter().all(|unit| !unit.formatting_only));
     Ok(())
@@ -125,8 +183,16 @@ fn python_reindent_is_not_formatting_only() -> eyre::Result<()> {
 fn multiline_string_change_is_not_formatting_only() -> eyre::Result<()> {
     let (_repo, analysis) = analyze_change(
         "src/lib.rs",
-        "const HELP: &str = \"usage:\n  run\n\";\n",
-        "const HELP: &str = \"usage:\n    run\n\";\n",
+        indoc! {"
+            const HELP: &str = \"usage:
+              run
+            \";
+        "},
+        indoc! {"
+            const HELP: &str = \"usage:
+                run
+            \";
+        "},
     )?;
     assert!(analysis.units.iter().all(|unit| !unit.formatting_only));
     Ok(())
@@ -136,7 +202,17 @@ fn multiline_string_change_is_not_formatting_only() -> eyre::Result<()> {
 /// change is only hinted as whitespace-only.
 #[test]
 fn unsupported_language_is_never_formatting_only() -> eyre::Result<()> {
-    let (_repo, analysis) = analyze_change("config.yaml", "a:\n  b: 1\n", "a:\n    b: 1\n")?;
+    let (_repo, analysis) = analyze_change(
+        "config.yaml",
+        indoc! {"
+            a:
+              b: 1
+        "},
+        indoc! {"
+            a:
+                b: 1
+        "},
+    )?;
     assert!(analysis.units.iter().all(|unit| !unit.formatting_only));
     assert!(
         analysis

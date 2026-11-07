@@ -197,6 +197,8 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use crate::rows::{Pair, RowKind};
 
     use super::*;
@@ -246,8 +248,20 @@ mod tests {
             head: TextPos { row: 3, col: 4 },
         };
         let line = |index: usize| rows.get(index).and_then(|row| row_text(row, Column::Left));
-        assert_eq!(selection.text(line), "old\n\nsame");
+        assert_eq!(
+            selection.text(line),
+            indoc! {"
+                old
+
+                same"}
+        );
         let right = |index: usize| rows.get(index).and_then(|row| row_text(row, Column::Right));
-        assert_eq!(selection.text(right), "new\nmore\nsame");
+        assert_eq!(
+            selection.text(right),
+            indoc! {"
+                new
+                more
+                same"}
+        );
     }
 }

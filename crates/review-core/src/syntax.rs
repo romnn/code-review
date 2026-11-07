@@ -897,6 +897,8 @@ fn ecmascript_wrap_site(
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     fn equivalent(language: Language, before: &str, after: &str) -> bool {
@@ -911,14 +913,30 @@ mod tests {
     fn python_continuation_is_lexical() {
         assert!(!equivalent(
             Language::Python,
-            "if ready:\n    a()\n    # \\\n    b()\n",
-            "if ready:\n    a()\n    # \\\n      b()\n",
+            indoc! {"
+                if ready:
+                    a()
+                    # \\
+                    b()
+            "},
+            indoc! {"
+                if ready:
+                    a()
+                    # \\
+                      b()
+            "},
         ));
         // An explicit continuation is exact, with the gaps around it.
         assert!(!equivalent(
             Language::Python,
-            "x = 1 + \\\n    2\n",
-            "x = 1 + \\\n        2\n",
+            indoc! {"
+                x = 1 + \\
+                    2
+            "},
+            indoc! {"
+                x = 1 + \\
+                        2
+            "},
         ));
         // A bare carriage return ends a line too.
         assert!(!equivalent(
@@ -928,35 +946,110 @@ mod tests {
         ));
     }
 
+    const ECMASCRIPT_LINE_BREAK_CASES: &[(&str, &str)] = &[
+        (
+            "throw new Error(\"denied\");",
+            indoc! {"
+                throw
+                new Error(\"denied\");"},
+        ),
+        (
+            "function f(x) { return x; }",
+            indoc! {"
+                function f(x) { return
+                x; }"},
+        ),
+        (
+            "a: for (;;) { break a; }",
+            indoc! {"
+                a: for (;;) { break
+                a; }"},
+        ),
+        (
+            "a: for (;;) { continue a; }",
+            indoc! {"
+                a: for (;;) { continue
+                a; }"},
+        ),
+        (
+            "function* g() { yield x; }",
+            indoc! {"
+                function* g() { yield
+                x; }"},
+        ),
+        (
+            "const f = async (x) => x;",
+            indoc! {"
+                const f = async
+                (x) => x;"},
+        ),
+        (
+            "async function f() {}",
+            indoc! {"
+                async
+                function f() {}"},
+        ),
+        (
+            "const f = (x) => x;",
+            indoc! {"
+                const f = (x)
+                => x;"},
+        ),
+        (
+            "x++;",
+            indoc! {"
+                x
+                ++;"},
+        ),
+        ("throw new Error();", "throw\u{2028}new Error();"),
+        ("throw new Error();", "throw\u{2029}new Error();"),
+        ("throw new Error();", "throw\rnew Error();"),
+        (
+            "throw new Error();",
+            indoc! {"
+                throw /*
+                */ new Error();"},
+        ),
+    ];
+
+    const TYPESCRIPT_LINE_BREAK_CASES: &[(&str, &str)] = &[
+        (
+            "type A = B;",
+            indoc! {"
+                type
+                A = B;"},
+        ),
+        (
+            "declare const x: number;",
+            indoc! {"
+                declare
+                const x: number;"},
+        ),
+        (
+            "const y = x as T;",
+            indoc! {"
+                const y = x
+                as T;"},
+        ),
+        (
+            "function f(x): x is T { return true; }",
+            indoc! {"
+                function f(x): x
+                is T { return true; }"},
+        ),
+        (
+            "let a = b!;",
+            indoc! {"
+                let a = b
+                !;"},
+        ),
+    ];
+
     /// Every restricted production of ECMAScript, and TypeScript's own, records whether a line
     /// terminator separates its tokens; any line terminator counts.
     #[test]
     fn ecmascript_restricted_line_breaks_are_significant() {
-        let cases = [
-            (
-                "throw new Error(\"denied\");",
-                "throw\nnew Error(\"denied\");",
-            ),
-            (
-                "function f(x) { return x; }",
-                "function f(x) { return\nx; }",
-            ),
-            ("a: for (;;) { break a; }", "a: for (;;) { break\na; }"),
-            (
-                "a: for (;;) { continue a; }",
-                "a: for (;;) { continue\na; }",
-            ),
-            ("function* g() { yield x; }", "function* g() { yield\nx; }"),
-            ("const f = async (x) => x;", "const f = async\n(x) => x;"),
-            ("async function f() {}", "async\nfunction f() {}"),
-            ("const f = (x) => x;", "const f = (x)\n=> x;"),
-            ("x++;", "x\n++;"),
-            ("throw new Error();", "throw\u{2028}new Error();"),
-            ("throw new Error();", "throw\u{2029}new Error();"),
-            ("throw new Error();", "throw\rnew Error();"),
-            ("throw new Error();", "throw /*\n*/ new Error();"),
-        ];
-        for (before, after) in cases {
+        for &(before, after) in ECMASCRIPT_LINE_BREAK_CASES {
             for language in [Language::JavaScript, Language::TypeScript] {
                 assert!(
                     !equivalent(language, before, after),
@@ -964,17 +1057,7 @@ mod tests {
                 );
             }
         }
-        let typescript = [
-            ("type A = B;", "type\nA = B;"),
-            ("declare const x: number;", "declare\nconst x: number;"),
-            ("const y = x as T;", "const y = x\nas T;"),
-            (
-                "function f(x): x is T { return true; }",
-                "function f(x): x\nis T { return true; }",
-            ),
-            ("let a = b!;", "let a = b\n!;"),
-        ];
-        for (before, after) in typescript {
+        for &(before, after) in TYPESCRIPT_LINE_BREAK_CASES {
             assert!(
                 !equivalent(Language::TypeScript, before, after),
                 "{before:?} against {after:?}"
@@ -983,15 +1066,34 @@ mod tests {
         // Line breaks elsewhere stay formatting.
         assert!(equivalent(
             Language::JavaScript,
-            "f(a, b);\nconst x = [1, 2];\n",
-            "f(\n  a,\n  b,\n);\nconst x =\n  [1, 2];\n"
-                .replace(",\n);", "\n);")
-                .as_str(),
+            indoc! {"
+                f(a, b);
+                const x = [1, 2];
+            "},
+            indoc! {"
+                f(
+                  a,
+                  b,
+                );
+                const x =
+                  [1, 2];
+            "}
+            .replace(
+                indoc! {"
+                    ,
+                    );"},
+                "\n);"
+            )
+            .as_str(),
         ));
         assert!(equivalent(
             Language::TypeScript,
             "function f(x: number) { return g(x); }\n",
-            "function f(x: number) {\n  return g(x);\n}\n",
+            indoc! {"
+                function f(x: number) {
+                  return g(x);
+                }
+            "},
         ));
     }
 
@@ -1005,8 +1107,14 @@ mod tests {
         ));
         assert!(!equivalent(
             Language::Rust,
-            "#[attr(a = -1)]\nfn f() {}\n",
-            "#[attr(a =- 1)]\nfn f() {}\n",
+            indoc! {"
+                #[attr(a = -1)]
+                fn f() {}
+            "},
+            indoc! {"
+                #[attr(a =- 1)]
+                fn f() {}
+            "},
         ));
         assert!(!equivalent(
             Language::Rust,
@@ -1016,13 +1124,26 @@ mod tests {
         assert!(equivalent(
             Language::Rust,
             "fn f() { vec![1, 2]; }\n",
-            "fn f() {\n    vec![\n        1,\n        2\n    ];\n}\n",
+            indoc! {"
+                fn f() {
+                    vec![
+                        1,
+                        2
+                    ];
+                }
+            "},
         ));
         // Outside macros too: an attribute macro receives the whole item.
         assert!(!equivalent(
             Language::Rust,
-            "#[policy]\nfn f() -> i32 { a + -b }\n",
-            "#[policy]\nfn f() -> i32 { a +-b }\n",
+            indoc! {"
+                #[policy]
+                fn f() -> i32 { a + -b }
+            "},
+            indoc! {"
+                #[policy]
+                fn f() -> i32 { a +-b }
+            "},
         ));
     }
 
@@ -1119,43 +1240,76 @@ mod tests {
         }
     }
 
-    /// Every counterexample from the reviews of the proof: each pair has the same tree in the
-    /// pinned grammar, and the language accepts one and rejects the other or reads them
-    /// differently.
-    #[test]
-    fn review_counterexamples_are_not_equivalent() {
+    const REVIEW_COUNTEREXAMPLES: &[(Language, &str, &str)] = {
         use Language::{Go, JavaScript, Json, Python, Rust, Toml, Tsx, TypeScript};
-        let cases = [
+        &[
             // Python: a vertical tab is no whitespace; a comment's backslash continues nothing.
             (Python, "x = (1 + 2)\n", "x = (1\u{b}+ 2)\n"),
             (
                 Python,
-                "if ready:\n    a()\n    # \\\n    b()\n",
-                "if ready:\n    a()\n    # \\\n      b()\n",
+                indoc! {"
+                    if ready:
+                        a()
+                        # \\
+                        b()
+                "},
+                indoc! {"
+                    if ready:
+                        a()
+                        # \\
+                          b()
+                "},
             ),
             (
                 Python,
-                "if a:\n    b()\n    c()\n",
-                "if a:\n    b()\n      c()\n",
+                indoc! {"
+                    if a:
+                        b()
+                        c()
+                "},
+                indoc! {"
+                    if a:
+                        b()
+                          c()
+                "},
             ),
             // JavaScript: restricted productions, the hashbang's position, `-->` comments.
             (
                 JavaScript,
                 "throw new Error(\"denied\");\n",
-                "throw\nnew Error(\"denied\");\n",
+                indoc! {"
+                    throw
+                    new Error(\"denied\");
+                "},
             ),
             (
                 JavaScript,
-                "#!/usr/bin/env node\nf();\n",
-                " #!/usr/bin/env node\nf();\n",
+                indoc! {"
+                    #!/usr/bin/env node
+                    f();
+                "},
+                indoc! {"
+                     #!/usr/bin/env node
+                    f();
+                "},
             ),
             (
                 JavaScript,
-                "const x = 1;\n--> comment\n",
+                indoc! {"
+                    const x = 1;
+                    --> comment
+                "},
                 "const x = 1; --> comment\n",
             ),
             // TypeScript: `interface` before a break; angle-list commas are tokens.
-            (TypeScript, "interface I {}\n", "interface\nI {}\n"),
+            (
+                TypeScript,
+                "interface I {}\n",
+                indoc! {"
+                    interface
+                    I {}
+                "},
+            ),
             (TypeScript, "f<string>();\n", "f<string,>();\n"),
             (
                 Tsx,
@@ -1165,22 +1319,49 @@ mod tests {
             // Go: a break after an operand inserts a semicolon.
             (
                 Go,
-                "package p\nvar a = g(1 + 2)\n",
-                "package p\nvar a = g(1\n+ 2)\n",
+                indoc! {"
+                    package p
+                    var a = g(1 + 2)
+                "},
+                indoc! {"
+                    package p
+                    var a = g(1
+                    + 2)
+                "},
             ),
             (
                 Go,
-                "package p\nfunc f(x int) {}\n",
-                "package p\nfunc f(x\nint) {}\n",
+                indoc! {"
+                    package p
+                    func f(x int) {}
+                "},
+                indoc! {"
+                    package p
+                    func f(x
+                    int) {}
+                "},
             ),
             (
                 Go,
-                "package p\nvar a = []int{1}\n",
-                "package p\nvar a = []int{1\n}\n",
+                indoc! {"
+                    package p
+                    var a = []int{1}
+                "},
+                indoc! {"
+                    package p
+                    var a = []int{1
+                    }
+                "},
             ),
             // JSON: a vertical tab is no whitespace; a comment is no JSON.
             (Json, "{\"a\": 1}", "{\"a\":\u{b}1}"),
-            (Json, "{\"a\": 1}", "{\"a\": 1 // one\n}"),
+            (
+                Json,
+                "{\"a\": 1}",
+                indoc! {"
+                    {\"a\": 1 // one
+                    }"},
+            ),
             // TOML: quoted keys are exact.
             (Toml, "\" \" = 1\n", "\"  \" = 1\n"),
             (Toml, "' ' = 1\n", "'  ' = 1\n"),
@@ -1192,16 +1373,35 @@ mod tests {
             ),
             (
                 Rust,
-                "#[policy]\nfn f() -> i32 { a + -b }\n",
-                "#[policy]\nfn f() -> i32 { a +-b }\n",
+                indoc! {"
+                    #[policy]
+                    fn f() -> i32 { a + -b }
+                "},
+                indoc! {"
+                    #[policy]
+                    fn f() -> i32 { a +-b }
+                "},
             ),
             (
                 Rust,
-                "#[probe]\nfn f(x: u8) {}\n",
-                "#[probe]\nfn f(x: u8,) {}\n",
+                indoc! {"
+                    #[probe]
+                    fn f(x: u8) {}
+                "},
+                indoc! {"
+                    #[probe]
+                    fn f(x: u8,) {}
+                "},
             ),
-        ];
-        assert_never_equivalent(&cases);
+        ]
+    };
+
+    /// Every counterexample from the reviews of the proof: each pair has the same tree in the
+    /// pinned grammar, and the language accepts one and rejects the other or reads them
+    /// differently.
+    #[test]
+    fn review_counterexamples_are_not_equivalent() {
+        assert_never_equivalent(REVIEW_COUNTEREXAMPLES);
     }
 
     /// The counterexamples of the fifth review: touching tokens that are one lexeme or that a
@@ -1241,34 +1441,83 @@ mod tests {
             // Python's encoding declaration counts only on line 1 or 2.
             (
                 Python,
-                "# -*- coding: latin-1 -*-\nx = 1\n",
-                "\n\n# -*- coding: latin-1 -*-\nx = 1\n",
+                indoc! {"
+                    # -*- coding: latin-1 -*-
+                    x = 1
+                "},
+                indoc! {"
+
+
+                    # -*- coding: latin-1 -*-
+                    x = 1
+                "},
             ),
             (
                 Python,
-                "#!/usr/bin/env python\n# coding: latin-1\nx = 1\n",
-                "#!/usr/bin/env python\n\n# coding: latin-1\nx = 1\n",
+                indoc! {"
+                    #!/usr/bin/env python
+                    # coding: latin-1
+                    x = 1
+                "},
+                indoc! {"
+                    #!/usr/bin/env python
+
+                    # coding: latin-1
+                    x = 1
+                "},
             ),
             // Round 6: the real lexers merge or reject what the grammars split.
             (
                 Go,
-                "package p\n\nvar x = a< -b\n",
-                "package p\n\nvar x = a<-b\n",
+                indoc! {"
+                    package p
+
+                    var x = a< -b
+                "},
+                indoc! {"
+                    package p
+
+                    var x = a<-b
+                "},
             ),
             (
                 Go,
-                "package p\n\nvar x = a+ +b\n",
-                "package p\n\nvar x = a++b\n",
+                indoc! {"
+                    package p
+
+                    var x = a+ +b
+                "},
+                indoc! {"
+                    package p
+
+                    var x = a++b
+                "},
             ),
             (
                 Go,
-                "package p\n\nvar x = a- -b\n",
-                "package p\n\nvar x = a--b\n",
+                indoc! {"
+                    package p
+
+                    var x = a- -b
+                "},
+                indoc! {"
+                    package p
+
+                    var x = a--b
+                "},
             ),
             (
                 Go,
-                "package p\n\nvar x = a/ *b\n",
-                "package p\n\nvar x = a/*b\n",
+                indoc! {"
+                    package p
+
+                    var x = a/ *b
+                "},
+                indoc! {"
+                    package p
+
+                    var x = a/*b
+                "},
             ),
             (JavaScript, "f(a< !--b);\n", "f(a<!--b);\n"),
             (
@@ -1286,13 +1535,33 @@ mod tests {
             // A Go `//line` directive must start its line.
             (
                 Go,
-                "package p\n\n//line x:notanumber\nvar a = 1\n",
-                "package p\n\n //line x:notanumber\nvar a = 1\n",
+                indoc! {"
+                    package p
+
+                    //line x:notanumber
+                    var a = 1
+                "},
+                indoc! {"
+                    package p
+
+                     //line x:notanumber
+                    var a = 1
+                "},
             ),
             (
                 Go,
-                "package p\n\n//go:noinline\nfunc f() {}\n",
-                "package p\n\n  //go:noinline\nfunc f() {}\n",
+                indoc! {"
+                    package p
+
+                    //go:noinline
+                    func f() {}
+                "},
+                indoc! {"
+                    package p
+
+                      //go:noinline
+                    func f() {}
+                "},
             ),
         ];
         assert_never_equivalent(&cases);
@@ -1325,8 +1594,16 @@ mod tests {
             (TypeScript, "const x=y+1;\n", "const x = y + 1;\n"),
             (
                 Go,
-                "package p\n\nvar x = f(a,b)\n",
-                "package p\n\nvar x = f(a, b)\n",
+                indoc! {"
+                    package p
+
+                    var x = f(a,b)
+                "},
+                indoc! {"
+                    package p
+
+                    var x = f(a, b)
+                "},
             ),
             (Rust, "fn f() { g(a,b); }\n", "fn f() { g(a, b); }\n"),
             // Not after a literal or other punctuation.
@@ -1358,19 +1635,41 @@ mod tests {
             (
                 TypeScript,
                 "const total = items.filter(f);\n",
-                "const total = items\n  .filter(f);\n",
+                indoc! {"
+                    const total = items
+                      .filter(f);
+                "},
             ),
             (TypeScript, "const y = x?.y;\n", "const y = x ?.y;\n"),
-            (TypeScript, "const y = this.y;\n", "const y = this\n  .y;\n"),
+            (
+                TypeScript,
+                "const y = this.y;\n",
+                indoc! {"
+                    const y = this
+                      .y;
+                "},
+            ),
             (
                 Rust,
                 "fn f() -> u32 { fraction.chars().count() }\n",
-                "fn f() -> u32 {\n    fraction\n        .chars()\n        .count()\n}\n",
+                indoc! {"
+                    fn f() -> u32 {
+                        fraction
+                            .chars()
+                            .count()
+                    }
+                "},
             ),
             (
                 Rust,
                 "fn f(&self) -> u32 { self.a.len() }\n",
-                "fn f(&self) -> u32 {\n    self\n        .a\n        .len()\n}\n",
+                indoc! {"
+                    fn f(&self) -> u32 {
+                        self
+                            .a
+                            .len()
+                    }
+                "},
             ),
         ];
         for (language, before, after) in cases {
@@ -1390,7 +1689,14 @@ mod tests {
         for (language, prefix, suffix) in [
             (Language::Rust, "const A: u64 = ", ";\n"),
             (Language::Tsx, "const a = ", ";\n"),
-            (Language::Go, "package p\n\nvar a = ", "\n"),
+            (
+                Language::Go,
+                indoc! {"
+                    package p
+
+                    var a = "},
+                "\n",
+            ),
         ] {
             let source = format!("{prefix}{}{suffix}", vec!["1"; terms].join(" + "));
             let started = std::time::Instant::now();
@@ -1405,59 +1711,145 @@ mod tests {
         }
     }
 
-    /// The reflows formatters make of formatted code stay proven when no token changes.
-    #[test]
-    fn common_reflows_stay_equivalent() {
+    const COMMON_REFLOW_CASES: &[(Language, &str, &str)] = {
         use Language::{Go, Json, Python, Rust, TypeScript};
-        let cases = [
+        &[
             (
                 Rust,
-                "fn f(&mut self) {\n    for entry in &entries[..take] { self.apply(entry); }\n}\n",
-                "fn f(&mut self) {\n    for entry in &entries[..take] {\n        self.apply(entry);\n    }\n}\n",
+                indoc! {"
+                    fn f(&mut self) {
+                        for entry in &entries[..take] { self.apply(entry); }
+                    }
+                "},
+                indoc! {"
+                    fn f(&mut self) {
+                        for entry in &entries[..take] {
+                            self.apply(entry);
+                        }
+                    }
+                "},
             ),
             (
                 Rust,
                 "fn f() -> u32 { a.iter().map(g).sum() }\n",
-                "fn f() -> u32 {\n    a.iter()\n        .map(g)\n        .sum()\n}\n",
+                indoc! {"
+                    fn f() -> u32 {
+                        a.iter()
+                            .map(g)
+                            .sum()
+                    }
+                "},
             ),
             (
                 Rust,
                 "fn f() -> bool { alpha && beta || gamma }\n",
-                "fn f() -> bool {\n    alpha\n        && beta\n        || gamma\n}\n",
+                indoc! {"
+                    fn f() -> bool {
+                        alpha
+                            && beta
+                            || gamma
+                    }
+                "},
             ),
             (
                 TypeScript,
                 "const total = items.filter((x) => x.ok).map((x) => x.value);\n",
-                "const total = items.filter((x) => x.ok)\n  .map((x) => x.value);\n",
+                indoc! {"
+                    const total = items.filter((x) => x.ok)
+                      .map((x) => x.value);
+                "},
             ),
             (
                 TypeScript,
-                "const ok = alpha && beta;\nconst v = cond ? a : b;\n",
-                "const ok =\n  alpha &&\n  beta;\nconst v = cond\n  ? a\n  : b;\n",
+                indoc! {"
+                    const ok = alpha && beta;
+                    const v = cond ? a : b;
+                "},
+                indoc! {"
+                    const ok =
+                      alpha &&
+                      beta;
+                    const v = cond
+                      ? a
+                      : b;
+                "},
             ),
             (
                 Go,
-                "package p\n\ntype S struct {\n\ta int // a\n\tlonger string // b\n}\n\nfunc f() { g(1, 2) }\n",
-                "package p\n\ntype S struct {\n\ta      int    // a\n\tlonger string // b\n}\n\nfunc f() {\n\tg(1,\n\t\t2)\n}\n",
+                indoc! {"
+                    package p
+
+                    type S struct {
+                    \ta int // a
+                    \tlonger string // b
+                    }
+
+                    func f() { g(1, 2) }
+                "},
+                indoc! {"
+                    package p
+
+                    type S struct {
+                    \ta      int    // a
+                    \tlonger string // b
+                    }
+
+                    func f() {
+                    \tg(1,
+                    \t\t2)
+                    }
+                "},
             ),
             (
                 Python,
                 "result = compute(alpha, beta, gamma)\n",
-                "result = compute(\n    alpha, beta,\n    gamma\n)\n",
+                indoc! {"
+                    result = compute(
+                        alpha, beta,
+                        gamma
+                    )
+                "},
             ),
             (
                 Python,
-                "x = 1\ny = [a, b]\n\n\n\nz = 2\n",
-                "x = 1\ny = [a, b]\n\nz = 2\n",
+                indoc! {"
+                    x = 1
+                    y = [a, b]
+
+
+
+                    z = 2
+                "},
+                indoc! {"
+                    x = 1
+                    y = [a, b]
+
+                    z = 2
+                "},
             ),
             (Python, "f( a, b )\n", "f(a, b)\n"),
             (
                 Json,
                 "{\"a\": [1, 2], \"b\": {\"c\": null}}",
-                "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": null\n  }\n}\n",
+                indoc! {"
+                    {
+                      \"a\": [
+                        1,
+                        2
+                      ],
+                      \"b\": {
+                        \"c\": null
+                      }
+                    }
+                "},
             ),
-        ];
-        for (language, before, after) in cases {
+        ]
+    };
+
+    /// The reflows formatters make of formatted code stay proven when no token changes.
+    #[test]
+    fn common_reflows_stay_equivalent() {
+        for &(language, before, after) in COMMON_REFLOW_CASES {
             assert!(
                 equivalent(language, before, after),
                 "{language:?}: {before:?} against {after:?}"
@@ -1469,8 +1861,20 @@ mod tests {
     fn rust_rewrap_is_equivalent() {
         assert!(equivalent(
             Language::Rust,
-            "fn main() {\n    call(alpha, beta, gamma);\n}\n",
-            "fn main() {\n    call(\n        alpha,\n        beta,\n        gamma\n    );\n}\n",
+            indoc! {"
+                fn main() {
+                    call(alpha, beta, gamma);
+                }
+            "},
+            indoc! {"
+                fn main() {
+                    call(
+                        alpha,
+                        beta,
+                        gamma
+                    );
+                }
+            "},
         ));
     }
 
@@ -1483,13 +1887,21 @@ mod tests {
         ));
         assert!(!equivalent(
             Language::Rust,
-            "const S: &str = r#\"a\nb\"#;",
-            "const S: &str = r#\"a\n  b\"#;"
+            indoc! {"
+                const S: &str = r#\"a
+                b\"#;"},
+            indoc! {"
+                const S: &str = r#\"a
+                  b\"#;"}
         ));
         assert!(!equivalent(
             Language::Rust,
-            "// a b\nfn f() {}",
-            "// a  b\nfn f() {}"
+            indoc! {"
+                // a b
+                fn f() {}"},
+            indoc! {"
+                // a  b
+                fn f() {}"}
         ));
         assert!(!equivalent(
             Language::Rust,
@@ -1512,13 +1924,30 @@ mod tests {
     fn javascript_return_line_break_is_not_equivalent() {
         assert!(!equivalent(
             Language::JavaScript,
-            "function f() {\n  return isAdmin;\n}\n",
-            "function f() {\n  return\n  isAdmin;\n}\n",
+            indoc! {"
+                function f() {
+                  return isAdmin;
+                }
+            "},
+            indoc! {"
+                function f() {
+                  return
+                  isAdmin;
+                }
+            "},
         ));
         assert!(equivalent(
             Language::JavaScript,
-            "function f() {\n  return isAdmin;\n}\n",
-            "function f() {\n    return isAdmin;\n}\n",
+            indoc! {"
+                function f() {
+                  return isAdmin;
+                }
+            "},
+            indoc! {"
+                function f() {
+                    return isAdmin;
+                }
+            "},
         ));
     }
 
@@ -1549,31 +1978,63 @@ mod tests {
 
     #[test]
     fn python_indentation_is_significant_but_bracket_wrapping_is_not() {
-        let original = "if a:\n    x()\n    y()\n";
+        let original = indoc! {"
+            if a:
+                x()
+                y()
+        "};
         assert!(!equivalent(
             Language::Python,
             original,
-            "if a:\n    x()\ny()\n"
+            indoc! {"
+                if a:
+                    x()
+                y()
+            "}
         ));
         assert!(!equivalent(
             Language::Python,
             original,
-            "if a:\n  x()\n  y()\n"
+            indoc! {"
+                if a:
+                  x()
+                  y()
+            "}
         ));
         assert!(!equivalent(
             Language::Python,
-            "if a:\n    x()\nfor i in b:\n    c(i)\n",
-            "if a:\n    x()\n    for i in b:\n        c(i)\n"
+            indoc! {"
+                if a:
+                    x()
+                for i in b:
+                    c(i)
+            "},
+            indoc! {"
+                if a:
+                    x()
+                    for i in b:
+                        c(i)
+            "}
         ));
         assert!(equivalent(
             Language::Python,
             "f(a, b)\n",
-            "f(\n    a,\n    b)\n"
+            indoc! {"
+                f(
+                    a,
+                    b)
+            "}
         ));
         assert!(!equivalent(
             Language::Python,
-            "s = \"\"\"a\n b\"\"\"\n",
-            "s = \"\"\"a\n  b\"\"\"\n"
+            indoc! {"
+                s = \"\"\"a
+                 b\"\"\"
+            "},
+            indoc! {"
+                s = \"\"\"a
+                  b\"\"\"
+            "}
         ));
     }
 
@@ -1581,25 +2042,56 @@ mod tests {
     fn go_json_and_toml_follow_the_same_rules() {
         assert!(!equivalent(
             Language::Go,
-            "package p\nfunc f() int {\n\treturn 1\n}\n",
-            "package p\nfunc f() int {\n\treturn\n\t1\n}\n"
+            indoc! {"
+                package p
+                func f() int {
+                \treturn 1
+                }
+            "},
+            indoc! {"
+                package p
+                func f() int {
+                \treturn
+                \t1
+                }
+            "}
         ));
         assert!(equivalent(
             Language::Go,
-            "package p\nfunc f() { g(1, 2) }\n",
-            "package p\nfunc f() {\n\tg(1,\n\t\t2)\n}\n"
+            indoc! {"
+                package p
+                func f() { g(1, 2) }
+            "},
+            indoc! {"
+                package p
+                func f() {
+                \tg(1,
+                \t\t2)
+                }
+            "}
         ));
         assert!(equivalent(
             Language::Json,
             "{\"a\": [1, 2]}",
-            "{\n  \"a\": [\n    1,\n    2\n  ]\n}"
+            indoc! {"
+                {
+                  \"a\": [
+                    1,
+                    2
+                  ]
+                }"}
         ));
         assert!(!equivalent(Language::Json, "{\"a b\": 1}", "{\"a  b\": 1}"));
         // A trailing comma is an extra token, not formatting.
         assert!(!equivalent(
             Language::Toml,
             "a = [1, 2]\n",
-            "a = [\n  1,\n  2,\n]\n"
+            indoc! {"
+                a = [
+                  1,
+                  2,
+                ]
+            "}
         ));
         assert!(!equivalent(
             Language::Toml,
@@ -1609,7 +2101,12 @@ mod tests {
         assert!(equivalent(
             Language::Toml,
             "a = [1, 2]\n",
-            "a = [\n  1,\n  2\n]\n"
+            indoc! {"
+                a = [
+                  1,
+                  2
+                ]
+            "}
         ));
         assert!(!equivalent(
             Language::Toml,
@@ -1651,12 +2148,20 @@ mod tests {
         assert!(equivalent(
             Rust,
             "fn f<'a>(x: &'a u8, y: u8) {}",
-            "fn f<'a>(\n    x: &'a u8,\n    y: u8\n) {}"
+            indoc! {"
+                fn f<'a>(
+                    x: &'a u8,
+                    y: u8
+                ) {}"}
         ));
         assert!(equivalent(
             Rust,
             "fn f() { a.b().c(); }",
-            "fn f() {\n    a.b()\n        .c();\n}"
+            indoc! {"
+                fn f() {
+                    a.b()
+                        .c();
+                }"}
         ));
     }
 }
