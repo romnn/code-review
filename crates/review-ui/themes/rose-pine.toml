@@ -15,6 +15,7 @@ accent = "#9ccfd8"
 selection = "#403d52"
 find = "#524f67"
 error = "#eb6f92"
+note = "#f6c177"
 
 [review]
 open = "#e0def4"

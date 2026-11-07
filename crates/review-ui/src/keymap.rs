@@ -315,7 +315,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "ToggleFold",
-        &["z a"],
+        &["z a", "p"],
         DIFF,
         "Diff",
         "fold or unfold the hunk",
@@ -327,7 +327,7 @@ const DEFAULTS: &[Default] = &[
         &["enter"],
         DIFF,
         "Diff",
-        "follow move · expand",
+        "follow move · expand · fold or unfold",
         None,
         None,
     ),

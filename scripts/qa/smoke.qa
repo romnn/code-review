@@ -58,7 +58,7 @@ expect "row_height":28.0
 key |
 state
 expect "diff_style":"soft"
-expect "headers":"chips","change_bar":true
+expect "background":"muted","change_bar":false
 expect "density":"normal"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 expect "row_height":28.0
@@ -113,7 +113,7 @@ key z shift-a
 state
 expect "approved":"shown"
 expect "status":"Approved hunks shown\."
-expect "row_count":48,
+expect "row_count":50,
 shot 07b-approved-shown
 key z shift-a
 state
@@ -257,17 +257,17 @@ key u
 key 0
 scroll 5000
 state
-expect "scroll_offset":468.0,
+expect "scroll_offset":524.0,
 key ,
 key tab
 key f o n t
 state
 expect "cursor":"Font size: 10 pt"
-expect "scroll_offset":114.0,
+expect "scroll_offset":156.0,
 key escape
 key escape
 state
-expect "scroll_offset":(468\.0|467\.99[0-9]*),
+expect "scroll_offset":(524\.0|523\.99[0-9]*),
 
 # Clicking beside the settings list closes it and gives the keys back to the mode; clicking
 # its search field gives the field the keys, as Tab does.
@@ -295,7 +295,7 @@ key escape
 file src/engine.rs
 scroll 300
 state
-expect "rows":\[\{"row":16,"source":15,
+expect "rows":\[\{"row":18,"source":15,
 file src/compat.rs
 
 # Zed's look, a setting at a time, each found by search and applied with Enter: One Dark, the

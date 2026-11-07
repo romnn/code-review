@@ -834,15 +834,18 @@ it, muted, so it never reads as code.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
-  changes), the lines it covers only when its code is folded away or no scope names it, since
-  the gutter numbers the shown lines (unit IDs stay out; `y i` copies one), and last at most
-  one tag (`reformatted only`, `reformatted only · auto-approved`, `whitespace changed · not
-  proven equivalent`, `changed since revision 1`): an aside in parentheses, faint and italic,
-  four cells apart, on the header's own background in both header styles, so it never breaks
-  the band as a chip would; unchanged lines left out are one rule (`15 unchanged lines`, Enter shows more); a note is
-  a bounded block with an accent bar; every hunk header is a gray band and every hunk has a gray bar
-  along its left edge, both in the accent's blue for the selected hunk, so each hunk's start and
-  extent show at a glance. Approved hunks fold to
+  changes), the lines it covers (`L27–29`) only when its code is folded away or no scope names
+  it, since the gutter numbers the shown lines (unit IDs stay out; `y i` copies one), and last
+  at most one tag (`reformatted only`, `reformatted only · auto-approved`, `whitespace changed ·
+  not proven equivalent`, `changed since revision 1`): the lines and the tag are asides, faint,
+  the tag italic and in parentheses, four cells apart, on the header's own background, so
+  nothing breaks the band as a chip would; unchanged lines left out are one rule (`15
+  unchanged lines`, Enter shows more); a note is a block of italic yellow text with a yellow
+  bar; every hunk has a gray bar along its left edge, and its header is a gray band that turns
+  green once all of it is approved and red once some of it is flagged. The selected hunk's bar
+  and header take the solid color of its state, blue while it still needs the reviewer, green
+  once approved, red once flagged, so each hunk's start, extent and state show at a glance.
+  Enter or `p` (as `za`) shows a folded hunk's code and folds it again. Approved hunks fold to
   their header, and unchanged lines between folded hunks or between one and the file's edge
   show nothing, not even a gap rule or a blank row, so a run of folded hunks reads as a list of
   headers; `zA` (`[diff] approved = "folded"` or `"shown"`) shows approved hunks like any other,
@@ -854,29 +857,35 @@ it, muted, so it never reads as code.
   space and the name, so a folder's children start under its name; the marker is lazygit's
   `▼`/`▶` for an open or folded folder and the change-kind letter, colored by kind, for a file,
   and folder names have no trailing `/`, as lazygit's tree directories have none. Names are
-  colored by review state; only state that needs action or confirms done carries a glyph (`✓` done, `◐` partly reviewed, `!` flagged, `↻` changed since reviewed), so
-  unreviewed files are just bright names. Change details and counts live in the diff's header. Moves
+  colored by review state, as lazygit colors staged and unstaged files: a done file or folder
+  is green whole, its kind letter and `✓` too, a flagged one red, one changed since reviewed
+  purple, and one that still needs the reviewer bright; only state that needs action or
+  confirms done carries a glyph (`✓` done, `◐` partly reviewed, `!` flagged, `↻` changed since
+  reviewed), so unreviewed files are just bright names. Change details and counts live in the diff's header. Moves
   are one quiet line naming the other end (Enter follows it); a move with edits also shows its edits
   where the code arrives. The file buffer's header names the scopes around the cursor
   (`src/engine.rs › impl Ledger › fn balance`). On tinted lines, syntax colors too dim to read are
   lifted toward the text color until they reach a 3:1 contrast.
 - **Diff styles.** How a diff is colored is independent of the theme: a diff style is a named
   bundle of syntax colors (on or off), what changed lines are drawn on (`none`, `muted`, mixed
-  toward the editor background, or `bold`), hunk headers (`bands` across the width or small
-  muted `chips`) and a change bar in the gutter. A style is colors only: it never moves a row,
-  so cycling styles never shifts the content. Three are built in, in the order `|` cycles them:
-  `plain`, lazygit's red and green text without syntax or backgrounds; `bold` (the default),
-  delta's syntax colors on its line backgrounds (`#5f1519`, `#14471f`, overridable per theme);
-  and `soft`, the Zed prototype's muted look with chips and a change bar. `[styles.<name>]`
-  tables add more (one that sets `density` is rejected with an error saying where it belongs),
+  toward the editor background, or `bold`), and whether a change bar marks changed lines in
+  the gutter, which no built-in style has. A style is colors only: it never moves a row, so
+  cycling styles never shifts the content. Three are built in, in the order `|` cycles them: `plain`, lazygit's red and green
+  text without syntax or backgrounds; `bold` (the default), delta's syntax colors on its line
+  backgrounds (`#5f1519`, `#14471f`, overridable per theme); and `soft`, the Zed prototype's
+  muted look. `[styles.<name>]` tables add more (one that sets `density` is rejected with an
+  error saying where it belongs, and one that sets the retired `headers` says it is gone),
   `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `|`
   hint names the style in use. Changed-token emphasis is off by default
   (`[diff] token_emphasis`).
 - **Density.** The rows' spacing is its own setting, `[diff] density`: `compact`, a terminal's
-  line height with each hunk right after the code before it; `normal` (the default), a little
-  more line height and a blank row before each hunk; `comfortable`, Zed's taller lines with the
-  same blank rows. Every row keeps one height, and the air is whole blank rows, so places and
-  scrolling stay row arithmetic.
+  line height with each hunk and note right after the code before it; `normal` (the default),
+  a little more line height, a blank row before each hunk and one above and below each note;
+  `comfortable`, Zed's taller lines with the same blank rows. A terminal's lines cannot grow,
+  so there `comfortable` also puts a blank row between each gap of unchanged lines and the hunk
+  after it. Every row keeps one height, and the air is whole blank rows, so places and
+  scrolling stay row arithmetic; a half-line gap around notes would need rows of their own
+  heights.
 - **Side by side.** `s` toggles `[diff] layout` between `unified` and `side-by-side`. Pairing is a
   projection after the rows are laid out (`rows::present`): a run of removed lines beside the
   added lines right after it in the same unit and hunk, line by line, with the shorter side
@@ -932,8 +941,10 @@ it, muted, so it never reads as code.
   source palette and license: carbonfox (the default), nightfox, nordfox, terafox, duskfox,
   tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine. Files in
   `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
-  `[theme] name` picks one, and the settings list previews and applies them. The app is dark
-  only and monospace throughout.
+  `[theme] name` picks one, and the settings list previews and applies them. `[ui] note`, the
+  theme's yellow, colors notes: italic text and a bar on a band tinted toward it, so a note
+  never reads as code; a theme file without it gets One Dark's yellow. The app is dark only and
+  monospace throughout.
 - **State model.** What is shown derives from a snapshot (one history, one pinned revision) and
   caches keyed by blob identity, so reloading never pairs new changes with old text. Every row
   names its hunk explicitly or none. A mark captures its exact units and revision when the

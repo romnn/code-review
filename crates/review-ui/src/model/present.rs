@@ -21,7 +21,7 @@
 //! density change lands on the same line.
 
 use super::{Model, ZOOM_RANGE};
-use crate::config::{Approved, DiffLayout};
+use crate::config::{Approved, Density, DiffLayout};
 use crate::frame::{self, Geometry, Grid, Metrics, Scale, Viewports};
 use crate::look;
 use crate::rows::{Layout, Presentation, Row, RowKind};
@@ -169,6 +169,7 @@ pub(crate) fn opening(
     Presentation {
         layout: effective_layout(look.layout, grid.half_cells),
         density: look.density,
+        roomy: look.density == Density::Comfortable && !grid.tall_rows,
     }
 }
 
@@ -201,6 +202,7 @@ impl Model {
         Presentation {
             layout: effective_layout(look.layout, grid.half_cells),
             density: look.density,
+            roomy: look.density == Density::Comfortable && !grid.tall_rows,
         }
     }
 

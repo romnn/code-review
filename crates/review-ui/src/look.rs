@@ -2,8 +2,7 @@
 //! emphasis.
 //!
 //! A diff style says how a diff is colored whatever the theme: syntax colors or not, what
-//! changed lines are drawn on, how hunk headers are drawn, and whether changed lines have a bar
-//! in the gutter. It never moves a row, so cycling the styles never shifts the content; the
+//! changed lines are drawn on, and whether changed lines have a bar in the gutter. It never moves a row, so cycling the styles never shifts the content; the
 //! rows' spacing is the density's alone.
 //! Three styles are built in, in the order `|` cycles them (`plain` as lazygit draws a diff,
 //! `bold` as delta does, `soft` as Zed does), and `[styles.<name>]` tables add more.
@@ -14,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::config::{Background, Density, DiffLayout, Headers, StyleConfig, points_to_pixels};
+use crate::config::{Background, Density, DiffLayout, StyleConfig, points_to_pixels};
 use crate::theme::Theme;
 
 /// How a diff is colored, whatever the theme; nothing in it moves a row.
@@ -29,15 +28,12 @@ pub struct DiffStyle {
     pub syntax: bool,
     /// What changed lines are drawn on.
     pub background: Background,
-    /// How hunk headers are drawn.
-    pub headers: Headers,
     /// Whether changed lines have a colored bar in the gutter.
     pub change_bar: bool,
 }
 
 impl DiffStyle {
-    /// A one-line summary, such as `syntax colors · muted line backgrounds · chips · change
-    /// bar`.
+    /// A one-line summary, such as `syntax colors · muted line backgrounds · change bar`.
     #[must_use]
     pub fn summary(&self) -> String {
         let mut parts = vec![
@@ -51,7 +47,6 @@ impl DiffStyle {
                 Background::None => "no line backgrounds".to_owned(),
                 other => format!("{} line backgrounds", other.name()),
             },
-            format!("{} headers", self.headers.name()),
         ];
         if self.change_bar {
             parts.push("change bar".to_owned());
@@ -70,7 +65,6 @@ fn bold() -> DiffStyle {
         origin: Origin::BuiltIn,
         syntax: true,
         background: Background::Bold,
-        headers: Headers::Bands,
         change_bar: false,
     }
 }
@@ -83,7 +77,6 @@ fn built_in_styles() -> Vec<DiffStyle> {
             origin: Origin::BuiltIn,
             syntax: false,
             background: Background::None,
-            headers: Headers::Bands,
             change_bar: false,
         },
         bold(),
@@ -92,8 +85,7 @@ fn built_in_styles() -> Vec<DiffStyle> {
             origin: Origin::BuiltIn,
             syntax: true,
             background: Background::Muted,
-            headers: Headers::Chips,
-            change_bar: true,
+            change_bar: false,
         },
     ]
 }
@@ -112,7 +104,6 @@ pub fn styles(user: &BTreeMap<String, StyleConfig>) -> Vec<DiffStyle> {
             origin: Origin::User,
             syntax: config.syntax.unwrap_or(base.syntax),
             background: config.background.unwrap_or(base.background),
-            headers: config.headers.unwrap_or(base.headers),
             change_bar: config.change_bar.unwrap_or(base.change_bar),
         };
         match styles.iter_mut().find(|known| known.name == *name) {
@@ -232,7 +223,7 @@ mod tests {
             (
                 "soft".to_owned(),
                 StyleConfig {
-                    change_bar: Some(false),
+                    change_bar: Some(true),
                     ..StyleConfig::default()
                 },
             ),
@@ -243,13 +234,12 @@ mod tests {
         let calm = &styles[3];
         assert!(calm.syntax);
         assert_eq!(calm.background, Background::Muted);
-        assert_eq!(calm.headers, Headers::Bands);
         let soft = &styles[2];
         assert_eq!(soft.origin, Origin::User);
-        assert!(!soft.change_bar);
+        assert!(soft.change_bar);
         assert_eq!(
-            soft.headers,
-            Headers::Bands,
+            soft.background,
+            Background::Bold,
             "taken from bold, not the old soft"
         );
 

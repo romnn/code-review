@@ -16,6 +16,8 @@ accent = "#78a9ff"
 selection = "#525253"
 find = "#07a19e"
 error = "#ee5396"
+# IBM Carbon's yellow 30, since carbonfox's own yellow is a teal.
+note = "#f1c21b"
 
 [review]
 open = "#f2f4f8"

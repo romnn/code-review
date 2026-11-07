@@ -179,6 +179,19 @@ pub fn number_column(code_cell: f32, room: f32, lines: usize) -> f32 {
     (code_cell * (scroll::float(digits) + room)).round()
 }
 
+/// Whether `scale` makes the comfortable density's rows taller than the normal density's.
+fn tall_rows(scale: &Scale, metrics: &Metrics) -> bool {
+    let height = |density| {
+        scale
+            .sizes(&Metrics {
+                density,
+                ..*metrics
+            })
+            .row_height
+    };
+    height(Density::Comfortable) > height(Density::Normal)
+}
+
 /// A height in rows `row_height` tall.
 fn in_rows(height: f32, row_height: f32) -> f64 {
     f64::from(height) / f64::from(row_height)
@@ -201,6 +214,7 @@ impl Geometry {
             row_height: sizes.row_height,
             code_cell: sizes.code_cell,
             half_cells: self.half_cells(&sizes),
+            tall_rows: tall_rows(scale, metrics),
             page_context: in_rows(sizes.page_context, sizes.row_height),
             viewports: self.viewports(&before, &sizes, metrics),
         }
@@ -343,6 +357,9 @@ pub struct Grid {
     pub code_cell: f32,
     /// The cells of code each half of a side-by-side diff has room for.
     pub half_cells: f32,
+    /// Whether the comfortable density's rows are taller than the normal density's; where
+    /// they are not, as in a terminal, comfortable adds blank rows instead.
+    pub tall_rows: bool,
     /// The rows a track click's page keeps in view from the page before.
     pub page_context: f64,
     /// Each list's viewport.

@@ -1,6 +1,7 @@
 //! Projects the unified rows for a presentation: removed and added lines paired side by side, a
-//! blank row before each hunk for the normal and comfortable densities, and the indices that
-//! point into the rows (unit headers, file headers, the widest rows) found again afterwards.
+//! blank row before each hunk and around each note for the normal and comfortable densities,
+//! and the indices that point into the rows (unit headers, file headers, the widest rows) found
+//! again afterwards.
 //!
 //! The projection only moves what [`super::build`] decided.
 //! Every line of code survives exactly once, in order on its side; a missing side is explicit
@@ -20,6 +21,9 @@ pub struct Presentation {
     pub layout: DiffLayout,
     /// How much air the rows have.
     pub density: Density,
+    /// Whether a blank row also comes between each gap of unchanged lines and the hunk after
+    /// it: the comfortable density's air where rows cannot be taller.
+    pub roomy: bool,
 }
 
 impl Default for Presentation {
@@ -28,6 +32,7 @@ impl Default for Presentation {
         Self {
             layout: DiffLayout::Unified,
             density: Density::Compact,
+            roomy: false,
         }
     }
 }
@@ -47,7 +52,7 @@ pub fn present(mut layout: Layout, presentation: Presentation) -> Layout {
     };
     layout.rows = match presentation.density {
         Density::Compact => rows,
-        Density::Normal | Density::Comfortable => space(rows, &mut projected),
+        Density::Normal | Density::Comfortable => space(rows, &mut projected, presentation.roomy),
     };
     let at = |row: usize| projected.get(row).copied().unwrap_or(row);
     for row in layout.unit_rows.values_mut() {
@@ -211,12 +216,13 @@ fn set(projected: &mut [usize], source: usize, at: usize) {
     }
 }
 
-/// Adds a blank row before each hunk: before its header, or before the gap of unchanged lines
-/// that leads to it.
+/// Adds a blank row before each hunk, before its header or before the gap of unchanged lines
+/// that leads to it, and around each note; when `roomy`, also between such a gap and the
+/// hunk's header.
 ///
 /// Never at the top, never twice in a row, and never between two folded hunks' headers, so a
 /// run of them reads as one list.
-fn space(rows: Vec<Row>, projected: &mut [usize]) -> Vec<Row> {
+fn space(rows: Vec<Row>, projected: &mut [usize], roomy: bool) -> Vec<Row> {
     let folded = |row: &Row| row.note().is_some_and(|note| note.folded);
     let mut out: Vec<Row> = Vec::with_capacity(rows.len() + rows.len() / 8);
     // Where each row moved, so the earlier pass's targets can follow.
@@ -236,7 +242,17 @@ fn space(rows: Vec<Row>, projected: &mut [usize]) -> Vec<Row> {
         let after_air = out
             .last()
             .is_none_or(|last| matches!(last.kind(), RowKind::Spacer | RowKind::FileHeader));
-        if starts_hunk && !after_air {
+        // A note stands apart from the code around it, a blank row above and below.
+        let after_note = out.last().is_some_and(|last| last.kind() == RowKind::Note);
+        let around_note = match kind {
+            RowKind::Note => !after_note,
+            RowKind::Spacer | RowKind::FileHeader => false,
+            _ => after_note,
+        };
+        let after_gap = roomy
+            && kind == RowKind::Header
+            && out.last().is_some_and(|last| last.kind() == RowKind::Gap);
+        if (starts_hunk || around_note || after_gap) && !after_air {
             out.push(Row {
                 file: row.file,
                 unit: row.unit,
@@ -337,6 +353,7 @@ mod tests {
     const SIDE_BY_SIDE: Presentation = Presentation {
         layout: DiffLayout::SideBySide,
         density: Density::Compact,
+        roomy: false,
     };
 
     /// The lines of each side, in order, with `None` for padding.
@@ -502,6 +519,7 @@ mod tests {
             Presentation {
                 layout: DiffLayout::Unified,
                 density,
+                roomy: false,
             },
         );
         let kinds: Vec<RowKind> = shown.rows.iter().map(Row::kind).collect();
@@ -530,6 +548,82 @@ mod tests {
         );
     }
 
+    /// The kinds of `rows` presented unified at `density`, roomy or not.
+    fn spaced(rows: Vec<Row>, density: Density, roomy: bool) -> Vec<RowKind> {
+        let presentation = Presentation {
+            layout: DiffLayout::Unified,
+            density,
+            roomy,
+        };
+        present(layout(rows), presentation)
+            .rows
+            .iter()
+            .map(Row::kind)
+            .collect()
+    }
+
+    /// A note, however many lines long, stands apart with a blank row above and below in the
+    /// normal and comfortable densities, and sits right under its code in the compact one.
+    #[test]
+    fn notes_have_air_unless_compact() {
+        let unit = unit_id("u1-0");
+        let rows = || {
+            vec![
+                note(RowKind::Header, "line 4", unit, Some(0)),
+                code(RowKind::Added, "x", unit, Some(0)),
+                note(RowKind::Note, "first", unit, None),
+                note(RowKind::Note, "second", unit, None),
+                code(RowKind::Context, "y", unit, None),
+            ]
+        };
+        let lines = [RowKind::Note, RowKind::Note];
+        for density in [Density::Normal, Density::Comfortable] {
+            assert_eq!(
+                spaced(rows(), density, false),
+                [
+                    &[RowKind::Header, RowKind::Added, RowKind::Spacer][..],
+                    &lines,
+                    &[RowKind::Spacer, RowKind::Context],
+                ]
+                .concat(),
+                "{density:?}"
+            );
+        }
+        assert_eq!(
+            spaced(rows(), Density::Compact, false),
+            [
+                &[RowKind::Header, RowKind::Added][..],
+                &lines,
+                &[RowKind::Context],
+            ]
+            .concat()
+        );
+    }
+
+    /// Where rows cannot be taller, the comfortable density also sets a gap of unchanged lines
+    /// apart from the hunk after it.
+    #[test]
+    fn roomy_rows_set_gaps_apart_from_their_hunks() {
+        let (unit, other) = (unit_id("u1-0"), unit_id("u1-1"));
+        let rows = vec![
+            note(RowKind::Header, "line 4", unit, Some(0)),
+            code(RowKind::Added, "x", unit, Some(0)),
+            note(RowKind::Gap, "9 unchanged lines", other, None),
+            note(RowKind::Header, "line 14", other, Some(1)),
+        ];
+        assert_eq!(
+            spaced(rows, Density::Comfortable, true),
+            [
+                RowKind::Header,
+                RowKind::Added,
+                RowKind::Spacer,
+                RowKind::Gap,
+                RowKind::Spacer,
+                RowKind::Header,
+            ]
+        );
+    }
+
     /// Folded hunks' headers in a row read as one list, without air between them; an unfolded
     /// hunk after them still gets its blank row.
     #[test]
@@ -554,6 +648,7 @@ mod tests {
             Presentation {
                 layout: DiffLayout::Unified,
                 density: Density::Normal,
+                roomy: false,
             },
         );
         let kinds: Vec<RowKind> = shown.rows.iter().map(Row::kind).collect();

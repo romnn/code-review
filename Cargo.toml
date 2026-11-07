@@ -16,6 +16,8 @@ review-ui = { path = "crates/review-ui" }
 # Engine dependencies. tree-sitter and its grammars follow Zed's Cargo.toml and Cargo.lock so
 # review-core links into the Zed fork without a second tree-sitter.
 imara-diff = { version = "0.2", default-features = false }
+# Multi-line strings written out as lines; Zed's Cargo.lock has it too.
+indoc = "2.0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.144"
 sha2 = "0.10.9"

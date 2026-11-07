@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use indoc::indoc;
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
 use review_core::tree::NodeKind;
 use review_core::{MarkVerdict, Review};
@@ -683,8 +684,17 @@ fn definition() -> Definition {
         path: "src/ledger.rs".to_owned(),
         line: 1,
         column: 0,
-        lines: rows::FullText::new("// ledger\nfn balance() {}\n"),
-        syntax: crate::syntax::analyze("src/ledger.rs", "// ledger\nfn balance() {}\n"),
+        lines: rows::FullText::new(indoc! {"
+            // ledger
+            fn balance() {}
+        "}),
+        syntax: crate::syntax::analyze(
+            "src/ledger.rs",
+            indoc! {"
+                // ledger
+                fn balance() {}
+            "},
+        ),
     }
 }
 
@@ -1760,4 +1770,100 @@ fn the_bar_says_which_revision_shows_and_how_fresh_it_is() {
         format!("rev 1 · {head} · rev 2 available · synced just now")
     );
     assert_eq!(sync_text(host.model(), 30.0), "rev 1 · rev 2 available");
+}
+
+/// The file header says how long the file is, before its line counts, and drops that first
+/// when it runs out of room.
+#[test]
+fn the_file_header_says_how_long_the_file_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.settle();
+    let model = host.model();
+    let palette = crate::paint::Palette::of(model);
+    let header = |budget: f32| {
+        let room = crate::paint::Room {
+            budget,
+            cell: 1.0,
+            gap: 1.0,
+        };
+        crate::paint::header::file_header(model, &palette, room, 1.0).unwrap()
+    };
+    let engine = include_str!("../../../review-core/demo/trees/feature-1/src/engine.rs");
+    let wide = header(200.0);
+    assert_eq!(
+        wide.lines.map(|lines| lines.text),
+        Some(format!("{} lines", engine.lines().count()))
+    );
+    let shown: Vec<(bool, bool)> = (0..200_u8)
+        .map(|budget| {
+            let header = header(f32::from(budget));
+            (header.lines.is_some(), header.counts.is_some())
+        })
+        .collect();
+    assert!(
+        shown.iter().all(|&(lines, counts)| !lines || counts),
+        "the length never shows without the counts"
+    );
+    assert!(
+        shown.contains(&(false, true)),
+        "a narrower header keeps the counts alone"
+    );
+}
+
+/// Comfortable rows count as tall only where the front end draws them taller than normal ones,
+/// as a window does; a terminal's rows never grow, so its comfortable density is roomy instead.
+#[test]
+fn only_growing_rows_are_tall() {
+    let metrics = crate::frame::Metrics {
+        code_size: 14.0,
+        density: crate::config::Density::Comfortable,
+        panel: None,
+    };
+    let terminal = Scale::fixed(cells());
+    assert!(!Geometry::default().grid(&terminal, &metrics).tall_rows);
+    let window = Scale::new(|metrics| Sizes {
+        row_height: match metrics.density {
+            crate::config::Density::Comfortable => 1.5,
+            _ => 1.0,
+        },
+        ..cells()
+    });
+    assert!(Geometry::default().grid(&window, &metrics).tall_rows);
+}
+
+/// Enter on a folded approved hunk shows its code and folds it again, and `p` does the same,
+/// as `z a` does.
+#[test]
+fn enter_and_p_show_a_folded_hunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.update(|model| model.select_hunk(0));
+    let folded = |model: &Model| {
+        let view = model.view().unwrap();
+        model
+            .hunk_units()
+            .iter()
+            .all(|&unit| model.folds.is_folded(&view, unit))
+    };
+    assert!(
+        folded(host.model()),
+        "the approved first hunk starts folded"
+    );
+    host.dispatch(Action::Activate);
+    assert!(!folded(host.model()), "Enter shows its code");
+    host.dispatch(Action::Activate);
+    assert!(folded(host.model()), "and folds it again");
+    let fold_keys: Vec<&str> = host
+        .model()
+        .settings
+        .keymap
+        .iter()
+        .filter(|binding| binding.action == "ToggleFold")
+        .flat_map(|binding| binding.keys.iter().map(String::as_str))
+        .collect();
+    assert_eq!(fold_keys, ["z a", "p"]);
 }

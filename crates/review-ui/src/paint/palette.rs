@@ -10,6 +10,35 @@ use crate::rows::Badge;
 use crate::state::Progress;
 use crate::theme::{self, Theme};
 
+/// How far a decided hunk's header moves from the band toward its solid color.
+const HEADER_TINT: f32 = 0.22;
+
+/// What a hunk asks of the reviewer, which colors its header and, while selected, its bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkTone {
+    /// Something in it still needs the reviewer: blue.
+    Open,
+    /// All of it is approved: green.
+    Approved,
+    /// Some of it is flagged: red.
+    Flagged,
+}
+
+impl HunkTone {
+    /// The tone of a hunk whose units have `badges`.
+    #[must_use]
+    pub fn of(badges: &[Badge]) -> Self {
+        match super::annotation::badges_glyph(badges).0 {
+            Badge::Flagged => Self::Flagged,
+            Badge::Accepted | Badge::Auto => Self::Approved,
+            Badge::Unreviewed | Badge::Seen | Badge::Changed => Self::Open,
+        }
+    }
+}
+
+/// How far a note's background moves from the band toward the note's yellow.
+const NOTE_TINT: f32 = 0.08;
+
 /// The colors of the window, by role, from the theme and the configured diff colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
@@ -31,6 +60,10 @@ pub struct Palette {
     pub faint: Hsla,
     /// The selected hunk, focus and keys.
     pub accent: Hsla,
+    /// A note's text and bar: a yellow, so a note never reads as code.
+    pub note: Hsla,
+    /// Behind a note: the band tinted toward the note's yellow.
+    pub note_band: Hsla,
     /// A text selection, translucent.
     pub selection: Hsla,
     /// A find match, translucent.
@@ -118,6 +151,8 @@ impl Palette {
             dim: theme.ui.dim,
             faint: theme.ui.faint,
             accent: theme.ui.accent,
+            note: theme.ui.note,
+            note_band: theme::mix(theme.ui.band, theme.ui.note, NOTE_TINT),
             selection: theme.ui.selection.alpha(0.6),
             find: theme.ui.find.alpha(0.45),
             error: theme.ui.error,
@@ -181,11 +216,50 @@ impl Palette {
         }
     }
 
-    /// The colors of a selected hunk header's text on the accent's solid blue: one ink that
+    /// The solid color of a hunk of `tone` while selected: its header and its bar.
+    #[must_use]
+    pub fn hunk_solid(&self, tone: HunkTone) -> Hsla {
+        match tone {
+            HunkTone::Open => self.accent,
+            HunkTone::Approved => self.accepted,
+            HunkTone::Flagged => self.flagged,
+        }
+    }
+
+    /// The header of a hunk of `tone` that is not selected: the raised gray, or once the
+    /// reviewer has decided on it, the band tinted dark toward its solid color.
+    #[must_use]
+    pub fn hunk_header(&self, tone: HunkTone) -> Hsla {
+        match tone {
+            HunkTone::Open => self.raised,
+            tone => theme::mix(self.band, self.hunk_solid(tone), HEADER_TINT),
+        }
+    }
+
+    /// The colors of the text of a hunk header of `tone` that is not selected: as they are, or
+    /// once the reviewer has decided on it, its solid color, lifted toward the text color
+    /// where it would not read, quieter parts softened.
+    #[must_use]
+    pub fn on_header(&self, tone: HunkTone) -> Self {
+        match tone {
+            HunkTone::Open => *self,
+            tone => {
+                let ink = theme::legible(self.hunk_solid(tone), self.hunk_header(tone), self.text);
+                Self {
+                    text: ink,
+                    dim: ink,
+                    faint: ink.alpha(0.7),
+                    ..*self
+                }
+            }
+        }
+    }
+
+    /// The colors of a selected hunk header's text on its solid color `solid`: one ink that
     /// reads on it, with quieter parts softened rather than tinted.
     #[must_use]
-    pub fn on_accent(&self) -> Self {
-        let ink = if self.accent.l > 0.5 {
+    pub fn on(&self, solid: Hsla) -> Self {
+        let ink = if theme::contrast(self.background, solid) > theme::contrast(self.text, solid) {
             self.background
         } else {
             self.text
@@ -201,6 +275,63 @@ impl Palette {
             flagged: ink,
             changed: ink,
             ..*self
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hunk is flagged once any of it is, approved once all of it is, by a mark or
+    /// automatically, and otherwise still needs the reviewer.
+    #[test]
+    fn a_hunk_takes_the_tone_of_what_it_asks() {
+        assert_eq!(
+            HunkTone::of(&[Badge::Accepted, Badge::Auto]),
+            HunkTone::Approved
+        );
+        assert_eq!(
+            HunkTone::of(&[Badge::Accepted, Badge::Flagged]),
+            HunkTone::Flagged
+        );
+        assert_eq!(
+            HunkTone::of(&[Badge::Accepted, Badge::Unreviewed]),
+            HunkTone::Open
+        );
+        assert_eq!(HunkTone::of(&[Badge::Changed]), HunkTone::Open);
+        assert_eq!(HunkTone::of(&[]), HunkTone::Open);
+    }
+
+    /// Selected, a hunk is solid blue, green or red; otherwise its header is the raised gray,
+    /// or once decided a dark green or red with text in the same color.
+    #[test]
+    fn hunk_headers_are_colored_by_tone() {
+        let (themes, _) = theme::all(None);
+        for theme in &themes {
+            header_colors(
+                &Palette::new(theme, None, None, Background::Bold),
+                &theme.name,
+            );
+        }
+    }
+
+    fn header_colors(palette: &Palette, theme: &str) {
+        let palette = *palette;
+        assert_eq!(palette.hunk_solid(HunkTone::Open), palette.accent);
+        assert_eq!(palette.hunk_solid(HunkTone::Approved), palette.accepted);
+        assert_eq!(palette.hunk_solid(HunkTone::Flagged), palette.flagged);
+        assert_eq!(palette.hunk_header(HunkTone::Open), palette.raised);
+        assert_eq!(palette.on_header(HunkTone::Open), palette);
+        for tone in [HunkTone::Approved, HunkTone::Flagged] {
+            let header = palette.hunk_header(tone);
+            assert_ne!(header, palette.raised, "{tone:?}");
+            assert_ne!(header, palette.hunk_solid(tone), "{tone:?}");
+            let ink = palette.on_header(tone).text;
+            assert!(
+                crate::theme::contrast(ink, header) >= 3.0,
+                "{tone:?} reads on its header in {theme}"
+            );
         }
     }
 }

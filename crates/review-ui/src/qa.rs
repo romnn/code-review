@@ -348,7 +348,6 @@ fn view_state(model: &Model, screen: &dyn Screen) -> Value {
         "style": {
             "syntax": look.style.syntax,
             "background": look.style.background.name(),
-            "headers": look.style.headers.name(),
             "change_bar": look.style.change_bar,
         },
         "applied_theme": model.settings.appearance.applied.theme.name,

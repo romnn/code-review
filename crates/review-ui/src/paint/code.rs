@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use super::palette::HunkTone;
 use super::{Layer, Palette, Piece, Run, Style};
 use crate::color::Hsla;
 use crate::config::Background;
@@ -23,18 +24,18 @@ pub enum Frame {
     /// In a hunk that is not selected: a gray bar on the hunk's gray band, so every hunk's
     /// extent shows.
     Hunk,
-    /// In the selected hunk: the accent's bar.
-    Selected,
+    /// In the selected hunk, of its tone: a bar in the tone's solid color.
+    Selected(HunkTone),
 }
 
 impl Frame {
-    /// The bar along the row's left edge: gray, or the accent in the selected hunk.
+    /// The bar along the row's left edge: gray, or the selected hunk's solid color.
     #[must_use]
     pub fn bar(self, palette: &Palette) -> Option<Hsla> {
         match self {
             Self::Outside => None,
             Self::Hunk => Some(palette.faint),
-            Self::Selected => Some(palette.accent),
+            Self::Selected(tone) => Some(palette.hunk_solid(tone)),
         }
     }
 
@@ -51,10 +52,21 @@ impl Frame {
 pub fn frame(model: &Model, index: usize) -> Frame {
     let selected = (model.mode == Mode::Diff).then_some(model.hunk);
     match hunk_at(model, index) {
-        Some(hunk) if Some(hunk) == selected => Frame::Selected,
+        Some(hunk) if Some(hunk) == selected => Frame::Selected(hunk_tone(model, hunk)),
         Some(_) => Frame::Hunk,
         None => Frame::Outside,
     }
+}
+
+/// The tone of hunk `hunk`, from its units' review states and the marks still saving.
+#[must_use]
+pub fn hunk_tone(model: &Model, hunk: usize) -> HunkTone {
+    let units = model.rows.hunks.get(hunk).map_or(&[][..], Vec::as_slice);
+    let badges = model
+        .view()
+        .map(|view| crate::state::badges(&view, units, &model.pending))
+        .unwrap_or_default();
+    HunkTone::of(&badges)
 }
 
 /// The hunk that diff row `index` belongs to for its band and bar: from the hunk's header

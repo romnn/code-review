@@ -13,7 +13,7 @@ expect "hunks":3
 expect "scope":"impl Ledger › fn apply_batch"
 # The brace reflow at lines 27–29 is proven formatting-only beside the file's real changes, so
 # it is approved automatically, without a mark, and folds like an approved hunk.
-expect "text":"lines 27–29","tag":"reformatted only · auto-approved"
+expect "text":"L27–29","tag":"reformatted only · auto-approved"
 expect "sync":"rev 1 · [0-9a-f]{7} · synced just now"
 expect "files_header":"#128 feature/reconcile"
 shot 02-engine

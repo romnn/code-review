@@ -23,6 +23,9 @@ const BUILT_IN: &[&str] = &[
     include_str!("../themes/rose-pine.toml"),
 ];
 
+/// The note color of a theme file without one: One Dark's yellow.
+const NOTE: u32 = 0x00e5_c07b;
+
 /// The default theme's name.
 pub const DEFAULT: &str = "carbonfox";
 
@@ -67,6 +70,8 @@ pub struct Ui {
     pub find: Hsla,
     /// Errors.
     pub error: Hsla,
+    /// Notes: a yellow, as notes are; a theme file that leaves it out gets [`NOTE`].
+    pub note: Hsla,
 }
 
 /// Review states' colors.
@@ -180,6 +185,11 @@ impl Theme {
                 selection: ui("selection")?,
                 find: ui("find")?,
                 error: ui("error")?,
+                note: if file.ui.contains_key("note") {
+                    ui("note")?
+                } else {
+                    rgb(NOTE).into()
+                },
             },
             review: Review {
                 open: review("open")?,

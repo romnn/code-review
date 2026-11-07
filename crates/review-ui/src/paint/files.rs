@@ -139,21 +139,17 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
     let shown = !directory && model.selected.as_deref() == Some(node.path.as_str());
     let cursor = model.tree_cursor.min(visible.len().saturating_sub(1));
     let on_cursor = position == cursor && tree_focused(model);
-    // Only what still needs the reviewer carries ink; done files recede, so the eye lands on
-    // open, flagged and changed ones.
+    // As lazygit colors staged files, a done file is green whole, so what is done and what
+    // still needs the reviewer (bright, red when flagged) tell apart at a glance.
     let done = progress == Progress::Done;
-    let (name_color, glyph_color) = if done {
-        (palette.dim, palette.faint)
-    } else {
-        (palette.progress(progress), palette.progress(progress))
-    };
+    let name_color = palette.progress(progress);
     let folder_color = name_color.alpha(0.8);
     let marker = match (&node.change, directory) {
         (_, true) => Piece::new(if collapsed { "▶" } else { "▼" }, folder_color),
         (Some(change), false) => Piece::new(
             change.kind.letter().to_string(),
             if done {
-                palette.faint
+                name_color
             } else {
                 palette.tone(change.tone())
             },
@@ -179,7 +175,7 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
             node.name.clone(),
             if directory { folder_color } else { name_color },
         ),
-        glyph: Piece::new(progress_glyph(progress), glyph_color),
+        glyph: Piece::new(progress_glyph(progress), name_color),
         background,
     })
 }

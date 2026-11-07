@@ -22,7 +22,6 @@
 //! [styles.calm]     # a diff style beside plain, bold and soft: colors only, never spacing
 //! syntax = true         # syntax colors in the diff
 //! background = "muted"  # changed lines' background: "none", "muted" or "bold"
-//! headers = "chips"     # hunk headers as "bands" across the width or quiet "chips"
 //! change_bar = true     # a colored bar in the gutter of changed lines
 //!
 //! [theme]
@@ -248,7 +247,8 @@ struct DiffSection {
 struct StyleSection {
     syntax: Option<bool>,
     background: Option<Background>,
-    headers: Option<Headers>,
+    /// Read only to say it is gone: hunk headers have one look.
+    headers: Option<serde::de::IgnoredAny>,
     change_bar: Option<bool>,
     /// Read only to say where it belongs now: a style never changes the spacing.
     density: Option<serde::de::IgnoredAny>,
@@ -347,12 +347,15 @@ impl Background {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Density {
-    /// A terminal's line height, with each hunk right after the code before it.
+    /// A terminal's line height, with each hunk and note right after the code before it.
     Compact,
-    /// A little more line height, and a blank row before each hunk.
+    /// A little more line height, a blank row before each hunk, and one above and below each
+    /// note.
     #[default]
     Normal,
-    /// An editor's spacing, as Zed has it: tall lines, and a blank row before each hunk.
+    /// An editor's spacing, as Zed has it: tall lines and the normal density's blank rows; in
+    /// a terminal, whose lines cannot grow, also a blank row between each gap of unchanged
+    /// lines and the hunk after it.
     Comfortable,
 }
 
@@ -371,28 +374,6 @@ impl Density {
     }
 }
 
-/// How hunk headers are drawn; they take one row either way.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Headers {
-    /// A band across the width, as a terminal draws it.
-    #[default]
-    Bands,
-    /// Quiet chips on the editor background, as an editor draws them.
-    Chips,
-}
-
-impl Headers {
-    /// The header look's name as the configuration file spells it.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Bands => "bands",
-            Self::Chips => "chips",
-        }
-    }
-}
-
 /// A user diff style as the configuration file sets it; fields it leaves out take the
 /// defaults, which are the bold style's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -401,8 +382,6 @@ pub struct StyleConfig {
     pub syntax: Option<bool>,
     /// What changed lines are drawn on.
     pub background: Option<Background>,
-    /// How hunk headers are drawn.
-    pub headers: Option<Headers>,
     /// Whether changed lines have a colored bar in the gutter.
     pub change_bar: Option<bool>,
 }
@@ -847,6 +826,9 @@ fn parse_style(value: toml::Value) -> Result<StyleConfig, String> {
     } = value
         .try_into()
         .map_err(|err: toml::de::Error| err.message().to_owned())?;
+    if headers.is_some() {
+        return Err("it sets headers, but hunk headers have one look now; remove it".to_owned());
+    }
     if density.is_some() {
         return Err(
             "it sets density, but a diff style is colors only; set density under [diff]".to_owned(),
@@ -855,7 +837,6 @@ fn parse_style(value: toml::Value) -> Result<StyleConfig, String> {
     Ok(StyleConfig {
         syntax,
         background,
-        headers,
         change_bar,
     })
 }
@@ -912,41 +893,93 @@ pub fn weight_from_name(name: &str) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::{formatdoc, indoc};
+
     use super::*;
 
     #[test]
     fn font_settings_parse_with_names_numbers_and_defaults() {
-        let config = parse("[font]\nfamily = \"SF Mono\"\nsize = 14\nweight = \"Semi Bold\"\n")
-            .unwrap()
-            .font;
+        let config = parse(indoc! {"
+            [font]
+            family = \"SF Mono\"
+            size = 14
+            weight = \"Semi Bold\"
+        "})
+        .unwrap()
+        .font;
         assert_eq!(config.family.as_deref(), Some("SF Mono"));
         assert_eq!(config.size_points, Some(14.0));
         assert_eq!(config.weight, Some(600.0));
         assert_eq!(
-            parse("[font]\nweight = 300\n").unwrap().font.weight,
+            parse(indoc! {"
+                [font]
+                weight = 300
+            "})
+            .unwrap()
+            .font
+            .weight,
             Some(300.0)
         );
         assert_eq!(parse("").unwrap(), Config::default());
 
         // Mistakes are reported rather than silently ignored.
-        assert!(parse("[font]\nsize = 200\n").is_err());
-        assert!(parse("[font]\nweight = \"chunky\"\n").is_err());
-        assert!(parse("[font]\nfamliy = \"x\"\n").is_err());
+        assert!(
+            parse(indoc! {"
+                [font]
+                size = 200
+            "})
+            .is_err()
+        );
+        assert!(
+            parse(indoc! {"
+                [font]
+                weight = \"chunky\"
+            "})
+            .is_err()
+        );
+        // The misspelled key is deliberate: an unknown key must make the file fail to parse.
+        // spellcheck:ignore-start
+        assert!(
+            parse(indoc! {"
+                [font]
+                famliy = \"x\"
+            "})
+            .is_err()
+        );
+        // spellcheck:ignore-end
     }
 
     #[test]
     fn view_and_diff_settings_parse() {
-        let config = parse(
-            "[view]\ncontext = 5\n[diff]\nstyle = \"plain\"\nremoved = \"#112233\"\n[theme]\nname = \"nordfox\"\n",
-        )
+        let config = parse(indoc! {"
+            [view]
+            context = 5
+            [diff]
+            style = \"plain\"
+            removed = \"#112233\"
+            [theme]
+            name = \"nordfox\"
+        "})
         .unwrap();
         assert_eq!(config.context, 5);
         assert_eq!(config.diff_style.as_deref(), Some("plain"));
         assert_eq!(config.removed, Some(0x0011_2233));
         assert_eq!(config.added, None);
         assert_eq!(config.theme.as_deref(), Some("nordfox"));
-        assert!(parse("[diff]\nadded = \"green\"\n").is_err());
-        assert!(parse("[diff]\nstyle = 3\n").is_err());
+        assert!(
+            parse(indoc! {"
+                [diff]
+                added = \"green\"
+            "})
+            .is_err()
+        );
+        assert!(
+            parse(indoc! {"
+                [diff]
+                style = 3
+            "})
+            .is_err()
+        );
     }
 
     fn setting(table: &'static str, key: &'static str, value: &str) -> Remembered {
@@ -963,24 +996,55 @@ mod tests {
     fn values_are_remembered_in_place() {
         let plain = setting("diff", "style", "plain");
         assert_eq!(
-            with_values("[font]\nsize = 14\n", std::slice::from_ref(&plain)).unwrap(),
-            "[font]\nsize = 14\n\n[diff]\nstyle = \"plain\"\n"
-        );
-        assert_eq!(
             with_values(
-                "[diff]\nstyle = \"syntax\"\nadded = \"#000000\"\n[view]\n",
+                indoc! {"
+                    [font]
+                    size = 14
+                "},
                 std::slice::from_ref(&plain)
             )
             .unwrap(),
-            "[diff]\nstyle = \"plain\"\nadded = \"#000000\"\n[view]\n"
+            indoc! {"
+                [font]
+                size = 14
+
+                [diff]
+                style = \"plain\"
+            "}
+        );
+        assert_eq!(
+            with_values(
+                indoc! {"
+                    [diff]
+                    style = \"syntax\"
+                    added = \"#000000\"
+                    [view]
+                "},
+                std::slice::from_ref(&plain)
+            )
+            .unwrap(),
+            indoc! {"
+                [diff]
+                style = \"plain\"
+                added = \"#000000\"
+                [view]
+            "}
         );
         let added = with_values(
-            "[diff]\nadded = \"#000000\"\n",
+            indoc! {"
+                [diff]
+                added = \"#000000\"
+            "},
             std::slice::from_ref(&plain),
         )
         .unwrap();
         assert_eq!(parse(&added).unwrap().diff_style.as_deref(), Some("plain"));
-        let keys = parse("[keys]\nNextUnit = \"ctrl-j\"\nToggleOverview = []\n").unwrap();
+        let keys = parse(indoc! {"
+            [keys]
+            NextUnit = \"ctrl-j\"
+            ToggleOverview = []
+        "})
+        .unwrap();
         assert_eq!(keys.keys["NextUnit"], ["ctrl-j"]);
         assert_eq!(keys.keys["ToggleOverview"], Vec::<String>::new());
         let width = Remembered {
@@ -1036,7 +1100,13 @@ NextHunk = [\"j\"]
             "background = \"muted\" # a calm one",
             "NextHunk = [\"j\"]",
         ] {
-            assert!(updated.contains(kept), "lost {kept:?} in:\n{updated}");
+            assert!(
+                updated.contains(kept),
+                "{}",
+                formatdoc! {"
+                    lost {kept:?} in:
+                    {updated}"}
+            );
         }
         let config = parse(&updated).unwrap();
         assert_eq!(config.diff_style.as_deref(), Some("plain"));
@@ -1074,12 +1144,22 @@ NextHunk = [\"j\"]
     fn broken_files_are_left_alone() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[diff\nstyle = 1\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                [diff
+                style = 1
+            "},
+        )
+        .unwrap();
         let err = remember(&path, &[setting("diff", "style", "plain")]).unwrap_err();
         assert!(matches!(err, RememberError::Invalid { .. }), "{err:?}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "[diff\nstyle = 1\n"
+            indoc! {"
+                [diff
+                style = 1
+            "}
         );
         assert!(with_values("diff = 3\n", &[setting("diff", "style", "plain")]).is_err());
 
@@ -1101,7 +1181,15 @@ NextHunk = [\"j\"]
     fn remembering_replaces_the_file_whole() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "# mine\n[theme]\nname = \"carbonfox\"\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                # mine
+                [theme]
+                name = \"carbonfox\"
+            "},
+        )
+        .unwrap();
         // A reader that opened the old file before the write; Windows may refuse to replace a
         // file that is open, so only Unix checks this.
         #[cfg(unix)]
@@ -1112,7 +1200,11 @@ NextHunk = [\"j\"]
         // The path has the new text, comments kept, and no temporary file is left.
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "# mine\n[theme]\nname = \"nordfox\"\n"
+            indoc! {"
+                # mine
+                [theme]
+                name = \"nordfox\"
+            "}
         );
         let names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -1126,7 +1218,14 @@ NextHunk = [\"j\"]
         {
             let mut old = String::new();
             std::io::Read::read_to_string(&mut reader, &mut old).unwrap();
-            assert_eq!(old, "# mine\n[theme]\nname = \"carbonfox\"\n");
+            assert_eq!(
+                old,
+                indoc! {"
+                    # mine
+                    [theme]
+                    name = \"carbonfox\"
+                "}
+            );
         }
 
         // A symlinked configuration is written where the link points, and stays a link.
@@ -1134,7 +1233,14 @@ NextHunk = [\"j\"]
         {
             let real = dir.path().join("dotfiles").join("config.toml");
             std::fs::create_dir_all(real.parent().unwrap()).unwrap();
-            std::fs::write(&real, "[theme]\nname = \"carbonfox\"\n").unwrap();
+            std::fs::write(
+                &real,
+                indoc! {"
+                    [theme]
+                    name = \"carbonfox\"
+                "},
+            )
+            .unwrap();
             let link = dir.path().join("linked.toml");
             std::os::unix::fs::symlink(&real, &link).unwrap();
             remember(&link, &[setting("theme", "name", "nordfox")]).unwrap();
@@ -1146,7 +1252,10 @@ NextHunk = [\"j\"]
             );
             assert_eq!(
                 std::fs::read_to_string(&real).unwrap(),
-                "[theme]\nname = \"nordfox\"\n"
+                indoc! {"
+                    [theme]
+                    name = \"nordfox\"
+                "}
             );
         }
     }
@@ -1172,7 +1281,10 @@ NextHunk = [\"j\"]
         assert!(is_link("config.toml") && is_link("middle.toml"));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dotfiles/config.toml")).unwrap(),
-            "[theme]\nname = \"nordfox\"\n"
+            indoc! {"
+                [theme]
+                name = \"nordfox\"
+            "}
         );
     }
 
@@ -1184,7 +1296,14 @@ NextHunk = [\"j\"]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let other = dir.path().join("kept.toml");
-        std::fs::write(&path, "[theme]\nname = \"carbonfox\"\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                [theme]
+                name = \"carbonfox\"
+            "},
+        )
+        .unwrap();
         std::fs::hard_link(&path, &other).unwrap();
 
         remember(&path, &[setting("theme", "name", "nordfox")]).unwrap();
@@ -1192,7 +1311,10 @@ NextHunk = [\"j\"]
         for name in [&path, &other] {
             assert_eq!(
                 std::fs::read_to_string(name).unwrap(),
-                "[theme]\nname = \"nordfox\"\n"
+                indoc! {"
+                    [theme]
+                    name = \"nordfox\"
+                "}
             );
         }
     }
@@ -1200,11 +1322,16 @@ NextHunk = [\"j\"]
     /// Layouts and styles parse by the names the file uses.
     #[test]
     fn looks_and_styles_parse() {
-        let config = parse(
-            "[diff]\nlayout = \"side-by-side\"\nstyle = \"calm\"\ndensity = \"compact\"\n\
-             [styles.calm]\nsyntax = true\nbackground = \"muted\"\nheaders = \"chips\"\n\
-             change_bar = true\n",
-        )
+        let config = parse(indoc! {"
+            [diff]
+            layout = \"side-by-side\"
+            style = \"calm\"
+            density = \"compact\"
+            [styles.calm]
+            syntax = true
+            background = \"muted\"
+            change_bar = true
+        "})
         .unwrap();
         assert_eq!(config.diff_layout, DiffLayout::SideBySide);
         assert_eq!(config.diff_style.as_deref(), Some("calm"));
@@ -1214,7 +1341,6 @@ NextHunk = [\"j\"]
             StyleConfig {
                 syntax: Some(true),
                 background: Some(Background::Muted),
-                headers: Some(Headers::Chips),
                 change_bar: Some(true),
             }
         );
@@ -1225,10 +1351,14 @@ NextHunk = [\"j\"]
         );
         // A style is colors only; density set in one says where it belongs, and costs only
         // that style.
-        let config = parse(
-            "[diff]\nstyle = \"calm\"\n[styles.calm]\ndensity = \"comfortable\"\n\
-             [styles.fine]\nsyntax = false\n",
-        )
+        let config = parse(indoc! {"
+            [diff]
+            style = \"calm\"
+            [styles.calm]
+            density = \"comfortable\"
+            [styles.fine]
+            syntax = false
+        "})
         .unwrap();
         assert_eq!(config.diff_style.as_deref(), Some("calm"));
         assert!(!config.styles.contains_key("calm"));
@@ -1240,11 +1370,27 @@ NextHunk = [\"j\"]
             "{:?}",
             config.problems
         );
+        // Hunk headers have one look; a style that still sets headers says so.
+        let config = parse(indoc! {"
+            [styles.calm]
+            headers = \"chips\"
+        "})
+        .unwrap();
+        assert!(!config.styles.contains_key("calm"));
+        assert!(
+            config.problems[0].contains("[styles.calm] cannot be used: it sets headers"),
+            "{:?}",
+            config.problems
+        );
         // A mistake in a style costs only that style, never the whole file.
-        let config = parse(
-            "[font]\nsize = 15\n[styles.calm]\nbackground = \"loud\"\n[styles.fine]\n\
-             syntax = false\n",
-        )
+        let config = parse(indoc! {"
+            [font]
+            size = 15
+            [styles.calm]
+            background = \"loud\"
+            [styles.fine]
+            syntax = false
+        "})
         .unwrap();
         assert_eq!(config.font.size_points, Some(15.0));
         assert!(!config.styles.contains_key("calm"));
@@ -1254,17 +1400,27 @@ NextHunk = [\"j\"]
             "{:?}",
             config.problems
         );
-        assert!(parse("[diff]\nlayout = \"split\"\n").is_err());
+        assert!(
+            parse(indoc! {"
+                [diff]
+                layout = \"split\"
+            "})
+            .is_err()
+        );
     }
 
     /// Presets are gone: an older file's `[presets]` costs nothing else and is named once,
     /// however many presets it has.
     #[test]
     fn presets_are_noted_once_and_ignored() {
-        let config = parse(
-            "[diff]\ndensity = \"compact\"\n[presets.mine]\ntheme = \"nordfox\"\n\
-             [presets.other]\ncolour = \"red\"\n",
-        )
+        let config = parse(indoc! {"
+            [diff]
+            density = \"compact\"
+            [presets.mine]
+            theme = \"nordfox\"
+            [presets.other]
+            colour = \"red\"
+        "})
         .unwrap();
         assert_eq!(config.density, Density::Compact);
         assert_eq!(
@@ -1277,10 +1433,20 @@ NextHunk = [\"j\"]
     #[test]
     fn approved_hunks_fold_by_default() {
         assert_eq!(parse("").unwrap().approved, Approved::Folded);
-        let config = parse("[diff]\napproved = \"shown\"\n").unwrap();
+        let config = parse(indoc! {"
+            [diff]
+            approved = \"shown\"
+        "})
+        .unwrap();
         assert_eq!(config.approved, Approved::Shown);
         assert_eq!(config.approved.toggled(), Approved::Folded);
-        assert!(parse("[diff]\napproved = \"open\"\n").is_err());
+        assert!(
+            parse(indoc! {"
+                [diff]
+                approved = \"open\"
+            "})
+            .is_err()
+        );
     }
 
     /// 13 points is 17.33 logical pixels; gpui applies the display scale on top.
@@ -1309,11 +1475,20 @@ NextHunk = [\"j\"]
     fn formatting_is_approved_automatically_by_default() {
         assert!(parse("").unwrap().auto_approve_formatting);
         assert!(
-            !parse("[review]\nauto_approve_formatting = false\n")
-                .unwrap()
-                .auto_approve_formatting
+            !parse(indoc! {"
+                [review]
+                auto_approve_formatting = false
+            "})
+            .unwrap()
+            .auto_approve_formatting
         );
-        assert!(parse("[review]\nauto_approve = false\n").is_err());
+        assert!(
+            parse(indoc! {"
+                [review]
+                auto_approve = false
+            "})
+            .is_err()
+        );
     }
 
     /// A file the apps cannot read whole keeps `[review] auto_approve_formatting` as `cr` reads
@@ -1328,21 +1503,49 @@ NextHunk = [\"j\"]
             assert!(load(&path).is_err(), "{text:?} is broken for the apps");
             fallback(&path).auto_approve_formatting
         };
-        assert!(!fallback(
-            "[review]\nauto_approve_formatting = false\n[diff]\ncontex = 5\n"
-        ));
-        assert!(fallback("[diff]\ncontex = 5\n"));
-        assert!(!fallback("[review\nauto_approve_formatting = true\n"));
-        assert!(!fallback(
-            "[review]\nauto_approve_formatting = 1\n[diff]\ncontex = 5\n"
-        ));
+        // The misspelled keys are deliberate: an unknown key makes the apps reject the file.
+        // spellcheck:ignore-start
+        assert!(!fallback(indoc! {"
+            [review]
+            auto_approve_formatting = false
+            [diff]
+            contex = 5
+        "}));
+        assert!(fallback(indoc! {"
+            [diff]
+            contex = 5
+        "}));
+        assert!(!fallback(indoc! {"
+            [review
+            auto_approve_formatting = true
+        "}));
+        assert!(!fallback(indoc! {"
+            [review]
+            auto_approve_formatting = 1
+            [diff]
+            contex = 5
+        "}));
+        // spellcheck:ignore-end
     }
 
     /// Language servers may start unless `[lsp] enabled = false`; a misspelled key is an error.
     #[test]
     fn language_servers_are_on_unless_turned_off() {
         assert!(parse("").unwrap().language_servers);
-        assert!(!parse("[lsp]\nenabled = false\n").unwrap().language_servers);
-        assert!(parse("[lsp]\nenable = false\n").is_err());
+        assert!(
+            !parse(indoc! {"
+                [lsp]
+                enabled = false
+            "})
+            .unwrap()
+            .language_servers
+        );
+        assert!(
+            parse(indoc! {"
+                [lsp]
+                enable = false
+            "})
+            .is_err()
+        );
     }
 }

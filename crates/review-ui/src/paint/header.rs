@@ -79,6 +79,8 @@ pub struct FileHeader {
     /// A rename, entry changes, what kind of change it is, and why side by side shows
     /// unified, joined with ` · `.
     pub details: Piece,
+    /// The file's length, such as `142 lines`, before the line counts, when it fits.
+    pub lines: Option<Piece>,
     /// The added and removed line counts, `+12` and `−3`, when they fit.
     pub counts: Option<[Piece; 2]>,
     /// The hunks approved of the file's, when it fits.
@@ -88,8 +90,8 @@ pub struct FileHeader {
 /// The selected file's header, with the parts that fit `room`, or `None` with no file
 /// selected; [`NO_FILE`] says so in [`Palette::faint`].
 ///
-/// When the room is narrow, the line counts make way first, then the meter; the path keeps
-/// some room and truncates from its start.
+/// When the room is narrow, the file's length makes way first, then the line counts, then the
+/// meter; the path keeps some room and truncates from its start.
 /// `meter_gap` is the gap inside the meter, between its bar and its counts.
 #[must_use]
 pub fn file_header(
@@ -120,6 +122,13 @@ pub fn file_header(
     let counts_room = gap + text(&added) + gap + text(&removed);
     let show_meter = lead + meter_room <= budget;
     let show_counts = show_meter && lead + meter_room + counts_room <= budget;
+    let lines = section.lines.map(|lines| match lines {
+        1 => "1 line".to_owned(),
+        lines => format!("{lines} lines"),
+    });
+    let lines = lines.filter(|lines| {
+        show_counts && lead + meter_room + counts_room + gap + text(lines) <= budget
+    });
     Some(FileHeader {
         kind: change.map(|change| {
             Piece::new(
@@ -131,6 +140,7 @@ pub fn file_header(
         dir: Piece::new(dir, palette.dim),
         name: Piece::new(name, palette.text).weighted(Weight::Bold),
         details: Piece::new(file_details(model, section).join(" · "), palette.faint),
+        lines: lines.map(|lines| Piece::new(lines, palette.faint)),
         counts: show_counts.then(|| {
             [
                 Piece::new(added, palette.added_sign),

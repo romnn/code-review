@@ -355,29 +355,18 @@ impl ReviewApp {
                     scope,
                     tag,
                     location,
-                    chips,
                     ..
                 } = header;
-                // The innermost scope and the location, a chip with its padding on both
-                // sides, with a gap between them in either style, then the tag after its own
-                // wider gap.
-                let padding = if chips.is_some() { GRID * 3.0 } else { 0.0 };
-                let widths: Vec<f32> = scope
-                    .as_ref()
-                    .map(|scope| cells(&scope.inner))
-                    .into_iter()
-                    .chain(location.as_ref().map(|piece| padding + cells(piece)))
-                    .collect();
-                let gaps = scroll::float(widths.len().saturating_sub(1)) * GRID * 2.0;
-                let tag = tag.as_ref().map_or(0.0, |tag| {
-                    let gap = if widths.is_empty() {
-                        0.0
-                    } else {
-                        self.tag_gap()
-                    };
-                    gap + cells(tag)
-                });
-                widths.iter().sum::<f32>() + gaps + tag
+                // The innermost scope, then the location and the tag, each an aside after the
+                // tag's gap.
+                let mut width = scope.as_ref().map_or(0.0, |scope| cells(&scope.inner));
+                for aside in [location, tag].into_iter().flatten() {
+                    if width > 0.0 {
+                        width += self.tag_gap();
+                    }
+                    width += cells(aside);
+                }
+                width
             }
             // The note's area starts after its accent bar, which takes the sign's place.
             Annotation::Note { text, tag, .. } => {
@@ -417,18 +406,8 @@ impl ReviewApp {
             .child(
                 self.noted(
                     h_flex()
-                        .child(
-                            div()
-                                .pl(px(GRID * 3.0))
-                                .text_color(to_gpui(text.color))
-                                .child(ink::shown(&text.text)),
-                        )
-                        .children(tag.map(|tag| {
-                            div()
-                                .pl(px(GRID * 3.0))
-                                .text_color(to_gpui(tag.color))
-                                .child(ink::shown(&tag.text))
-                        })),
+                        .child(ink::shown_piece(text).pl(px(GRID * 3.0)))
+                        .children(tag.map(|tag| ink::shown_piece(tag).pl(px(GRID * 3.0)))),
                     pan,
                     behind,
                     colors,
@@ -481,23 +460,11 @@ impl ReviewApp {
         (self.sizes().ui_cell() * f32::from(annotation::TAG_GAP_CELLS)).round()
     }
 
-    /// One small muted part of a hunk header with chips, such as its location.
-    fn header_chip(&self, piece: &Piece, background: Hsla) -> Div {
-        div()
-            .flex_none()
-            .px(px(GRID * 1.5))
-            .line_height(px(self.sizes().ui_size() * 1.45))
-            .bg(background)
-            .text_color(to_gpui(piece.color))
-            .child(ink::shown(&piece.text))
-    }
-
     /// A hunk's header: one quiet line with its state glyph, the scopes around it, where it is
     /// when its code is folded away or no scope names it, and what kind of change it is.
     ///
-    /// It is a gray band, blue when selected; with chips headers its location is a small muted
-    /// chip. The tag is an italic aside on the band itself in either style, so the band stays
-    /// whole.
+    /// It is a band, tinted by the hunk's review state and solid when selected; the location
+    /// and the tag are asides on the band itself, so the band stays whole.
     fn hunk_header(
         &self,
         header: HunkHeader,
@@ -513,37 +480,23 @@ impl ReviewApp {
             scope,
             tag,
             location,
-            chips,
         } = header;
-        let has_scope = scope.is_some();
-        let first_tag = !has_scope && location.is_none();
         let behind = super::pairs::line_background(colors, &[Some(background)]);
-        let scope = scope.map(scope_title);
-        let content = if let Some(chip_background) = chips {
-            h_flex()
-                .min_w_0()
-                .gap(px(GRID * 2.0))
-                .children(scope)
-                .children(location.map(|piece| self.header_chip(&piece, to_gpui(chip_background))))
-        } else {
-            h_flex()
-                .min_w_0()
-                .children(scope)
-                .children(location.map(|location| {
-                    div()
-                        .when(has_scope, |location| location.ml(px(GRID * 2.0)))
-                        .flex_none()
-                        .text_color(to_gpui(location.color))
-                        .child(ink::shown(&location.text))
-                }))
-        };
-        // The tag, an aside on the band whichever style the header has.
         let tag_gap = self.tag_gap();
-        let content = content.children(tag.map(|tag| {
-            ink::shown_piece(tag)
-                .when(!first_tag, |tag| tag.ml(px(tag_gap)))
-                .flex_none()
-        }));
+        let mut first = scope.is_none();
+        let mut asides = Vec::new();
+        for aside in [location, tag].into_iter().flatten() {
+            asides.push(
+                ink::shown_piece(aside)
+                    .when(!first, |aside| aside.ml(px(tag_gap)))
+                    .flex_none(),
+            );
+            first = false;
+        }
+        let content = h_flex()
+            .min_w_0()
+            .children(scope.map(scope_title))
+            .children(asides);
         base.bg(to_gpui(background))
             .child(frame_bar(frame, colors))
             .child(
@@ -790,6 +743,7 @@ impl ReviewApp {
                     .text_color(to_gpui(file.details.color))
                     .child(file.details.text),
             )
+            .children(file.lines.map(ink::piece))
             .when_some(file.counts, |line, [added, removed]| {
                 line.child(ink::piece(added)).child(ink::piece(removed))
             })

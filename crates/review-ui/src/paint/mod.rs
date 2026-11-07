@@ -29,7 +29,7 @@ pub mod picker;
 pub mod settings;
 
 pub use flatten::{Flat, Ink, composite, flatten};
-pub use palette::Palette;
+pub use palette::{HunkTone, Palette};
 
 /// How a stretch of text is styled over its line's own colors; a field left out keeps what is
 /// under it.

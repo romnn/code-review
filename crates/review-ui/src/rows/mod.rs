@@ -351,6 +351,8 @@ pub struct FileSection {
     pub collapsed: bool,
     /// Whether the file exists at the head, so it can be shown in full.
     pub has_head: bool,
+    /// The head file's line count, once its text has loaded.
+    pub lines: Option<usize>,
     /// The section's units, in review order.
     pub units: Vec<UnitId>,
     /// How the file changed, for its kind letter and color.
@@ -615,6 +617,7 @@ fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> Fil
         .unwrap_or(folds.approved == Approved::Folded && total > 0 && reviewed == total);
     FileSection {
         has_head: file.is_some_and(|file| file.new.is_some()),
+        lines: folds.texts.get(&path).map(|text| text.lines.len()),
         formatting_only: file.is_some_and(|file| file.formatting_only),
         noise: file
             .and_then(|file| file.noise)
@@ -943,21 +946,21 @@ fn hunk_tag(tags: Vec<Option<String>>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// Joins two units' line descriptions into the span of a display hunk: "lines 3–9".
+/// Joins two units' line descriptions into the span of a display hunk: "L3–9".
 fn join_lines(first: &str, last: &str) -> String {
     let start = first
         .rsplit(' ')
         .next()
-        .and_then(|range| range.split('–').next());
+        .and_then(|range| range.trim_start_matches('L').split('–').next());
     let end = last
         .rsplit(' ')
         .next()
-        .and_then(|range| range.rsplit('–').next());
+        .and_then(|range| range.trim_start_matches('L').rsplit('–').next());
     match (start, end) {
         (Some(start), Some(end))
             if start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok() =>
         {
-            format!("lines {start}–{end}")
+            format!("L{start}–{end}")
         }
         _ => format!("{first} · {last}"),
     }
@@ -1025,14 +1028,14 @@ fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
         .then(|| "whitespace changed · not proven equivalent".to_owned())
 }
 
-/// A unit's header line: where it is, such as "lines 27–29", or what a file unit changes.
+/// A unit's header line: where it is, such as "L27–29", or what a file unit changes.
 fn header(view: &RevisionView<'_>, unit: UnitId) -> String {
     match view.unit(unit).ok().and_then(|record| record.chunk()) {
-        Some(chunk) if chunk.added.is_empty() => format!("removed at line {}", chunk.new.start + 1),
+        Some(chunk) if chunk.added.is_empty() => format!("removed at L{}", chunk.new.start + 1),
         Some(chunk) if chunk.new.end() > chunk.new.start + 1 => {
-            format!("lines {}–{}", chunk.new.start + 1, chunk.new.end())
+            format!("L{}–{}", chunk.new.start + 1, chunk.new.end())
         }
-        Some(chunk) => format!("line {}", chunk.new.start + 1),
+        Some(chunk) => format!("L{}", chunk.new.start + 1),
         None => {
             let described = view
                 .describe(unit)
@@ -1520,6 +1523,8 @@ fn with_ending(content: &str, ending: LineEnding) -> String {
 
 #[cfg(test)]
 mod tests {
+    use indoc::formatdoc;
+
     use super::*;
 
     #[test]
@@ -1588,7 +1593,7 @@ mod tests {
                 .iter()
                 .filter(|row| row.file == file && row.kind() == RowKind::Header)
                 .filter_map(|row| row.note())
-                .find(|note| note.text == "lines 27–29")
+                .find(|note| note.text == "L27–29")
                 .cloned()
                 .unwrap()
         };
@@ -1695,7 +1700,12 @@ mod tests {
     fn the_widest_line_wins_over_the_longest_in_bytes() {
         let accents = "é".repeat(200);
         let ascii = "x".repeat(300);
-        let text = FullText::new(&format!("{accents}\n{ascii}\n"));
+        let text = FullText::new(&formatdoc!(
+            "
+                {accents}
+                {ascii}
+            "
+        ));
         assert!(accents.len() > ascii.len());
         assert_eq!(text.longest, 1);
         assert_eq!(display_width("中文"), 4);

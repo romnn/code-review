@@ -91,8 +91,9 @@ impl Model {
         self.reveal_hunk();
     }
 
-    /// Enter in the diff: follows the selected hunk's move to its other end, or expands a
-    /// collapsed unit to show its code.
+    /// Enter in the diff: follows the selected hunk's move to its other end, expands a
+    /// collapsed unit to show its code, or else folds or unfolds the hunk, so an approved
+    /// hunk's code shows without `z a`.
     pub(super) fn diff_activate(&mut self) {
         let Some(rows) = self.hunk_rows.get(self.hunk).cloned() else {
             return;
@@ -123,6 +124,8 @@ impl Model {
                 self.folds.expanded.insert(unit);
             }
             self.rebuild();
+        } else {
+            self.toggle_fold();
         }
     }
 

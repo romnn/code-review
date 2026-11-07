@@ -206,7 +206,7 @@ expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y"
 key |
 state
 expect "diff_style":"soft"
-expect "headers":"chips","change_bar":true
+expect "background":"muted","change_bar":false
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-soft
 key |
@@ -423,7 +423,7 @@ key z shift-a
 state
 expect "approved":"shown"
 expect "status":"Approved hunks shown\."
-expect "row_count":48,
+expect "row_count":50,
 shot 07b-approved-shown
 key z shift-a
 state

@@ -442,10 +442,13 @@ fn header_reach(header: &HunkHeader) -> u16 {
         .scope
         .as_ref()
         .map_or(0, |scope| width(&scope.inner.text));
-    let padding = if header.chips.is_some() { 2 } else { 0 };
     let location = header.location.as_ref().map_or(0, |piece| {
-        let before = u16::from(header.scope.is_some());
-        width(&piece.text).saturating_add(before + padding)
+        let before = if header.scope.is_some() {
+            TAG_GAP_CELLS
+        } else {
+            0
+        };
+        width(&piece.text).saturating_add(before)
     });
     let tag = header.tag.as_ref().map_or(0, |tag| {
         let first = header.scope.is_none() && header.location.is_none();
@@ -515,7 +518,6 @@ fn hunk_header(
         scope,
         tag,
         location,
-        chips,
     } = header;
     let bg = over(background, *band);
     let y = row.y;
@@ -525,12 +527,10 @@ fn hunk_header(
     painter.piece(row.x + FRAME + GUTTER, y, 1, glyph, bg);
     let x = row.x + FRAME + GUTTER + SIGN;
     let right = row.right().saturating_sub(1);
-    // The parts after the scopes: the location with the cell before it, and the tag with its
-    // gap.
-    let chip_bg = chips.map(|chip| over(bg, chip));
-    let location_width = location.as_ref().map_or(0, |piece| {
-        width(&piece.text) + 1 + if chip_bg.is_some() { 2 } else { 0 }
-    });
+    // The parts after the scopes, each an aside with its gap before it.
+    let location_width = location
+        .as_ref()
+        .map_or(0, |piece| width(&piece.text) + TAG_GAP_CELLS);
     let tag_width = tag
         .as_ref()
         .map_or(0, |tag| width(&tag.text) + TAG_GAP_CELLS);
@@ -557,22 +557,16 @@ fn hunk_header(
             }
             x += painter.piece(x, 0, right.saturating_sub(x), inner, bg);
         }
+        // The location and the tag are asides on the band itself, so the band stays whole.
         if let Some(piece) = location {
-            if scope.is_some() {
-                x += 1;
+            if x > 0 {
+                x += TAG_GAP_CELLS;
             }
             if x >= right {
                 return;
             }
-            match chip_bg {
-                Some(chip) => {
-                    let text = format!(" {} ", piece.text);
-                    x += painter.text(x, 0, right - x, &text, Brush::piece(piece, chip));
-                }
-                None => x += painter.piece(x, 0, right - x, piece, bg),
-            }
+            x += painter.piece(x, 0, right - x, piece, bg);
         }
-        // The tag is an aside on the band itself, never a chip, so the band stays whole.
         if let Some(tag) = tag {
             if x > 0 {
                 x += TAG_GAP_CELLS;
@@ -620,26 +614,27 @@ fn file_header(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area
         dir,
         name,
         details,
+        lines,
         counts,
         meter,
     } = file;
     let right = x + budget;
-    // The right edge: the counts, then the meter.
+    // The right edge: the file's length, the counts, then the meter.
     let meter_width = meter
         .as_ref()
         .map_or(0, |meter| 5 + 1 + width(&meter.counts.text));
     let counts_width = counts.as_ref().map_or(0, |[added, removed]| {
         width(&added.text) + HEADER_GAP + width(&removed.text)
     });
-    let tail = meter_width
-        + counts_width
-        + if meter_width > 0 && counts_width > 0 {
-            HEADER_GAP
-        } else {
-            0
-        };
+    let lines_width = lines.as_ref().map_or(0, |lines| width(&lines.text));
+    let parts = [lines_width, counts_width, meter_width];
+    let shown = u16::try_from(parts.iter().filter(|&&part| part > 0).count()).unwrap_or(0);
+    let tail = parts.iter().sum::<u16>() + shown.saturating_sub(1) * HEADER_GAP;
     let tail_at = right.saturating_sub(tail);
     let mut at = tail_at;
+    if let Some(lines) = &lines {
+        at += painter.piece(at, y, right - at, lines, surface) + HEADER_GAP;
+    }
     if let Some([added, removed]) = &counts {
         at += painter.piece(at, y, right - at, added, surface) + HEADER_GAP;
         at += painter.piece(at, y, right.saturating_sub(at), removed, surface) + HEADER_GAP;
@@ -826,7 +821,6 @@ mod tests {
             }),
             location: None,
             tag: Some(Piece::new("tag", palette.faint)),
-            chips: None,
         });
         assert_eq!(reach(&header), room);
         assert_eq!(draw(&header, 3.0), "fn    tag ", "the tag stands apart");

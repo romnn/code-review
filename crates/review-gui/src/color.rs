@@ -101,6 +101,7 @@ mod tests {
                 selection,
                 find,
                 error,
+                note,
             } = theme.ui;
             let theme::Review {
                 open,
@@ -140,6 +141,7 @@ mod tests {
                     selection,
                     find,
                     error,
+                    note,
                     open,
                     done,
                     flagged,

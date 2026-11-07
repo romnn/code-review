@@ -6,9 +6,9 @@
 use review_core::UnitId;
 
 use super::code::Frame;
+use super::palette::HunkTone;
 use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
-use crate::config::Headers;
 use crate::model::Model;
 use crate::rows::{Badge, Note, Row, RowKind};
 use crate::state;
@@ -28,7 +28,8 @@ pub enum Annotation {
     },
     /// A hunk's header.
     Header(HunkHeader),
-    /// A note: a bounded block with an accent bar along its left, on the band.
+    /// A note: italic yellow text with a yellow bar along its left, on a block tinted toward
+    /// the yellow, so it never reads as code.
     Note {
         /// The note.
         text: Piece,
@@ -50,7 +51,8 @@ pub enum Annotation {
     },
 }
 
-/// The cells of space before a hunk header's tag, which sets it apart as an aside.
+/// The cells of space before a hunk header's location and tag, which set them apart as
+/// asides.
 pub const TAG_GAP_CELLS: u16 = 4;
 
 /// A hunk's header: one quiet line with its state glyph, the scopes around it, where it is when
@@ -58,7 +60,8 @@ pub const TAG_GAP_CELLS: u16 = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HunkHeader {
     /// The line's background: a gray a step above its hunk's band, so each hunk's start shows
-    /// at a glance, and on the selected one the same blue as its bar.
+    /// at a glance, tinted green once approved and red once flagged; on the selected hunk, the
+    /// same solid blue, green or red as its bar.
     pub background: Hsla,
     /// `▸` when the hunk shows its header alone, `▾` when its code shows, in the gutter.
     pub fold: Piece,
@@ -66,15 +69,12 @@ pub struct HunkHeader {
     pub glyph: Piece,
     /// The scopes around the hunk, such as `impl Ledger › fn apply`.
     pub scope: Option<Scope>,
-    /// The lines it covers.
+    /// The lines it covers, such as `L27–29`: quiet text on the header's own background,
+    /// [`TAG_GAP_CELLS`] apart from the scopes before it, as the tag is.
     pub location: Option<Piece>,
     /// What kind of change it is, such as `(reformatted only)`: an italic aside in the faint
-    /// color, last on the line and [`TAG_GAP_CELLS`] apart from what comes before it, on the
-    /// header's own background in either header style, so it never breaks the band.
+    /// color, last on the line and [`TAG_GAP_CELLS`] apart from what comes before it.
     pub tag: Option<Piece>,
-    /// With chips headers, the background of the location's chip; with band headers, `None`,
-    /// and the location starts with `· ` after the scopes.
-    pub chips: Option<Hsla>,
 }
 
 /// A hunk header's scopes, in bold: the outer ones faint and cut first when space runs out,
@@ -143,13 +143,13 @@ pub fn annotation(
         },
         RowKind::Header => Annotation::Header(hunk_header(model, palette, row, note, frame)),
         RowKind::Note => Annotation::Note {
-            text: Piece::new(note.text.clone(), palette.text),
+            text: Piece::new(note.text.clone(), palette.note).italicized(),
             tag: note
                 .tag
                 .as_ref()
-                .map(|tag| Piece::new(tag.clone(), palette.faint)),
-            accent: palette.accent,
-            background: palette.band,
+                .map(|tag| Piece::new(tag.clone(), palette.dim)),
+            accent: palette.note,
+            background: palette.note_band,
         },
         _ => {
             let color = match note.kind {
@@ -218,17 +218,15 @@ fn hunk_header(
     let folded = model
         .view()
         .is_some_and(|view| units.iter().all(|&unit| model.folds.is_folded(&view, unit)));
-    let selected = frame == Frame::Selected;
-    let background = if selected {
-        palette.accent
+    let tone = HunkTone::of(&badges);
+    let selected = matches!(frame, Frame::Selected(_));
+    let (background, palette) = if selected {
+        let solid = palette.hunk_solid(tone);
+        (solid, palette.on(solid))
     } else {
-        palette.raised
+        (palette.hunk_header(tone), palette.on_header(tone))
     };
-    let palette = &if selected {
-        palette.on_accent()
-    } else {
-        *palette
-    };
+    let palette = &palette;
     // What the hunk changes leads: the scopes around it, innermost brightest.
     // Where it is matters only when its code is folded away or no scope names it, since the
     // gutter numbers the lines that show; a file unit's text says what changed, so it stays.
@@ -245,21 +243,7 @@ fn hunk_header(
     } else {
         label
     };
-    let chips = (model.look().style.headers == Headers::Chips).then_some(if selected {
-        palette.text.alpha(0.15)
-    } else {
-        palette.surface
-    });
-    // On a band, each piece after the first starts with a separator; a chip stands apart.
-    let separated = |text: String, first: bool| {
-        if first || chips.is_some() {
-            text
-        } else {
-            format!("· {text}")
-        }
-    };
-    let has_scope = scope.is_some();
-    let location = location.map(|text| Piece::new(separated(text, !has_scope), location_color));
+    let location = location.map(|text| Piece::new(text, location_color));
     let tag = note
         .tag
         .as_ref()
@@ -271,7 +255,6 @@ fn hunk_header(
         scope,
         location,
         tag,
-        chips,
     }
 }
 
