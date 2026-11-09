@@ -119,15 +119,22 @@ mod tests {
     /// The state directory comes from `XDG_STATE_HOME` when it is absolute, else from home.
     #[test]
     fn the_log_lives_in_the_state_directory() {
+        // The temporary directory is absolute on every platform, which `/state` is not on
+        // Windows.
+        let root = std::env::temp_dir();
+        let (state, home) = (root.join("state"), root.join("home"));
         assert_eq!(
-            path(Some(Path::new("/state")), Some(Path::new("/home/me"))),
-            Some(PathBuf::from("/state/code-review/review-tui.log"))
+            path(Some(&state), Some(&home)),
+            Some(state.join("code-review").join("review-tui.log"))
         );
         assert_eq!(
-            path(Some(Path::new("relative")), Some(Path::new("/home/me"))),
-            Some(PathBuf::from(
-                "/home/me/.local/state/code-review/review-tui.log"
-            ))
+            path(Some(Path::new("relative")), Some(&home)),
+            Some(
+                home.join(".local")
+                    .join("state")
+                    .join("code-review")
+                    .join("review-tui.log")
+            )
         );
         assert_eq!(path(None, None), None);
     }
