@@ -576,11 +576,7 @@ mod tests {
     /// installed.
     #[test]
     fn definition_from_a_demo_head_line() {
-        if std::process::Command::new("rust-analyzer")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !crate::lsp::rust_analyzer_installed() {
             eprintln!("skipped: rust-analyzer is not installed");
             return;
         }

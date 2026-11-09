@@ -500,6 +500,16 @@ pub fn byte_column(line: &str, utf16: usize) -> usize {
     line.len()
 }
 
+/// Whether a working rust-analyzer is on the path. rustup installs a `rust-analyzer` proxy even
+/// without the component, which runs and fails, so only a successful `--version` counts.
+#[cfg(test)]
+pub(crate) fn rust_analyzer_installed() -> bool {
+    Command::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -552,11 +562,7 @@ mod tests {
     /// Runs rust-analyzer against a two-file crate; skipped where rust-analyzer is not installed.
     #[test]
     fn rust_analyzer_finds_a_definition_in_another_file() {
-        if Command::new("rust-analyzer")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !rust_analyzer_installed() {
             eprintln!("skipped: rust-analyzer is not installed");
             return;
         }
