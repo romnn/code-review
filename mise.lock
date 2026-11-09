@@ -2,6 +2,158 @@
 
 lockfile_version = 3
 
+[conda-packages.linux-x64."_openmp_mutex-4.5-20_gnu"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda"
+checksum = "sha256:1dd3fffd892081df9726d7eb7e0dea6198962ba775bd88842135a4ddb4deb3c9"
+
+[conda-packages.linux-x64."lcms2-2.20-h9073bf1_0"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/lcms2-2.20-h9073bf1_0.conda"
+checksum = "sha256:f19bd0697093c5ba8b459f02dd3d21c5d953dc49db185fdf7a159153f7e3b7fd"
+
+[conda-packages.linux-x64."lerc-4.3.0-he78707d_0"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/lerc-4.3.0-he78707d_0.conda"
+checksum = "sha256:467aa52e9ba7a438f17944909e1904399eab863778ab501cf271e30cfa4bc6f3"
+
+[conda-packages.linux-x64."libdeflate-1.26-h351257e_0"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libdeflate-1.26-h351257e_0.conda"
+checksum = "sha256:f437f68abb1fa1dededd082a0c2800bec40495e01cf9ec46f4e693e34d60b644"
+
+[conda-packages.linux-x64."libgcc-16.2.0-ha9f2e26_7"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda"
+checksum = "sha256:e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea"
+
+[conda-packages.linux-x64."libgomp-16.2.0-he0feb66_7"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda"
+checksum = "sha256:92a0bb350c7be6a4eedcb4e111c60aefd176018e6b1c009a6e025dbe9bbcd758"
+
+[conda-packages.linux-x64."libjpeg-turbo-3.2.1-h7cc23a3_0"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libjpeg-turbo-3.2.1-h7cc23a3_0.conda"
+checksum = "sha256:2f7d092a3212884825c43814575225fde8a9190611bc0e38c55e0dae45e329ac"
+
+[conda-packages.linux-x64."liblzma-5.8.3-hb03c661_1"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda"
+checksum = "sha256:9787df8c22a59c9a70d3e5a10db9ad663485e75e9ccc3f09bd092cb7b95e0dab"
+
+[conda-packages.linux-x64."libpng-1.6.59-h922cc85_0"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libpng-1.6.59-h922cc85_0.conda"
+checksum = "sha256:c7381be8ef713501f6cd2f5ad473e401f2edeaec3c46788296b8dbf0de165e15"
+
+[conda-packages.linux-x64."libstdcxx-16.2.0-h934c35e_7"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda"
+checksum = "sha256:fa7018298629fc429971fffd6ecba3d27a7b02e4e890d6a93ea01ffebe8cb745"
+
+[conda-packages.linux-x64."libtiff-4.7.2-h6d37cbf_2"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libtiff-4.7.2-h6d37cbf_2.conda"
+checksum = "sha256:3406eed96ee929309ecd3937308d5a81302f4ca2eddd30e832071cbe9121a6c7"
+
+[conda-packages.linux-x64."libwebp-base-1.6.0-hd42ef1d_1"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libwebp-base-1.6.0-hd42ef1d_1.conda"
+checksum = "sha256:8415001414f488c85b72b9d8cc2071dfb3981a47bc3c8eb56ef91a57d12eae7f"
+
+[conda-packages.linux-x64."libzlib-1.3.2-h25fd6f3_3"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda"
+checksum = "sha256:eb8a0db0aa570124f7d2a93d7c7f596e3390df5e047818d873baad32985fc736"
+
+[conda-packages.linux-x64."zstd-1.5.7-hb78ec9c_7"]
+url = "https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda"
+checksum = "sha256:47d682b9f6d6ec9eb1a6e6c3e75ea6273e899e78fb7fc59f81d39745009fbc60"
+
+[conda-packages.macos-arm64."lcms2-2.20-hce41798_0"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/lcms2-2.20-hce41798_0.conda"
+checksum = "sha256:a5474fb5eea0d8d7219c29362df161327f09f02cb32f11c5ab4fa7460fe7b356"
+
+[conda-packages.macos-arm64."lerc-4.3.0-h0699d0c_0"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/lerc-4.3.0-h0699d0c_0.conda"
+checksum = "sha256:93b1189cf3e47b93fe613dc08213cf22b892650097e8df77519e50f9301e9f62"
+
+[conda-packages.macos-arm64."libcxx-23.1.5-h55c6f16_0"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libcxx-23.1.5-h55c6f16_0.conda"
+checksum = "sha256:b4b1fd6107980fed8b4e7ae8b08257b50c0f88b8771a530dc4a561f5d796457b"
+
+[conda-packages.macos-arm64."libdeflate-1.26-h72bfca4_0"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libdeflate-1.26-h72bfca4_0.conda"
+checksum = "sha256:f9c75ef67dbcc8e3c255d37e32948550bc8aa6752102c181686630b9ede96b8d"
+
+[conda-packages.macos-arm64."libjpeg-turbo-3.2.1-hb001647_0"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libjpeg-turbo-3.2.1-hb001647_0.conda"
+checksum = "sha256:957469c69b3b9c9e6ae48dc1267c5c9dfe0db9e1aefa5fa9abf9798224aa23c9"
+
+[conda-packages.macos-arm64."liblzma-5.8.3-h8088a28_1"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/liblzma-5.8.3-h8088a28_1.conda"
+checksum = "sha256:23d0630046a3e8b164d8f80f2b74ed2605af2e7050ab9913018056402fae4311"
+
+[conda-packages.macos-arm64."libpng-1.6.59-hf5e6511_0"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libpng-1.6.59-hf5e6511_0.conda"
+checksum = "sha256:4de4dc4cb7432c328c1eaf4f7cc9c6b48c073eab1e9c6723d4533e6d57e7d595"
+
+[conda-packages.macos-arm64."libtiff-4.7.2-h87d37ca_2"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libtiff-4.7.2-h87d37ca_2.conda"
+checksum = "sha256:3c1cf481a60ed8598093641b3a41ee1a7bb78413029ec566a238927504e941bd"
+
+[conda-packages.macos-arm64."libwebp-base-1.6.0-h202fb40_1"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libwebp-base-1.6.0-h202fb40_1.conda"
+checksum = "sha256:0ff54650d470c7e54cbeffdd53a8c063e055a7bcf784388c0385ce5c4741b0f4"
+
+[conda-packages.macos-arm64."libzlib-1.3.2-h8088a28_3"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/libzlib-1.3.2-h8088a28_3.conda"
+checksum = "sha256:a18fa5d5bac452401459f966cf0d872224e8080c4ff93c77e168d43ab42ef9d7"
+
+[conda-packages.macos-arm64."zstd-1.5.7-hf451053_7"]
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hf451053_7.conda"
+checksum = "sha256:da867f5092eb0cb746d353694f0098031fd9817a4ce7d5743121209ae0f406ca"
+
+[conda-packages.windows-x64."lcms2-2.20-hf2c6c5f_0"]
+url = "https://conda.anaconda.org/conda-forge/win-64/lcms2-2.20-hf2c6c5f_0.conda"
+checksum = "sha256:7389c5b7fafa0ff27466df34fdadb70c726ad4377f0d97aed8edbc7d0a948155"
+
+[conda-packages.windows-x64."lerc-4.3.0-hd936e49_0"]
+url = "https://conda.anaconda.org/conda-forge/win-64/lerc-4.3.0-hd936e49_0.conda"
+checksum = "sha256:e96230bcb2e65df55c14c52ef2cbd5b688482fbb8760de59688879edcdfa3679"
+
+[conda-packages.windows-x64."libdeflate-1.26-h1a1d4e4_0"]
+url = "https://conda.anaconda.org/conda-forge/win-64/libdeflate-1.26-h1a1d4e4_0.conda"
+checksum = "sha256:f51f28e894579387a531c53d97e058642ecfb232c4cb156c43c9121a9044f3d8"
+
+[conda-packages.windows-x64."libjpeg-turbo-3.2.1-hfd05255_0"]
+url = "https://conda.anaconda.org/conda-forge/win-64/libjpeg-turbo-3.2.1-hfd05255_0.conda"
+checksum = "sha256:195be7b2ff1eeff02b31cf366437a38d84560c2f6c4facd56b2969024f50957f"
+
+[conda-packages.windows-x64."liblzma-5.8.3-hfd05255_1"]
+url = "https://conda.anaconda.org/conda-forge/win-64/liblzma-5.8.3-hfd05255_1.conda"
+checksum = "sha256:d36c4a1e1f80fd08e18a407e03622ff2f34dfdd022da6488ad19603dea19e6d5"
+
+[conda-packages.windows-x64."libpng-1.6.59-hdc8cecf_0"]
+url = "https://conda.anaconda.org/conda-forge/win-64/libpng-1.6.59-hdc8cecf_0.conda"
+checksum = "sha256:36050852deae6edc98d7b71489b8d07254e2753c69bd524bf5784927cd1f0b2c"
+
+[conda-packages.windows-x64."libtiff-4.7.2-hef6d50c_2"]
+url = "https://conda.anaconda.org/conda-forge/win-64/libtiff-4.7.2-hef6d50c_2.conda"
+checksum = "sha256:61a557e19917a459f871471ca523b93973372ebf01a97e5802b56d069a2789b8"
+
+[conda-packages.windows-x64."libzlib-1.3.2-hfd05255_3"]
+url = "https://conda.anaconda.org/conda-forge/win-64/libzlib-1.3.2-hfd05255_3.conda"
+checksum = "sha256:0629c2cc0404d3bb29d6baa7b4ba62da80797015e86de050db81ea5a07050527"
+
+[conda-packages.windows-x64."ucrt-10.0.26100.0-h57928b3_0"]
+url = "https://conda.anaconda.org/conda-forge/win-64/ucrt-10.0.26100.0-h57928b3_0.conda"
+checksum = "sha256:3005729dce6f3d3f5ec91dfc49fc75a0095f9cd23bab49efb899657297ac91a5"
+
+[conda-packages.windows-x64."vc-14.5-ha367084_42"]
+url = "https://conda.anaconda.org/conda-forge/win-64/vc-14.5-ha367084_42.conda"
+checksum = "sha256:0598ca1ce913618cff9bd90391bcf75cd9edb22057c85dd6784dd762b7a888e2"
+
+[conda-packages.windows-x64."vc14_runtime-14.51.36247-habf1de7_42"]
+url = "https://conda.anaconda.org/conda-forge/win-64/vc14_runtime-14.51.36247-habf1de7_42.conda"
+checksum = "sha256:8dfbfd68ebf53249d11e528cbb80ad5a2460b0c5b4636eed82ee0d3950827a3d"
+
+[conda-packages.windows-x64."vcomp14-14.51.36247-habf1de7_42"]
+url = "https://conda.anaconda.org/conda-forge/win-64/vcomp14-14.51.36247-habf1de7_42.conda"
+checksum = "sha256:b3558ed059d6272ef919ea959311af73c35b5fe43c789cd43f71b398671fec49"
+
+[conda-packages.windows-x64."zstd-1.5.7-h534d264_7"]
+url = "https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-h534d264_7.conda"
+checksum = "sha256:ca7daae4f218a11fab82cc2857f0ea518ec3f46acec60490485347a4c22c6b3e"
+
 [[tools.actionlint]]
 version = "1.7.12"
 backend = "aqua:rhysd/actionlint"
@@ -25,6 +177,43 @@ url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_
 url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/384924919"
 provenance = "github-attestations"
 
+[[tools."aqua:charmbracelet/freeze"]]
+version = "0.2.2"
+backend = "aqua:charmbracelet/freeze"
+specifiers = ["latest"]
+
+[tools."aqua:charmbracelet/freeze"."platforms.linux-x64"]
+checksum = "sha256:012fdbdd16c0c19570f9052aac34d16d93d7d0d3b565b05374cc59492f53539b"
+url = "https://github.com/charmbracelet/freeze/releases/download/v0.2.2/freeze_0.2.2_Linux_x86_64.tar.gz"
+url_api = "https://api.github.com/repos/charmbracelet/freeze/releases/assets/242747186"
+
+[tools."aqua:charmbracelet/freeze"."platforms.macos-arm64"]
+checksum = "sha256:6936ebad96dda73a6c952d7e945106916c4d4345334828109b4db6ddbb9aabee"
+url = "https://github.com/charmbracelet/freeze/releases/download/v0.2.2/freeze_0.2.2_Darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/charmbracelet/freeze/releases/assets/242747208"
+
+[tools."aqua:charmbracelet/freeze"."platforms.windows-x64"]
+checksum = "sha256:971fc4b83ca797835505929620012db39a9c5aa849dccca369e852575fb1d344"
+url = "https://github.com/charmbracelet/freeze/releases/download/v0.2.2/freeze_0.2.2_Windows_x86_64.zip"
+url_api = "https://api.github.com/repos/charmbracelet/freeze/releases/assets/242747196"
+
+[[tools."aqua:linebender/resvg"]]
+version = "0.49.0"
+backend = "aqua:linebender/resvg"
+specifiers = ["latest"]
+
+[tools."aqua:linebender/resvg"."platforms.linux-x64"]
+checksum = "sha256:216637e75e909e53e3098b0875cd5f7da2fdc8b4359771b4a29b539afff9d3f5"
+checksum_source = "mise-versions"
+url = "https://github.com/linebender/resvg/releases/download/v0.49.0/resvg-linux-x86_64.tar.gz"
+url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/672458584"
+
+[tools."aqua:linebender/resvg"."platforms.macos-arm64"]
+checksum = "sha256:847acb5210c7c6244b5e8f07dd62fa1ce596108cce8193628ebfd5750504b259"
+checksum_source = "mise-versions"
+url = "https://github.com/linebender/resvg/releases/download/v0.49.0/resvg-macos-aarch64.zip"
+url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/672460044"
+
 [[tools."aqua:nextest-rs/nextest/cargo-nextest"]]
 version = "0.9.150"
 backend = "aqua:nextest-rs/nextest/cargo-nextest"
@@ -47,6 +236,29 @@ checksum = "sha256:b7a8bf567140b8b366716f2dea27b32e088dc12f53597315f976d0dbf7c6a
 checksum_source = "mise-versions"
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-pc-windows-msvc.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/679074355"
+
+[[tools."aqua:oxipng/oxipng"]]
+version = "10.2.1"
+backend = "aqua:oxipng/oxipng"
+specifiers = ["latest"]
+
+[tools."aqua:oxipng/oxipng"."platforms.linux-x64"]
+checksum = "sha256:46e3c4beb9aae57290ad809dd3374b07153579d3322a3778c53900633618b7c6"
+checksum_source = "mise-versions"
+url = "https://github.com/oxipng/oxipng/releases/download/v10.2.1/oxipng-10.2.1-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/oxipng/oxipng/releases/assets/541676037"
+
+[tools."aqua:oxipng/oxipng"."platforms.macos-arm64"]
+checksum = "sha256:7039fcfc78e8aa1ed2b57d848057a0296f082e92b3e1807ac65402d10d926764"
+checksum_source = "mise-versions"
+url = "https://github.com/oxipng/oxipng/releases/download/v10.2.1/oxipng-10.2.1-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/oxipng/oxipng/releases/assets/541682884"
+
+[tools."aqua:oxipng/oxipng"."platforms.windows-x64"]
+checksum = "sha256:7e940f83ee46874b73f53031f96a15834cb70b220af27391fb06fe7b4dd798e1"
+checksum_source = "mise-versions"
+url = "https://github.com/oxipng/oxipng/releases/download/v10.2.1/oxipng-10.2.1-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/oxipng/oxipng/releases/assets/541679560"
 
 [[tools."aqua:rustsec/rustsec/cargo-audit"]]
 version = "0.22.2"
@@ -93,6 +305,70 @@ checksum = "sha256:12a0cefb77498820ef6fb302ed8758cbda39be87d4c15120dc74c1dea968a
 checksum_source = "mise-versions"
 url = "https://github.com/ast-grep/ast-grep/releases/download/0.51.1/app-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/ast-grep/ast-grep/releases/assets/701859070"
+
+[[tools."conda:pngquant"]]
+version = "3.0.3"
+backend = "conda:pngquant"
+specifiers = ["latest"]
+
+[tools."conda:pngquant".options]
+channel = "conda-forge"
+
+[tools."conda:pngquant"."platforms.linux-x64"]
+checksum = "sha256:dfc5c5ff7898919dce02ea7c9a9f1b1b5c281215d4cdb931b82d92fc9c3c0643"
+url = "https://conda.anaconda.org/conda-forge/linux-64/pngquant-3.0.3-h71f41fa_1.conda"
+conda_deps = [
+    "libzlib-1.3.2-h25fd6f3_3",
+    "libpng-1.6.59-h922cc85_0",
+    "libgcc-16.2.0-ha9f2e26_7",
+    "lcms2-2.20-h9073bf1_0",
+    "libjpeg-turbo-3.2.1-h7cc23a3_0",
+    "_openmp_mutex-4.5-20_gnu",
+    "libgomp-16.2.0-he0feb66_7",
+    "libtiff-4.7.2-h6d37cbf_2",
+    "libdeflate-1.26-h351257e_0",
+    "lerc-4.3.0-he78707d_0",
+    "libstdcxx-16.2.0-h934c35e_7",
+    "liblzma-5.8.3-hb03c661_1",
+    "libwebp-base-1.6.0-hd42ef1d_1",
+    "zstd-1.5.7-hb78ec9c_7",
+]
+
+[tools."conda:pngquant"."platforms.macos-arm64"]
+checksum = "sha256:9e105b47ecdf3f478a0d8daafd84f6844a7140388a7dd69318c5ee3a6a83143d"
+url = "https://conda.anaconda.org/conda-forge/osx-arm64/pngquant-3.0.3-h5cccf9f_1.conda"
+conda_deps = [
+    "libzlib-1.3.2-h8088a28_3",
+    "libpng-1.6.59-hf5e6511_0",
+    "lcms2-2.20-hce41798_0",
+    "libjpeg-turbo-3.2.1-hb001647_0",
+    "libtiff-4.7.2-h87d37ca_2",
+    "libdeflate-1.26-h72bfca4_0",
+    "lerc-4.3.0-h0699d0c_0",
+    "liblzma-5.8.3-h8088a28_1",
+    "libwebp-base-1.6.0-h202fb40_1",
+    "libcxx-23.1.5-h55c6f16_0",
+    "zstd-1.5.7-hf451053_7",
+]
+
+[tools."conda:pngquant"."platforms.windows-x64"]
+checksum = "sha256:e7a6224224326f6efe9573732fd96291bb4321117ccf6922a2dfeb4358b93059"
+url = "https://conda.anaconda.org/conda-forge/win-64/pngquant-3.0.3-hc6e71ca_1.conda"
+conda_deps = [
+    "vc-14.5-ha367084_42",
+    "vc14_runtime-14.51.36247-habf1de7_42",
+    "vcomp14-14.51.36247-habf1de7_42",
+    "ucrt-10.0.26100.0-h57928b3_0",
+    "lcms2-2.20-hf2c6c5f_0",
+    "libjpeg-turbo-3.2.1-hfd05255_0",
+    "libzlib-1.3.2-hfd05255_3",
+    "libpng-1.6.59-hdc8cecf_0",
+    "libtiff-4.7.2-hef6d50c_2",
+    "libdeflate-1.26-h1a1d4e4_0",
+    "lerc-4.3.0-hd936e49_0",
+    "liblzma-5.8.3-hfd05255_1",
+    "zstd-1.5.7-h534d264_7",
+]
 
 [[tools."github:est31/cargo-udeps"]]
 version = "0.1.61"
@@ -260,6 +536,29 @@ checksum = "sha256:518f759fba43205f17a717656054c1d25bc883455a6296989e9d021c6edb7
 checksum_source = "mise-versions"
 url = "https://github.com/crate-ci/typos/releases/download/v1.51.1/typos-v1.51.1-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/crate-ci/typos/releases/assets/616657506"
+
+[[tools.uv]]
+version = "0.13.7"
+backend = "aqua:astral-sh/uv"
+specifiers = ["latest"]
+
+[tools.uv."platforms.linux-x64"]
+checksum = "sha256:c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/704009823"
+provenance = "github-attestations"
+
+[tools.uv."platforms.macos-arm64"]
+checksum = "sha256:81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/704009442"
+provenance = "github-attestations"
+
+[tools.uv."platforms.windows-x64"]
+checksum = "sha256:0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/704009796"
+provenance = "github-attestations"
 
 [[tools.zig]]
 version = "0.17.0"

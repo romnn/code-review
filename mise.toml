@@ -20,3 +20,10 @@ actionlint = "latest"
 # Cross-target linting
 zig = "latest"
 "github:rust-cross/cargo-zigbuild" = "latest"
+
+# Rendered terminal output and screenshots (task screenshots)
+"aqua:charmbracelet/freeze" = "latest"
+"aqua:linebender/resvg" = "latest"
+"aqua:oxipng/oxipng" = "latest"
+"conda:pngquant" = "latest"
+uv = "latest"

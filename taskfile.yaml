@@ -73,6 +73,33 @@ tasks:
         cmds:
             - scripts/qa/run.sh {{.CLI_ARGS}}
 
+    docs:screenshots:
+        desc: "render every screenshot scene of review-gui and review-tui and copy the ones README.md shows into docs/screenshots (needs sway, grim and the mise tools)"
+        aliases: [screenshots]
+        sources: &screenshot-sources
+            - scripts/screenshots/*
+            - scripts/qa/run.sh
+            - crates/*/src/**/*.rs
+            - crates/*/Cargo.toml
+            - crates/review-ui/themes/*.toml
+            - crates/review-core/demo/**/*
+            - Cargo.lock
+            - README.md
+        generates:
+            - target/screenshots/all/*/*.png
+            - docs/screenshots/*/*.png
+        cmds:
+            - scripts/screenshots/run.sh {{.CLI_ARGS}}
+
+    docs:screenshots:gallery:
+        desc: "render one scene in every theme and diff style, in both front ends, under target/screenshots/gallery/"
+        aliases: ["screenshots:gallery"]
+        sources: *screenshot-sources
+        generates:
+            - target/screenshots/gallery/*/*.png
+        cmds:
+            - scripts/screenshots/run.sh --gallery {{.CLI_ARGS}}
+
     lint:actions:
         desc: "lint GitHub Actions workflows"
         cmds:

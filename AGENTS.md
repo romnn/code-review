@@ -76,8 +76,15 @@ to date when a decision changes.
   `scripts/qa/smoke-common.qa`, the checks both front ends answer alike. Read the screenshots to
   check rendering. Commands are documented in `crates/review-gui/src/app/qa.rs`,
   `crates/review-tui/src/qa.rs` and `scripts/qa/run.sh`.
-- Any front-end change is QA'd interactively with the `app-qa` skill (`.claude/skills/app-qa`,
-  driven by `scripts/qa/session.sh` for review-gui): drive the app, read the screenshots, and fix
+- `task screenshots` renders every scene of `scripts/screenshots/scenes.qa` in both front ends,
+  dark and light, under `target/screenshots/all/`, and copies into `docs/screenshots/` only the
+  images README.md shows, the only ones committed: to show another, reference it in README.md
+  and rerun.
+  `task screenshots:gallery` renders every theme in every diff style under
+  `target/screenshots/gallery/`. Rerun it after a visible change and read the images.
+- Any front-end change is QA'd interactively: review-gui with the `gui-qa` skill
+  (`.agents/skills/gui-qa`, driven by `scripts/qa/session.sh`), review-tui with the `tui-qa` skill
+  (`.agents/skills/tui-qa`, off screen and under tmux). Drive the app, read the screens, and fix
   the UX issues you find before reporting. A change to review-ui is checked in both front ends.
 - `review-gui --bench-scroll` scrolls a whole review and prints frame timing. The perf test
   exports its 60,000-line fixture for it with

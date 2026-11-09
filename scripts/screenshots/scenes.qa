@@ -1,0 +1,130 @@
+# The documentation's screenshots, the same scenes in review-gui and review-tui: run by
+# scripts/screenshots/run.sh once per front end and theme, which writes the configurations under
+# target/screenshots/config/ first, each with that run's theme.
+# Every scene rebuilds the demo, so none sees the marks an earlier one made.
+# The overview overlay is left out: it shows when each revision was recorded, which is the
+# clock's time and would change every image on every run.
+
+# The hero: the files with their progress, a diff with an approved hunk and its note, a
+# reformatted-only hunk approved automatically and folded, and a hunk flagged for follow-up.
+launch --demo --config target/screenshots/config/folded.toml
+file src/engine.rs
+key 0
+key !
+state
+expect "hunk":2,"hunks":3,.*"hunk_badges":\["Flagged"\]
+key k k
+key z a
+state
+expect "hunk":0,.*"hunk_badges":\["Accepted"\]
+shot hero
+
+# The files with the review's progress, previewing a partly reviewed file.
+launch --demo --config target/screenshots/config/folded.toml
+file src/engine.rs
+state
+expect "mode":"Tree"
+shot tree
+
+# Approved hunks folded to their headers: the diff opens at the first hunk that needs the
+# reviewer.
+launch --demo --config target/screenshots/config/folded.toml
+file src/engine.rs
+key 0
+state
+expect "mode":"Diff"
+expect "hunk":2,
+shot approved-folded
+
+# A hunk flagged for follow-up.
+launch --demo --config target/screenshots/config/folded.toml
+file tools/stats.py
+key 0
+state
+expect "hunk_badges":\["Flagged"\]
+shot flagged
+
+# A note on an approved hunk, with approved hunks shown.
+launch --demo --config target/screenshots/config/shown.toml
+file src/engine.rs
+key 0
+key k k
+state
+expect "approved":"shown"
+expect "hunk":0,
+shot note
+
+# A file whose every hunk is proven reformatted only, approved automatically.
+launch --demo --config target/screenshots/config/shown.toml
+file src/parser.rs
+key 0
+state
+expect "tag":"reformatted only · auto-approved"
+shot reformatted
+
+# Code moved with edits from another file, which Enter follows.
+launch --demo --config target/screenshots/config/folded.toml
+file src/format.rs
+key 0
+state
+expect "path":"src/format.rs"
+shot move
+
+# Side by side: the base's lines beside the head's.
+launch --demo --config target/screenshots/config/side-by-side.toml
+file src/engine.rs
+key 0
+state
+expect "effective_layout":"side-by-side"
+shot side-by-side
+
+# The whole file as a read-only buffer, finding a name in it.
+launch --demo --config target/screenshots/config/folded.toml
+file src/engine.rs
+key 0
+key =
+key /
+key b a l a n c e
+key enter
+state
+expect "mode":"Buffer"
+expect "query":"balance"
+shot buffer-find
+
+# Ctrl+P finds a file by a fuzzy match of its path.
+launch --demo --config target/screenshots/config/folded.toml
+key ctrl-p
+key r s
+state
+expect "overlay":"Picker"
+shot file-finder
+
+# The settings list over the diff: themes, diff styles, density and the rest.
+launch --demo --config target/screenshots/config/folded.toml
+file src/engine.rs
+key 0
+key shift-t
+state
+expect "overlay":"Settings"
+shot settings
+
+# The keys, as `?` lists them.
+launch --demo --config target/screenshots/config/folded.toml
+file src/engine.rs
+key 0
+key ?
+state
+expect "overlay":"Help"
+shot help
+
+# Revision 2, after a force-push: approvals carry over where the code is unchanged, and a hunk
+# that changed since it was approved shows how, with its note from revision 1.
+launch --demo --config target/screenshots/config/folded.toml
+launch --demo-revision 2 --config target/screenshots/config/folded.toml
+file src/engine.rs
+key 0
+find changed since
+state
+expect "revision":"2"
+expect "tag":"changed since revision 1"
+shot revision-2

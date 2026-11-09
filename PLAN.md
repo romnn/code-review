@@ -5,16 +5,15 @@ It remembers what you have already reviewed down to the hunk, across pushes and 
 walks you through a change in a sensible order, and keeps reformatting and moved code from
 drowning the real edits. See [prior-work.md](prior-work.md) for the survey this plan builds on.
 
-We build the review engine once and put two desktop front ends on it, then keep the one that is
-easier to maintain and grow:
+We build the review engine once and put two light front ends on it:
 
-- **review-gui**: a standalone app on `gpui` and `gpui-component`, copying the GPL Zed code it
-  needs (highlighting queries and similar).
-- **zed**: a fork of Zed with a review crate added, inheriting Zed's editor, multibuffer, LSP for
-  every language, highlighting and vim mode.
+- **review-gui**: a standalone desktop app on `gpui` and `gpui-component`, copying the GPL Zed
+  code it needs (highlighting queries and similar).
+- **review-tui**: the same review in a terminal, with the same keys, configuration and behavior.
 
-review-gui draws a model that knows no UI toolkit, `review-ui`, so the same review also runs in a
-terminal as **review-tui**, with the same keys, configuration and behavior.
+Both draw a model that knows no UI toolkit, `review-ui`. An earlier plan also built the review
+into a fork of Zed and kept whichever front end proved easier to grow; the fork was dropped
+because a whole editor is far too heavy to ship for this, and the two apps do the job as well.
 
 No web stack and no JavaScript: everything is Rust.
 
@@ -102,7 +101,7 @@ in full rather than guessing.
 
 Shell out to the `git` CLI rather than linking a git library: it supports every repository layout
 users have (partial clones, worktrees, alternates), matches what `git diff` shows, and keeps the
-engine's dependency tree small enough to embed in Zed without version conflicts. The git layer
+engine's dependency tree small enough to embed in another application without version conflicts. The git layer
 produces verified immutable inputs; everything after it is pure analysis over object IDs.
 
 - A long-lived `git cat-file --batch` process reads blobs.
@@ -463,11 +462,9 @@ The tests in `syntax.rs` and `analysis/build.rs` pin the rules:
 
 #### Languages
 
-MVP languages: Rust, Python, JavaScript, TypeScript and TSX, Go, JSON and TOML. Grammar versions
-are pinned to the ones Zed uses so the engine can link into the Zed fork. Like Zed, JavaScript is
-parsed with the TSX grammar. Zed ships no TOML grammar (TOML is an extension there), so
-`tree-sitter-toml-ng` has no Zed pin; it has no `links` key and shares Zed's
-`tree-sitter-language`. Every language above has a justified wrap-site list, so none is dropped;
+MVP languages: Rust, Python, JavaScript, TypeScript and TSX, Go, JSON and TOML, on the
+crates.io releases of tree-sitter and its grammars. Like Zed, JavaScript is parsed with the TSX
+grammar. Every language above has a justified wrap-site list, so none is dropped;
 TypeScript's list rests on its parser rather than a specification and is the first to drop if
 review finds a construct it cannot justify. Unsupported languages and parse errors are never
 formatting-only; lines whose only difference is whitespace may be dimmed there, but they stay
@@ -485,8 +482,7 @@ the standing, so every front end and `cr` agree.
 The policy is explicit, never an engine default. `ReviewPolicy` has no `Default`; a front end
 that approves automatically builds its views with `History::view_under` (or
 `current_view_under`) and its policy, while `History::view` and `current_view` decide by marks
-alone (`ReviewPolicy::MARKS_ONLY`). An embedder that never opted in, such as the Zed fork,
-therefore counts every unmarked unit as open, matching the badges it draws from `UnitState`.
+alone (`ReviewPolicy::MARKS_ONLY`). An embedder that never opted in therefore counts every unmarked unit as open, matching the badges it draws from `UnitState`.
 The apps and `cr` opt in by default and share one setting,
 `[review] auto_approve_formatting` in `$XDG_CONFIG_HOME/code-review/config.toml`
 (`review_core::store::default_config_file`, or `CODE_REVIEW_CONFIG`): the apps read the whole
@@ -654,7 +650,7 @@ Rules:
   log is a hard error, never skipped.
 
 An event log keeps the state human-readable, diffable and easy to sync, and avoids linking SQLite,
-which would conflict with Zed's own `libsqlite3-sys`.
+which would conflict with an embedder's own `libsqlite3-sys`.
 
 ### Live updates
 
@@ -681,11 +677,10 @@ change what is being reviewed.
 | `crates/review-ui` | `review-ui` | GPL-3.0-or-later | The apps' shared model, free of any UI toolkit: state and behavior, keymap and key matcher, configuration, themes, rows, frame geometry and paint decisions. GPL because its highlighting queries are copied from Zed. |
 | `crates/review-gui` | `review-gui` | GPL-3.0-or-later | The standalone gpui + gpui-component app, a view over `review-ui`. |
 | `crates/review-tui` | `review-tui` | GPL-3.0-or-later | The ratatui terminal app, a view over the same model. |
-| Zed fork (separate repo) | `code_review` | GPL-3.0-or-later | Review crate inside a Zed fork, depending on `review-core` by path. |
 
-`review-core` must stay embeddable in Zed: no async runtime, no SQLite, no git library, and only
-small, common dependencies (imara-diff, serde, serde_json, thiserror, a hash crate, and tree-sitter
-with grammar versions matching Zed's).
+`review-core` stays embeddable in other applications, editors included: no async runtime, no
+SQLite, no git library, and only small, common dependencies (imara-diff, serde, serde_json,
+thiserror, a hash crate, and tree-sitter with its grammars).
 
 ## CLI (MVP)
 
@@ -946,7 +941,9 @@ it, muted, so it never reads as code.
   `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
   `[theme] name` picks one, and the settings list previews and applies them. `[ui] note`, the
   theme's yellow, colors notes: italic text and a bar on a band tinted toward it, so a note
-  never reads as code; a theme file without it gets One Dark's yellow. The app is dark only and
+  never reads as code; a theme file without it gets One Dark's yellow. Themes carry no notion
+  of light or dark and the app does not follow the system appearance: the reviewer picks a
+  theme, and review-gui keeps gpui-component's own widgets dark whichever it is. The app is
   monospace throughout.
 - **State model.** What is shown derives from a snapshot (one history, one pinned revision) and
   caches keyed by blob identity, so reloading never pairs new changes with old text. Every row
@@ -964,8 +961,8 @@ it, muted, so it never reads as code.
   `gpui-pre` 0.3.11) once it clears. `gpui-pre-platform` is built with the `wayland` feature only,
   so the Linux build links nothing from X11 and needs only `libxkbcommon-dev`.
 - **One tree-sitter.** `gpui-component`'s tree-sitter highlighter is an optional feature and stays
-  off, so the dependency graph has exactly one tree-sitter, the one `review-core` pins to Zed's
-  revision, and no `links` conflict.
+  off, so the dependency graph has exactly one tree-sitter, the one `review-core` uses, and no `links`
+  conflict.
 - **Syntax highlighting.** `review-ui` runs Zed's `highlights.scm` queries (copied under
   `crates/review-ui/queries/` with their source commit; TOML's comes with its grammar) on the
   grammars `review-core` exposes through `Language::grammar`. Each blob is highlighted once, in
@@ -1046,7 +1043,7 @@ implementation of its behavior, everything that is not drawing or platform input
 `review-ui`, which knows no UI toolkit. review-gui and review-tui are views over it: each maps the
 model's state onto its surface and its input onto model calls, and runs the effects the model
 queues. Anything the two apps share that is not engine logic belongs here; engine logic still
-belongs in `review-core`, which the Zed fork uses too.
+belongs in `review-core`, so that the engine stays usable on its own.
 
 - **License.** `review-ui` is GPL-3.0-or-later because Zed's `highlights.scm` queries are copied
   into `crates/review-ui/queries/`. Both apps link it, so they are GPL too; `review-core` and
@@ -1211,7 +1208,7 @@ few marks. It covers every feature the front ends render: formatting-only files,
 real edit, a plain move and a move with edits, a rename with edits, mode, symlink and binary
 changes, deletion-only chunks and noise. `--demo` rebuilds it and opens revision 1, and
 `--demo-revision N` advances to revision N keeping marks, in `cr`, review-gui and review-tui
-alike. It is the shared fixture for every front end; the Zed fork opens the same review.
+alike. It is the shared fixture for every front end.
 
 ### QA harness
 
@@ -1232,51 +1229,21 @@ then has the app write its screen as text and as SGR-colored `.ansi` under `targ
 An `include <script>` line runs another script in place: `scripts/qa/smoke.qa` and
 `scripts/qa/smoke-tui.qa` walk the demo in each app and share `scripts/qa/smoke-common.qa`, the
 checks that do not depend on geometry. QA runs keep their configuration and demo under
-`target/qa/`, so they never touch the user's settings or race another front end's demo. The Zed
-fork reuses the runner with its own QA mode.
+`target/qa/`, so they never touch the user's settings or race another front end's demo.
 
-### zed
-
-As built for M3 in `~/dev/zed-review` (remote `upstream`, Zed `main` at c7bea34383), crate
-`crates/code_review`:
-
-- **Patch to upstream:** five lines in four files: the workspace member and dependency in
-  `Cargo.toml`, the dependency in `crates/zed/Cargo.toml`, `code_review::init(cx)` in `main.rs`,
-  and `code_review::bind_keys(cx)` at the end of `load_default_keymap` in `zed.rs`. Zed reloads its
-  keymap by clearing every binding, so the crate's own `keymap.json` must be re-bound from there;
-  that line is also what lets the review keys win over vim's normal mode. `Cargo.lock` gains
-  `code_review`, `review-core` and `tree-sitter-toml-ng`; there is one tree-sitter in the graph.
-- **Opening:** command-palette actions (`code_review: open demo`, `open demo revision`,
-  `review working tree`, `review range`) and, at startup, `CODE_REVIEW_DEMO=1`,
-  `CODE_REVIEW_DEMO_REVISION=N`, `CODE_REVIEW_RANGE=a..b` or `CODE_REVIEW_WORKTREE=REF`, because
-  Zed's CLI rejects unknown flags. `scripts/zed/launch.sh` wraps them with its own Zed profile
-  (dark theme, terminal font, diff colors as theme overrides). The review's head worktree opens as
-  a workspace in the first window; every buffer of it is made read-only.
-- **Review item:** one `MultiBuffer` per step over the head worktree's project buffers, so
-  highlighting, go-to-definition, search, excerpt expansion, sticky scroll and breadcrumbs are
-  Zed's. Each file gets a `BufferDiff` whose base text is the head file with only the step's
-  shown units reverted, so Zed renders exactly the step's own units as hunks and every other change
-  as context. Header blocks carry the badge, collapsed units (formatting-only, plain moves, noise,
-  exact moves with edits) are `Replace` blocks with a one-line summary that `enter` expands in
-  place, and interdiffs, inner move diffs, descriptions and notes are blocks below. A PR overview
-  with the description rendered by Zed's Markdown renderer sits above the step.
-- **Panel:** Steps and Files tabs; the file tree comes from `review_core::tree` and marks whole
-  files and directories through `Review::mark_files`.
-- **State:** engine work runs on the background executor; a mark shows as a pending badge in the
-  next frame and the reloaded snapshot replaces it without rebuilding the excerpts. Base texts are
-  built off the main thread; the only main-thread work is Zed's excerpt and block update on a step
-  change (a few milliseconds on the demo), and every engine call and layout pass logs its time.
-- **Snapshot hygiene:** rust-analyzer's default `cargo check` on save writes a `target/` directory
-  into the head worktree, which Zed then rescans on its main thread (multi-second hangs) and which
-  runs the reviewed code. The launch profile turns off check on save, build scripts and proc
-  macros, as review-gui does; the fork should enforce this per review worktree rather than rely
-  on the profile.
-- **Trust:** the engine's trust decision maps onto Zed's restricted mode (`TrustedWorktrees`):
-  trusted reviews trust the head worktree, untrusted ones restrict it, and trusting it in Zed's
-  prompt records the trust in the engine.
-- **QA:** `CODE_REVIEW_QA=1` speaks the same stdin protocol as review-gui's `--qa`;
-  `scripts/qa/zed-smoke.qa` walks the demo, and `QA_BINARY=scripts/zed/launch.sh` drives the fork
-  with `scripts/qa/session.sh`.
+The documentation's screenshots come from the same harness: `task screenshots` runs
+`scripts/screenshots/run.sh`, which plays `scripts/screenshots/scenes.qa` in both apps, once in
+carbonfox and once in GitHub Light, and writes every scene to
+`target/screenshots/all/{gui,tui}/<scene>.png` and `<scene>-light.png`. Only the images
+README.md shows are committed: the script copies those into `docs/screenshots/`, reduced to a
+palette with pngquant (half the size, with no difference visible even zoomed in) and recompressed
+with oxipng, and deletes any other image there. review-gui is shot at a fixed 1600x1000 window at scale 2; review-tui's
+`.ansi` screens at 150x44 become terminal windows through freeze's SVG and resvg, in JetBrains
+Mono NL with the symbols it lacks copied in from DejaVu Sans Mono, both downloaded at pinned
+versions, so the images do not depend on the fonts installed. The scenes leave out what reads
+the clock, such as the overview's revision times, so a rerun without code changes reproduces
+every image byte for byte. `task screenshots:gallery` renders one scene in every theme and diff
+style under `target/screenshots/gallery/`, uncommitted, for judging themes side by side.
 
 ## Milestones
 
@@ -1285,8 +1252,9 @@ As built for M3 in `~/dev/zed-review` (remote `upstream`, Zed `main` at c7bea343
 3. **M2: gpui slice.** The thin slice on gpui + gpui-component; built, see
    [review-gui](#review-gui). Its model since moved into `review-ui`, and review-tui draws it in
    a terminal (see [review-tui](#review-tui)).
-4. **M3: zed slice.** The same slice as a Zed fork crate.
-5. **M4: compare and choose.** Measure both, then grow the chosen one to the full feature set.
+4. **M3: zed slice.** The same slice as a Zed fork crate; built, then dropped as too heavy to
+   ship.
+5. **M4: grow the apps.** Grow review-gui and review-tui to the full feature set.
 6. **Later:** post comments and reviews to GitHub; import historical PR pushes from GitHub's
    force-push timeline events; an MCP server over the engine for agents; more languages; in-app
    walkthrough generation; risk hints per file; CI and lint results inline.
@@ -1337,14 +1305,6 @@ Each runs against temporary git repositories built in the test:
 - Lockfiles and `@generated` files are classified as noise and still need a mark.
 - A 50,000-line diff is analyzed in under a second in release mode.
 
-## Choosing between the front ends (M4)
-
-Compare on: clean and incremental build time, binary size, startup time, scrolling a 50,000-line
-diff, LSP quality, lines of code we own, upstream churn (review-gui: gpui and gpui-component
-releases; zed: rebase conflicts per month), and how easy the walkthrough and marking UI were to
-build.
-
 ## Open questions
 
 - How should stacked PRs be handled: one review per PR, or a review spanning the stack?
-- Where should the Zed fork live, given that a GitHub fork of a public repository is public?

@@ -22,6 +22,13 @@
 # configuration, demo, logs and shots under target/qa/tui/ apart from review-gui's.
 # The binary defaults to target/debug/review-gui (or review-tui), built first.
 # QA_VULKAN=lavapipe makes review-gui render with Mesa's software Vulkan driver.
+# QA_OUT=<dir> keeps the configuration, demo, logs and shots there instead, so a run of its own,
+# as scripts/screenshots/run.sh starts, leaves the smoke runs' files alone.
+# QA_SIZE=<width>x<height> (1600x1000 by default) sets sway's output, and with it review-gui's
+# window, in logical pixels, and QA_SCALE=<factor> (1 by default) its scale: 2 renders and
+# shoots the same layout at twice the pixels.
+# QA_RESIZE=<size> sends `resize <size>` after every launch, as review-tui starts at 160x50;
+# an `expect` right after `launch` still checks the launch's state.
 # review-gui needs sway and grim; sway and the app always shut down, even on failure.
 
 set -euo pipefail
@@ -31,8 +38,8 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 binary=${2:-}
 front_end=${QA_FRONT_END:-gui}
 case $front_end in
-    gui) out="$root/target/qa" ;;
-    tui) out="$root/target/qa/tui" ;;
+    gui) out=${QA_OUT:-$root/target/qa} ;;
+    tui) out=${QA_OUT:-$root/target/qa/tui} ;;
     *)
         echo "qa: QA_FRONT_END is gui or tui, not $front_end" >&2
         exit 2
@@ -76,8 +83,11 @@ trap cleanup EXIT
 # Starts headless sway and finds the socket it creates.
 start_sway() {
     local config="$out/sway.conf"
+    local size=${QA_SIZE:-1600x1000} scale=${QA_SCALE:-1}
     # Client-side decorations, as on GNOME, so screenshots show the app's own title bar.
-    printf 'output HEADLESS-1 resolution 1600x1000\ndefault_border none\nfor_window [app_id="code-review"] border csd\n' >"$config"
+    # The resolution is in physical pixels.
+    printf 'output HEADLESS-1 resolution %.0fx%.0f scale %s\ndefault_border none\nfor_window [app_id="code-review"] border csd\n' \
+        "$(bc <<<"${size%x*} * $scale")" "$(bc <<<"${size#*x} * $scale")" "$scale" >"$config"
     local -A before=()
     local path
     for path in "$runtime"/wayland-*; do
@@ -138,6 +148,15 @@ launch() {
     app_pid=$APP_PID
     # The first answer also proves that the window has rendered a frame.
     send state
+    if [[ -n ${QA_RESIZE:-} ]]; then
+        local launched=$answer
+        send "resize $QA_RESIZE"
+        if [[ $answer == error:* ]]; then
+            echo "qa: resize $QA_RESIZE: $answer" >&2
+            exit 1
+        fi
+        answer=$launched
+    fi
 }
 
 # Prints the lines of the script `$1` with each `include <script>` line replaced by that
