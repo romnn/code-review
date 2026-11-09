@@ -308,7 +308,11 @@ impl ReviewApp {
                     .detach();
                 }
                 Effect::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                // Only Linux and FreeBSD have a primary selection.
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 Effect::CopyPrimary(text) => cx.write_to_primary(ClipboardItem::new_string(text)),
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                Effect::CopyPrimary(_) => {}
                 Effect::Title(title) => window.set_window_title(&title),
                 Effect::ScrollSheet(step) => self.scroll_sheet(step),
                 Effect::Fullscreen => window.toggle_fullscreen(),

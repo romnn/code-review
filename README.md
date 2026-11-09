@@ -43,7 +43,7 @@ cargo install --locked --git https://github.com/romnn/code-review review-tui rev
 
 The desktop app, `review-gui`, is not released yet. Build it from source with
 `cargo install --locked --git https://github.com/romnn/code-review review-gui`; on Linux it needs
-Wayland, a Vulkan driver and `libxkbcommon`.
+Wayland, a Vulkan driver, `libxkbcommon` and `fontconfig`.
 
 ## Quick start
 

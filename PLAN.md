@@ -959,7 +959,8 @@ it, muted, so it never reads as code.
 - **Stack.** `gpui-pre` 0.3.9 and `gpui-component` 0.8.0, both Apache-2.0. 0.9.0 and 0.8.1 are
   newer but still inside the repository's 14-day dependency cooldown; move to 0.9.0 (which uses
   `gpui-pre` 0.3.11) once it clears. `gpui-pre-platform` is built with the `wayland` feature only,
-  so the Linux build links nothing from X11 and needs only `libxkbcommon-dev`.
+  so the Linux build links nothing from X11 and needs only `libxkbcommon-dev` and
+  `libfontconfig-dev`.
 - **One tree-sitter.** `gpui-component`'s tree-sitter highlighter is an optional feature and stays
   off, so the dependency graph has exactly one tree-sitter, the one `review-core` uses, and no `links`
   conflict.

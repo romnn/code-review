@@ -446,13 +446,13 @@ fn parse_definition(result: &Value) -> Option<Definition> {
 }
 
 /// Encodes an absolute path as a `file://` URI, percent-encoding everything but unreserved
-/// characters and `/`.
+/// characters, `/` and `:`. A Windows path such as `C:\x` becomes `file:///C:/x`.
 fn file_uri(path: &Path) -> String {
     use std::fmt::Write as _;
 
     let mut uri = String::from("file://");
-    for byte in path.to_string_lossy().bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+    for byte in uri_path(path).bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
             uri.push(char::from(byte));
         } else {
             // Writing to a `String` cannot fail.
@@ -462,7 +462,23 @@ fn file_uri(path: &Path) -> String {
     uri
 }
 
-/// Decodes a `file://` URI into a path.
+/// The path part of a file URI: the path itself on Unix; on Windows without the `\\?\` prefix
+/// that canonical paths carry, with `/` separators and a leading `/` before the drive.
+fn uri_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/");
+        if text.starts_with('/') {
+            text
+        } else {
+            format!("/{text}")
+        }
+    } else {
+        text.into_owned()
+    }
+}
+
+/// Decodes a `file://` URI into a path; on Windows, `/C:/x` becomes `C:/x`.
 fn path_from_uri(uri: &str) -> Option<PathBuf> {
     let encoded = uri.strip_prefix("file://")?;
     let mut bytes = Vec::with_capacity(encoded.len());
@@ -477,7 +493,14 @@ fn path_from_uri(uri: &str) -> Option<PathBuf> {
             rest = tail;
         }
     }
-    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+    let path = String::from_utf8(bytes).ok()?;
+    if cfg!(windows)
+        && let Some(drive) = path.strip_prefix('/')
+        && drive.as_bytes().get(1) == Some(&b':')
+    {
+        return Some(PathBuf::from(drive));
+    }
+    Some(PathBuf::from(path))
 }
 
 /// Converts a character index within `line` into a UTF-16 column.
@@ -498,6 +521,16 @@ pub fn byte_column(line: &str, utf16: usize) -> usize {
         units += character.len_utf16();
     }
     line.len()
+}
+
+/// Whether a working rust-analyzer is on the path. rustup installs a `rust-analyzer` proxy even
+/// without the component, which runs and fails, so only a successful `--version` counts.
+#[cfg(test)]
+pub(crate) fn rust_analyzer_installed() -> bool {
+    Command::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 #[cfg(test)]
@@ -523,6 +556,16 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// A canonical Windows path loses its `\\?\` prefix and gets `/` separators and a slash
+    /// before the drive; decoding gives back the drive path.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_become_file_uris() {
+        let uri = file_uri(Path::new(r"\\?\C:\a b\x.rs"));
+        assert_eq!(uri, "file:///C:/a%20b/x.rs");
+        assert_eq!(path_from_uri(&uri), Some(PathBuf::from("C:/a b/x.rs")));
     }
 
     #[test]
@@ -552,17 +595,14 @@ mod tests {
     /// Runs rust-analyzer against a two-file crate; skipped where rust-analyzer is not installed.
     #[test]
     fn rust_analyzer_finds_a_definition_in_another_file() {
-        if Command::new("rust-analyzer")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !rust_analyzer_installed() {
             eprintln!("skipped: rust-analyzer is not installed");
             return;
         }
-        let root = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         std::fs::write(
-            root.path().join("Cargo.toml"),
+            root.join("Cargo.toml"),
             indoc! {"
                 [package]
                 name = \"probe\"
@@ -571,9 +611,9 @@ mod tests {
             "},
         )
         .unwrap();
-        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
         std::fs::write(
-            root.path().join("src/util.rs"),
+            root.join("src/util.rs"),
             indoc! {"
                 pub fn helper() -> u32 {
                     7
@@ -588,11 +628,11 @@ mod tests {
                 let _ = util::helper();
             }
         "};
-        let main_path = root.path().join("src/main.rs");
+        let main_path = root.join("src/main.rs");
         std::fs::write(&main_path, main).unwrap();
 
         let command = server_for(&main_path).unwrap();
-        let mut server = LanguageServer::start(&command, root.path()).unwrap();
+        let mut server = LanguageServer::start(&command, root).unwrap();
         let line = "    let _ = util::helper();";
         let column = utf16_column(line, line.find("helper").unwrap());
         let found = server
@@ -606,9 +646,11 @@ mod tests {
                 Duration::from_secs(120),
             )
             .unwrap();
+        // Canonical on both sides: macOS's temporary directory is under `/var`, a symlink to
+        // `/private/var`, and Windows canonical paths carry a `\\?\` prefix.
         assert_eq!(
-            found.path,
-            root.path().join("src/util.rs").canonicalize().unwrap()
+            found.path.canonicalize().unwrap(),
+            root.join("src/util.rs").canonicalize().unwrap()
         );
         assert_eq!(
             found.position,

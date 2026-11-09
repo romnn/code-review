@@ -1,0 +1,3 @@
+# Check out LF everywhere, Windows included: the demo fixture's commit IDs are pinned to its
+# exact bytes, and tests read other checked-in text byte for byte.
+* text=auto eol=lf

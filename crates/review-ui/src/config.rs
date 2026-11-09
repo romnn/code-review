@@ -1458,13 +1458,16 @@ NextHunk = [\"j\"]
 
     #[test]
     fn the_file_lives_under_the_config_directory() {
+        // The temporary directory is absolute on every platform, which `/c` is not on Windows.
+        let root = std::env::temp_dir();
+        let (config, home) = (root.join("c"), root.join("h"));
         assert_eq!(
-            path(Some(Path::new("/c")), Some(Path::new("/h"))),
-            Some(PathBuf::from("/c/code-review/config.toml"))
+            path(Some(&config), Some(&home)),
+            Some(config.join("code-review").join("config.toml"))
         );
         assert_eq!(
-            path(None, Some(Path::new("/h"))),
-            Some(PathBuf::from("/h/.config/code-review/config.toml"))
+            path(None, Some(&home)),
+            Some(home.join(".config").join("code-review").join("config.toml"))
         );
         assert_eq!(path(Some(Path::new("relative")), None), None);
     }
