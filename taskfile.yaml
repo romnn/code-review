@@ -9,11 +9,12 @@ tasks:
     deps:linux:
         desc: "install the system libraries review-gui links against on Debian and Ubuntu"
         cmds:
-            # review-gui builds gpui for Wayland only and links libxkbcommon. freetype is built from
-            # source unless libfreetype-dev is installed. At run time the app also needs a Wayland
-            # compositor and a Vulkan driver, which it loads dynamically.
+            # review-gui builds gpui for Wayland only and links libxkbcommon and, through gpui's
+            # font-kit, fontconfig. freetype is built from source unless libfreetype-dev is
+            # installed. At run time the app also needs a Wayland compositor and a Vulkan driver,
+            # which it loads dynamically.
             - sudo apt-get update
-            - sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+            - sudo apt-get install -y --no-install-recommends libxkbcommon-dev libfontconfig-dev
 
     format:
         desc: "format all crates"
