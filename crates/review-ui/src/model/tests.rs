@@ -1534,6 +1534,28 @@ fn hunk_badges(model: &Model, hunk: usize) -> Vec<rows::Badge> {
     state::badges(&view, &units, &model.pending)
 }
 
+/// The file finder counts a file's automatic approvals as done, as the tree does: the demo's
+/// `src/parser.rs`, whose hunks are all proven formatting-only, reads as finished.
+#[test]
+fn the_file_finder_counts_automatic_approvals() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.dispatch(Action::FindFiles);
+    host.settle();
+    host.update(|model| model.edit_field(Field::PickerQuery, "parser"));
+    let search = host.run_job();
+    host.complete(search);
+    let picker = host.model().picker.as_ref().unwrap();
+    let parser = picker
+        .entries
+        .iter()
+        .find(|entry| entry.path == "src/parser.rs")
+        .and_then(|entry| entry.change)
+        .unwrap();
+    assert!(parser.total > 0);
+    assert_eq!(parser.reviewed, parser.total);
+}
+
 /// Proven formatting-only hunks that no mark decides count as done without a mark: the diff
 /// opens at the first hunk that needs one, past the engine's brace reflow, and approving that
 /// hunk finishes the file. Space on the reflow records an explicit reset, which makes it need

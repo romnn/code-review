@@ -76,7 +76,8 @@ pub struct Change {
     pub tone: FileTone,
     /// How far the file's review is.
     pub progress: Progress,
-    /// How many of the file's review units are reviewed, accepted or flagged.
+    /// How many of the file's review units are done: reviewed, accepted, flagged or approved
+    /// automatically, as the tree counts them.
     pub reviewed: usize,
     /// How many review units the file has.
     pub total: usize,
@@ -289,7 +290,7 @@ impl Model {
                             .as_ref()
                             .map_or(node.tone, review_core::FileChangeSummary::tone),
                         progress,
-                        reviewed: node.counts.reviewed + node.counts.accepted + node.counts.flagged,
+                        reviewed: node.counts.done(),
                         total: node.counts.units,
                     },
                     text: head.and_then(|oid| self.blobs.texts.get(*oid).cloned()),
