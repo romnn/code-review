@@ -1710,7 +1710,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5377,7 +5377,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6089,7 +6089,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6942,7 +6942,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7393,11 +7393,13 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.28.0"
-source = "git+https://github.com/tree-sitter/tree-sitter?rev=803c6ebaac27d69e1808b45058482e868d073ceb#803c6ebaac27d69e1808b45058482e868d073ceb"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5129de2ccc97808c4583d48f1fb44576d015cf241e432800572bda11ef30c3b"
 dependencies = [
  "cc",
  "regex",
+ "serde_json",
  "streaming-iterator",
  "tree-sitter-language",
 ]
@@ -7405,7 +7407,8 @@ dependencies = [
 [[package]]
 name = "tree-sitter-go"
 version = "0.25.0"
-source = "git+https://github.com/zed-industries/tree-sitter-go?rev=6862a49e3c5a7567a6c576420e9a8f944e198a85#6862a49e3c5a7567a6c576420e9a8f944e198a85"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -7423,8 +7426,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-language"
-version = "0.1.8"
-source = "git+https://github.com/tree-sitter/tree-sitter?rev=803c6ebaac27d69e1808b45058482e868d073ceb#803c6ebaac27d69e1808b45058482e868d073ceb"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
 
 [[package]]
 name = "tree-sitter-python"
@@ -7459,7 +7463,8 @@ dependencies = [
 [[package]]
 name = "tree-sitter-typescript"
 version = "0.23.2"
-source = "git+https://github.com/zed-industries/tree-sitter-typescript?rev=e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899#e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -8276,7 +8281,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -128,8 +128,8 @@ fn the_policy_can_turn_it_off() -> eyre::Result<()> {
         assert_that!(total.new, eq(2));
         assert_that!(total.auto_approved, eq(0));
     }
-    // Walkthrough progress and next-open navigation, as the Zed fork reads them, count the
-    // re-wrap as open too.
+    // Walkthrough progress and next-open navigation, as an embedder that never opted in reads
+    // them, count the re-wrap as open too.
     let view = history.current_view()?;
     let partition = review_core::walkthrough::partition(&view);
     let reviewed: usize = partition

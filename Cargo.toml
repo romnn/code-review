@@ -13,29 +13,27 @@ publish = false
 review-core = { path = "crates/review-core" }
 review-ui = { path = "crates/review-ui" }
 
-# Engine dependencies. tree-sitter and its grammars follow Zed's Cargo.toml and Cargo.lock so
-# review-core links into the Zed fork without a second tree-sitter.
+# Engine dependencies.
 imara-diff = { version = "0.2", default-features = false }
-# Multi-line strings written out as lines; Zed's Cargo.lock has it too.
+# Multi-line strings written out as lines.
 indoc = "2.0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.144"
 sha2 = "0.10.9"
 thiserror = "2.0.12"
-tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "803c6ebaac27d69e1808b45058482e868d073ceb" }
-tree-sitter-go = { git = "https://github.com/zed-industries/tree-sitter-go", rev = "6862a49e3c5a7567a6c576420e9a8f944e198a85" }
+tree-sitter = "0.27.1"
+tree-sitter-go = "0.25"
 tree-sitter-json = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24.2"
-# Zed ships no TOML grammar crate (TOML is an extension there), so this one has no Zed pin.
 tree-sitter-toml-ng = "0.7"
-tree-sitter-typescript = { git = "https://github.com/zed-industries/tree-sitter-typescript", rev = "e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899" }
+tree-sitter-typescript = "0.23.2"
 
 # Front-end dependencies: gpui and gpui-component for review-gui, the rest for review-ui and
 # review-tui.
 # gpui-component pins an exact gpui-pre release.
 # Its optional tree-sitter highlighter stays off: it wants crates.io tree-sitter 0.26, which would
-# conflict (`links = "tree-sitter"`) with the Zed tree-sitter review-core links.
+# conflict (`links = "tree-sitter"`) with the tree-sitter review-core links.
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false }
 gpui-component = { version = "=0.8.0", default-features = false }
@@ -95,12 +93,6 @@ allow_attributes_without_reason = "deny" # every #[allow] must carry reason = ".
 map_unwrap_or = "allow"
 assigning_clones = "allow"
 struct_excessive_bools = "allow"
-
-[patch.crates-io]
-# Unify `tree_sitter_language::LanguageFn` between the crates.io grammar crates and the git
-# tree-sitter above, exactly as Zed does; two instances would make grammar constants
-# type-incompatible with `tree_sitter::Language`.
-tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "803c6ebaac27d69e1808b45058482e868d073ceb" }
 
 [workspace.metadata.cargo-fc]
 install_missing_targets = true

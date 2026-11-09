@@ -16,7 +16,6 @@
 #
 # QA_SIZE=WxH sets the output size (default 1600x1000).
 # QA_BINARY replaces target/debug/review-gui, which is otherwise built first;
-# QA_BINARY=scripts/zed/launch.sh drives the Zed fork, which speaks the same protocol.
 # QA_VULKAN=lavapipe renders with Mesa's software Vulkan driver.
 # QA_SESSION=<name> keeps a separate session under target/qa/<name>, for agents working in parallel.
 # QA_TTL bounds the session in seconds (default 3600); every process is started under timeout.
@@ -70,7 +69,7 @@ start() {
     fi
 
     # Client-side decorations, as on GNOME, so screenshots show the app's own title bar.
-    printf 'output HEADLESS-1 resolution %s\ndefault_border none\nfor_window [app_id="code-review"] border csd\nfor_window [app_id="dev.zed.Zed-Dev"] border csd\n' \
+    printf 'output HEADLESS-1 resolution %s\ndefault_border none\nfor_window [app_id="code-review"] border csd\n' \
         "${QA_SIZE:-1600x1000}" >"$dir/sway.conf"
     local -A before=()
     local path

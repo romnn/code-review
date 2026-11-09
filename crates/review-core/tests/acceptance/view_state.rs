@@ -41,7 +41,7 @@ fn view_state_round_trips_per_front_end() -> eyre::Result<()> {
     };
     review.save_view_state("review-lite", &lite)?;
     review.save_view_state(
-        "zed",
+        "review-tui",
         &Folders {
             collapsed: Vec::new(),
         },
@@ -54,7 +54,7 @@ fn view_state_round_trips_per_front_end() -> eyre::Result<()> {
         some(eq(&lite))
     );
     assert_that!(
-        reopened.view_state::<Folders>("zed")?,
+        reopened.view_state::<Folders>("review-tui")?,
         some(field!(Folders.collapsed, is_empty()))
     );
 

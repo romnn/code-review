@@ -17,8 +17,6 @@ to date when a decision changes.
   review-ui in the lazygit-style flow described under "Product direction" in PLAN.md.
 - `crates/review-tui`: the ratatui terminal app (GPL-3.0-or-later), a view over the same model
   that works as review-gui does, within what a terminal can show.
-- The Zed-fork front end lives in a separate checkout, `~/dev/zed-review`, as the `code_review`
-  crate, and depends on `review-core` by path.
 
 ## Invariants
 
@@ -28,10 +26,10 @@ to date when a decision changes.
   never by content hash alone, line numbers, or display hunks.
 - Formatting-only is a proof over tree-sitter syntax trees; unsupported languages and parse errors
   are never formatting-only.
-- `review-core` stays UI-agnostic and embeddable in Zed: synchronous API, no async runtime, no
-  SQLite, no git library (shell out to `git` and `gh`), and only small common dependencies.
-  tree-sitter and its grammars use the versions Zed's `Cargo.lock` pins. Check any new dependency
-  against Zed's `Cargo.lock` for `links` conflicts.
+- `review-core` stays UI-agnostic and embeddable in other applications: synchronous API, no
+  async runtime, no SQLite, no git library (shell out to `git` and `gh`), and only small common
+  dependencies. The graph has exactly one tree-sitter; check any new dependency for `links`
+  conflicts with it.
 - Analysis runs against pinned, immutable snapshot IDs. State transitions take `review.lock`
   exclusively and log readers take it shared; the event log is append-only, one newline-terminated
   record per event.
@@ -42,8 +40,8 @@ to date when a decision changes.
   review is trusted.
 - Code copied from Zed goes only into GPL-3.0-or-later crates, with a comment naming the source
   file and Zed commit.
-- Front ends never reimplement engine logic; anything every front end, the Zed fork included,
-  needs belongs in `review-core`.
+- Front ends never reimplement engine logic; anything every front end needs belongs in
+  `review-core`.
 - Anything review-gui and review-tui share that is not engine logic belongs in `review-ui`: state,
   behavior, keys, configuration, and what to draw in which colors. A front end only maps the
   model's state onto its surface and its input onto model calls, and runs the effects the model
@@ -58,8 +56,7 @@ to date when a decision changes.
   escapes or `concat!`; the ast-grep rules in `.ast-grep/rules/` check it.
 - Tools come from `mise.toml`; on Linux, `task deps:linux` installs the system libraries gpui
   needs.
-- Never build Rust under `/tmp`. Separate build trees, including the Zed fork's, go under
-  `/mnt/ssd2/cargo-targets/<name>/`.
+- Never build Rust under `/tmp`; separate build trees go on disk outside it.
 - Tests that need repositories create small temporary git repos with the `git` CLI.
 - review-gui builds gpui for Wayland only and links only libxkbcommon; at run time it needs a
   Wayland compositor and a Vulkan driver. Check those before blaming the code.
