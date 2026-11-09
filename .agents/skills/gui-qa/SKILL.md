@@ -1,9 +1,12 @@
 ---
-name: app-qa
-description: Drive the review apps (the review-gui desktop app, the review-tui terminal app, and the Zed fork) headlessly, take and read screenshots, and hunt UX and functional issues against the project's quality bar. Use when building, changing, reviewing, or QA-ing any front-end behavior, layout, keybinding, scrolling, or rendering, and before reporting UI work as done.
+name: gui-qa
+description: Drive the review-gui desktop app headlessly in sway, take and read screenshots, and hunt UX and functional issues against the project's quality bar. Use when building, changing, reviewing, or QA-ing review-gui's behavior, layout, keybindings, scrolling, or rendering, or anything in review-ui (check review-tui too, with tui-qa), and before reporting that work as done.
 ---
 
-# App QA
+# GUI QA
+
+This skill covers review-gui. The terminal front end has its own skill,
+`tui-qa`; a change to review-ui is checked with both.
 
 Every UI change is checked by driving the real app and looking at it. Unit tests and `state` JSON
 prove behavior; screenshots prove what the reviewer actually sees. Do both, and judge every
@@ -134,31 +137,3 @@ found and fixed, and the 3-4 screenshots that best show the result.
   Verify those by checking that the gpui calls are wired up, and say so.
 - Headless sway delivers a frame about every 40 ms, so measure frame timing with the release
   scroll benchmark on a real display, not here.
-- The Zed fork speaks the same protocol through `CODE_REVIEW_QA=1`; drive it with
-  `QA_SESSION=zed QA_BINARY=scripts/zed/launch.sh scripts/qa/session.sh start --demo` after
-  `cargo build -p zed` in `~/dev/zed-review` (target dir `/mnt/ssd2/cargo-targets/zed-review`).
-  `QA_SESSION` keeps it apart from a review-gui session. Its specifics, documented in
-  `crates/code_review/src/qa.rs` of the fork:
-  - `scroll` takes lines, not pixels, and `sample` reports `scroll_lines`.
-  - `find` searches the buffer text; for text in detail blocks (interdiffs, moves, notes) it
-    focuses the unit instead.
-  - `wait <text>` waits for the active item; `definition <text>` repeats go-to-definition while
-    rust-analyzer indexes, which takes a minute or two on the first launch.
-  - The fork runs from its checkout (a debug build reads its assets from there) with its own
-    profile under `target/zed-profile`, wiped of Zed's workspace database at each launch.
-  - Headless sway gives Zed no GNOME button layout, so the title bar shows no window controls
-    there; on GNOME Zed draws its own.
-- review-tui, the terminal front end, speaks the same protocol off screen, without sway:
-  `task qa:tui -- scripts/qa/smoke-tui.qa` (`QA_FRONT_END=tui scripts/qa/run.sh`) keeps its
-  configuration, demo and shots under `target/qa/tui/`. Its specifics, documented in
-  `crates/review-tui/src/qa.rs`:
-  - Positions are terminal cells on a 160×50 screen; `resize <columns>x<rows>` changes it.
-  - `shot <name>` makes the app write its screen to `<name>.txt` and, with SGR colors,
-    `<name>.ansi`; read the `.txt` to check the layout.
-  - `paste <json string>` pastes as a terminal's bracketed paste, `click <column> <row>
-    [count]` presses a cell, and `wheel <turns> [<column> <row>]` turns the wheel three rows a
-    turn.
-  - Check the real terminal too: run `review-tui --demo` in a detached `tmux -L <socket>`
-    session under `timeout --foreground` (a background process group cannot take the
-    terminal), drive it with `send-keys`, read it with `capture-pane -e -p`, and check
-    `#{alternate_on}` and `stty` after it quits. Kill the tmux server when done.
