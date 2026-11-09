@@ -1,0 +1,59 @@
+# Catppuccin Latte, from catppuccin/palette (MIT, Copyright (c) 2021 Catppuccin).
+name = "catppuccin-latte"
+title = "Catppuccin Latte"
+
+[ui]
+background = "#eff1f5"
+panel = "#e6e9ef"
+band = "#e6e9ee"
+raised = "#ccd0da"
+hairline = "#ccd0da"
+text = "#4c4f69"
+dim = "#5c5f77"
+faint = "#8c8fa1"
+accent = "#1e66f5"
+selection = "#bcc0cc"
+find = "#acb0be"
+error = "#d20f39"
+note = "#df8e1d"
+
+[review]
+open = "#4c4f69"
+done = "#40a02b"
+flagged = "#d20f39"
+changed = "#fe640b"
+
+[kind]
+added = "#40a02b"
+modified = "#1e66f5"
+deleted = "#d20f39"
+renamed = "#04a5e5"
+moved = "#8839ef"
+type = "#fe640b"
+quiet = "#8c8fa1"
+
+# The base blended a fifth of the way to red and green, as nightfox's light themes derive theirs.
+[diff]
+removed_line = "#e9c4cf"
+added_line = "#cce1cd"
+quiet_line = "#ccd0da"
+removed_text = "#d20f39"
+added_text = "#40a02b"
+removed_sign = "#d20f39"
+added_sign = "#40a02b"
+
+[syntax]
+keyword = "#8839ef"
+function = "#1e66f5"
+type = "#df8e1d"
+string = "#40a02b"
+constant = "#fe640b"
+comment = "#7c7f93"
+parameter = "#e64553"
+attribute = "#df8e1d"
+operator = "#04a5e5"
+punctuation = "#7c7f93"
+property = "#7287fd"
+special = "#d20f39"
+tag = "#8839ef"
+escape = "#ea76cb"

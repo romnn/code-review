@@ -333,7 +333,7 @@ key shift-t
 state
 expect "overlay":"Settings"
 expect "cursor":"Theme: Carbonfox"
-expect "entries":23\}
+expect "entries":28\}
 expect "geometry":\{"width":32,"list_top":3,"cursor_top":4\}
 key j
 state

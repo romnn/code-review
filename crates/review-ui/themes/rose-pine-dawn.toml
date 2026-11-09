@@ -1,0 +1,59 @@
+# Rosé Pine Dawn, from rose-pine/palette (MIT, Copyright (c) 2021 Rosé Pine).
+name = "rose-pine-dawn"
+title = "Rosé Pine Dawn"
+
+[ui]
+background = "#faf4ed"
+panel = "#fffaf3"
+band = "#fffaf3"
+raised = "#f2e9e1"
+hairline = "#f2e9e1"
+text = "#575279"
+dim = "#797593"
+faint = "#9893a5"
+accent = "#56949f"
+selection = "#dfdad9"
+find = "#cecacd"
+error = "#b4637a"
+note = "#ea9d34"
+
+[review]
+open = "#575279"
+done = "#286983"
+flagged = "#b4637a"
+changed = "#ea9d34"
+
+[kind]
+added = "#286983"
+modified = "#56949f"
+deleted = "#b4637a"
+renamed = "#56949f"
+moved = "#907aa9"
+type = "#ea9d34"
+quiet = "#9893a5"
+
+# The base blended a fifth of the way to love and pine, as nightfox's light themes derive theirs.
+[diff]
+removed_line = "#ecd7d6"
+added_line = "#d0d8d8"
+quiet_line = "#f2e9e1"
+removed_text = "#b4637a"
+added_text = "#286983"
+removed_sign = "#b4637a"
+added_sign = "#286983"
+
+[syntax]
+keyword = "#286983"
+function = "#d7827e"
+type = "#56949f"
+string = "#ea9d34"
+constant = "#ea9d34"
+comment = "#9893a5"
+parameter = "#907aa9"
+attribute = "#907aa9"
+operator = "#797593"
+punctuation = "#797593"
+property = "#907aa9"
+special = "#b4637a"
+tag = "#56949f"
+escape = "#286983"

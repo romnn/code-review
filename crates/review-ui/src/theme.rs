@@ -21,6 +21,11 @@ const BUILT_IN: &[&str] = &[
     include_str!("../themes/one-dark.toml"),
     include_str!("../themes/catppuccin-mocha.toml"),
     include_str!("../themes/rose-pine.toml"),
+    include_str!("../themes/catppuccin-latte.toml"),
+    include_str!("../themes/rose-pine-dawn.toml"),
+    include_str!("../themes/one-light.toml"),
+    include_str!("../themes/github-light.toml"),
+    include_str!("../themes/solarized-light.toml"),
 ];
 
 /// The note color of a theme file without one: One Dark's yellow.
@@ -347,7 +352,7 @@ mod tests {
     /// Every built-in theme parses and defines every syntax tone.
     #[test]
     fn built_in_themes_are_complete() {
-        assert_eq!(BUILT_IN.len(), 9);
+        assert_eq!(BUILT_IN.len(), 14);
         for text in BUILT_IN {
             let theme = Theme::parse(text).unwrap();
             for tone in [Tone::Keyword, Tone::String, Tone::Comment, Tone::Function] {
@@ -415,7 +420,7 @@ mod tests {
         std::fs::write(dir.path().join("mine.toml"), carbon).unwrap();
         std::fs::write(dir.path().join("broken.toml"), "name = \"x\"\n").unwrap();
         let (themes, problems) = all(Some(dir.path()));
-        assert_eq!(themes.len(), 9);
+        assert_eq!(themes.len(), 14);
         assert_eq!(themes[0].ui.background, rgb(0x0000_0000).into());
         assert_eq!(problems.len(), 1, "{problems:?}");
     }

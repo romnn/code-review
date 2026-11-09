@@ -1,0 +1,60 @@
+# Solarized Light, from altercation/solarized by Ethan Schoonover (MIT, Copyright (c) 2011
+# Ethan Schoonover), with base01 as the text, as Solarized emphasizes it, for contrast.
+name = "solarized-light"
+title = "Solarized Light"
+
+[ui]
+background = "#fdf6e3"
+panel = "#eee8d5"
+band = "#f4eedb"
+raised = "#dfdccb"
+hairline = "#c0c4bb"
+text = "#586e75"
+dim = "#657b83"
+faint = "#93a1a1"
+accent = "#268bd2"
+selection = "#eee8d5"
+find = "#e7d59f"
+error = "#dc322f"
+note = "#b58900"
+
+[review]
+open = "#586e75"
+done = "#859900"
+flagged = "#dc322f"
+changed = "#cb4b16"
+
+[kind]
+added = "#859900"
+modified = "#268bd2"
+deleted = "#dc322f"
+renamed = "#2aa198"
+moved = "#6c71c4"
+type = "#cb4b16"
+quiet = "#93a1a1"
+
+# The base blended a fifth of the way to red and green, as nightfox's light themes derive theirs.
+[diff]
+removed_line = "#f6cfbf"
+added_line = "#e5e3b6"
+quiet_line = "#eee8d5"
+removed_text = "#dc322f"
+added_text = "#859900"
+removed_sign = "#dc322f"
+added_sign = "#859900"
+
+[syntax]
+keyword = "#859900"
+function = "#268bd2"
+type = "#b58900"
+string = "#2aa198"
+constant = "#d33682"
+comment = "#93a1a1"
+parameter = "#657b83"
+attribute = "#cb4b16"
+operator = "#859900"
+punctuation = "#586e75"
+property = "#268bd2"
+special = "#dc322f"
+tag = "#268bd2"
+escape = "#dc322f"

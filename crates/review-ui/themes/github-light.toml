@@ -1,0 +1,59 @@
+# GitHub Light, from primer/primitives' light theme as github-vscode-theme ships it (MIT,
+# Copyright (c) 2018 GitHub Inc.), with its diff line backgrounds and prettylights syntax colors.
+name = "github-light"
+title = "GitHub Light"
+
+[ui]
+background = "#ffffff"
+panel = "#f6f8fa"
+band = "#f6f8fa"
+raised = "#eaeef2"
+hairline = "#d0d7de"
+text = "#1f2328"
+dim = "#59636e"
+faint = "#6e7781"
+accent = "#0969da"
+selection = "#ddf4ff"
+find = "#fae17d"
+error = "#d1242f"
+note = "#9a6700"
+
+[review]
+open = "#1f2328"
+done = "#1a7f37"
+flagged = "#d1242f"
+changed = "#bc4c00"
+
+[kind]
+added = "#1a7f37"
+modified = "#9a6700"
+deleted = "#d1242f"
+renamed = "#0969da"
+moved = "#8250df"
+type = "#bc4c00"
+quiet = "#6e7781"
+
+[diff]
+removed_line = "#ffebe9"
+added_line = "#dafbe1"
+quiet_line = "#eaeef2"
+removed_text = "#82071e"
+added_text = "#116329"
+removed_sign = "#82071e"
+added_sign = "#116329"
+
+[syntax]
+keyword = "#cf222e"
+function = "#8250df"
+type = "#953800"
+string = "#0a3069"
+constant = "#0550ae"
+comment = "#6e7781"
+parameter = "#1f2328"
+attribute = "#0550ae"
+operator = "#0550ae"
+punctuation = "#1f2328"
+property = "#0550ae"
+special = "#cf222e"
+tag = "#116329"
+escape = "#116329"

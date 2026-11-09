@@ -937,9 +937,12 @@ it, muted, so it never reads as code.
   or else its unit's header. Places kept for other files are row identities too, so a
   density change never lands a returning reviewer on another line.
 - **Themes as data.** A theme is a TOML file of semantic roles (`[ui]`, `[review]`, `[kind]`,
-  `[diff]`, `[syntax]`). Nine are built in under `crates/review-ui/themes/`, each citing its
-  source palette and license: carbonfox (the default), nightfox, nordfox, terafox, duskfox,
-  tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine. Files in
+  `[diff]`, `[syntax]`). Fourteen are built in under `crates/review-ui/themes/`, each citing its
+  source palette and license: the dark carbonfox (the default), nightfox, nordfox, terafox,
+  duskfox, tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine, and the light GitHub
+  Light, One Light, Catppuccin Latte, Solarized Light and Rosé Pine Dawn. Light themes whose
+  source defines no diff backgrounds derive them by blending the base a fifth of the way to red
+  and green, as nightfox's light palettes do. Files in
   `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
   `[theme] name` picks one, and the settings list previews and applies them. `[ui] note`, the
   theme's yellow, colors notes: italic text and a bar on a band tinted toward it, so a note

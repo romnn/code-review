@@ -275,7 +275,7 @@ mod tests {
     fn the_frame_stands_out_in_every_theme() {
         let (themes, problems) = theme::all(None);
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(themes.len(), 9);
+        assert_eq!(themes.len(), 14);
         for theme in &themes {
             let palette = Palette::new(theme, None, None, Background::Bold);
             let behind = theme::mix(palette.text, palette.background, backdrop(&palette).a);

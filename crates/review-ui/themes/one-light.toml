@@ -1,0 +1,60 @@
+# One Light, the palette of Atom's One Light syntax theme (MIT, Copyright (c) 2016 GitHub Inc.):
+# packages/one-light-syntax/styles/colors.less, with One Dark's choice of roles.
+name = "one-light"
+title = "One Light"
+
+[ui]
+background = "#fafafa"
+panel = "#f0f0f0"
+band = "#f0f0f1"
+raised = "#e5e5e6"
+hairline = "#d3d4d5"
+text = "#383a42"
+dim = "#696c77"
+faint = "#a0a1a7"
+accent = "#4078f2"
+selection = "#e5e5e6"
+find = "#cdced0"
+error = "#e45649"
+note = "#cb7701"
+
+[review]
+open = "#383a42"
+done = "#50a14f"
+flagged = "#e45649"
+changed = "#b76b01"
+
+[kind]
+added = "#50a14f"
+modified = "#4078f2"
+deleted = "#e45649"
+renamed = "#0184bc"
+moved = "#a626a4"
+type = "#b76b01"
+quiet = "#a0a1a7"
+
+# The base blended a fifth of the way to red and green, as nightfox's light themes derive theirs.
+[diff]
+removed_line = "#f6d9d7"
+added_line = "#d8e8d8"
+quiet_line = "#e5e5e6"
+removed_text = "#e45649"
+added_text = "#50a14f"
+removed_sign = "#e45649"
+added_sign = "#50a14f"
+
+[syntax]
+keyword = "#a626a4"
+function = "#4078f2"
+type = "#cb7701"
+string = "#50a14f"
+constant = "#b76b01"
+comment = "#a0a1a7"
+parameter = "#e45649"
+attribute = "#cb7701"
+operator = "#0184bc"
+punctuation = "#383a42"
+property = "#e45649"
+special = "#cb7701"
+tag = "#e45649"
+escape = "#0184bc"
