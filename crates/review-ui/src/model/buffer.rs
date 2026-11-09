@@ -551,12 +551,23 @@ fn find_definition(
     drop(servers);
     let target = std::fs::read_to_string(&definition.path)
         .map_err(|err| format!("cannot read {}: {err}", definition.path.display()))?;
-    let shown = definition
+    // In the root's canonical spelling, which the server's answer need not share: Windows
+    // canonical paths carry a `\\?\` prefix that no URI does.
+    let target_path = definition
         .path
-        .strip_prefix(root)
-        .unwrap_or(&definition.path)
-        .display()
-        .to_string();
+        .canonicalize()
+        .unwrap_or_else(|_| definition.path.clone());
+    // Inside the review, the path as the review names files, with `/` on every platform.
+    let shown = target_path.strip_prefix(root).map_or_else(
+        |_| target_path.display().to_string(),
+        |relative| {
+            relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        },
+    );
     let target_line = target.lines().nth(definition.position.line).unwrap_or("");
     let column = lsp::byte_column(target_line, definition.position.character);
     Ok(Definition {
