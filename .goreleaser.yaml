@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+dist: goreleaser-dist
+
+# review-gui is not built here: gpui cannot be cross-compiled from Linux, since its macOS build
+# needs Xcode's Metal compiler and the system frameworks, and its Windows build needs windres.
+builds:
+    - id: &cli cr
+      builder: rust
+      binary: cr
+      tool: cargo
+      command: zigbuild
+      targets: &targets
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-gnu
+          - aarch64-pc-windows-gnullvm
+      flags: ["--release", "--package=review-cli"]
+
+    - id: &tui review-tui
+      builder: rust
+      binary: review-tui
+      tool: cargo
+      command: zigbuild
+      targets: *targets
+      flags: ["--release", "--package=review-tui"]
+
+archives:
+    - id: &archive code-review
+      ids: [*cli, *tui]
+      formats: ["tar.gz"]
+      name_template: "code-review_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+      # cr is MIT OR Apache-2.0; review-tui is GPL-3.0-or-later.
+      files:
+          - LICENSE-MIT
+          - LICENSE-APACHE
+          - src: crates/review-tui/LICENSE
+            dst: LICENSE-GPL-3.0
+      format_overrides:
+          - goos: windows
+            formats: ["zip"]
+
+checksum:
+    name_template: "checksums.txt"
+
+changelog:
+    use: github
+    filters:
+        exclude: ["^ci:", "^docs:", "^test:"]
+
+homebrew_casks:
+    - name: code-review
+      ids: [*archive]
+      binaries: [cr, review-tui]
+      description: "Review large diffs and GitHub pull requests hunk by hunk, keeping review state across revisions."
+      homepage: "https://github.com/romnn/code-review"
+      license: "GPL-3.0-or-later"
+      custom_block: |
+          os macos: "darwin", linux: "linux"
+
+          postflight_steps do
+            on_macos do
+              if_path_exists "/usr/bin/xattr" do
+                run "/usr/bin/xattr",
+                    args:         ["-dr", "com.apple.quarantine", "{{ `{{staged_path}}` }}/cr", "{{ `{{staged_path}}` }}/review-tui"],
+                    must_succeed: false
+              end
+            end
+          end
+      directory: Casks
+      commit_author:
+          name: romnn
+          email: contact@romnn.com
+      repository:
+          owner: romnn
+          name: homebrew-tap
+          branch: main
+          token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+          pull_request:
+              enabled: false
+
+release:
+    draft: false

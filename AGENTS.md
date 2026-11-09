@@ -52,6 +52,9 @@ to date when a decision changes.
 - Use the `task` commands in `taskfile.yaml`: `task check`, `task test`, `task lint`, and before
   calling work done `task lint:fc`, `task test:fc`, `task lint:ast-grep` and `task spellcheck`.
   Builds use the project's own `target/`.
+- Release binaries are cross-built by `task build:goreleaser` in the cargo-zigbuild image, whose
+  Rust (1.93) lags stable: use no standard-library API newer than that. The `build` workflow
+  catches it on every pull request.
 - Multi-line strings are written out with `indoc!`, `formatdoc!` or `writedoc!`, never with `\n`
   escapes or `concat!`; the ast-grep rules in `.ast-grep/rules/` check it.
 - Tools come from `mise.toml`; on Linux, `task deps:linux` installs the system libraries gpui

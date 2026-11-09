@@ -476,7 +476,8 @@ fn code_cells(character: char) -> usize {
 
 /// How many hex digits `<U+…>` writes `code` with: four at least.
 fn hex_digits(code: u32) -> usize {
-    usize::try_from(code.bit_width().div_ceil(4)).map_or(6, |digits| digits.max(4))
+    let digits = code.checked_ilog(16).map_or(1, |log| log + 1);
+    usize::try_from(digits).map_or(6, |digits| digits.max(4))
 }
 
 /// Appends `character`'s code to `text`: caret notation for a C0 control and DEL, `<9b>` for
