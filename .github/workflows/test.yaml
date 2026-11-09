@@ -43,6 +43,7 @@ jobs:
               with:
                   cache-on-failure: true
             - name: Feature-combination tests
-              run: task test:fc
+              # Every failure at once, instead of stopping at the first one.
+              run: task test:fc -- --no-fail-fast
             - name: Doc-tests
               run: task test:doc
