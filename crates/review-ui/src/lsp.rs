@@ -467,7 +467,10 @@ fn file_uri(path: &Path) -> String {
 fn uri_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
-        let text = text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/");
+        let text = text
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&text)
+            .replace('\\', "/");
         if text.starts_with('/') {
             text
         } else {
