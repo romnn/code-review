@@ -7,10 +7,16 @@ A fast, native tool for reviewing **large, often AI-written diffs and GitHub pul
 remembers what you have reviewed down to the hunk, across pushes and force-pushes, and keeps
 reformatting and moved code from drowning the real edits.
 
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero-light.png">
-  <img alt="review-tui reviewing a pull request: the file tree with review progress, an approved hunk with a note, a reformatted-only hunk approved automatically and a flagged hunk" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero.png">
-</picture>
+<p align="center">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero-light.png">
+    <img width="80%" alt="review-tui reviewing a pull request: the file tree with review progress, an approved hunk with a note, a reformatted-only hunk approved automatically and a flagged hunk" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero.png">
+  </picture>
+  <br>
+  <em>The terminal app (<code>review-tui</code>).</em>
+  <br><br>
+</p>
 
 - **Review state per hunk that survives pushes.** After a push, rebase or force-push, only new or
   changed hunks are unreviewed, and changed ones show what changed since you last saw them.
@@ -77,19 +83,31 @@ review-tui --demo       # a built-in demo review to try it out
 
 `review-tui` runs anywhere a terminal does, over SSH included, as a single static binary.
 
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2-light.png">
-  <img alt="review-tui after a force-push: a hunk changed since it was reviewed, with the interdiff and the note carried over" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2.png">
-</picture>
+<p align="center">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2-light.png">
+    <img width="80%" alt="review-tui after a force-push: a hunk changed since it was reviewed, with the interdiff and the note carried over" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2.png">
+  </picture>
+  <br>
+  <em>The terminal app (<code>review-tui</code>) after a force-push.</em>
+  <br><br>
+</p>
 
 ## The desktop app
 
 `review-gui` is a native gpui app with smooth scrolling, mouse selection and a settings panel.
 
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side-light.png">
-  <img alt="review-gui showing a diff side by side" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side.png">
-</picture>
+<p align="center">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side-light.png">
+    <img width="80%" alt="review-gui showing a diff side by side" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side.png">
+  </picture>
+  <br>
+  <em>The desktop app (<code>review-gui</code>) showing a diff side by side.</em>
+  <br><br>
+</p>
 
 ## The CLI
 
