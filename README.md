@@ -11,10 +11,10 @@ reformatting and moved code from drowning the real edits.
   <br>
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero-light.png">
-    <img width="80%" alt="review-tui reviewing a pull request: the file tree with review progress, an approved hunk with a note, a reformatted-only hunk approved automatically and a flagged hunk" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero.png">
+    <img width="90%" alt="review-tui reviewing a pull request: the file tree with review progress, an approved hunk with a note, a reformatted-only hunk approved automatically and a flagged hunk" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero.png">
   </picture>
   <br>
-  <em>The terminal app (<code>review-tui</code>).</em>
+  The terminal app (<code>review-tui</code>).
   <br><br>
 </p>
 
@@ -87,10 +87,10 @@ review-tui --demo       # a built-in demo review to try it out
   <br>
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2-light.png">
-    <img width="80%" alt="review-tui after a force-push: a hunk changed since it was reviewed, with the interdiff and the note carried over" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2.png">
+    <img width="90%" alt="review-tui after a force-push: a hunk changed since it was reviewed, with the interdiff and the note carried over" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2.png">
   </picture>
   <br>
-  <em>The terminal app (<code>review-tui</code>) after a force-push.</em>
+  The terminal app (<code>review-tui</code>) after a force-push.
   <br><br>
 </p>
 
@@ -102,10 +102,10 @@ review-tui --demo       # a built-in demo review to try it out
   <br>
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side-light.png">
-    <img width="80%" alt="review-gui showing a diff side by side" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side.png">
+    <img width="90%" alt="review-gui showing a diff side by side" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/side-by-side.png">
   </picture>
   <br>
-  <em>The desktop app (<code>review-gui</code>) showing a diff side by side.</em>
+  The desktop app (<code>review-gui</code>) showing a diff side by side.
   <br><br>
 </p>
 
