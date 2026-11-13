@@ -179,7 +179,20 @@ struct OpenOutput<'a> {
     status: review_core::Status,
 }
 
-pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> eyre::Result<()> {
+/// A review that [`open_review`] opened and refreshed.
+struct Opened {
+    review: Review,
+    recorded: review_core::Recorded,
+    history: History,
+}
+
+/// Opens the review of the target, or of the current branch without one, records its current
+/// state and remembers it for this branch.
+fn open_review(
+    context: &Context,
+    target: Option<&str>,
+    worktree: Option<&str>,
+) -> eyre::Result<Opened> {
     let repo = Repo::discover(&context.repo_dir)?;
     let review = if target.is_none() && worktree.is_none() {
         let (review, detected) = Review::open_for_current_branch(&context.data_dir, repo)?;
@@ -193,6 +206,19 @@ pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> 
     context.remember(&review)?;
     let history = review.history()?;
     print_warnings(&history);
+    Ok(Opened {
+        review,
+        recorded,
+        history,
+    })
+}
+
+pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> eyre::Result<()> {
+    let Opened {
+        review,
+        recorded,
+        history,
+    } = open_review(context, target, worktree)?;
     let status = history
         .view_under(recorded.number, context.policy)?
         .status();
@@ -207,6 +233,32 @@ pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> 
     Ok(())
 }
 
+/// What `cr` without a command does: renders the review `--review` names, or else opens the
+/// review of the current branch as `cr open` does and renders the revision it recorded.
+///
+/// Standard output carries only the rendering, or its JSON; what was opened goes to standard
+/// error.
+pub fn open_and_show(context: &Context) -> eyre::Result<()> {
+    let options = ShowOptions::default();
+    if context.review.is_some() {
+        return show(context, &options);
+    }
+    let Opened {
+        review,
+        recorded,
+        history,
+    } = open_review(context, None, None)?;
+    // Render the revision this call recorded, even if another `cr` records a newer one meanwhile.
+    let view = history.view_under(recorded.number, context.policy)?;
+    if !context.json {
+        eprint!(
+            "{}",
+            render::open_summary(review.key(), &recorded, &view.status())
+        );
+    }
+    render_view(context, &view, &options)
+}
+
 pub fn status(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
     let review = context.load()?;
     let history = review.history()?;
@@ -219,7 +271,8 @@ pub fn status(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
     Ok(())
 }
 
-/// What `cr show` renders.
+/// What `cr show` renders; the default is every step of the current revision.
+#[derive(Default)]
 pub struct ShowOptions {
     pub unreviewed: bool,
     pub step: Option<usize>,
@@ -233,7 +286,16 @@ pub fn show(context: &Context, options: &ShowOptions) -> eyre::Result<()> {
     let history = review.history()?;
     print_warnings(&history);
     let view = pick_view(context, &history, options.revision)?;
-    let mut parts = partition(&view);
+    render_view(context, &view, options)
+}
+
+/// Prints the steps of `view` that `options` select.
+fn render_view(
+    context: &Context,
+    view: &RevisionView<'_>,
+    options: &ShowOptions,
+) -> eyre::Result<()> {
+    let mut parts = partition(view);
     if let Some(step) = options.step {
         let index = step
             .checked_sub(1)
@@ -254,11 +316,11 @@ pub fn show(context: &Context, options: &ShowOptions) -> eyre::Result<()> {
     }
     parts.steps.retain(|step| !step.units.is_empty());
     if context.json {
-        return print_json(&render::show_json(&view, &parts)?);
+        return print_json(&render::show_json(view, &parts)?);
     }
     print!(
         "{}",
-        render::show(&view, &parts, options.expand, context.painter)?
+        render::show(view, &parts, options.expand, context.painter)?
     );
     Ok(())
 }

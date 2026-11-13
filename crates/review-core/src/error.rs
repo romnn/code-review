@@ -147,10 +147,14 @@ pub enum Error {
     /// A review target could not be parsed or resolved.
     #[error("invalid review target {0:?}")]
     InvalidTarget(String),
-    /// No target was given, and the current branch has neither an open pull request nor commits
-    /// beyond the default branch.
+    /// No target was given, and the current branch has no open pull request, no uncommitted
+    /// changes and no commits beyond the default branch.
     #[error("nothing to review: {0}; pass a pull request, a base..head range, or --worktree")]
     NothingToReview(String),
+    /// A review key is already stored for a different target, so opening it would review
+    /// something else under the same marks.
+    #[error("review {0} is already stored for a different target")]
+    KeyConflict(String),
     /// A walkthrough failed validation.
     #[error(transparent)]
     Walkthrough(#[from] WalkthroughError),

@@ -10,13 +10,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre;
 
 /// Review large diffs and pull requests hunk by hunk, across pushes and force-pushes.
+///
+/// Without a command, opens the review of the current branch as `cr open` does and renders it as
+/// `cr show` does; with --review or --demo, renders that review.
 #[derive(Debug, Parser)]
 #[command(name = "cr", version)]
 struct Cli {
     #[command(flatten)]
     options: GlobalOptions,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 /// Options shared by every command.
@@ -80,7 +83,9 @@ enum Command {
         /// A pull request number or URL, or a `base..head` range.
         ///
         /// Without one (and without --worktree), reopens the review last opened on this branch,
-        /// or else reviews the branch's open pull request, or else `<default branch>..<branch>`.
+        /// or else reviews the branch's open pull request, or else, when the branch has
+        /// uncommitted changes, the working tree against the default branch, or else
+        /// `<default branch>..<branch>`.
         target: Option<String>,
         /// Review the working tree, including uncommitted and untracked files, against a ref.
         #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "target")]
@@ -193,7 +198,10 @@ fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
     let context = commands::Context::new(&cli.options)?;
-    match cli.command {
+    let Some(command) = cli.command else {
+        return commands::open_and_show(&context);
+    };
+    match command {
         Command::Open { target, worktree } => {
             commands::open(&context, target.as_deref(), worktree.as_deref())
         }

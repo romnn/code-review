@@ -133,10 +133,13 @@ produces verified immutable inputs; everything after it is pure analysis over ob
 
 To review an agent's uncommitted turn, capture the working tree without touching the user's index:
 with a temporary `GIT_INDEX_FILE` holding a copy of the user's index (which keeps git's stat cache
-and sparse-checkout entries; `git read-tree HEAD` when there is no index), `git add -A` (tracked
+and sparse-checkout entries, and the index's date, so git still rereads files as new as the index
+whose stat cannot show an edit; `git read-tree HEAD` when there is no index), `git add -A` (tracked
 and untracked files, respecting `.gitignore`), `git write-tree` and `git commit-tree` with a fixed
 identity and date produce a synthetic snapshot commit, pinned like any other. Staged and unstaged changes are captured together. Two captures of
 different contents are two revisions; a capture identical to the current revision deduplicates.
+Whether a working tree has uncommitted changes is decided by the same capture: its tree against
+`HEAD`'s, so the two can never disagree.
 
 ### Line diff and units
 
@@ -686,6 +689,7 @@ thiserror, a hash crate, and tree-sitter with its grammars).
 
 | Command | Purpose |
 |---|---|
+| `cr` | `cr open` without a target, then `cr show` of the revision it recorded; the summary goes to standard error. With `--review` or `--demo`, `cr show` of that review. |
 | `cr open [pr-number \| pr-url \| base..head \| --worktree [ref]]` | Start or refresh a review; records a revision if anything changed and prints a summary. Without a target, see below. |
 | `cr status` | Counts per file and in total: new, changed since reviewed, reviewed, accepted, flagged, approved automatically, noise. |
 | `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts, saying how many of them were approved automatically. |
@@ -708,16 +712,30 @@ review, whatever the shared configuration's `[review] auto_approve_formatting` s
    is opened by number or URL so marks are shared.
    A merged or closed pull request is skipped, because its review would no longer follow the
    branch; reviewing one stays possible by number or URL.
-3. Otherwise `<default branch>..<branch>` (`..HEAD` when detached), where the default branch is
+3. Otherwise, on a branch whose working tree has uncommitted changes, the working tree against
+   the default branch (`--worktree <default branch>`), whether or not the branch has commits yet,
+   so uncommitted work is never left out.
+   Uncommitted means what a capture records: staged and unstaged changes and untracked files that
+   are not ignored, but not changes inside a submodule's checkout, which a capture cannot see.
+   The key names the checkout and the default branch, not the branch, so work begun on the
+   default branch and moved with `git checkout -b` stays one review; rule 1 then ties the new
+   branch to it once it is opened there, and it keeps following the branch after commits.
+   A detached `HEAD` never gets this rule, because a working-tree review is trusted and a
+   detached commit may be someone else's code.
+4. Otherwise `<default branch>..<branch>` (`..HEAD` when detached), where the default branch is
    what `origin/HEAD` names, or else the first of `origin/main`, `origin/master`, `main` and
    `master` that exists.
    Any `gh` failure (not installed, not authenticated, no GitHub remote, no pull request) only
    skips rule 2 and is reported as the reason.
-   With no default branch, or no commit on `HEAD` beyond it, opening fails and asks for a target
-   or `--worktree`.
+   With no default branch, or neither uncommitted changes nor a commit on `HEAD` beyond it,
+   opening fails and asks for a target or `--worktree`.
 
-A remembered review always wins, so a pull request opened after a range review of the same branch
-is picked up only by naming it once.
+A remembered review always wins, so a pull request opened after a range or working-tree review of
+the same branch is picked up only by naming it once.
+Work committed in full on a new branch before any review is opened there gets a range review of
+its own, whose units start unreviewed; the marks stay with the working-tree review.
+A review key is never reopened for a different target (a range ending at a branch named
+`WORKTREE` would otherwise share the working-tree key); opening one fails instead.
 
 ## Front ends
 

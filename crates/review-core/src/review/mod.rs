@@ -119,14 +119,25 @@ impl ReviewTarget {
     /// The current branch's open pull request comes first, as `gh pr view` resolves it, keyed
     /// exactly as when it is opened by number or URL.
     /// A merged or closed pull request is not used: its review would no longer follow the branch.
-    /// Otherwise the target is the range from the default branch (see [`Repo::default_branch`])
-    /// to the current branch, or to `HEAD` when it is detached.
-    /// A `gh` failure of any kind only skips the pull request; [`Detected::Range`] says why.
+    ///
+    /// Otherwise, on a branch whose working tree has uncommitted changes (see
+    /// [`Repo::has_uncommitted_changes`]), the target is the working tree against the default
+    /// branch (see [`Repo::default_branch`]), whether or not the branch has commits yet.
+    /// Its key names the checkout and the default branch but not the current branch, so work
+    /// begun on one branch and moved to a new one with `git checkout -b` stays one review.
+    /// A detached `HEAD` never gets one, because a working-tree review is trusted (see
+    /// [`Review::trust`]) and a detached commit may be someone else's code.
+    ///
+    /// Otherwise the target is the range from the default branch to the current branch, or to
+    /// `HEAD` when it is detached.
+    /// A `gh` failure of any kind only skips the pull request; [`Detected::Range`] and
+    /// [`Detected::Worktree`] say why.
     ///
     /// # Errors
     ///
     /// Returns [`Error::NothingToReview`] when there is no open pull request and either no
-    /// default branch or no commit on `HEAD` beyond it, and an error when git fails.
+    /// default branch, or neither uncommitted changes on a branch nor a commit on `HEAD` beyond
+    /// the default branch, and an error when git fails.
     pub fn for_current_branch(repo: &Repo) -> Result<(Self, Detected), Error> {
         let no_pull_request = match github::for_current_branch(repo) {
             Ok(found) if found.state == "OPEN" => match github::parse_url(&found.url) {
@@ -168,7 +179,15 @@ impl ReviewTarget {
                 "{no_pull_request}, and there is no default branch to compare with"
             ))
         })?;
-        let head = repo.current_branch()?.unwrap_or_else(|| "HEAD".to_owned());
+        let branch = repo.current_branch()?;
+        if branch.is_some() && repo.work_tree().is_some() && repo.has_uncommitted_changes()? {
+            let detected = Detected::Worktree {
+                base: base.clone(),
+                no_pull_request,
+            };
+            return Ok((Self::Worktree { base }, detected));
+        }
+        let head = branch.unwrap_or_else(|| "HEAD".to_owned());
         if repo.count_commits(&base, &head)? == 0 {
             return Err(Error::NothingToReview(format!(
                 "{no_pull_request}, and {head} has no commits beyond {base}"
@@ -239,6 +258,14 @@ pub enum Detected {
         /// Why the pull request rule did not apply, such as `gh is not installed`.
         no_pull_request: String,
     },
+    /// The working tree against the default branch, because the current branch has
+    /// uncommitted changes and no open pull request was found.
+    Worktree {
+        /// The default branch.
+        base: String,
+        /// Why the pull request rule did not apply, such as `gh is not installed`.
+        no_pull_request: String,
+    },
 }
 
 impl fmt::Display for Detected {
@@ -258,6 +285,13 @@ impl fmt::Display for Detected {
                 head,
                 no_pull_request,
             } => write!(f, "reviewing {base}..{head}: {no_pull_request}"),
+            Self::Worktree {
+                base,
+                no_pull_request,
+            } => write!(
+                f,
+                "reviewing the working tree against {base}: {no_pull_request}"
+            ),
         }
     }
 }
@@ -352,7 +386,9 @@ impl Review {
     ///
     /// # Errors
     ///
-    /// Returns an error when the storage cannot be created.
+    /// Returns [`Error::KeyConflict`] when the key is stored for another target, such as a range
+    /// ending at a branch named `WORKTREE` and a working-tree review against the same base, and
+    /// an error when the storage cannot be created.
     pub fn open(data_dir: &Path, repo: Repo, target: ReviewTarget) -> Result<Self, Error> {
         let key = target.key(&repo)?;
         let dir = ReviewDir::new(data_dir, &key);
@@ -362,9 +398,18 @@ impl Review {
             target,
         };
         store::create_dir(dir.root())?;
-        if store::read_json::<ReviewMeta>(&dir.meta())?.as_ref() != Some(&meta) {
+        // Two first opens of colliding targets must not both find no metadata and both write.
+        let lock = LockGuard::acquire(&dir.lock())?;
+        let stored = store::read_json::<ReviewMeta>(&dir.meta())?;
+        if let Some(stored) = &stored
+            && stored.target != meta.target
+        {
+            return Err(Error::KeyConflict(meta.key.as_str().to_owned()));
+        }
+        if stored.as_ref() != Some(&meta) {
             store::write_json_atomic(&dir.meta(), &meta, "review metadata")?;
         }
+        drop(lock);
         Ok(Self { dir, repo, meta })
     }
 

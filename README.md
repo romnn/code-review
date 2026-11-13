@@ -114,6 +114,7 @@ review-tui --demo       # a built-in demo review to try it out
 `cr` drives the same reviews from scripts and agents, with `--json` output:
 
 ```bash
+cr                   # open the current branch's review, uncommitted work included, and show it
 cr open 128          # start or refresh a review
 cr status            # counts per file and in total
 cr show              # render the changes, step by step

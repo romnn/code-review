@@ -648,4 +648,57 @@ mod open_without_target {
         );
         Ok(())
     }
+
+    /// `cr` without a command, on a new branch with only uncommitted work, opens the working tree
+    /// against the default branch and renders it: the changes on standard output, what was opened
+    /// on standard error.
+    #[test]
+    fn bare_cr_opens_and_shows_uncommitted_work() -> eyre::Result<()> {
+        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[])?;
+        let (data_dir, bin_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+        let (repo, data) = (repo_dir.path(), data_dir.path());
+        let path = path_without_gh(bin_dir.path())?;
+        // The `feature` branch's one commit is empty, so all its work is uncommitted.
+        std::fs::write(repo.join("a.txt"), "uncommitted\n")?;
+
+        let run = |extra: &[&str]| -> eyre::Result<(String, String)> {
+            let output = Command::new(env!("CARGO_BIN_EXE_cr"))
+                .args(extra)
+                .args(["--color", "never", "-C"])
+                .arg(repo)
+                .env("CR_DATA_DIR", data)
+                .env("XDG_CONFIG_HOME", super::config_home(data))
+                .env_remove("CODE_REVIEW_CONFIG")
+                .env("PATH", &path)
+                .envs(GIT_ENV)
+                .output()
+                .wrap_err("failed to run cr")?;
+            let stderr = String::from_utf8(output.stderr)?;
+            eyre::ensure!(output.status.success(), "cr failed: {stderr}");
+            Ok((String::from_utf8(output.stdout)?, stderr))
+        };
+
+        let (stdout, stderr) = run(&[])?;
+        assert!(
+            stderr
+                .starts_with("cr: reviewing the working tree against main: gh is not installed\n"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("..WORKTREE: recorded revision 1"),
+            "{stderr}"
+        );
+        assert!(stdout.contains("+uncommitted"), "{stdout}");
+        assert!(!stdout.contains("WORKTREE"), "{stdout}");
+
+        // With --json, standard output is only the rendering's JSON.
+        let (stdout, _) = run(&["--json"])?;
+        let shown: Value = serde_json::from_str(&stdout)?;
+        assert!(shown.get("steps").is_some(), "{stdout}");
+
+        // The bare command remembered the review, so `cr show` finds it.
+        let (shown_again, _) = run(&["show"])?;
+        assert!(shown_again.contains("+uncommitted"), "{shown_again}");
+        Ok(())
+    }
 }

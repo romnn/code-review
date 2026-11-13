@@ -217,6 +217,70 @@ fn uncommitted_work_snapshots() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A capture sees an edit that kept the file's size and date, which git's stat cache cannot tell
+/// apart from no edit when the file is as new as the index ("racily clean"); git then rereads the
+/// file, and so must a capture working on a copy of the index.
+#[test]
+fn capture_sees_racily_clean_edits() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    // Without ctime, which an edit always moves, the stat cache judges by date and size alone.
+    repo.git(&["config", "core.trustctime", "false"])?;
+    repo.write("a.txt", "aaaa\n")?;
+    repo.commit("base")?;
+    let file = repo.path().join("a.txt");
+    let index = repo.path().join(".git/index");
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let set_modified = |path: &std::path::Path| -> eyre::Result<()> {
+        std::fs::File::options()
+            .write(true)
+            .open(path)?
+            .set_modified(past)?;
+        Ok(())
+    };
+
+    // Cache the file's stat at the past date, then date the index in that same second.
+    set_modified(&file)?;
+    repo.git(&["update-index", "--refresh"])?;
+    set_modified(&index)?;
+
+    // Edit the file in place without changing its size or date.
+    std::fs::write(&file, "bbbb\n")?;
+    set_modified(&file)?;
+
+    let git = Repo::discover(repo.path())?;
+    assert_that!(git.has_uncommitted_changes()?, eq(true));
+    let review = Review::open(
+        repo.data_dir(),
+        git,
+        ReviewTarget::Worktree {
+            base: "HEAD".to_owned(),
+        },
+    )?;
+    let recorded = review.refresh()?;
+    let units = summaries(&review.history()?, recorded.number)?;
+    assert!(units.iter().any(|unit| unit.added.contains("bbbb")));
+    Ok(())
+}
+
+/// A read-only index, which git can still read and replace, does not stop a capture.
+#[cfg(unix)]
+#[test]
+fn capture_reads_a_read_only_index() -> eyre::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = TestRepo::new()?;
+    repo.write("a.txt", "one\n")?;
+    repo.commit("base")?;
+    repo.write("a.txt", "two\n")?;
+    let index = repo.path().join(".git/index");
+    std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o444))?;
+
+    let git = Repo::discover(repo.path())?;
+    assert_that!(git.has_uncommitted_changes()?, eq(true));
+    git.capture_worktree()?;
+    Ok(())
+}
+
 /// Stages `path` as an entry of `mode` holding `content`, through git so it works everywhere.
 fn stage_entry(repo: &TestRepo, mode: &str, content: &str, path: &str) -> eyre::Result<()> {
     let blob_file = repo.path().join(".git/staged-blob");
