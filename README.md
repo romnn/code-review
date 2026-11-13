@@ -11,10 +11,10 @@ reformatting and moved code from drowning the real edits.
   <br>
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero-light.png">
-    <img width="90%" alt="review-tui reviewing a pull request: the file tree with review progress, an approved hunk with a note, a reformatted-only hunk approved automatically and a flagged hunk" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero.png">
+    <img width="90%" alt="cr reviewing a pull request: the file tree with review progress, an approved hunk with a note, a reformatted-only hunk approved automatically and a flagged hunk" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/hero.png">
   </picture>
   <br>
-  The terminal app (<code>review-tui</code>).
+  The terminal app (<code>cr</code>).
   <br><br>
 </p>
 
@@ -38,13 +38,13 @@ configuration and review state.
 brew install --cask romnn/tap/code-review
 ```
 
-This installs `review-tui` and `cr` on macOS and Linux. Prebuilt binaries for macOS, Linux and
-Windows are on the [releases page](https://github.com/romnn/code-review/releases).
+This installs `cr` on macOS and Linux. Prebuilt binaries for macOS, Linux and Windows are on the
+[releases page](https://github.com/romnn/code-review/releases).
 
 From source:
 
 ```bash
-cargo install --locked --git https://github.com/romnn/code-review review-tui review-cli
+cargo install --locked --git https://github.com/romnn/code-review review-cli
 ```
 
 The desktop app, `review-gui`, is not released yet. Build it from source with
@@ -56,11 +56,11 @@ Wayland, a Vulkan driver, `libxkbcommon` and `fontconfig`.
 Run it in a repository:
 
 ```bash
-review-tui              # the branch's open pull request, or <default branch>..<branch>
-review-tui 128          # a pull request by number or URL (needs the GitHub CLI, `gh`)
-review-tui main..HEAD   # a range
-review-tui --worktree   # uncommitted and untracked changes, such as an agent's last turn
-review-tui --demo       # a built-in demo review to try it out
+cr              # the branch's open pull request, its uncommitted work, or <default branch>..<branch>
+cr 128          # a pull request by number or URL (needs the GitHub CLI, `gh`)
+cr main..HEAD   # a range
+cr --worktree   # uncommitted and untracked changes, such as an agent's last turn
+cr --demo       # a built-in demo review to try it out
 ```
 
 `review-gui` takes the same arguments. Press `?` for every key. The essentials:
@@ -81,16 +81,16 @@ review-tui --demo       # a built-in demo review to try it out
 
 ## The terminal app
 
-`review-tui` runs anywhere a terminal does, over SSH included, as a single static binary.
+`cr` runs anywhere a terminal does, over SSH included, as a single static binary.
 
 <p align="center">
   <br>
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2-light.png">
-    <img width="90%" alt="review-tui after a force-push: a hunk changed since it was reviewed, with the interdiff and the note carried over" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2.png">
+    <img width="90%" alt="cr after a force-push: a hunk changed since it was reviewed, with the interdiff and the note carried over" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/tui/revision-2.png">
   </picture>
   <br>
-  The terminal app (<code>review-tui</code>) after a force-push.
+  The terminal app (<code>cr</code>) after a force-push.
   <br><br>
 </p>
 
@@ -109,9 +109,9 @@ review-tui --demo       # a built-in demo review to try it out
   <br><br>
 </p>
 
-## The CLI
+## Commands for scripts and agents
 
-`cr` drives the same reviews from scripts and agents, with `--json` output:
+`cr`'s commands drive the same reviews from scripts and agents, with `--json` output:
 
 ```bash
 cr open 128          # start or refresh a review
@@ -124,8 +124,8 @@ cr export            # flagged, accepted and annotated units, for an agent
 
 ## License
 
-The engine (`review-core`) and the CLI (`cr`) are licensed under either of
+The engine (`review-core`) is licensed under either of
 [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option. The
-shared app model (`review-ui`) and both apps are licensed under
-[GPL-3.0-or-later](crates/review-ui/LICENSE), because they include syntax highlighting queries
-from [Zed](https://github.com/zed-industries/zed).
+shared app model (`review-ui`), the apps and `cr`, which contains the terminal app, are licensed
+under [GPL-3.0-or-later](crates/review-ui/LICENSE), because they include syntax highlighting
+queries from [Zed](https://github.com/zed-industries/zed).

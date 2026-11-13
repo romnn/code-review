@@ -42,7 +42,7 @@ impl Log {
 
     /// Records `message`.
     pub fn write(&self, message: &str) {
-        let line = format!("review-tui: {message}");
+        let line = format!("cr: {message}");
         if self.direct {
             eprintln!("{line}");
             return;
@@ -51,7 +51,7 @@ impl Log {
             && let Err(err) = append(path, &line)
         {
             self.held.lock().push(format!(
-                "review-tui: cannot write the log {}: {err}",
+                "cr: cannot write the log {}: {err}",
                 path.display()
             ));
         }
@@ -107,8 +107,8 @@ mod tests {
         assert_eq!(
             text,
             indoc! {"
-                review-tui: first
-                review-tui: second
+                cr: first
+                cr: second
             "}
         );
         assert_eq!(log.held.lock().len(), 2);

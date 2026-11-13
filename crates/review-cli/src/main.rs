@@ -1,5 +1,6 @@
-//! The `cr` command-line interface to the review engine.
+//! `cr`: the terminal review app without a command, and commands for scripts and agents.
 
+mod app;
 mod commands;
 mod config;
 mod render;
@@ -10,13 +11,36 @@ use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre;
 
 /// Review large diffs and pull requests hunk by hunk, across pushes and force-pushes.
+///
+/// Without a command, opens the review in the terminal app; the commands drive the same reviews
+/// from scripts and agents.
 #[derive(Debug, Parser)]
 #[command(name = "cr", version)]
 struct Cli {
     #[command(flatten)]
     options: GlobalOptions,
+    #[command(flatten)]
+    app: AppOptions,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+/// What the terminal app opens, without a command.
+#[derive(Debug, Clone, clap::Args)]
+pub struct AppOptions {
+    /// A pull request number or URL, or a `base..head` range.
+    ///
+    /// Without one (and without --worktree), reopens the review last opened on this branch, or
+    /// else reviews the branch's open pull request, or else, when the branch has uncommitted
+    /// changes, the working tree against the default branch, or else
+    /// `<default branch>..<branch>`.
+    #[arg(conflicts_with_all = ["demo", "demo_revision"])]
+    target: Option<String>,
+    /// Review the working tree, including uncommitted and untracked files, against a ref.
+    #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with_all = ["target", "demo", "demo_revision"])]
+    worktree: Option<String>,
+    #[command(flatten)]
+    terminal: review_tui::Terminal,
 }
 
 /// Options shared by every command.
@@ -40,6 +64,10 @@ pub struct GlobalOptions {
     /// Act on the built-in demo, recording its revisions up to this one and keeping marks.
     #[arg(long, global = true, value_name = "N", conflicts_with = "demo")]
     demo_revision: Option<u32>,
+    /// Where the demo's repository and data live, instead of `target/demo`; QA runs use their
+    /// own, so other front ends' demos cannot reset theirs.
+    #[arg(long, global = true, env = "CODE_REVIEW_DEMO_DIR", hide = true)]
+    demo_dir: Option<PathBuf>,
     /// When to color text output.
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
@@ -80,7 +108,9 @@ enum Command {
         /// A pull request number or URL, or a `base..head` range.
         ///
         /// Without one (and without --worktree), reopens the review last opened on this branch,
-        /// or else reviews the branch's open pull request, or else `<default branch>..<branch>`.
+        /// or else reviews the branch's open pull request, or else, when the branch has
+        /// uncommitted changes, the working tree against the default branch, or else
+        /// `<default branch>..<branch>`.
         target: Option<String>,
         /// Review the working tree, including uncommitted and untracked files, against a ref.
         #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "target")]
@@ -192,8 +222,12 @@ enum WalkthroughCommand {
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+    let Some(command) = cli.command else {
+        return app::run(&cli.options, cli.app);
+    };
+    app::refuse_with_command(&cli.app)?;
     let context = commands::Context::new(&cli.options)?;
-    match cli.command {
+    match command {
         Command::Open { target, worktree } => {
             commands::open(&context, target.as_deref(), worktree.as_deref())
         }
@@ -228,5 +262,18 @@ fn main() -> eyre::Result<()> {
         },
         Command::Watch { interval, count } => commands::watch(&context, interval, count),
         Command::Worktree { revision } => commands::worktree(&context, revision),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    use super::*;
+
+    /// The command line is consistent: no two arguments clash.
+    #[test]
+    fn the_command_line_is_consistent() {
+        Cli::command().debug_assert();
     }
 }

@@ -44,14 +44,15 @@ pub struct Context {
 impl Context {
     pub fn new(options: &GlobalOptions) -> eyre::Result<Self> {
         if let Some(request) = demo_request(options)? {
-            let review = review_core::demo::prepare(
-                &review_core::demo::DemoPaths::in_project(),
-                &review_core::demo::fixture_dir(),
-                request,
-            )?;
+            let paths = options.demo_dir.as_deref().map_or_else(
+                review_core::demo::DemoPaths::in_project,
+                review_core::demo::DemoPaths::under,
+            );
+            let review =
+                review_core::demo::prepare(&paths, &review_core::demo::fixture_dir(), request)?;
             return Ok(Self {
-                data_dir: review_core::demo::DemoPaths::in_project().data,
-                repo_dir: review_core::demo::DemoPaths::in_project().repo,
+                data_dir: paths.data,
+                repo_dir: paths.repo,
                 review: Some(review.key().as_str().to_owned()),
                 json: options.json,
                 painter: Painter {

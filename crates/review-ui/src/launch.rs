@@ -27,7 +27,9 @@ pub struct Options {
     /// A pull request number or URL, or a `base..head` range.
     ///
     /// Without one (and without --worktree), reopens the review last opened on this branch, or
-    /// else reviews the branch's open pull request, or else `<default branch>..<branch>`.
+    /// else reviews the branch's open pull request, or else, when the branch has uncommitted
+    /// changes, the working tree against the default branch, or else
+    /// `<default branch>..<branch>`.
     pub target: Option<String>,
     /// Review the working tree, including uncommitted and untracked files, against a ref.
     #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "target")]

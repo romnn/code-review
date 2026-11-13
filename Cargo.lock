@@ -5848,6 +5848,7 @@ dependencies = [
  "color-eyre",
  "indoc",
  "review-core",
+ "review-tui",
  "serde",
  "serde_json",
  "tempfile",

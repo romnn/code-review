@@ -649,3 +649,28 @@ mod open_without_target {
         Ok(())
     }
 }
+
+/// `--demo-dir` puts the demo a command acts on there, as it does the app's, so a QA run's demo
+/// never resets the default one.
+#[test]
+fn commands_use_the_demo_directory() -> eyre::Result<()> {
+    let demo = tempfile::tempdir()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_cr"))
+        .args(["--demo", "--demo-dir"])
+        .arg(demo.path())
+        .args(["--json", "status"])
+        .env_remove("CODE_REVIEW_DEMO_DIR")
+        .env("XDG_CONFIG_HOME", config_home(demo.path()))
+        .env_remove("CODE_REVIEW_CONFIG")
+        .envs(GIT_ENV)
+        .output()
+        .wrap_err("failed to run cr")?;
+    eyre::ensure!(
+        output.status.success(),
+        "cr failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(demo.path().join("repo").is_dir());
+    assert!(demo.path().join("data").is_dir());
+    Ok(())
+}
