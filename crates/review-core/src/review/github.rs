@@ -76,12 +76,14 @@ pub(crate) fn for_current_branch(repo: &Repo) -> Result<BranchPullRequest, Error
     pr_view(repo, None, "number,url,state,headRefName")
 }
 
-/// Runs `gh pr view [<spec>] --json <fields>` in the repository's working tree.
+/// Runs `gh pr view [<spec>] --json <fields>` in the repository's working tree, or in its git
+/// directory when it is bare.
+///
+/// `gh` finds the repository from where it runs, so running it anywhere else would ask about
+/// whatever repository the process happens to be in.
 fn pr_view<T: DeserializeOwned>(repo: &Repo, spec: Option<&str>, fields: &str) -> Result<T, Error> {
     let mut command = Command::new("gh");
-    if let Some(work_tree) = repo.work_tree() {
-        command.current_dir(work_tree);
-    }
+    command.current_dir(repo.work_tree().unwrap_or_else(|| repo.git_dir()));
     repo.apply_env(&mut command);
     let args: Vec<&str> = ["pr", "view"]
         .into_iter()

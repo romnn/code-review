@@ -265,6 +265,54 @@ fn bare_repository_reviews_the_range() -> eyre::Result<()> {
     Ok(())
 }
 
+/// `gh` looks for a bare repository's pull request in that repository, not in whatever checkout
+/// the process runs in.
+#[cfg(unix)]
+#[gtest]
+fn gh_runs_in_a_bare_repository() -> eyre::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let test = feature_repo()?;
+    let scratch = tempfile::tempdir()?;
+    let bare_path = scratch.path().join("repo.git");
+    let source = test.path().display().to_string();
+    let destination = bare_path.display().to_string();
+    test.git(&["clone", "--quiet", "--bare", &source, &destination])?;
+
+    // A `gh` that records where it ran and finds no pull request.
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin)?;
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        indoc! {r#"
+            #!/bin/sh
+            pwd -P > "$GH_CWD_FILE"
+            exit 1
+        "#},
+    )?;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
+    let cwd_file = scratch.path().join("gh-cwd");
+    let mut path = bin.into_os_string();
+    if let Some(inherited) = std::env::var_os("PATH") {
+        path.push(":");
+        path.push(inherited);
+    }
+
+    let mut repo = Repo::discover(&bare_path)?;
+    repo.set_command_env([
+        ("PATH", path),
+        ("GH_CWD_FILE", cwd_file.clone().into_os_string()),
+    ]);
+    ReviewTarget::for_current_branch(&repo)?;
+    let ran_in = std::fs::read_to_string(&cwd_file)?;
+    expect_that!(
+        std::path::Path::new(ran_in.trim()),
+        eq(bare_path.canonicalize()?.as_path())
+    );
+    Ok(())
+}
+
 /// An untracked file is uncommitted work even when `status.showUntrackedFiles` hides it, since a
 /// working-tree capture adds it.
 #[gtest]
