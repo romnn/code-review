@@ -1,13 +1,15 @@
 # Agent guidelines
 
 Native Rust tool for reviewing large diffs and GitHub pull requests. Read [PLAN.md](PLAN.md) for
-the design and milestones and [prior-work.md](prior-work.md) for the survey behind it. Keep both up
-to date when a decision changes.
+the design and milestones, [prior-work.md](prior-work.md) for the survey behind it, and the
+decision records in [adr/](adr) before changing an area one governs. Keep them up to date when a
+decision changes: an accepted ADR changes only through a new one that supersedes it.
 
 ## Layout
 
 - `crates/review-core`: the engine (MIT OR Apache-2.0).
-- `crates/review-cli`: the `cr` binary (MIT OR Apache-2.0).
+- `crates/review-cli`: the `cr` binary, the only one released: the terminal app without a command,
+  and commands for scripts and agents (GPL-3.0-or-later, for the app it contains).
 - `crates/review-ui`: the front ends' shared model, free of any UI toolkit (GPL-3.0-or-later,
   for the `highlights.scm` queries copied from Zed): the review window's state and behavior as
   actions in and effects out, the keymap and key matcher, configuration, frame geometry and

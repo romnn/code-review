@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 review-core = { path = "crates/review-core" }
 review-ui = { path = "crates/review-ui" }
+review-tui = { path = "crates/review-tui" }
 
 # Engine dependencies.
 imara-diff = { version = "0.2", default-features = false }

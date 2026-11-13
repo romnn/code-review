@@ -676,10 +676,10 @@ change what is being reviewed.
 | Path | Crate | License | Purpose |
 |---|---|---|---|
 | `crates/review-core` | `review-core` | MIT OR Apache-2.0 | Engine: git layer, snapshots, units, formatting proof, moves, noise, correspondence, walkthroughs, event store, export. Synchronous API; callers run it on their own background threads. |
-| `crates/review-cli` | `review-cli` (binary `cr`) | MIT OR Apache-2.0 | CLI over the engine, with `--json` output for agents. |
+| `crates/review-cli` | `review-cli` (binary `cr`) | GPL-3.0-or-later | The one released binary ([ADR 1](adr/0001-cr-is-the-one-binary-and-runs-the-terminal-app.md)): the terminal app without a command, and commands over the engine with `--json` output for agents. GPL because it contains the terminal app. |
 | `crates/review-ui` | `review-ui` | GPL-3.0-or-later | The apps' shared model, free of any UI toolkit: state and behavior, keymap and key matcher, configuration, themes, rows, frame geometry and paint decisions. GPL because its highlighting queries are copied from Zed. |
 | `crates/review-gui` | `review-gui` | GPL-3.0-or-later | The standalone gpui + gpui-component app, a view over `review-ui`. |
-| `crates/review-tui` | `review-tui` | GPL-3.0-or-later | The ratatui terminal app, a view over the same model. |
+| `crates/review-tui` | `review-tui` | GPL-3.0-or-later | The ratatui terminal app, a view over the same model; a library `cr` runs, and a `review-tui` binary for the QA scripts, which is not released. |
 
 `review-core` stays embeddable in other applications, editors included: no async runtime, no
 SQLite, no git library, and only small, common dependencies (imara-diff, serde, serde_json,
@@ -689,7 +689,7 @@ thiserror, a hash crate, and tree-sitter with its grammars).
 
 | Command | Purpose |
 |---|---|
-| `cr` | `cr open` without a target, then `cr show` of the revision it recorded; the summary goes to standard error. With `--review` or `--demo`, `cr show` of that review. |
+| `cr [pr-number \| pr-url \| base..head \| --worktree [ref] \| --demo]` | The terminal app (see [review-tui](#review-tui)) on that review, or without one on the review chosen as below. |
 | `cr open [pr-number \| pr-url \| base..head \| --worktree [ref]]` | Start or refresh a review; records a revision if anything changed and prints a summary. Without a target, see below. |
 | `cr status` | Counts per file and in total: new, changed since reviewed, reviewed, accepted, flagged, approved automatically, noise. |
 | `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts, saying how many of them were approved automatically. |
@@ -703,7 +703,8 @@ Every command accepts `--review <key>`, defaulting to the review for the current
 branch, `--json`, and `--no-auto-approve`, which counts proven formatting-only units as needing
 review, whatever the shared configuration's `[review] auto_approve_formatting` says.
 
-`cr open`, review-gui and review-tui without a target and without `--worktree` choose one in
+`cr` and `cr open`, review-gui and review-tui without a target and without `--worktree` choose one
+([ADR 2](adr/0002-uncommitted-work-is-reviewed-against-the-default-branch.md)) in
 `review-core` (`Review::open_for_current_branch`), and say on standard error which rule fired
 (the apps also in their status line when the review opens, after any configuration problem):
 
@@ -1065,8 +1066,8 @@ queues. Anything the two apps share that is not engine logic belongs here; engin
 belongs in `review-core`, so that the engine stays usable on its own.
 
 - **License.** `review-ui` is GPL-3.0-or-later because Zed's `highlights.scm` queries are copied
-  into `crates/review-ui/queries/`. Both apps link it, so they are GPL too; `review-core` and
-  `cr` stay MIT OR Apache-2.0.
+  into `crates/review-ui/queries/`. Both apps link it, and `cr` contains the terminal app, so
+  they are GPL too; `review-core` stays MIT OR Apache-2.0.
 - **Model.** `model::Model` is the whole review window apart from its drawing: the snapshot on
   screen, the selected file and hunk, the mode, marks waiting for the engine, folds, find,
   pickers, settings and the file buffer. It is shaped like model-view-update: input arrives as an
@@ -1167,7 +1168,8 @@ belongs in `review-core`, so that the engine stays usable on its own.
 
 ### review-tui
 
-`review-tui` draws `review-ui`'s model in a terminal and works as review-gui does: the same keys
+The terminal app, which `cr` runs without a command (and the unreleased `review-tui` binary the
+QA scripts drive), draws `review-ui`'s model in a terminal and works as review-gui does: the same keys
 and `[keys]` overrides, configuration file, marks, folded folders, themes, diff styles, pickers,
 settings, find, file buffer, overview and `?` sheet, and mouse selection with copies through OSC
 52, which also works over ssh.

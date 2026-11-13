@@ -1,7 +1,8 @@
 [package]
 name = "review-cli"
-description = "The cr command-line interface to the review engine"
-license = "MIT OR Apache-2.0"
+description = "The cr command: the terminal review app, and commands for scripts and agents"
+# It runs review-tui, which is GPL-3.0-or-later.
+license = "GPL-3.0-or-later"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -16,6 +17,7 @@ path = "src/main.rs"
 clap.workspace = true
 color-eyre.workspace = true
 review-core.workspace = true
+review-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
