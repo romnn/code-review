@@ -5,3 +5,7 @@
 goreleaser-dist/
 .intentionally-empty-file.o
 *_compiler_family.o
+# Grammar sources review-languages' build.rs fetches; `task grammars:fetch` fills it.
+/crates/review-languages/_cache/
+# Bytecode Python writes when a script under scripts/ is imported, as tests do.
+__pycache__/

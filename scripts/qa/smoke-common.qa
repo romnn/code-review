@@ -116,9 +116,11 @@ expect "collapsed":\["src"\]
 key shift-n
 state
 expect "selected":"scripts/release.sh"
+# A shell script is highlighted too, as every common file type is.
+expect "highlighted":true
 key n
 state
-expect "selected":"tools/stats.py"
+expect "selected":"tools/notify.rb"
 shot 06-next-file-past-folded
 key z shift-r
 file src/engine.rs

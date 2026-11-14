@@ -57,3 +57,15 @@ property = "#0550ae"
 special = "#cf222e"
 tag = "#116329"
 escape = "#116329"
+# Markup colors as primer's prettylights picks them.
+# Emphasized and strong text keep the text color; quotes are dimmed.
+# Inserted and deleted lines take the diff's text colors.
+heading = "#0550ae"
+emphasis = "#1f2328"
+strong = "#1f2328"
+link = "#0a3069"
+raw = "#0550ae"
+list = "#3b2300"
+quote = "#59636e"
+inserted = "#116329"
+deleted = "#82071e"

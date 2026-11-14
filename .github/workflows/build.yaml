@@ -26,5 +26,14 @@ jobs:
                   cache: true
                   env: false
             - run: mise install task
+            # review-languages' build script fetches the grammars and Helix's queries this cache
+            # holds at their pins.
+            # A pin bump restores the last cache, whose entries are checked on use, so only what
+            # moved is fetched again, and saves a new one under its own key.
+            - uses: actions/cache@v6
+              with:
+                  path: crates/review-languages/_cache
+                  key: grammars-${{ runner.os }}-${{ hashFiles('crates/review-languages/languages.toml', 'crates/review-grammar-sources/src/**') }}
+                  restore-keys: grammars-${{ runner.os }}-
             - name: Release (dry-run)
               run: task build:goreleaser

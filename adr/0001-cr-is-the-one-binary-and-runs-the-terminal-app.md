@@ -10,8 +10,7 @@ Releases and the Homebrew cask used to install two programs: `review-tui`, the t
 A reviewer had to know which one to type, and `cr` without a command failed with a list of
 subcommands, although the obvious meaning of `cr` alone is "show me the review".
 
-The terminal app links `review-ui`, which is GPL-3.0-or-later because its highlighting queries are
-copied from Zed.
+The terminal app links `review-ui`, which is GPL-3.0-or-later.
 A binary that contains the app is therefore GPL-3.0-or-later too.
 The alternatives considered were:
 

@@ -1,0 +1,12 @@
+{# A ledger entry as a card. #}
+<article class="card">
+  <h2>{{ entry.title|e }}</h2>
+  {% if entry.tags is not empty %}
+    <ul class="tags">
+      {% for tag in entry.tags %}
+        <li>{{ tag|lower }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  <footer>{{ entry.amount|number_format(2, '.', ',') }}</footer>
+</article>

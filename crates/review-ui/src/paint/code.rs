@@ -12,7 +12,7 @@ use crate::find::Match;
 use crate::model::buffer::Marker;
 use crate::model::{Mode, Model};
 use crate::rows::{Body, Cell, FullText, Row, RowKind};
-use crate::syntax::{SideSyntax, Span};
+use crate::syntax::{SideSyntax, Span, Tone};
 use crate::text::{Column, Pane, Selection, TextPos};
 use crate::theme::{self, Theme};
 
@@ -270,7 +270,8 @@ pub fn clipped(cells: usize, offset: f64, room: f64) -> bool {
     crate::scroll::rows(cells) - offset > room
 }
 
-/// Syntax colors for the runs of one line that lie within its first `len` bytes.
+/// Syntax colors for the runs of one line that lie within its first `len` bytes; headings and
+/// strong markup are bold and emphasized markup italic, as well as colored.
 #[must_use]
 pub fn syntax_runs(theme: &Theme, spans: &[Span], len: usize) -> Layer {
     spans
@@ -279,7 +280,11 @@ pub fn syntax_runs(theme: &Theme, spans: &[Span], len: usize) -> Layer {
         .filter_map(|(range, tone)| {
             Some(Run {
                 range: range.clone(),
-                style: Style::text(theme.syntax(*tone)?),
+                style: Style {
+                    bold: matches!(tone, Tone::Heading | Tone::Strong),
+                    italic: *tone == Tone::Emphasis,
+                    ..Style::text(theme.syntax(*tone)?)
+                },
             })
         })
         .collect()

@@ -89,7 +89,7 @@ fn demo_is_deterministic() -> eyre::Result<()> {
     assert!(
         builds[0]
             .0
-            .contains("refs/demo/feature-1 08990e0fb3a2171c575605751fcc121d6de429be"),
+            .contains("refs/demo/head-1 ee89ed68ca5599940656dc184d47a188226e2a52"),
         "{}",
         builds[0].0
     );

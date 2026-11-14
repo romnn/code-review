@@ -1,0 +1,19 @@
+# Defaults for the ledger chart; helmfile overrides them per environment.
+replicaCount: 2
+
+image:
+  repository: ghcr.io/example/ledger
+  tag: ""
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  host: ledger.example.com
+
+reconcile:
+  schedule: "*/15 * * * *"
+  limit: 250

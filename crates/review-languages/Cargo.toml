@@ -1,0 +1,32 @@
+[package]
+name = "review-languages"
+description = "The languages review-ui highlights, from one manifest, the tree-sitter grammars it fetches at the revisions Helix pins and compiles, and the Helix queries it embeds"
+# This crate's own code; the grammars it fetches and compiles keep their licenses, which
+# `LICENSES` carries, and Helix's queries it embeds keep theirs, which `QUERIES_LICENSE` carries.
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+tree-sitter-language.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+indoc.workspace = true
+prettyplease.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+review-grammar-sources.workspace = true
+syn.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+tree-sitter.workspace = true
+
+[lints]
+workspace = true

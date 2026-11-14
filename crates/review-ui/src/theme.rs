@@ -243,6 +243,15 @@ impl Theme {
             Tone::Special => "special",
             Tone::Tag => "tag",
             Tone::Escape => "escape",
+            Tone::Heading => "heading",
+            Tone::Emphasis => "emphasis",
+            Tone::Strong => "strong",
+            Tone::Link => "link",
+            Tone::Raw => "raw",
+            Tone::List => "list",
+            Tone::Quote => "quote",
+            Tone::Inserted => "inserted",
+            Tone::Deleted => "deleted",
         };
         self.syntax.get(key).copied()
     }
@@ -349,19 +358,26 @@ pub fn all(user_dir: Option<&Path>) -> (Vec<Theme>, Vec<String>) {
 mod tests {
     use super::*;
 
-    /// Every built-in theme parses and defines every syntax tone.
+    /// Every built-in theme parses and colors every syntax tone but plain, and names no tone
+    /// that does not exist.
     #[test]
     fn built_in_themes_are_complete() {
         assert_eq!(BUILT_IN.len(), 14);
         for text in BUILT_IN {
             let theme = Theme::parse(text).unwrap();
-            for tone in [Tone::Keyword, Tone::String, Tone::Comment, Tone::Function] {
+            for tone in Tone::ALL.into_iter().filter(|tone| *tone != Tone::Plain) {
                 assert!(
                     theme.syntax(tone).is_some(),
                     "{} lacks {tone:?}",
                     theme.name
                 );
             }
+            assert_eq!(
+                theme.syntax.len(),
+                Tone::ALL.len() - 1,
+                "{} colors something other than the syntax tones",
+                theme.name
+            );
         }
         let (themes, problems) = all(None);
         assert_eq!(

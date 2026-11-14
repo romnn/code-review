@@ -9,7 +9,7 @@ expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[6,17\],"hunks":\[13,27\],"auto_approved":6\}
+expect "progress":\{"files":\[6,52\],"hunks":\[13,74\],"auto_approved":6\}
 shot 01-open
 
 include scripts/qa/smoke-common.qa
@@ -466,9 +466,9 @@ expect "selected":"src/engine.rs"
 # Ctrl+G searches contents with a preview; a hit inside a hunk opens the diff at that hunk, and
 # Tab widens the search to the whole tree, whose unchanged files open read-only.
 key ctrl-g
-key r e c o n c i l e
+key f n space r e c o n c i l e
 state
-expect "kind":"Content","scope":"Changed","query":"reconcile"
+expect "kind":"Content","scope":"Changed","query":"fn reconcile"
 expect "path":"src/engine.rs","line":43
 shot 13-content-search
 key enter
@@ -491,7 +491,7 @@ key escape
 
 # Enter typed before the search answers opens the newest query's first hit, not an older one.
 key ctrl-g
-key r e c o n c i l e enter
+key f n space r e c o n c i l e enter
 state
 expect "overlay":null
 expect "status":"src/engine.rs:44"

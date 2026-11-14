@@ -1,0 +1,17 @@
+{
+  "listen": "0.0.0.0:{{ .Port }}",
+  "database": {
+    "url": "{{ .DatabaseURL }}",
+    "pool": {{ .PoolSize | default 10 }}
+  },
+  "reconcile": {
+    "limit": {{ .ReconcileLimit }},
+    "currencies": [
+      {{- range $index, $currency := .Currencies }}
+      {{- if $index }},{{ end }}
+      "{{ $currency }}"
+      {{- end }}
+    ]
+  },
+  "debug": {{ .Debug }}
+}

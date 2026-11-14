@@ -1,0 +1,506 @@
+# The languages cr highlights, one row each, and the one source of truth of review-ui's registry
+# (ADR 3).
+# build.rs fetches and compiles the grammar of every tree-house-tier row that pins one, fetches
+# Helix's queries at the `helix` commit and embeds them, and generates `LANGUAGES` from the rows.
+#
+# A row has:
+#
+# - `name`: Helix's name for the language, which injections use, such as `markdown.inline`.
+# - `tier`, named for the project whose work highlights the row: `tree-house`, highlighted by
+#   tree-house with its grammar and Helix's queries under `runtime/queries/<queries>/`, with every
+#   directory their `; inherits:` lines name, or `bat`, highlighted by syntect with the bat syntax
+#   `bat` names.
+# - Its grammar: `proof`, the language of review-core's formatting proof whose grammar crate it
+#   shares and whose scopes it shows, or `[language.grammar]`, fetched from `git` at `rev`, in
+#   `subpath` when the grammar is not the repository's root.
+#   The fetched grammar's `sources` under `src/` are compiled, its `license-file` (LICENSE by
+#   default) has the SPDX `license`, and its C entry point is `tree_sitter_<name>`, where `name`
+#   is the row's unless the grammar names another.
+# - `aliases` and `injection-regex`: the names fences and injections call it by, matched whole and
+#   ignoring case.
+# - Its detection: `extensions` without the dot, whole `filenames`, `globs` over the path, where
+#   `*` also crosses `/`, and the interpreters of a `#!` line in `shebangs`.
+# - `bat`: the bat syntax that highlights the row in the bat tier, kept by hand.
+# - `data`, for a template language: the `nodes` of its grammar that hold the template's literal
+#   text, which is highlighted as the language of the file the template produces, such as YAML
+#   for `values.yaml.gotmpl`.
+# - `local-queries = true`: the row's queries are cr's own, under `queries/<queries>/` beside
+#   this manifest, rather than Helix's.
+#
+# A language moves between the tiers by its `tier` alone.
+# Its names and detection stay, and its grammar stays pinned for when it moves back, but only the
+# tree-house tier's grammars are compiled and its queries embedded.
+#
+# `task grammars:sync -- <helix commit>` moves every row to that commit of Helix: its grammar's
+# `git`, `rev` and `subpath`, its detection and its injection regex, as Helix's languages.toml has
+# them.
+# `locked = true` keeps it from moving a row, and a list of fields, such as
+# `locked = ["extensions"]`, keeps only those; `grammar` stands for the grammar's pin.
+
+helix = "a714a818a3a4f6dd5aad3b003a78692f90a1703f"
+
+[[language]]
+name = "rust"
+tier = "tree-house"
+queries = "rust"
+proof = "rust"
+injection-regex = "rs|rust"
+extensions = ["rs"]
+shebangs = ["rust-script", "cargo"]
+
+[[language]]
+name = "python"
+tier = "tree-house"
+queries = "python"
+proof = "python"
+aliases = ["python3", "py3"]
+injection-regex = "py(thon)?"
+# spellcheck:ignore-next-line
+extensions = ["py", "pyi", "py3", "pyw", "ptl", "rpy", "cpy", "ipy", "pyt"]
+filenames = [".python_history", ".pythonstartup", ".pythonrc"]
+globs = ["*SConstruct", "*SConscript", "*sconstruct"]
+shebangs = ["python", "uv"]
+
+# review-core parses JavaScript with the TSX grammar, whose trees Helix's JavaScript queries
+# do not fit, so it takes TSX's queries, and `.jsx`, which Helix gives a language of its own.
+[[language]]
+name = "javascript"
+tier = "tree-house"
+queries = "tsx"
+proof = "javascript"
+aliases = ["jsx", "mjs", "cjs", "node"]
+injection-regex = "(js|javascript)"
+extensions = ["js", "mjs", "cjs", "jsx", "rules", "es6", "pac", "gs"]
+filenames = [".node_repl_history", "jakefile"]
+shebangs = ["node"]
+locked = ["extensions"]
+
+[[language]]
+name = "typescript"
+tier = "tree-house"
+queries = "typescript"
+proof = "typescript"
+aliases = ["mts", "cts"]
+injection-regex = "(ts|typescript)"
+extensions = ["ts", "mts", "cts"]
+shebangs = ["deno", "bun", "ts-node"]
+
+[[language]]
+name = "tsx"
+tier = "tree-house"
+queries = "tsx"
+proof = "tsx"
+injection-regex = "(tsx)"
+extensions = ["tsx"]
+
+[[language]]
+name = "go"
+tier = "tree-house"
+queries = "go"
+proof = "go"
+aliases = ["golang"]
+injection-regex = "go"
+extensions = ["go"]
+
+[[language]]
+name = "json"
+tier = "tree-house"
+queries = "json"
+proof = "json"
+aliases = ["jsonc", "jsonl"]
+injection-regex = "json"
+extensions = [
+  "json", "arb", "ipynb", "geojson", "gltf", "webmanifest", "js.map", "ts.map", "css.map", "jsonl",
+  "avsc", "ldtk", "ldtkl", "sublime-build", "sublime-color-scheme", "sublime-commands",
+  "sublime-completions", "sublime-keymap", "sublime-macro", "sublime-menu", "sublime-mousemap",
+  "sublime-project", "sublime-settings", "sublime-theme", "sublime-workspace", "code-workspace",
+  "tfstate",
+]
+filenames = [
+  "flake.lock", ".babelrc", ".bowerrc", ".jscrc", ".jslintrc", ".vuerc", "composer.lock",
+  ".watchmanconfig", ".swift-format", "devenv.lock", "devbox.lock", "manifest.lock", "deno.lock",
+]
+globs = [".pytest_cache/v/cache/*", "*.tfstate.backup"]
+
+[[language]]
+name = "toml"
+tier = "tree-house"
+queries = "toml"
+proof = "toml"
+injection-regex = "toml"
+extensions = ["toml"]
+filenames = [
+  "pdm.lock", "poetry.lock", "Cargo.lock", "uv.lock", "containers.conf", "mounts.conf",
+  "policy.conf", "registries.conf", "storage.conf", "staticcheck.conf",
+]
+globs = ["containers.conf.d/*.conf", "containers.conf.modules/*.conf"]
+
+[[language]]
+name = "bash"
+tier = "tree-house"
+queries = "bash"
+aliases = ["shellscript", "ksh"]
+injection-regex = "(shell|bash|zsh|sh)"
+extensions = [
+  "sh", "bash", "ash", "dash", "ksh", "mksh", "zsh", "zshenv", "zlogin", "zlogout", "zprofile",
+  "zshrc", "eclass", "ebuild", "bazelrc", "Renviron", "zsh-theme", "cshrc", "tcshrc",
+  "bashrc_Apple_Terminal", "zshrc_Apple_Terminal",
+]
+filenames = [
+  ".tmux.conf", "tmux.conf", ".sh_history", ".bash_history", ".bash_login", ".bash_logout",
+  ".bash_profile", ".bashrc", ".profile", ".zshenv", ".zlogin", ".zlogout", ".zprofile", ".zshrc",
+  ".zimrc", "APKBUILD", ".bash_aliases", "bash_completion", ".Renviron", ".xprofile", ".xsession",
+  ".xsessionrc", ".yashrc", ".yash_profile", ".hushlogin", ".xinitrc", "xinitrc", ".xserverrc",
+  "xserverrc", "direnvrc",
+]
+globs = [
+  "i3/config", "sway/config", "bash-completion/completions/*", "bash_completion.d/*",
+  "bin/activate",
+]
+shebangs = ["sh", "bash", "dash", "zsh"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-bash"
+rev = "a06c2e4415e9bc0346c6b86d401879ffb44058f7"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "markdown"
+tier = "tree-house"
+queries = "markdown"
+injection-regex = "md|markdown"
+extensions = [
+  "md", "livemd", "markdown", "mdx", "mkd", "mkdn", "mdwn", "mdown", "markdn", "mdtxt", "mdtext",
+  "workbook",
+]
+filenames = ["PULLREQ_EDITMSG"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+rev = "f969cd3ae3f9fbd4e43205431d0ae286014c05b5"
+subpath = "tree-sitter-markdown"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "markdown.inline"
+tier = "tree-house"
+queries = "markdown.inline"
+injection-regex = "markdown\\.inline"
+
+[language.grammar]
+name = "markdown_inline"
+git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+rev = "f969cd3ae3f9fbd4e43205431d0ae286014c05b5"
+subpath = "tree-sitter-markdown-inline"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "yaml"
+tier = "tree-house"
+queries = "yaml"
+injection-regex = "yml|yaml"
+extensions = ["yml", "yaml", "sublime-syntax", "bu"]
+filenames = [
+  ".prettierrc", ".clangd", ".clang-format", ".clang-tidy", "yarn.lock", ".stylelintrc",
+  ".puppeteerrc",
+]
+globs = [".gem/credentials", ".kube/config", ".kube/kuberc", ".bundle/config"]
+
+# Its scanner is C++, which includes schema.generated.cc itself.
+[language.grammar]
+git = "https://github.com/ikatyang/tree-sitter-yaml"
+rev = "0e36bed171768908f331ff7dff9d956bae016efb"
+sources = ["parser.c", "scanner.cc"]
+license = "MIT"
+
+# `.h` is C, the deterministic default for a header both C and C++ use; Helix makes it C++.
+[[language]]
+name = "c"
+tier = "tree-house"
+queries = "c"
+injection-regex = "c"
+extensions = ["c", "h", "h.in"]
+locked = ["extensions"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-c"
+rev = "b780e47fc780ddc8da13afa35a3f4ed5c157823d"
+sources = ["parser.c"]
+license = "MIT"
+
+# Without `.h`, which is C; Helix's `.hpp.in` glob only matches a file of that name, so it is
+# an extension here.
+[[language]]
+name = "cpp"
+tier = "tree-house"
+queries = "cpp"
+aliases = ["c++", "cxx", "cc", "hpp"]
+injection-regex = "cpp"
+extensions = [
+  "cc", "hh", "c++", "cpp", "hpp", "ipp", "tpp", "cxx", "hxx", "ixx", "txx", "ino", "C", "H", "cu",
+  "cuh", "cppm", "h++", "ii", "inl", "hpp.in",
+]
+locked = ["extensions", "filenames"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-cpp"
+rev = "8b5b49eb196bec7040441bee33b2c9a4838d6967"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "css"
+tier = "tree-house"
+queries = "css"
+injection-regex = "css"
+extensions = ["css"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-css"
+rev = "dda5cfc5722c429eaba1c910ca32c2c0c5bb1a3f"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "html"
+tier = "tree-house"
+queries = "html"
+aliases = ["htm", "xhtml"]
+injection-regex = "html"
+extensions = [
+  "html", "htm", "shtml", "xhtml", "xht", "jsp", "asp", "aspx", "jshtm", "volt", "rhtml", "cshtml",
+]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-html"
+rev = "73a3947324f6efddf9e17c0ea58d454843590cc0"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "diff"
+tier = "tree-house"
+queries = "diff"
+aliases = ["patch", "udiff"]
+injection-regex = "diff"
+extensions = ["diff", "patch", "rej"]
+
+[language.grammar]
+git = "https://github.com/the-mikedavis/tree-sitter-diff"
+rev = "2520c3f934b3179bb540d23e0ef45f75304b5fed"
+sources = ["parser.c"]
+license = "MIT"
+
+[[language]]
+name = "dockerfile"
+tier = "tree-house"
+queries = "dockerfile"
+aliases = ["containerfile"]
+injection-regex = "docker|dockerfile"
+extensions = ["Dockerfile", "dockerfile", "Containerfile", "containerfile"]
+filenames = ["Dockerfile", "dockerfile", "Containerfile", "containerfile"]
+globs = ["Dockerfile.*", "dockerfile.*", "Containerfile.*", "containerfile.*"]
+
+[language.grammar]
+git = "https://github.com/camdencheek/tree-sitter-dockerfile"
+rev = "971acdd908568b4531b0ba28a445bf0bb720aba5"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "make"
+tier = "tree-house"
+queries = "make"
+injection-regex = "(make|makefile|Makefile|mk)"
+# spellcheck:ignore-next-line
+extensions = ["make", "mk", "mak"]
+filenames = ["Makefile", "makefile", "GNUmakefile", "OCamlMakefile"]
+shebangs = ["make", "gmake"]
+
+[language.grammar]
+git = "https://github.com/alemuller/tree-sitter-make"
+rev = "a4b9187417d6be349ee5fd4b6e77b4172c6827dd"
+sources = ["parser.c"]
+license = "MIT"
+
+[[language]]
+name = "lua"
+tier = "tree-house"
+queries = "lua"
+injection-regex = "lua"
+extensions = ["lua", "rockspec"]
+shebangs = ["lua", "luajit"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter-grammars/tree-sitter-lua"
+rev = "10fe0054734eec83049514ea2e718b2a56acd0c9"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+license-file = "LICENSE.md"
+
+[[language]]
+name = "ruby"
+tier = "tree-house"
+queries = "ruby"
+aliases = ["rb"]
+injection-regex = "ruby"
+extensions = [
+  "rb", "rake", "irb", "gemspec", "rabl", "jbuilder", "jb", "podspec", "rjs", "rbi", "rbs",
+]
+filenames = [
+  "rakefile", "gemfile", "Rakefile", "Gemfile", "Podfile", "Vagrantfile", "Brewfile", "Guardfile",
+  "Capfile", "Cheffile", "Hobofile", "Appraisals", "Rantfile", "Berksfile", "Berksfile.lock",
+  "Thorfile", "Puppetfile", "Fastfile", "Appfile", "Deliverfile", "Matchfile", "Scanfile",
+  "Snapfile", "Gymfile", ".irbrc", ".simplecov",
+]
+globs = ["*.Brewfile"]
+shebangs = ["ruby"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-ruby"
+rev = "ad907a69da0c8a4f7a943a7fe012712208da6dee"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+[[language]]
+name = "java"
+tier = "tree-house"
+queries = "java"
+injection-regex = "java"
+extensions = ["java", "jav", "pde"]
+
+[language.grammar]
+git = "https://github.com/tree-sitter/tree-sitter-java"
+rev = "e10607b45ff745f5f876bfa3e94fbcc6b44bdc11"
+sources = ["parser.c"]
+license = "MIT"
+
+[[language]]
+name = "powershell"
+tier = "tree-house"
+queries = "powershell"
+aliases = ["ps1"]
+injection-regex = "(pwsh|powershell)"
+extensions = ["ps1", "psm1", "psd1", "pscc", "psrc"]
+shebangs = ["pwsh", "powershell"]
+
+[language.grammar]
+git = "https://github.com/airbus-cert/tree-sitter-powershell"
+rev = "c9316be0faca5d5b9fd3b57350de650755f42dc0"
+sources = ["parser.c", "scanner.c"]
+license = "MIT"
+
+# Template languages: each row's `data` nodes take the language of the file the template
+# produces, and its own injections give their language when the file's name says nothing.
+# Go templates also take `.tmpl`, as Go and chezmoi name them.
+[[language]]
+name = "gotmpl"
+tier = "tree-house"
+queries = "gotmpl"
+injection-regex = "gotmpl"
+extensions = ["gotmpl", "tmpl"]
+data = { nodes = ["text"] }
+locked = ["extensions"]
+
+[language.grammar]
+git = "https://github.com/ngalaiko/tree-sitter-go-template"
+rev = "aa71f63de226c5592dfbfc1f29949522d7c95fac"
+sources = ["parser.c"]
+license = "MIT"
+
+# Helm's templates are Go templates whose text is YAML unless their name says otherwise.
+[[language]]
+name = "helm"
+tier = "tree-house"
+queries = "helm"
+globs = ["templates/*.yaml", "templates/*.yml", "templates/_*.tpl", "templates/NOTES.txt"]
+data = { nodes = ["text"] }
+
+[language.grammar]
+name = "gotmpl"
+git = "https://github.com/ngalaiko/tree-sitter-go-template"
+rev = "aa71f63de226c5592dfbfc1f29949522d7c95fac"
+sources = ["parser.c"]
+license = "MIT"
+
+# Jinja takes cr's fork of cathaysia's grammar, which nvim-treesitter uses, rather than Helix's,
+# whose text is anonymous and whose queries paint expressions as strings.
+# The fork is cathaysia's v0.13.1 without Jinja's optional line syntax, line statements (`# if`)
+# and line comments (`##`), which Jinja enables only when configured to, so such lines are text:
+# `## Heading` in `README.md.j2` is Markdown.
+# Its queries are cr's, derived from the grammar's own.
+[[language]]
+name = "jinja"
+tier = "tree-house"
+queries = "jinja"
+local-queries = true
+aliases = ["nunjucks"]
+injection-regex = "jinja"
+extensions = ["jinja", "jinja2", "j2", "njk"]
+data = { nodes = ["content", "raw_body"] }
+locked = true
+
+[language.grammar]
+git = "https://github.com/romnn/tree-sitter-jinja"
+rev = "68cdfae2d1a3c1fa0563b23f5a56ce36f67b02b6"
+subpath = "tree-sitter-jinja"
+sources = ["parser.c", "scanner.c"]
+license = "Apache-2.0"
+
+[[language]]
+name = "erb"
+tier = "tree-house"
+queries = "erb"
+injection-regex = "erb"
+extensions = ["erb"]
+data = { nodes = ["content"] }
+
+[language.grammar]
+name = "embedded_template"
+git = "https://github.com/tree-sitter/tree-sitter-embedded-template"
+rev = "5bce9d580d3b78f48e13e331f69dfa0abd4ff68b"
+sources = ["parser.c"]
+license = "MIT"
+
+[[language]]
+name = "ejs"
+tier = "tree-house"
+queries = "ejs"
+injection-regex = "ejs"
+extensions = ["ejs"]
+data = { nodes = ["content"] }
+
+[language.grammar]
+name = "embedded_template"
+git = "https://github.com/tree-sitter/tree-sitter-embedded-template"
+rev = "5bce9d580d3b78f48e13e331f69dfa0abd4ff68b"
+sources = ["parser.c"]
+license = "MIT"
+
+[[language]]
+name = "twig"
+tier = "tree-house"
+queries = "twig"
+injection-regex = "twig"
+extensions = ["twig"]
+data = { nodes = ["content"] }
+
+[language.grammar]
+git = "https://github.com/gbprod/tree-sitter-twig"
+rev = "0afd9a6d808944e65a7be393e31868b85345735f"
+sources = ["parser.c"]
+license = "WTFPL"
+license-file = "LICENCE"
+
+# The bat tier.
+# SQL's grammar, tree-sitter-sequel, is a 47 MB parser.c with about 10 MB of parse tables, too
+# much for every `cr` to carry until a comparison shows it highlights SQL better.
+[[language]]
+name = "sql"
+tier = "bat"
+bat = "SQL"
+injection-regex = "sql"
+extensions = ["sql", "dsql"]

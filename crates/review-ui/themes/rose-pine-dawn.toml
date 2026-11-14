@@ -57,3 +57,15 @@ property = "#907aa9"
 special = "#b4637a"
 tag = "#56949f"
 escape = "#286983"
+# Markup colors as Helix's rose_pine_dawn theme picks them, links in their
+# targets' color.
+# Inserted and deleted lines take the diff's text colors.
+heading = "#907aa9"
+emphasis = "#575279"
+strong = "#575279"
+link = "#907aa9"
+raw = "#797593"
+list = "#9893a5"
+quote = "#797593"
+inserted = "#286983"
+deleted = "#b4637a"

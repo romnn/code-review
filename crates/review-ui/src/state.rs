@@ -62,29 +62,38 @@ pub struct MarkJob {
     pub history: Arc<History>,
 }
 
-/// What background work makes of a blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Product {
-    /// Its text, for context lines and the file buffer.
-    Text,
-    /// Its highlighting and scopes.
-    Syntax,
+/// One version of a file: its blob under its path, which together decide its syntax, since the
+/// same blob may be a script under one name and Markdown under another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SideKey {
+    /// The blob.
+    pub oid: ObjectId,
+    /// Its repository-relative path in that version.
+    pub path: String,
 }
 
-/// Work running on blobs, per product: a blob's text and its highlighting are claimed apart, so
-/// a running highlight never keeps its text from loading, and each claim is free again once its
-/// work finishes, so a blob that comes back after its results were pruned is worked on again.
+/// The highlights of one blob as one syntax.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SyntaxKey {
+    /// The blob.
+    pub oid: ObjectId,
+    /// The syntax its text and path resolved to.
+    pub resolved: crate::syntax::Resolved,
+}
+
+/// Blobs whose text is being read: each is claimed once while its read runs, and is free again
+/// once it finishes, so a blob that comes back after its text was pruned is read again.
 #[derive(Debug, Default)]
-pub struct Outstanding(HashSet<(ObjectId, Product)>);
+pub struct Outstanding(HashSet<ObjectId>);
 
 impl Outstanding {
-    /// Claims `product` of `oid` for new work; `false` when that work is already running.
-    pub fn claim(&mut self, oid: &ObjectId, product: Product) -> bool {
-        self.0.insert((oid.clone(), product))
+    /// Claims `oid`'s text for a new read; `false` when that read is already running.
+    pub fn claim(&mut self, oid: &ObjectId) -> bool {
+        self.0.insert(oid.clone())
     }
 
-    /// Frees the claims of finished work, whatever its outcome.
-    pub fn finish(&mut self, claims: &[(ObjectId, Product)]) {
+    /// Frees the claims of finished reads, whatever their outcome.
+    pub fn finish(&mut self, claims: &[ObjectId]) {
         for claim in claims {
             self.0.remove(claim);
         }
@@ -359,31 +368,19 @@ mod tests {
         );
     }
 
-    /// A blob's text and highlighting are claimed apart, each once while its work runs and
-    /// again after it finished, as when its text returns in a later revision (A, then B, then A)
-    /// after its results were pruned.
+    /// A blob's text is claimed once while its read runs and again after it finished, as when
+    /// it returns in a later revision (A, then B, then A) after it was pruned.
     #[test]
     fn finished_work_frees_its_claims() {
         let a = ObjectId::parse(&"a".repeat(40)).unwrap();
         let b = ObjectId::parse(&"b".repeat(40)).unwrap();
         let mut outstanding = Outstanding::default();
-        assert!(outstanding.claim(&a, Product::Syntax));
-        assert!(
-            outstanding.claim(&a, Product::Text),
-            "highlighting a blob never keeps its text from loading"
-        );
-        assert!(
-            !outstanding.claim(&a, Product::Syntax),
-            "running work is not started twice"
-        );
-        outstanding.finish(&[(a.clone(), Product::Syntax), (a.clone(), Product::Text)]);
-        assert!(outstanding.claim(&b, Product::Syntax));
-        outstanding.finish(&[(b, Product::Syntax)]);
-        assert!(
-            outstanding.claim(&a, Product::Syntax),
-            "A is highlighted again when it returns"
-        );
-        assert!(outstanding.claim(&a, Product::Text));
+        assert!(outstanding.claim(&a));
+        assert!(!outstanding.claim(&a), "running work is not started twice");
+        outstanding.finish(std::slice::from_ref(&a));
+        assert!(outstanding.claim(&b));
+        outstanding.finish(&[b]);
+        assert!(outstanding.claim(&a), "A is read again when it returns");
     }
 
     /// A folder covers the files its counts sum, never a deleted file of the same name.

@@ -11,6 +11,8 @@ publish = false
 
 [workspace.dependencies]
 review-core = { path = "crates/review-core" }
+review-grammar-sources = { path = "crates/review-grammar-sources" }
+review-languages = { path = "crates/review-languages" }
 review-ui = { path = "crates/review-ui" }
 review-tui = { path = "crates/review-tui" }
 
@@ -22,13 +24,40 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.144"
 sha2 = "0.11.1"
 thiserror = "2.0.12"
-tree-sitter = "0.27.1"
+# The one tree-sitter runtime in the graph, patched to romnn/tree-sitter below (ADR 3), and the
+# grammar ABI every grammar crate exposes, from the same repository.
+tree-sitter = "0.27.2"
+tree-sitter-language = "0.1.5"
 tree-sitter-go = "0.25"
 tree-sitter-json = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23.2"
+
+# Highlighting dependencies, of review-ui (ADR 3).
+# tree-house links the tree-sitter crate's runtime and compiles no C of its own; its default
+# `fixtures` feature is for its own tests.
+tree-house = { git = "https://github.com/romnn/tree-house", branch = "main", default-features = false }
+ropey = { version = "1.6", default-features = false }
+regex = "1"
+# bat's syntaxes on the pure-Rust fancy-regex engine: two-face's default is Oniguruma, a C library
+# the release cross-builds would have to compile.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+# The tree-house tier's grammars beyond review-core's are fetched at Helix's revisions and
+# compiled by review-languages' build.rs with cc.
+cc = "1.2"
+# review-languages' build script writes its generated module with quote, checks that it parses
+# with syn and formats it with prettyplease.
+prettyplease = "0.3"
+proc-macro2 = { version = "1", default-features = false }
+quote = { version = "1", default-features = false }
+syn = { version = "3", default-features = false, features = ["full", "parsing"] }
+# Hashes cached sources the way git hashes blobs, to check them against the pinned commit.
+sha1_smol = "1.0.1"
+# Kills a timed-out git with its helpers, as one process group.
+rustix = { version = "1.1", default-features = false, features = ["process", "std"] }
 
 # Front-end dependencies: gpui and gpui-component for review-gui, the rest for review-ui and
 # review-tui.
@@ -67,6 +96,15 @@ color-eyre = "0.6"
 # Test dependencies.
 googletest = "0.14"
 tempfile = "3"
+
+# The graph links exactly one tree-sitter runtime, romnn/tree-sitter (ADR 3): v0.27.2 with the
+# parser's explicit-frame stack fix and the query extension tree-house calls.
+# tree-sitter-language comes from the same repository, so the runtime and every grammar crate share
+# one `LanguageFn`.
+# A test in review-ui checks both against `cargo metadata`.
+[patch.crates-io]
+tree-sitter = { git = "https://github.com/romnn/tree-sitter", branch = "main" }
+tree-sitter-language = { git = "https://github.com/romnn/tree-sitter", branch = "main" }
 
 [workspace.lints.rust]
 warnings = { level = "warn", priority = -1 }

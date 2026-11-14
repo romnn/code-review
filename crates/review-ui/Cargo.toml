@@ -1,7 +1,7 @@
 [package]
 name = "review-ui"
 description = "The review front ends' shared model: the review window's state and behavior, configuration, themes, rows and keymap"
-# The syntax highlighting queries are copied from Zed, which is GPL-3.0-or-later.
+# The apps that contain it are GPL-3.0-or-later; see PLAN.md, "License".
 license = "GPL-3.0-or-later"
 version.workspace = true
 edition.workspace = true
@@ -13,20 +13,32 @@ publish.workspace = true
 clap.workspace = true
 nucleo-matcher.workspace = true
 parking_lot.workspace = true
+regex.workspace = true
 review-core.workspace = true
+review-languages.workspace = true
+ropey.workspace = true
 serde.workspace = true
 # QA mode's answers keep their keys in the order they are written, as review-gui's always
 # have through gpui, so every front end's answers read alike.
 serde_json = { workspace = true, features = ["preserve_order"] }
+syntect.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
-tree-sitter.workspace = true
+tree-house.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-language.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
 tree-sitter-toml-ng.workspace = true
+tree-sitter-typescript.workspace = true
+two-face.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+color-eyre.workspace = true
 indoc.workspace = true
 tempfile.workspace = true
 

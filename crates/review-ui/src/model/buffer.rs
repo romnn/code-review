@@ -169,7 +169,7 @@ impl Model {
         let buffer = Buffer {
             id: self.next_buffer_id(),
             origin: Origin::Review(path),
-            syntax: self.blobs.syntax.get(&head.oid).cloned(),
+            syntax: self.blobs.side_syntax(&head),
             lines,
             markers: Arc::new(markers),
             cursor: TextPos { row, col: 0 },
@@ -356,11 +356,14 @@ impl Model {
             return;
         };
         let units = view.units_of_file(&path);
-        let oid = units
+        let syntax = units
             .first()
             .and_then(|&unit| view.file(unit).ok())
-            .and_then(|file| file.new.as_ref().map(|side| side.oid.clone()));
-        let syntax = oid.and_then(|oid| self.blobs.syntax.get(&oid).cloned());
+            .and_then(|file| {
+                file.new
+                    .as_ref()
+                    .and_then(|side| self.blobs.side_syntax(side))
+            });
         if let Some(buffer) = &mut self.buffer {
             buffer.syntax = syntax;
         }

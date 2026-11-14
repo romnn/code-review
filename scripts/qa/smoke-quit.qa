@@ -5,11 +5,11 @@ launch --demo
 file src/compat.rs
 key 0
 state
-expect "progress":\{"files":\[6,17\],"hunks":\[13,27\],"auto_approved":6\}
+expect "progress":\{"files":\[6,52\],"hunks":\[13,74\],"auto_approved":6\}
 rapid key space space space q
 exited
 launch --demo-revision 1
-expect "progress":\{"files":\[7,17\],"hunks":\[16,27\],"auto_approved":6\}
+expect "progress":\{"files":\[7,52\],"hunks":\[16,74\],"auto_approved":6\}
 
 # While quitting waits it takes no new marks, and quitting again drops nothing: of two approvals
 # before q and a third after it, then q again, both approvals before q are recorded, which
@@ -17,8 +17,8 @@ expect "progress":\{"files":\[7,17\],"hunks":\[16,27\],"auto_approved":6\}
 file src/generated/schema.rs
 key 0
 state
-expect "progress":\{"files":\[7,17\],"hunks":\[16,27\],"auto_approved":6\}
+expect "progress":\{"files":\[7,52\],"hunks":\[16,74\],"auto_approved":6\}
 rapid key space space q space q
 exited
 launch --demo-revision 1
-expect "progress":\{"files":\[8,17\],"hunks":\[18,27\],"auto_approved":6\}
+expect "progress":\{"files":\[8,52\],"hunks":\[18,74\],"auto_approved":6\}

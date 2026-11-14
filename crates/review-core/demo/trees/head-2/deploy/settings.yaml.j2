@@ -1,0 +1,16 @@
+# The ledger's settings on {{ inventory_hostname }}.
+ledger:
+  name: {{ ledger_name | default('ledger') }}
+  port: {{ ledger_port }}
+  timeout: {{ ledger_timeout | default(30) }}s
+{% if ledger_debug %}
+  log_level: debug
+{% elif ledger_verbose %}
+  log_level: info
+{% else %}
+  log_level: warn
+{% endif %}
+  currencies:
+{% for currency in ledger_currencies %}
+    - {{ currency | upper }}
+{% endfor %}

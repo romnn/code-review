@@ -16,15 +16,15 @@ expect "revision":"1"
 expect "mode":"Tree"
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[6,17\],"hunks":\[13,27\],"auto_approved":6\}
+expect "progress":\{"files":\[6,52\],"hunks":\[13,74\],"auto_approved":6\}
 expect "layout":\{"sidebar":32\}
 expect "viewport":\[33,1,127,47\]
 shot 01-open
 
 include scripts/qa/smoke-common.qa
 
-# Clicks under an overlay do nothing either: hash.rs's row sits under the sheet.
-click 10 17
+# Clicks under an overlay do nothing either: format.rs's row sits under the sheet.
+click 10 36
 state
 expect "selected":"src/engine.rs"
 expect "overlay":"Help"
@@ -270,7 +270,7 @@ state
 expect "overlay":"Picker"
 expect "area":"Picker"
 expect "kind":"Files","scope":"Changed","query":"eng"
-expect "entries":\[\{"path":"src/engine.rs","line":null,"text":"","changed":true\},\{"path":"config/settings.json"
+expect "entries":\[\{"path":"src/engine.rs","line":null,"text":"","changed":true\},\{"path":"deploy/nginx.conf.j2"
 shot 12-file-finder
 key escape
 state
@@ -288,9 +288,9 @@ expect "selected":"src/engine.rs"
 # Ctrl+G searches contents with a preview; a hit inside a hunk opens the diff at that hunk, and
 # Tab widens the search to the whole tree, whose unchanged files open read-only.
 key ctrl-g
-key r e c o n c i l e
+key f n space r e c o n c i l e
 state
-expect "kind":"Content","scope":"Changed","query":"reconcile"
+expect "kind":"Content","scope":"Changed","query":"fn reconcile"
 expect "path":"src/engine.rs","line":43
 shot 13-content-search
 key enter
@@ -315,7 +315,7 @@ key escape
 # Enter typed before the search answers opens the newest query's first hit, not an older one;
 # a double click on an entry opens it as well.
 key ctrl-g
-key r e c o n c i l e enter
+key f n space r e c o n c i l e enter
 state
 expect "overlay":null
 expect "status":"src/engine.rs:44"
@@ -433,11 +433,11 @@ expect "row_count":3,
 # The mouse in the files: a click on a tree row shows that file, a double click opens its
 # diff, and the wheel scrolls the list under it, three rows a turn, on a screen too short for
 # all of it.
-click 10 17
+click 10 23
 state
 expect "selected":"src/format.rs"
 expect "mode":"Tree"
-click 10 17 2
+click 10 23 2
 state
 expect "selected":"src/format.rs"
 expect "mode":"Diff"
@@ -451,7 +451,7 @@ state
 expect "scroll_offset":3\.0,
 wheel 1 10 6
 state
-expect "tree":\[\{"path":"assets","kind":"Directory","change":null,"progress":"Open","y":1\}
+expect "tree":\[\{"path":".github","kind":"Directory","change":null,"progress":"Open","y":-28\}
 resize 160x50
 
 # The divider between the files and the diff drags, which the next launch remembers, and a

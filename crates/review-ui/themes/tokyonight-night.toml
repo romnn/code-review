@@ -57,3 +57,15 @@ property = "#73daca"
 special = "#f7768e"
 tag = "#f7768e"
 escape = "#bb9af7"
+# Markup colors as Helix's tokyonight theme picks them.
+# Emphasized and strong text keep the text color, as tokyonight.nvim draws them; quotes are dimmed.
+# Inserted and deleted lines take the diff's text colors.
+heading = "#7aa2f7"
+emphasis = "#c0caf5"
+strong = "#c0caf5"
+link = "#1abc9c"
+raw = "#7aa2f7"
+list = "#ff9e64"
+quote = "#a9b1d6"
+inserted = "#9ece6a"
+deleted = "#f7768e"

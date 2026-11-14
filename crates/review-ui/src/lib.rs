@@ -29,7 +29,7 @@
 //! find and selection over rows, scroll arithmetic, the review snapshot on screen, and the
 //! language server client.
 //!
-//! The crate is GPL-3.0-or-later because its syntax highlighting queries are copied from Zed.
+//! The crate is GPL-3.0-or-later, like the apps it is the model of.
 
 pub mod color;
 pub mod config;

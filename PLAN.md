@@ -8,7 +8,7 @@ drowning the real edits. See [prior-work.md](prior-work.md) for the survey this 
 We build the review engine once and put two light front ends on it:
 
 - **review-gui**: a standalone desktop app on `gpui` and `gpui-component`, copying the GPL Zed
-  code it needs (highlighting queries and similar).
+  code it needs.
 - **review-tui**: the same review in a terminal, with the same keys, configuration and behavior.
 
 Both draw a model that knows no UI toolkit, `review-ui`. An earlier plan also built the review
@@ -45,7 +45,8 @@ in full rather than guessing.
 
 - Posting comments to GitHub (export only; posting comes after the MVP).
 - Multi-user or server features; review state is local to one reviewer.
-- Structural (AST) diff rendering. Tree-sitter is used only to prove formatting equivalence.
+- Structural (AST) diff rendering. Tree-sitter proves formatting equivalence and highlights code;
+  it never shapes the diff.
 - AI walkthrough generation inside the app (the CLI emits a prompt and imports the result).
 
 ## Concepts
@@ -466,8 +467,10 @@ The tests in `syntax.rs` and `analysis/build.rs` pin the rules:
 #### Languages
 
 MVP languages: Rust, Python, JavaScript, TypeScript and TSX, Go, JSON and TOML, on the
-crates.io releases of tree-sitter and its grammars. Like Zed, JavaScript is parsed with the TSX
-grammar. Every language above has a justified wrap-site list, so none is dropped;
+romnn/tree-sitter runtime
+([ADR 3](adr/0003-tree-house-highlights-a-curated-set-and-bat-the-rest.md)) and the crates.io
+releases of the grammars. Like Zed, JavaScript is parsed with the TSX grammar. Every language
+above has a justified wrap-site list, so none is dropped;
 TypeScript's list rests on its parser rather than a specification and is the first to drop if
 review finds a construct it cannot justify. Unsupported languages and parse errors are never
 formatting-only; lines whose only difference is whitespace may be dimmed there, but they stay
@@ -677,9 +680,11 @@ change what is being reviewed.
 |---|---|---|---|
 | `crates/review-core` | `review-core` | MIT OR Apache-2.0 | Engine: git layer, snapshots, units, formatting proof, moves, noise, correspondence, walkthroughs, event store, export. Synchronous API; callers run it on their own background threads. |
 | `crates/review-cli` | `review-cli` (binary `cr`) | GPL-3.0-or-later | The one released binary ([ADR 1](adr/0001-cr-is-the-one-binary-and-runs-the-terminal-app.md)): the terminal app without a command, and commands over the engine with `--json` output for agents. GPL because it contains the terminal app. |
-| `crates/review-ui` | `review-ui` | GPL-3.0-or-later | The apps' shared model, free of any UI toolkit: state and behavior, keymap and key matcher, configuration, themes, rows, frame geometry and paint decisions. GPL because its highlighting queries are copied from Zed. |
+| `crates/review-ui` | `review-ui` | GPL-3.0-or-later | The apps' shared model, free of any UI toolkit: state and behavior, keymap and key matcher, configuration, themes, rows, frame geometry, paint decisions and syntax highlighting. GPL like the apps it is the model of; the highlighting queries it reads are Helix's, MPL-2.0, which review-languages embeds. |
 | `crates/review-gui` | `review-gui` | GPL-3.0-or-later | The standalone gpui + gpui-component app, a view over `review-ui`. |
 | `crates/review-tui` | `review-tui` | GPL-3.0-or-later | The ratatui terminal app, a view over the same model; a library `cr` runs, and a `review-tui` binary for the QA scripts, which is not released. |
+| `crates/review-languages` | `review-languages` | MIT OR Apache-2.0 | `languages.toml`, the one manifest of highlighted languages, as a table for review-ui's registry, the tree-house tier's grammars beyond review-core's, which its build script fetches at the commits Helix pins and compiles, and Helix's queries, which it fetches at the manifest's Helix commit and embeds; each grammar keeps its own license, and the queries keep the MPL-2.0 ([ADR 3](adr/0003-tree-house-highlights-a-curated-set-and-bat-the-rest.md)). |
+| `crates/review-grammar-sources` | `review-grammar-sources` | MIT OR Apache-2.0 | review-languages' build dependency that parses and checks the manifest and finds, checks and fetches the grammars' sources, and the binary behind `task grammars:fetch`. |
 
 `review-core` stays embeddable in other applications, editors included: no async runtime, no
 SQLite, no git library, and only small, common dependencies (imara-diff, serde, serde_json,
@@ -980,14 +985,32 @@ it, muted, so it never reads as code.
   `gpui-pre` 0.3.11) once it clears. `gpui-pre-platform` is built with the `wayland` feature only,
   so the Linux build links nothing from X11 and needs only `libxkbcommon-dev` and
   `libfontconfig-dev`.
-- **One tree-sitter.** `gpui-component`'s tree-sitter highlighter is an optional feature and stays
-  off, so the dependency graph has exactly one tree-sitter, the one `review-core` uses, and no `links`
-  conflict.
-- **Syntax highlighting.** `review-ui` runs Zed's `highlights.scm` queries (copied under
-  `crates/review-ui/queries/` with their source commit; TOML's comes with its grammar) on the
-  grammars `review-core` exposes through `Language::grammar`. Each blob is highlighted once, in
-  the background after the first frame, and cached by its object ID; added and unchanged lines
-  take the head's colors and removed lines the base's.
+- **One tree-sitter.** The graph links exactly one tree-sitter runtime, the romnn/tree-sitter fork
+  (v0.27.2 with the parser's explicit-frame stack fix and the query extension tree-house calls),
+  patched in for `tree-sitter` and `tree-sitter-language` alike, so review-core's proof,
+  tree-house and every grammar share one runtime and one `LanguageFn`
+  ([ADR 3](adr/0003-tree-house-highlights-a-curated-set-and-bat-the-rest.md)). tree-house's fork
+  compiles no C of its own, and `gpui-component`'s tree-sitter highlighter is an optional feature
+  that stays off. `crates/review-ui/tests/one_runtime.rs` checks the locked graph.
+- **Syntax highlighting.** Two tiers, chosen per language in one manifest,
+  `crates/review-languages/languages.toml` (`review_ui::syntax`,
+  [ADR 3](adr/0003-tree-house-highlights-a-curated-set-and-bat-the-rest.md)):
+  a curated set of 29 languages parsed by tree-house with their tree-sitter grammars and Helix's
+  queries, injections and locals included, and bat's syntaxes through syntect for every other
+  file. Six of them are template languages (Go templates, Helm, Jinja, ERB, EJS and Twig),
+  whose literal text is highlighted as the language of the file they produce, in either tier:
+  `values.yaml.gotmpl` as YAML, `nginx.conf.j2` as bat's nginx. The grammars beyond
+  review-core's are fetched at the commits Helix pins, and the queries at the manifest's Helix
+  commit, by review-languages' build script, so a checkout's first build needs network or
+  `task grammars:fetch` beforehand, and
+  `task grammars:sync -- <commit>` follows a newer Helix. An injection tree-house
+  has no row for, such as a Kotlin fence in Markdown, goes to bat over exactly its ranges. Each
+  version of a file resolves its syntax from its own path and text (file name, glob and
+  extension, in the registry and then bat, then the `#!` line), and is highlighted once per blob
+  and resolved syntax, its breadcrumbs' scopes included, within a two-second budget past which
+  the rest stays plain. Files are highlighted one at a time in the
+  background after the first frame, the selected one first, each landing on its own; added and
+  unchanged lines take the head's colors and removed lines the base's.
 - **Scope breadcrumbs.** `review_core::scope` finds named scopes (`impl Ledger › fn apply`,
   `class Parser › def parse`, `func (*Ledger) Apply`, `[package]`) for every supported language,
   and `RevisionView::scope` gives a unit's breadcrumb, read from the head, or from the base for a
@@ -1065,9 +1088,11 @@ model's state onto its surface and its input onto model calls, and runs the effe
 queues. Anything the two apps share that is not engine logic belongs here; engine logic still
 belongs in `review-core`, so that the engine stays usable on its own.
 
-- **License.** `review-ui` is GPL-3.0-or-later because Zed's `highlights.scm` queries are copied
-  into `crates/review-ui/queries/`. Both apps link it, and `cr` contains the terminal app, so
-  they are GPL too; `review-core` stays MIT OR Apache-2.0.
+- **License.** `review-ui` is GPL-3.0-or-later, the license of the apps it is the shared model of:
+  both apps link it, and `cr` contains the terminal app. Its highlighting queries are Helix's,
+  MPL-2.0, which review-languages embeds unmodified, and they, the grammars review-languages
+  compiles and bat's syntaxes keep their notices in `THIRD-PARTY-SYNTAXES`, which release archives
+  ship. `review-core` stays MIT OR Apache-2.0.
 - **Model.** `model::Model` is the whole review window apart from its drawing: the snapshot on
   screen, the selected file and hunk, the mode, marks waiting for the engine, folds, find,
   pickers, settings and the file buffer. It is shaped like model-view-update: input arrives as an
@@ -1122,7 +1147,7 @@ belongs in `review-core`, so that the engine stays usable on its own.
   stale one. An outcome that must land whatever changed says so by name, `Always` with its
   reason: the opening, a save of marks or folded folders, whose failure must reach the reviewer
   and which quitting waits for, a refresh, which only adds newer history, and blob texts and
-  highlights, keyed by content.
+  highlights, keyed by content (highlights by blob and the syntax it resolved to).
 - **Geometry and scrolling.** The model owns every list's offset, in rows. Each frame the front
   end measures a `frame::Geometry` once, plain data in its units (logical pixels or cells): the
   diff pane's and lists' widths, the narrower half of a side-by-side row, each list's height and

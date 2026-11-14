@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Builds the ledger and runs it on a generated journal, to try it without installing it.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: bin/demo [--reconcile] [--entries N]
+
+Generates a random journal, prints the balances and, with --reconcile, checks them against
+config/settings.json.
+USAGE
+}
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+entries=12
+reconcile=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reconcile) reconcile=true ;;
+    --entries) entries="${2:?--entries needs a number}" && shift ;;
+    -h | --help) usage && exit 0 ;;
+    *) usage >&2 && exit 2 ;;
+  esac
+  shift
+done
+
+journal="$(mktemp "${TMPDIR:-/tmp}/ledger-demo.XXXXXX")"
+trap 'rm -f -- "$journal"' EXIT
+
+accounts=(assets:cash assets:bank expenses:food income:salary)
+for ((day = 1; day <= entries; day++)); do
+  account="${accounts[RANDOM % ${#accounts[@]}]}"
+  printf '2024-01-%02d %s %d\n' "$day" "$account" "$((RANDOM % 5000 - 2500))"
+done >"$journal"
+
+cargo build --quiet --release --manifest-path "$root/Cargo.toml"
+ledger="$root/target/release/ledger"
+"$ledger" balances "$journal"
+if [[ "$reconcile" == true ]]; then
+  "$ledger" reconcile --expected "$root/config/settings.json" "$journal" || {
+    echo "some accounts do not reconcile" >&2
+    exit 1
+  }
+fi
