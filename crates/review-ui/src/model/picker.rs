@@ -591,10 +591,11 @@ impl Model {
         self.highlighting += 1;
         self.spawn(Subject::Revision(revision), move || {
             let text = read_text(&review, &oid);
-            let syntax = text.as_ref().and_then(|text| {
-                review_core::syntax::Language::from_path(&path)
-                    .map(|_| Arc::new(crate::syntax::analyze(&path, &text.lines.join("\n"))))
-            });
+            // A text blob under the size limit, which `read_text` checks, is highlighted
+            // whatever its name: detection reads its first line too.
+            let syntax = text
+                .as_ref()
+                .map(|text| Arc::new(crate::syntax::analyze(&path, &text.lines.join("\n"))));
             Outcome::Unchanged(Unchanged {
                 path,
                 line,

@@ -4,6 +4,7 @@ extend-exclude = [
   # Verbatim license texts.
   "LICENSE-*",
   "crates/*/LICENSE",
+  "THIRD-PARTY-SYNTAXES",
 ]
 
 [default]

@@ -1,0 +1,19 @@
+{% extends "base.html.jinja" %}
+{% block content %}
+<h1>{{ ledger.name | title }}</h1>
+{% if entries %}
+<table class="entries">
+  {% for entry in entries %}
+  <tr class="{{ loop.cycle('odd', 'even') }}">
+    <td>{{ entry.date }}</td>
+    <td class="amount">{{ entry.amount | round(2) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% elif archived %}
+<p class="notice">This ledger is archived.</p>
+{% else %}
+<p>No entries yet.</p>
+{% endif %}
+{% raw %}<code>{{ entry.amount }}</code>{% endraw %} shows an amount.
+{% endblock %}

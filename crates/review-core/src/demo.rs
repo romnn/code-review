@@ -106,7 +106,7 @@ struct BinarySpec {
 
 #[derive(Debug, Deserialize)]
 struct RevisionSpec {
-    target: String,
+    base: String,
     head: String,
 }
 
@@ -275,7 +275,7 @@ fn move_refs(repo: &Repo, manifest: &Manifest, revision: RevisionNumber) -> Resu
         .get(revision.index())
         .ok_or_else(|| demo_error(format!("no demo revision {revision}")))?;
     for (branch, tree) in [
-        ("refs/heads/main", &spec.target),
+        ("refs/heads/main", &spec.base),
         ("refs/heads/feature", &spec.head),
     ] {
         let commit = repo.resolve_commit(&format!("refs/demo/{tree}"))?;

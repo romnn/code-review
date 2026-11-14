@@ -1,0 +1,7 @@
+<li class="entry<%= entry.reconciled ? ' reconciled' : '' %>">
+  <span class="date"><%= entry.date %></span>
+  <span class="amount"><%= entry.amount.toFixed(2) %></span>
+  <% if (entry.note) { %>
+    <em><%- entry.note %></em>
+  <% } %>
+</li>

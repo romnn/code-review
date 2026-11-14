@@ -361,7 +361,7 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let engine = std::fs::read_to_string(
-            review_core::demo::fixture_dir().join("trees/feature-1/src/engine.rs"),
+            review_core::demo::fixture_dir().join("trees/head-1/src/engine.rs"),
         )
         .unwrap();
         let lay_out = |approved| {

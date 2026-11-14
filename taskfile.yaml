@@ -101,6 +101,28 @@ tasks:
         cmds:
             - scripts/screenshots/run.sh --gallery {{.CLI_ARGS}}
 
+    grammars:fetch:
+        desc: "fill crates/review-languages/_cache with every pinned grammar and Helix's queries, for offline builds; -- --into <dir> also prepares a directory for CODE_REVIEW_GRAMMARS_DIR"
+        cmds:
+            - cargo run --quiet --locked -p review-grammar-sources -- {{.CLI_ARGS}}
+
+    grammars:sync:
+        desc: "move the grammars and highlighting queries to a Helix commit, e.g. task grammars:sync -- <commit>"
+        cmds:
+            - uv run --script scripts/grammars/sync.py {{.CLI_ARGS}}
+
+    grammars:sync:check:
+        desc: "check the grammar sync's manifest rewriting on a small manifest, offline"
+        cmds:
+            - uv run --script scripts/grammars/sync.py --self-test
+
+    third-party:
+        desc: "write THIRD-PARTY-SYNTAXES again from review-languages' query and grammar licenses and the bat syntaxes two-face embeds"
+        env:
+            REVIEW_WRITE_THIRD_PARTY: "1"
+        cmds:
+            - cargo nextest run -P default -p review-ui -E 'test(third_party_syntaxes_are_acknowledged)' {{.CLI_ARGS}}
+
     lint:actions:
         desc: "lint GitHub Actions workflows"
         cmds:
@@ -148,16 +170,18 @@ tasks:
         requires:
             vars: [GORELEASER_ARGS]
         cmds:
-            # The image ships zig, cargo-zigbuild, rust and every release target; only goreleaser
-            # is missing. safe.directory: the bind-mounted repo is owned by another uid.
+            # The image ships zig and cargo-zigbuild but not goreleaser, and its Rust lags stable:
+            # rustup installs the current stable over it, and goreleaser adds the release targets.
+            # safe.directory: the bind-mounted repo is owned by another uid.
             - >-
                 docker run --rm -e GITHUB_TOKEN -e TAP_GITHUB_TOKEN -e "HOST_UID=$(id -u)" -e
                 "HOST_GID=$(id -g)" {{.DOCKER_ENV}} -v "${PWD}:/workspace" -w /workspace
                 {{.ZIGBUILD_IMAGE}} bash -euo pipefail -c ' fix_perms() { for d in target
-                goreleaser-dist; do [ -e "$d" ] && chown -R "${HOST_UID}:${HOST_GID}" "$d" || true;
-                done; }; trap fix_perms EXIT; case "$(uname -m)" in x86_64) arch=x86_64 ;;
-                aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch" >&2; exit 1 ;; esac; curl
-                -sSfL
+                goreleaser-dist crates/review-languages/_cache; do [ -e "$d" ] && chown -R
+                "${HOST_UID}:${HOST_GID}" "$d" || true; done; }; trap fix_perms EXIT; case "$(uname
+                -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported
+                arch" >&2; exit 1 ;; esac; rustup toolchain install stable --profile minimal
+                --no-self-update; rustup default stable; curl -sSfL
                 "https://github.com/goreleaser/goreleaser/releases/download/v{{.GORELEASER_VERSION}}/goreleaser_Linux_${arch}.tar.gz"
                 | tar -xz -C /usr/local/bin goreleaser; git config --global --add safe.directory
                 "$(pwd)"; goreleaser {{.GORELEASER_ARGS}}'
@@ -165,6 +189,8 @@ tasks:
     build:goreleaser:
         desc: "cross-build every release target using goreleaser, without release optimizations"
         cmds:
+            # The container builds from the grammar cache, filled here on the host.
+            - task: grammars:fetch
             - task: goreleaser
               vars:
                   GORELEASER_ARGS: "build --snapshot --clean"
@@ -177,6 +203,7 @@ tasks:
     release:
         desc: "release using goreleaser"
         cmds:
+            - task: grammars:fetch
             - task: goreleaser
               vars: { GORELEASER_ARGS: "release --clean" }
 

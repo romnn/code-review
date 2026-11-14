@@ -23,8 +23,8 @@ use super::picker::{Found, PreviewText, Query, Unchanged};
 use super::sync::Tick;
 use super::{Model, Opened};
 use crate::rows::FullText;
-use crate::state::Product;
-use crate::syntax::SideSyntax;
+use crate::state::{SideKey, SyntaxKey};
+use crate::syntax::{Resolved, SideSyntax};
 
 /// What a background job or a timer hands back to the UI thread: what it produced, and what it
 /// was computed for.
@@ -82,7 +82,9 @@ pub(super) enum Because {
 pub(super) enum Outcome {
     /// The review opened, or why it could not.
     Opened(Result<Box<Opened>, String>),
-    /// File texts and highlights read in the background.
+    /// File texts read in the background.
+    TextsRead(TextsRead),
+    /// One file's highlights, made in the background.
     Highlighted(Highlighted),
     /// A mark saved or refused.
     Marked(Marked),
@@ -106,12 +108,20 @@ pub(super) enum Outcome {
     Tick(Tick),
 }
 
-/// File texts and highlights read in the background, by blob.
-pub(super) struct Highlighted {
-    /// What was asked for, which is no longer being read.
-    pub(super) asked: Vec<(ObjectId, Product)>,
+/// File texts read in the background, by blob.
+pub(super) struct TextsRead {
+    /// The blobs asked for, which are no longer being read.
+    pub(super) asked: Vec<ObjectId>,
     pub(super) texts: HashMap<ObjectId, Arc<FullText>>,
-    pub(super) syntax: HashMap<ObjectId, Arc<SideSyntax>>,
+}
+
+/// The versions of one file, highlighted in the background.
+pub(super) struct Highlighted {
+    /// The syntax each version resolved to, plain for binary and oversized ones.
+    pub(super) resolved: HashMap<SideKey, Resolved>,
+    /// The highlights made, by blob and syntax; a version that resolved to highlights already
+    /// made, or to plain, has none here.
+    pub(super) syntax: HashMap<SyntaxKey, Arc<SideSyntax>>,
 }
 
 /// Whether an outcome's subject still shows.
@@ -260,9 +270,13 @@ impl Model {
     /// Stops what marks the job of `outcome` as running, whether or not its outcome lands.
     fn ended(&mut self, outcome: &Outcome) {
         match outcome {
-            Outcome::Highlighted(highlighted) => {
+            Outcome::TextsRead(read) => {
                 self.highlighting = self.highlighting.saturating_sub(1);
-                self.requested.finish(&highlighted.asked);
+                self.requested.finish(&read.asked);
+            }
+            Outcome::Highlighted(_) => {
+                self.highlighting = self.highlighting.saturating_sub(1);
+                self.highlight_running = false;
             }
             Outcome::Unchanged(_) => self.highlighting = self.highlighting.saturating_sub(1),
             Outcome::Marked(_) => self.marking = false,
@@ -328,6 +342,7 @@ impl Model {
     fn land(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Opened(opened) => self.opened(opened),
+            Outcome::TextsRead(read) => self.texts_read(read),
             Outcome::Highlighted(highlighted) => self.highlighted(highlighted),
             Outcome::Marked(marked) => self.marked(marked),
             Outcome::Refreshed(refreshed) => self.refreshed(refreshed),

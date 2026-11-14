@@ -11,10 +11,22 @@ decision changes: an accepted ADR changes only through a new one that supersedes
 - `crates/review-cli`: the `cr` binary, the only one released: the terminal app without a command,
   and commands for scripts and agents (GPL-3.0-or-later, for the app it contains).
 - `crates/review-ui`: the front ends' shared model, free of any UI toolkit (GPL-3.0-or-later,
-  for the `highlights.scm` queries copied from Zed): the review window's state and behavior as
-  actions in and effects out, the keymap and key matcher, configuration, frame geometry and
-  scrolling, and `paint`, every drawing decision that is not geometry. Its themes are TOML data
-  in `crates/review-ui/themes/`, each citing its source palette.
+  like the apps it is the model of): the review window's state and behavior as actions in and
+  effects out, the keymap and key matcher, configuration, frame geometry and scrolling, syntax
+  highlighting, and `paint`, every drawing decision that is not geometry. Its themes are TOML data
+  in `crates/review-ui/themes/`, each citing its source palette. Highlighting follows
+  [ADR 3](adr/0003-tree-house-highlights-a-curated-set-and-bat-the-rest.md): one manifest of
+  languages, tree-house with Helix's queries (MPL-2.0, which review-languages embeds) for a
+  curated set, template languages among them, and bat's syntaxes for the rest.
+- `crates/review-languages`: `languages.toml`, the one manifest of highlighted languages (tier,
+  grammar, queries, names, detection, bat syntax), whose build script checks it, fetches the
+  tree-house tier's grammars beyond review-core's at the commits Helix pins, compiles them,
+  fetches Helix's queries at the manifest's commit, and generates the tables review-ui's
+  registry reads (MIT OR Apache-2.0 for its own code, each grammar under its license, Helix's
+  queries under the MPL-2.0, and its own Jinja queries in `queries/` under the Apache-2.0 of the
+  grammar they derive from). Tuning a language is editing its row.
+  `crates/review-grammar-sources` parses the manifest and finds, checks and fetches the
+  grammars' sources and the queries for it, and runs `task grammars:fetch`.
 - `crates/review-gui`: the gpui + gpui-component desktop app (GPL-3.0-or-later), a view over
   review-ui in the lazygit-style flow described under "Product direction" in PLAN.md.
 - `crates/review-tui`: the ratatui terminal app (GPL-3.0-or-later), a view over the same model
@@ -30,8 +42,10 @@ decision changes: an accepted ADR changes only through a new one that supersedes
   are never formatting-only.
 - `review-core` stays UI-agnostic and embeddable in other applications: synchronous API, no
   async runtime, no SQLite, no git library (shell out to `git` and `gh`), and only small common
-  dependencies. The graph has exactly one tree-sitter; check any new dependency for `links`
-  conflicts with it.
+  dependencies. The graph has exactly one tree-sitter runtime, the romnn/tree-sitter fork that
+  `[patch.crates-io]` selects for `tree-sitter` and `tree-sitter-language`; a grammar crate may
+  depend only on `tree-sitter-language`, and `crates/review-ui/tests/one_runtime.rs` checks the
+  locked graph. Check any new dependency for a runtime of its own or a `links` conflict.
 - Analysis runs against pinned, immutable snapshot IDs. State transitions take `review.lock`
   exclusively and log readers take it shared; the event log is append-only, one newline-terminated
   record per event.
@@ -54,13 +68,21 @@ decision changes: an accepted ADR changes only through a new one that supersedes
 - Use the `task` commands in `taskfile.yaml`: `task check`, `task test`, `task lint`, and before
   calling work done `task lint:fc`, `task test:fc`, `task lint:ast-grep` and `task spellcheck`.
   Builds use the project's own `target/`.
-- Release binaries are cross-built by `task build:goreleaser` in the cargo-zigbuild image, whose
-  Rust (1.93) lags stable: use no standard-library API newer than that. The `build` workflow
-  catches it on every pull request.
+- Release binaries are cross-built by `task build:goreleaser` in the cargo-zigbuild image with
+  the current stable Rust, which the task installs over the image's older one, so local builds,
+  CI and releases all use stable. The `build` workflow runs it on every pull request.
 - Multi-line strings are written out with `indoc!`, `formatdoc!` or `writedoc!`, never with `\n`
   escapes or `concat!`; the ast-grep rules in `.ast-grep/rules/` check it.
 - Tools come from `mise.toml`; on Linux, `task deps:linux` installs the system libraries gpui
   needs.
+- review-languages' build script fetches its grammars and Helix's queries with `git` into the
+  gitignored `crates/review-languages/_cache/` on a checkout's first build, so that build needs
+  network.
+  `task grammars:fetch` fills the cache ahead of an offline build, `CARGO_NET_OFFLINE=true`
+  forbids fetching in both, and `CODE_REVIEW_GRAMMARS_DIR`, absolute or relative to
+  `crates/review-languages`, points at prepared sources instead
+  (`task grammars:fetch -- --into <dir>`). `task grammars:sync -- <helix commit>` moves the
+  pins and the queries to another Helix commit, and `task grammars:sync:check` tests it.
 - Never build Rust under `/tmp`; separate build trees go on disk outside it.
 - Tests that need repositories create small temporary git repos with the `git` CLI.
 - review-gui builds gpui for Wayland only and links only libxkbcommon and fontconfig; at run

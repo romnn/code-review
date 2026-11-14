@@ -42,6 +42,15 @@ jobs:
             - uses: Swatinem/rust-cache@v2
               with:
                   cache-on-failure: true
+            # review-languages' build script fetches the grammars and Helix's queries this cache
+            # holds at their pins.
+            # A pin bump restores the last cache, whose entries are checked on use, so only what
+            # moved is fetched again, and saves a new one under its own key.
+            - uses: actions/cache@v6
+              with:
+                  path: crates/review-languages/_cache
+                  key: grammars-${{ runner.os }}-${{ hashFiles('crates/review-languages/languages.toml', 'crates/review-grammar-sources/src/**') }}
+                  restore-keys: grammars-${{ runner.os }}-
             - name: Feature-combination tests
               # Every failure at once, instead of stopping at the first one.
               run: task test:fc -- --no-fail-fast

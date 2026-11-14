@@ -26,11 +26,14 @@ archives:
       name_template: "code-review_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
       # cr is GPL-3.0-or-later, for the terminal app it contains; the engine inside it is
       # MIT OR Apache-2.0.
+      # THIRD-PARTY-SYNTAXES holds the notices of the grammars, Helix queries and bat syntaxes it
+      # embeds.
       files:
           - src: crates/review-cli/LICENSE
             dst: LICENSE-GPL-3.0
           - LICENSE-MIT
           - LICENSE-APACHE
+          - THIRD-PARTY-SYNTAXES
       format_overrides:
           - goos: windows
             formats: ["zip"]

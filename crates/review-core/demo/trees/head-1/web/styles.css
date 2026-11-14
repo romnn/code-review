@@ -1,0 +1,65 @@
+/* The ledger's look: a calm table with tabular numbers. */
+:root {
+  --fg: #1f2328;
+  --bg: #ffffff;
+  --muted: #59636e;
+  --accent: hsl(212 92% 45%);
+  --negative: #cf222e;
+  --radius: 6px;
+  font-family: system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --bg: #0d1117;
+    --muted: #9198a1;
+    --negative: #ff7b72;
+  }
+}
+
+body {
+  margin: 0;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+table.balances {
+  width: min(100%, 48rem);
+  margin: 1.5rem auto;
+  border-collapse: collapse;
+}
+
+.balances th,
+.balances td {
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 30%, transparent);
+  text-align: left;
+}
+
+.amount {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+tr.negative .amount,
+.mismatches .badge {
+  color: var(--negative);
+}
+
+.badge {
+  margin-left: 0.5em;
+  padding: 0 0.4em;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  font-size: 0.8em;
+}
+
+a:hover,
+a:focus-visible {
+  color: var(--accent);
+}
+
+.error::before {
+  content: "⚠ ";
+}

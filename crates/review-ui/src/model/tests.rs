@@ -1637,9 +1637,9 @@ fn n_and_shift_n_step_through_the_visible_files() {
     host.settle();
     assert_eq!(
         path_at(host.model(), host.model().tree_cursor),
-        "tools/stats.py"
+        "tools/notify.rb"
     );
-    assert_eq!(shown(host.model()), "tools/stats.py", "the file previews");
+    assert_eq!(shown(host.model()), "tools/notify.rb", "the file previews");
     host.dispatch(Action::PreviousFile);
     host.settle();
     assert_eq!(
@@ -1664,9 +1664,9 @@ fn n_and_shift_n_step_through_the_visible_files() {
     );
 
     // The ends stay put.
-    host.update(|model| model.show_file("Cargo.toml"));
+    host.update(|model| model.show_file("Makefile"));
     host.dispatch(Action::NextFile);
-    assert_eq!(shown(host.model()), "Cargo.toml");
+    assert_eq!(shown(host.model()), "Makefile");
     assert_eq!(host.model().status, "This is the last file.");
 
     // A search in the diff takes `n` and `N` for its matches.
@@ -1812,7 +1812,7 @@ fn the_file_header_says_how_long_the_file_is() {
         };
         crate::paint::header::file_header(model, &palette, room, 1.0).unwrap()
     };
-    let engine = include_str!("../../../review-core/demo/trees/feature-1/src/engine.rs");
+    let engine = include_str!("../../../review-core/demo/trees/head-1/src/engine.rs");
     let wide = header(200.0);
     assert_eq!(
         wide.lines.map(|lines| lines.text),
@@ -1888,4 +1888,278 @@ fn enter_and_p_show_a_folded_hunk() {
         .flat_map(|binding| binding.keys.iter().map(String::as_str))
         .collect();
     assert_eq!(fold_keys, ["z a", "p"]);
+}
+
+/// A review of `main..feature` in a new repository under `dir`: `main` holds `base`, and
+/// `feature` changes it to `head`, each a list of paths and contents, a path renamed in `head`
+/// under the same content as git sees it.
+fn review_of(dir: &Path, base: &[(&str, &str)], head: &[(&str, &str)]) -> Review {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            // Isolated from the user's configuration, with a fixed identity.
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    let write = |files: &[(&str, &str)]| {
+        for (path, content) in files {
+            let full = repo.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, content).unwrap();
+        }
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    write(base);
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "--allow-empty", "-m", "base"]);
+    git(&["checkout", "--quiet", "-b", "feature"]);
+    for entry in std::fs::read_dir(&repo).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() != ".git" {
+            let path = entry.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+    write(head);
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "--allow-empty", "-m", "head"]);
+    let review = Review::open(
+        &dir.join("data"),
+        review_core::Repo::discover(&repo).unwrap(),
+        review_core::ReviewTarget::Range {
+            base: "main".to_owned(),
+            head: "feature".to_owned(),
+        },
+    )
+    .unwrap();
+    review.refresh().unwrap();
+    review
+}
+
+/// The highlights of the version of `path` in the shown revision, head or base.
+fn side_syntax(model: &Model, path: &str, head: bool) -> Option<Arc<SideSyntax>> {
+    let view = model.view().unwrap();
+    let analysis = view.analysis().unwrap();
+    analysis
+        .files
+        .iter()
+        .filter_map(|file| {
+            if head {
+                file.new.as_ref()
+            } else {
+                file.old.as_ref()
+            }
+        })
+        .find(|side| side.path == path)
+        .and_then(|side| model.blobs.side_syntax(side))
+}
+
+/// The tone at the start of the zero-based `line` of `syntax`.
+fn first_tone(syntax: &SideSyntax, line: usize) -> crate::syntax::Tone {
+    syntax
+        .line(line)
+        .first()
+        .filter(|(range, _)| range.start == 0)
+        .map_or(crate::syntax::Tone::Plain, |(_, tone)| *tone)
+}
+
+/// One blob under two names is two file versions, each highlighted as its own name's
+/// language, never as whichever was highlighted first.
+#[test]
+fn the_same_blob_under_two_names_highlights_as_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = indoc! {"
+        # heading
+        echo hi
+    "};
+    let review = review_of(
+        dir.path(),
+        &[("keep.txt", "x\n")],
+        &[
+            ("keep.txt", "x\n"),
+            ("notes.sh", content),
+            ("notes.md", content),
+        ],
+    );
+    let host = Host::open(review);
+    let script = side_syntax(host.model(), "notes.sh", true).expect("the script is highlighted");
+    let markdown =
+        side_syntax(host.model(), "notes.md", true).expect("the Markdown is highlighted");
+    assert_eq!(first_tone(&script, 0), crate::syntax::Tone::Comment);
+    assert_eq!(first_tone(&markdown, 0), crate::syntax::Tone::Heading);
+}
+
+/// A rename across a language boundary keeps its blob, and each side takes its own path's
+/// language: the base as a script, the head as Markdown.
+#[test]
+fn a_rename_across_languages_highlights_each_side_by_its_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = indoc! {"
+        # heading
+        echo hi
+        more text
+        and more
+    "};
+    let review = review_of(
+        dir.path(),
+        &[("notes.sh", content)],
+        &[("notes.md", content)],
+    );
+    let host = Host::open(review);
+    let base = side_syntax(host.model(), "notes.sh", false).expect("the base is highlighted");
+    let head = side_syntax(host.model(), "notes.md", true).expect("the head is highlighted");
+    assert_eq!(first_tone(&base, 0), crate::syntax::Tone::Comment);
+    assert_eq!(first_tone(&base, 1), crate::syntax::Tone::Function);
+    assert_eq!(first_tone(&head, 0), crate::syntax::Tone::Heading);
+    assert_eq!(first_tone(&head, 1), crate::syntax::Tone::Plain);
+}
+
+/// A publish that holds only a renamed file's base still rebuilds the selected file, which
+/// the tree shows under its new path, so its removed lines and deletion breadcrumbs take the
+/// base's highlights.
+#[test]
+fn a_base_only_publish_rebuilds_a_renamed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = indoc! {"
+        fn one() {}
+        fn two() {}
+        fn three() {}
+        fn four() {}
+        fn five() {}
+        fn six() {}
+    "};
+    let head = base.replace("fn three() {}", "fn three() { 3 }");
+    let review = review_of(
+        dir.path(),
+        &[("old.rs", base)],
+        &[("new.rs", head.as_str())],
+    );
+    let mut host = Host::open(review);
+    assert_eq!(host.model().selected.as_deref(), Some("new.rs"));
+    let base_syntax = |model: &Model| {
+        model
+            .folds
+            .syntax
+            .get("new.rs")
+            .and_then(|syntax| syntax.base.clone())
+    };
+    assert!(
+        base_syntax(host.model()).is_some(),
+        "both sides start highlighted"
+    );
+
+    // Only the base needs highlighting again, as after a rebase that moved only the base.
+    host.update(|model| {
+        let key = model
+            .selected_sides()
+            .into_iter()
+            .find(|side| side.path == "old.rs")
+            .unwrap();
+        let resolved = model.blobs.resolved.remove(&key).unwrap();
+        model.blobs.syntax.remove(&crate::state::SyntaxKey {
+            oid: key.oid.clone(),
+            resolved,
+        });
+        model.rebuild();
+    });
+    assert!(base_syntax(host.model()).is_none());
+    host.update(Model::request_highlights);
+    host.settle();
+    assert!(
+        base_syntax(host.model()).is_some(),
+        "the base's highlights reach the file shown under its new path"
+    );
+}
+
+/// A deleted script without an extension is read before its syntax is chosen, so its `#!`
+/// line still makes it Bash.
+#[test]
+fn a_deleted_extensionless_script_is_highlighted_by_its_shebang() {
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[
+            ("keep.txt", "x\n"),
+            (
+                "tools/deploy",
+                indoc! {"
+                    #!/usr/bin/env -S bash -e
+                    echo hi
+                "},
+            ),
+        ],
+        &[("keep.txt", "y\n")],
+    );
+    let host = Host::open(review);
+    let base = side_syntax(host.model(), "tools/deploy", false).expect("the base is highlighted");
+    assert_eq!(first_tone(&base, 0), crate::syntax::Tone::Comment);
+    assert_eq!(first_tone(&base, 1), crate::syntax::Tone::Function);
+}
+
+/// Files are highlighted one at a time, the selected one first, and each lands on its own
+/// before the next one starts.
+#[test]
+fn highlights_land_file_by_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+        &[("a.rs", "fn a() { 1 }\n"), ("b.rs", "fn b() { 2 }\n")],
+    );
+    let history = review.history().unwrap();
+    let mut host = Host {
+        driver: Driver::new(Model::new(
+            settings(),
+            Scale::fixed(cells()),
+            fixed_window(),
+        )),
+        jobs: VecDeque::new(),
+        timers: Vec::new(),
+        clocks: Vec::new(),
+        copied: Vec::new(),
+        sheet_steps: Vec::new(),
+        quits: 0,
+        logged: Vec::new(),
+    };
+    let opener: Opener = Box::new(move || {
+        Ok(Loaded {
+            review,
+            history,
+            found: None,
+        })
+    });
+    host.update(|model| model.open(opener));
+    let opening = host.run_job();
+    host.complete(opening);
+    let selected = host.model().selected.clone().unwrap();
+    let other = if selected == "a.rs" { "b.rs" } else { "a.rs" };
+    // The opening read the texts; only the selected file's highlights wait.
+    assert_eq!(host.jobs.len(), 1, "one file is highlighted at a time");
+    let first = host.run_job();
+    host.complete(first);
+    assert!(side_syntax(host.model(), &selected, true).is_some());
+    assert!(
+        side_syntax(host.model(), other, true).is_none(),
+        "the other file waits for its own job"
+    );
+    assert_eq!(host.jobs.len(), 1, "the next file's highlights start");
+    let second = host.run_job();
+    host.complete(second);
+    assert!(side_syntax(host.model(), other, true).is_some());
+    assert!(host.jobs.is_empty(), "nothing is left to highlight");
 }

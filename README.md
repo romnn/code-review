@@ -24,6 +24,10 @@ reformatting and moved code from drowning the real edits.
   wrapping are checked over tree-sitter syntax trees, folded away and approved automatically; real
   edits inside reformatted code stay visible.
 - **Moves are detected**, within and across files, and shown as one line with their edits.
+- **Every common file type is highlighted**: about thirty languages with tree-sitter and Helix's
+  queries, everything else with bat's syntaxes, code fenced in Markdown included. Templates
+  (Helm charts, Go templates, Jinja, ERB, EJS and Twig) highlight their text as the file they
+  produce, such as `values.yaml.gotmpl` as YAML.
 - **Flag and annotate hunks**, then export them as Markdown or JSON to hand back to Claude or
   Codex. Agents can drive the `cr` CLI directly.
 - **Never pretends.** When identity, equivalence or a move is ambiguous, the code is reopened or
@@ -46,6 +50,9 @@ From source:
 ```bash
 cargo install --locked --git https://github.com/romnn/code-review review-cli
 ```
+
+The build fetches the tree-sitter grammars and Helix queries it highlights with from upstream, at
+the commits Helix pins, so it needs `git`, a C and C++ compiler, and network.
 
 The desktop app, `review-gui`, is not released yet. Build it from source with
 `cargo install --locked --git https://github.com/romnn/code-review review-gui`; on Linux it needs
@@ -127,5 +134,11 @@ cr export            # flagged, accepted and annotated units, for an agent
 The engine (`review-core`) is licensed under either of
 [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option. The
 shared app model (`review-ui`), the apps and `cr`, which contains the terminal app, are licensed
-under [GPL-3.0-or-later](crates/review-ui/LICENSE), because they include syntax highlighting
-queries from [Zed](https://github.com/zed-industries/zed).
+under [GPL-3.0-or-later](crates/review-ui/LICENSE).
+
+Syntax highlighting embeds third-party definitions under their own licenses: tree-sitter
+grammars, the tree-sitter queries of [Helix](https://github.com/helix-editor/helix) (MPL-2.0),
+embedded unmodified at the commit `crates/review-languages/languages.toml` names, Jinja queries
+derived from the Jinja grammar's (Apache-2.0), and the syntaxes the
+[bat](https://github.com/sharkdp/bat) project curates. Their notices are collected in
+[THIRD-PARTY-SYNTAXES](THIRD-PARTY-SYNTAXES), which release archives ship next to `cr`.

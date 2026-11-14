@@ -1631,7 +1631,7 @@ mod tests {
             .iter()
             .filter_map(|section| {
                 let path = review_core::demo::fixture_dir()
-                    .join("trees/feature-1")
+                    .join("trees/head-1")
                     .join(&section.path);
                 let text = std::fs::read_to_string(path).ok()?;
                 Some((section.path.clone(), Arc::new(FullText::new(&text))))
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn rows_own_hunks_explicitly() {
         let engine = std::fs::read_to_string(
-            review_core::demo::fixture_dir().join("trees/feature-1/src/engine.rs"),
+            review_core::demo::fixture_dir().join("trees/head-1/src/engine.rs"),
         )
         .unwrap();
         let folds = Folds {
@@ -1886,7 +1886,7 @@ mod tests {
     #[test]
     fn hunks_show_context_and_gaps() {
         let engine = std::fs::read_to_string(
-            review_core::demo::fixture_dir().join("trees/feature-1/src/engine.rs"),
+            review_core::demo::fixture_dir().join("trees/head-1/src/engine.rs"),
         )
         .unwrap();
         let text = Arc::new(FullText::new(&engine));
@@ -1948,7 +1948,7 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let engine = std::fs::read_to_string(
-            review_core::demo::fixture_dir().join("trees/feature-1/src/engine.rs"),
+            review_core::demo::fixture_dir().join("trees/head-1/src/engine.rs"),
         )
         .unwrap();
         let folds = Folds {

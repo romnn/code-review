@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ledger
+description: The ledger service and its web client.
+type: application
+version: 0.3.0
+appVersion: "0.3.0"

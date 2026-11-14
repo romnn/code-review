@@ -695,7 +695,7 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let order = review_core::walkthrough::partition(&view).order();
-        let folds = with_texts(&build(&view, &order, &Folds::default()), "feature-2");
+        let folds = with_texts(&build(&view, &order, &Folds::default()), "head-2");
         let unified = build(&view, &order, &folds);
         // An unchanged line shows on both halves; its left copy counts.
         let lines = |kinds: &[RowKind], rows: &[Row]| -> Vec<String> {
@@ -847,8 +847,8 @@ mod tests {
         let moved = &shown.rows[note];
         let block = nested_block(&shown.rows, note);
         assert!(block.len() > 5, "the edits show paired: {}", block.len());
-        let source = tree_lines("main-1", "src/report.rs");
-        let target = tree_lines("feature-1", "src/format.rs");
+        let source = tree_lines("base-1", "src/report.rs");
+        let target = tree_lines("head-1", "src/format.rs");
         let mut lefts = Vec::new();
         let mut rights = Vec::new();
         for (row, pair) in &block {

@@ -128,7 +128,10 @@ mod tests {
         );
         let review = opened(&["--demo-revision", "2", "--demo-dir", "/isolated/demo"])?.review;
         assert_eq!(review.demo_revision, Some(2));
-        assert_eq!(review.demo_dir.as_deref(), Some(Path::new("/isolated/demo")));
+        assert_eq!(
+            review.demo_dir.as_deref(),
+            Some(Path::new("/isolated/demo"))
+        );
         assert!(opened(&["--demo"])?.review.demo);
         Ok(())
     }

@@ -1,0 +1,10 @@
+The ledger is running as {{ include "ledger.fullname" . }}.
+{{- if .Values.ingress.enabled }}
+
+Open https://{{ .Values.ingress.host }} to use the web client.
+{{- else }}
+
+Forward a port to reach it:
+
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "ledger.fullname" . }} 8080:{{ .Values.service.port }}
+{{- end }}

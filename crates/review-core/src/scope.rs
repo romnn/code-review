@@ -5,8 +5,11 @@
 //! with syntax errors still gets the scopes the parser could recover, and nothing about review
 //! state depends on them.
 
+use std::ops::ControlFlow;
+use std::time::Instant;
+
 use serde::Serialize;
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, ParseOptions, Parser, Tree};
 
 use crate::syntax::Language;
 
@@ -59,23 +62,49 @@ impl ScopeMap {
     /// Parses `text` as `language`.
     #[must_use]
     pub fn new(language: Language, text: &str) -> Self {
+        Self::until(language, text, None).unwrap_or_default()
+    }
+
+    /// Parses `text` as `language`, giving up at `deadline` when one is given: `None` when the
+    /// parse or the walk over its tree did not finish by then.
+    ///
+    /// A caller with a time budget for a file, such as a highlighter running in the
+    /// background, bounds the parse with it; [`ScopeMap::new`] has no deadline.
+    #[must_use]
+    pub fn until(language: Language, text: &str, deadline: Option<Instant>) -> Option<Self> {
+        let passed = |deadline: Option<Instant>| deadline.is_some_and(|at| Instant::now() >= at);
+        // tree-sitter first asks for progress some way into the parse, which a small file
+        // never reaches.
+        if passed(deadline) {
+            return None;
+        }
         let mut parser = Parser::new();
         if parser.set_language(&language.grammar()).is_err() {
-            return Self::default();
+            return Some(Self::default());
         }
-        let Some(tree) = parser.parse(text, None) else {
-            return Self::default();
+        let bytes = text.as_bytes();
+        let mut read = |offset: usize, _| bytes.get(offset..).unwrap_or_default();
+        // tree-sitter asks this every few hundred parser steps.
+        let mut progress = |_: &tree_sitter::ParseState| {
+            if passed(deadline) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
         };
-        Self::from_tree(language, &tree, text)
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let tree = parser.parse_with_options(&mut read, None, Some(options))?;
+        let scopes = collect(language, tree.root_node(), text, deadline)?;
+        Some(Self { scopes })
     }
 
     /// Reads the scopes from `tree`, a parse of `text` as `language`, for callers that parse
     /// the file anyway.
     #[must_use]
     pub fn from_tree(language: Language, tree: &Tree, text: &str) -> Self {
-        let mut scopes = Vec::new();
-        collect(language, tree.root_node(), text, &mut scopes);
-        Self { scopes }
+        Self {
+            scopes: collect(language, tree.root_node(), text, None).unwrap_or_default(),
+        }
     }
 
     /// The scopes that contain the zero-based `line` and started on an earlier line, outermost
@@ -105,20 +134,45 @@ pub fn breadcrumb(scopes: &[&Scope]) -> String {
         .join(" › ")
 }
 
-/// Appends the scopes at and below `node`, depth first.
-fn collect(language: Language, node: Node<'_>, text: &str, scopes: &mut Vec<Scope>) {
-    if let Some((kind, label)) = scope_of(language, node, text) {
-        scopes.push(Scope {
-            kind,
-            label,
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-        });
+/// How many nodes the walk visits between looks at the clock.
+const NODES_PER_CHECK: usize = 4096;
+
+/// The scopes at and below `root`, in document order: a node before its named children, and
+/// those in order, as a depth-first walk visits them.
+///
+/// The walk keeps its own stack instead of recursing, so a deeply nested file, such as JSON
+/// with tens of thousands of nested arrays, cannot overflow the thread's stack.
+/// `None` when `deadline` passes first.
+fn collect(
+    language: Language,
+    root: Node<'_>,
+    text: &str,
+    deadline: Option<Instant>,
+) -> Option<Vec<Scope>> {
+    let mut scopes = Vec::new();
+    let mut pending = vec![root];
+    let mut visited = 0_usize;
+    while let Some(node) = pending.pop() {
+        visited += 1;
+        if visited.is_multiple_of(NODES_PER_CHECK)
+            && deadline.is_some_and(|at| Instant::now() >= at)
+        {
+            return None;
+        }
+        if let Some((kind, label)) = scope_of(language, node, text) {
+            scopes.push(Scope {
+                kind,
+                label,
+                start_line: node.start_position().row,
+                end_line: node.end_position().row,
+            });
+        }
+        // Reversed, so the first child comes off the stack first.
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        pending.extend(children.into_iter().rev());
     }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect(language, child, text, scopes);
-    }
+    Some(scopes)
 }
 
 /// The text of `node`'s field `field`, with its whitespace collapsed to single spaces.
@@ -350,6 +404,65 @@ mod tests {
         "};
         assert_eq!(at(Language::Toml, toml, 1), "[package]");
         assert_eq!(at(Language::Toml, toml, 4), "[[bin]]");
+    }
+
+    /// A deeply nested file walks without recursion: 100,000 nested JSON arrays inside a
+    /// member, far past what a recursive walk survives on a 2 MiB thread, give the member's one
+    /// scope on such a thread.
+    #[test]
+    fn deep_nesting_does_not_overflow_the_stack() {
+        let depth = 100_000;
+        let text = format!("{{\"deep\": {}{}}}", "[".repeat(depth), "]".repeat(depth));
+        let scopes = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || ScopeMap::new(Language::Json, &text))
+            .unwrap()
+            .join()
+            .expect("the walk returns instead of overflowing the stack");
+        let labels: Vec<&str> = scopes
+            .scopes()
+            .iter()
+            .map(|scope| scope.label.as_str())
+            .collect();
+        assert_eq!(labels, ["deep"]);
+    }
+
+    /// A deadline that has passed stops the parse, and no scopes come of it, while the same
+    /// text without one has them.
+    #[test]
+    fn a_passed_deadline_stops_the_parse() {
+        let text = "fn f() {}\n".repeat(20_000);
+        assert_eq!(
+            ScopeMap::until(Language::Rust, &text, Some(Instant::now())),
+            None
+        );
+        let whole = ScopeMap::until(Language::Rust, &text, None).unwrap();
+        assert_eq!(whole.scopes().len(), 20_000);
+        assert_eq!(whole, ScopeMap::new(Language::Rust, &text));
+    }
+
+    /// Scopes keep document order, outer before inner and siblings in order.
+    #[test]
+    fn scopes_come_in_document_order() {
+        let text = indoc! {"
+            mod a {
+                fn one() {}
+                mod b {
+                    fn two() {}
+                }
+                fn three() {}
+            }
+            fn four() {}
+        "};
+        let labels: Vec<String> = ScopeMap::new(Language::Rust, text)
+            .scopes()
+            .iter()
+            .map(|scope| scope.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            ["mod a", "fn one", "mod b", "fn two", "fn three", "fn four"]
+        );
     }
 
     /// Unsupported files have no scopes, and broken files keep what the parser recovers.

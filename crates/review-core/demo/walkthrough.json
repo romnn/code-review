@@ -21,17 +21,45 @@
     },
     {
       "title": "Front end and tools",
-      "why": "Display gains a currency; the stats script reports the maximum.",
-      "units": [{ "path": "web/app.ts" }, { "path": "tools/stats.py" }]
+      "why": "Display gains a currency, the client calls the new reconciliation and a view shows its mismatches; the stats script reports the maximum and a notifier posts mismatches.",
+      "units": [
+        { "path": "web/app.ts" },
+        { "path": "tools/stats.py" },
+        { "path": "web/api.ts" },
+        { "path": "web/view.tsx" },
+        { "path": "web/index.html" },
+        { "path": "web/styles.css" },
+        { "path": "tools/notify.rb" }
+      ]
+    },
+    {
+      "title": "Native and mobile clients",
+      "why": "The C interface, its C++ and JNI wrappers and the schema must agree on how long an account name may be.",
+      "units": [
+        { "path": "native/ffi.h" },
+        { "path": "native/ffi.c" },
+        { "path": "native/bridge.cpp" },
+        { "path": "android/LedgerBridge.java" },
+        { "path": "android/Main.kt" },
+        { "path": "db/migrations/0001_init.sql" },
+        { "path": "config/rules.lua" }
+      ]
     },
     {
       "title": "Packaging",
-      "why": "A new dependency, an executable release script, the new docs link and logo.",
+      "why": "A new dependency, executable scripts and checksummed downloads, tests in the image and CI, the new docs and logo.",
       "units": [
         { "path": "Cargo.toml" },
         { "path": "scripts/release.sh" },
         { "path": "docs/current" },
-        { "path": "assets/logo.bin" }
+        { "path": "assets/logo.bin" },
+        { "path": "scripts/install.sh" },
+        { "path": "scripts/install.ps1" },
+        { "path": "bin/demo" },
+        { "path": "Dockerfile" },
+        { "path": "Makefile" },
+        { "path": ".github/workflows/ci.yaml" },
+        { "path": "docs/guide.md" }
       ]
     }
   ]
