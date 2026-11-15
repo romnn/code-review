@@ -656,11 +656,15 @@ mod tests {
         tree.write("target/debug/build/3/out.o", "binary");
         tree.write("build.log", "noise");
         // Git records no directory's time, which Windows reports when an entry is made in it.
-        #[cfg(unix)]
-        std::fs::File::open(tree.path("src/nested"))
-            .unwrap()
-            .set_modified(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap();
+        // It is set only where each directory is watched on its own, whose events say just
+        // that: FSEvents carries a just-made directory's creation onto its later events, and a
+        // directory's creation counts.
+        if PER_DIRECTORY {
+            std::fs::File::open(tree.path("src/nested"))
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap();
+        }
         stays_asleep(
             &mut waiter,
             "writes git ignores, and a directory's new time",
