@@ -230,7 +230,8 @@ fn tree_row(painter: &mut Painter<'_>, row: &TreeRow, x: u16, y: u16, cells: u16
     painter.piece(at, y, 1, &row.marker, bg);
     at += marker_cells;
     let room = glyph_at.saturating_sub(at + 1);
-    let name = ellipsize_end(&row.name.text, room);
+    // The name's end shows too, as a file's extension or a folder chain's deepest folder.
+    let name = review_ui::paint::display::ellipsize_middle(&row.name.text, usize::from(room));
     let mut brush = Brush::piece(&row.name, bg);
     brush.crossed = row.deleted;
     painter.text(at, y, room, &name, brush);

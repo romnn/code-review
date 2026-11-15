@@ -37,7 +37,7 @@ impl Model {
                 hidden_below = None;
             }
             visible.push(index);
-            if node.kind == NodeKind::Directory && self.tree_collapsed.contains(&node.path) {
+            if self.folded(node) {
                 hidden_below = Some(node.depth);
             }
         }
@@ -239,15 +239,28 @@ impl Model {
         else {
             return false;
         };
+        let folded = close.unwrap_or(!self.folded(node));
         let path = node.path.clone();
-        let folded = close.unwrap_or(!self.tree_collapsed.contains(&path));
+        let folders: Vec<String> = node.directories().map(str::to_owned).collect();
         if folded {
             self.tree_collapsed.insert(path);
         } else {
-            self.tree_collapsed.remove(&path);
+            // Every folder of a chain unfolds with it, so none folds again when the chain
+            // parts.
+            for folder in &folders {
+                self.tree_collapsed.remove(folder);
+            }
         }
         self.update_visible_tree();
         true
+    }
+
+    /// Whether `node` is a folded folder: one whose own fold, or a fold of any folder of its
+    /// chain, hides what it holds.
+    #[must_use]
+    pub fn folded(&self, node: &TreeNode) -> bool {
+        node.directories()
+            .any(|folder| self.tree_collapsed.contains(folder))
     }
 
     /// `h`: folds an open folder, or moves to the parent folder.
@@ -255,8 +268,7 @@ impl Model {
         let Some(node) = self.tree_node() else {
             return;
         };
-        let open_folder =
-            node.kind == NodeKind::Directory && !self.tree_collapsed.contains(&node.path);
+        let open_folder = node.kind == NodeKind::Directory && !self.folded(node);
         if open_folder {
             self.tree_fold(Some(true));
             return;

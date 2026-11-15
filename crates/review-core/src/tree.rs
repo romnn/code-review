@@ -1,5 +1,9 @@
 //! The changed files of a revision as a directory tree, with review counts aggregated per
 //! directory, for file-tree sidebars.
+//!
+//! A directory whose only entry is one directory shows as one node with it, as VS Code's compact
+//! folders and GitHub's file tree show them, so a deep chain such as `src/main/java/com/acme`
+//! takes one row and one level of indent.
 
 use std::collections::BTreeMap;
 
@@ -20,11 +24,14 @@ pub enum NodeKind {
 /// One node of the tree, in display order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TreeNode {
-    /// The last path component.
+    /// The last path component, or for a chain of directories each holding only the next, all
+    /// of theirs joined by `/`.
     pub name: String,
-    /// The repository-relative path, without a trailing slash.
+    /// The repository-relative path, without a trailing slash; a chain's is its deepest
+    /// directory's.
     pub path: String,
-    /// The nesting depth; top-level entries are at 0.
+    /// The nesting depth among the nodes; top-level entries are at 0, and a chain takes one
+    /// level.
     pub depth: usize,
     /// Whether the node is a directory or a file.
     pub kind: NodeKind,
@@ -36,6 +43,28 @@ pub struct TreeNode {
     pub tone: FileTone,
     /// How a file changed; `None` for a directory.
     pub change: Option<FileChangeSummary>,
+}
+
+impl TreeNode {
+    /// The directories the node stands for, outermost first: a directory's own path, each
+    /// directory of a chain, and none for a file.
+    pub fn directories(&self) -> impl Iterator<Item = &str> {
+        let chain = match self.kind {
+            NodeKind::Directory => self.name.matches('/').count() + 1,
+            NodeKind::File => 0,
+        };
+        // The chain's directories are the path's last `chain` prefixes at a `/` or its end.
+        let ends: Vec<usize> = self
+            .path
+            .match_indices('/')
+            .map(|(at, _)| at)
+            .chain(std::iter::once(self.path.len()))
+            .collect();
+        let skip = ends.len().saturating_sub(chain);
+        ends.into_iter()
+            .skip(skip)
+            .filter_map(|end| self.path.get(..end))
+    }
 }
 
 #[derive(Default)]
@@ -78,10 +107,21 @@ fn flatten(
     let mut total = Counts::default();
     let mut strongest = FileTone::Generated;
     for (name, child) in &directory.directories {
+        // A directory holding only one directory joins it, as often as the chain goes on.
+        let mut name = name.clone();
+        let mut child = child;
+        while child.files.is_empty()
+            && let Some((inner, only)) = child.directories.iter().next()
+            && child.directories.len() == 1
+        {
+            name.push('/');
+            name.push_str(inner);
+            child = only;
+        }
         let path = format!("{prefix}{name}");
         let index = nodes.len();
         nodes.push(TreeNode {
-            name: name.clone(),
+            name,
             path: path.clone(),
             depth,
             kind: NodeKind::Directory,
@@ -199,6 +239,108 @@ mod tests {
                 ("src/old.rs", FileTone::Modified),
             ]
         );
+    }
+
+    /// A directory whose only entry is one directory shows as one node with it, named by the
+    /// chain and at the chain's depth, with the deepest directory's path and counts; a directory
+    /// holding a file or two directories stays apart, as a directory holding one file does.
+    #[test]
+    fn single_directory_chains_compact() {
+        let nodes = file_tree(&[
+            file("services/billing/internal/postgres/Repo.java", 0, 1),
+            file("services/billing/internal/postgres/Pool.java", 1, 1),
+            file("src/a/one.rs", 0, 1),
+            file("src/b/two.rs", 0, 1),
+            file("docs/guide/intro.md", 0, 1),
+            file("docs/README.md", 0, 1),
+            file("bin/demo", 0, 1),
+        ]);
+        let shape: Vec<(usize, &str, &str, usize)> = nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.depth,
+                    node.name.as_str(),
+                    node.path.as_str(),
+                    node.counts.units,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, "bin", "bin", 1),
+                (1, "demo", "bin/demo", 1),
+                (0, "docs", "docs", 2),
+                (1, "guide", "docs/guide", 1),
+                (2, "intro.md", "docs/guide/intro.md", 1),
+                (1, "README.md", "docs/README.md", 1),
+                (
+                    0,
+                    "services/billing/internal/postgres",
+                    "services/billing/internal/postgres",
+                    2
+                ),
+                (
+                    1,
+                    "Pool.java",
+                    "services/billing/internal/postgres/Pool.java",
+                    1
+                ),
+                (
+                    1,
+                    "Repo.java",
+                    "services/billing/internal/postgres/Repo.java",
+                    1
+                ),
+                (0, "src", "src", 2),
+                (1, "a", "src/a", 1),
+                (2, "one.rs", "src/a/one.rs", 1),
+                (1, "b", "src/b", 1),
+                (2, "two.rs", "src/b/two.rs", 1),
+            ]
+        );
+    }
+
+    /// A chain that starts below a directory with other entries keeps its parent's prefix.
+    #[test]
+    fn chains_compact_below_the_top_too() {
+        let nodes = file_tree(&[
+            file("src/main/java/App.java", 0, 1),
+            file("src/lib.rs", 0, 1),
+        ]);
+        let shape: Vec<(usize, &str, &str)> = nodes
+            .iter()
+            .map(|node| (node.depth, node.name.as_str(), node.path.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, "src", "src"),
+                (1, "main/java", "src/main/java"),
+                (2, "App.java", "src/main/java/App.java"),
+                (1, "lib.rs", "src/lib.rs"),
+            ]
+        );
+    }
+
+    /// A node stands for its own directory, each directory of its chain, or for a file none.
+    #[test]
+    fn nodes_name_the_directories_they_stand_for() {
+        let nodes = file_tree(&[
+            file("src/main/java/App.java", 0, 1),
+            file("src/lib.rs", 0, 1),
+        ]);
+        let directories = |path: &str| -> Vec<&str> {
+            nodes
+                .iter()
+                .find(|node| node.path == path)
+                .map(|node| node.directories().collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(directories("src"), ["src"]);
+        assert_eq!(directories("src/main/java"), ["src/main", "src/main/java"]);
+        assert_eq!(directories("src/lib.rs"), Vec::<&str>::new());
     }
 
     #[test]

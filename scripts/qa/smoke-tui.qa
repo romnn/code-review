@@ -451,7 +451,7 @@ state
 expect "scroll_offset":3\.0,
 wheel 1 10 6
 state
-expect "tree":\[\{"path":".github","kind":"Directory","change":null,"progress":"Open","y":-28\}
+expect "tree":\[\{"path":".github/workflows","kind":"Directory","change":null,"progress":"Open","y":-26\}
 resize 160x50
 
 # The divider between the files and the diff drags, which the next launch remembers, and a
