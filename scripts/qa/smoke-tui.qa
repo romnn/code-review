@@ -17,8 +17,8 @@ expect "mode":"Tree"
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
 expect "progress":\{"files":\[6,52\],"hunks":\[13,74\],"auto_approved":6\}
-expect "layout":\{"sidebar":32\}
-expect "viewport":\[33,1,127,47\]
+expect "layout":\{"sidebar":31,"fit":true\}
+expect "viewport":\[32,1,128,47\]
 shot 01-open
 
 include scripts/qa/smoke-common.qa
@@ -73,7 +73,7 @@ expect "row_count":38,
 # The mouse in the diff: a drag selects text across rows, which goes to the primary selection
 # when the button comes up, and Ctrl+C copies it; a press on a hunk's header selects that
 # hunk, and one on a rule of unchanged lines shows more of them.
-drag 45 6 60 8
+drag 44 6 59 8
 state
 expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[5,4\],"head":\[7,19\]\}
 primary
@@ -84,19 +84,19 @@ expect ^"pub fn apply_batch
 state
 expect "status":"Copied 3 lines\."
 shot 16-selection
-click 50 17
+click 49 17
 state
 expect "hunk":2,
-click 50 3
+click 49 3
 state
 expect "row_count":52,
-click 50 3
+click 49 3
 state
 expect "row_count":52,
 
 # Shift with a press extends the selection from where it started.
-click 45 20
-click 60 22 shift
+click 44 20
+click 59 22 shift
 state
 expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[19,
 key escape
@@ -229,7 +229,7 @@ expect "layout":"side-by-side","effective_layout":"side-by-side"
 expect "row_count":19,
 expect "kind":"Pair"
 shot 11-side-by-side
-drag 110 12 140 14
+drag 109 12 139 14
 state
 expect "column":"Right"
 pan 10
@@ -239,7 +239,7 @@ shot 11a-side-by-side-panned
 resize 90x50
 state
 expect "layout":"side-by-side","effective_layout":"unified"
-expect "viewport":\[33,1,57,47\]
+expect "viewport":\[32,1,58,47\]
 expect "selection":null
 shot 11c-narrow
 resize 160x50
@@ -334,12 +334,12 @@ state
 expect "overlay":"Settings"
 expect "cursor":"Theme: Carbonfox"
 expect "entries":28\}
-expect "geometry":\{"width":32,"list_top":3,"cursor_top":4\}
+expect "geometry":\{"width":31,"list_top":3,"cursor_top":4\}
 key j
 state
 expect "theme":"tokyonight-night"
 expect "applied_theme":"carbonfox","previewing":true
-expect "geometry":\{"width":32,"list_top":3,"cursor_top":5\}
+expect "geometry":\{"width":31,"list_top":3,"cursor_top":5\}
 shot 08-tokyonight
 key escape
 state
@@ -403,7 +403,7 @@ key z j q
 state
 expect "query":"zjq","searching":true
 key escape
-click 100 20
+click 99 20
 state
 expect "overlay":null
 
@@ -455,27 +455,27 @@ expect "tree":\[\{"path":".github","kind":"Directory","change":null,"progress":"
 resize 160x50
 
 # The divider between the files and the diff drags, which the next launch remembers, and a
-# double click puts it back.
-drag 32 20 40 20
+# double click fits the files' tree again.
+drag 31 20 40 20
 state
-expect "layout":\{"sidebar":40\}
+expect "layout":\{"sidebar":40,"fit":false\}
 expect "viewport":\[41,1,119,47\]
 click 40 20 2
 state
-expect "layout":\{"sidebar":32\}
+expect "layout":\{"sidebar":31,"fit":true\}
 
 # Screen modes: the diff across the whole width, and back; Ctrl+B hides the files and shows
 # them again, remembering it in review-tui's own width setting.
 key +
 state
 expect "screen":"Full"
-expect "layout":\{"sidebar":null\}
+expect "layout":\{"sidebar":null,"fit":true\}
 expect "viewport":\[0,1,160,47\]
 shot 12-full
 key _
 state
 expect "screen":"Split"
-expect "layout":\{"sidebar":32\}
+expect "layout":\{"sidebar":31,"fit":true\}
 key ctrl-b
 state
 expect "screen":"Full"
@@ -483,7 +483,7 @@ expect "mode":"Diff"
 key ctrl-b
 state
 expect "screen":"Split"
-expect "layout":\{"sidebar":32\}
+expect "layout":\{"sidebar":31,"fit":true\}
 
 # R fetches; the demo has nothing newer.
 key shift-r

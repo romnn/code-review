@@ -1081,9 +1081,15 @@ it, muted, so it never reads as code.
   room runs out, long text truncates with an ellipsis (paths from their start) and whole
   lower-priority parts make way: the file header drops its line counts, then its meter. Only the
   title bar and its buttons keep the platform's fixed size, so previewing a font size never moves
-  the settings panel. The files pane resizes by dragging its divider (double click resets, limits
-  keep it at least 180 px and 16 text cells wide and the diff at least 400 px wide), `Ctrl+B`
-  hides it, and the width is remembered in the `[layout]` table of the configuration. The pane
+  the settings panel. The files pane is as wide as its tree's widest row needs, every folder
+  open so folding and filtering never move it, at least 24 text cells and at most 40% of the
+  window; it follows the files as they change, a live working tree's included. Dragging its
+  divider sets a width of its own and a double click fits the tree again (limits keep it at
+  most 40% of the window and, within that, at least 180 px and 16 text cells wide and the diff
+  at least 400 px wide). While the settings panel is open, the pane is measured at the text
+  size it opened with, so previewing a font size moves neither the panel nor the diff.
+  `Ctrl+B` hides the pane, and
+  the width, or `"fit"`, is remembered in the `[layout]` table of the configuration. The pane
   has no header, since the window's title names the review: at its top two progress lines show
   the files and the hunks reviewed, each a bar, done of total, and the whole percent, rounded
   down so 100% means all of it; in a narrow pane the bar makes way first, then the percent, then
@@ -1203,7 +1209,8 @@ belongs in `review-core`, so that the engine stays usable on its own.
   and asks the front end only for its geometry, so a QA script's expectations read the same in
   both apps apart from the numbers.
 - **Shared configuration.** One configuration file serves both apps; each keeps only the files
-  pane's width apart (`[layout] sidebar` in logical pixels, `tui_sidebar` in cells). Saved view
+  pane's width apart (`[layout] sidebar` in logical pixels, `tui_sidebar` in cells, or `"fit"`
+  in either). Saved view
   state is shared under the name `review-lite` (see "Storage").
 
 ### review-tui
@@ -1237,7 +1244,9 @@ settings, find, file buffer, overview and `?` sheet, and mouse selection with co
   continues (`SIGCONT`), it takes the terminal again, raw mode included, and redraws it whole.
   A terminal that can no longer be drawn to, and input that ended, quit unattended too.
 - **Where a terminal differs.** No zoom, font size, fullscreen or smooth scrolling, and no
-  scrollbars. The files pane's width is its own `[layout] tui_sidebar`, in cells. A paste goes
+  scrollbars. The files pane fits its tree as in the window, within 40% of the terminal and
+  leaving the diff 44 cells, and its width is its own `[layout] tui_sidebar`, in cells. A paste
+  goes
   only into a text field taking typing, never in as keys. A terminal has no title bar the app
   can count on, so the files pane keeps a header naming the review: a pull request's number and
   head branch (`#128 feature/reconcile`), or the range (`main..feature`, `main..working tree`);

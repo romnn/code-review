@@ -1,8 +1,9 @@
 //! The files pane: its header, the review's progress under it, and the tree's rows.
 
-use review_core::tree::NodeKind;
+use review_core::tree::{NodeKind, TreeNode};
 use review_core::{ChangeKind, ReviewInfo, ReviewTarget};
 
+use super::display::display_width;
 use super::{Bar, Palette, Piece, Room, Weight};
 use crate::color::Hsla;
 use crate::model::Model;
@@ -103,6 +104,16 @@ pub const TREE_INDENT_CELLS: usize = 2;
 
 /// The cells before a tree row's name, after its indent: its marker and one space.
 pub const TREE_MARKER_CELLS: usize = 2;
+
+/// The cells the widest row of `tree` takes from its start to the end of its name: its
+/// indent, marker and name, with every folder open, so folding and filtering never change it.
+#[must_use]
+pub fn tree_cells(tree: &[TreeNode]) -> usize {
+    tree.iter()
+        .map(|node| node.depth * TREE_INDENT_CELLS + TREE_MARKER_CELLS + display_width(&node.name))
+        .max()
+        .unwrap_or(0)
+}
 
 /// A row of the file tree, drawn as lazygit draws its file tree: the indent, one marker cell,
 /// a space and the name, with our review state's glyph at the right.
@@ -369,6 +380,30 @@ fn count_width(counts: &[(usize, usize)]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The widest row counts its indent, its marker and its name in the cells it shows in, a
+    /// wide character taking two; an empty tree takes none.
+    #[test]
+    fn the_widest_row_counts_indent_marker_and_name() {
+        let node = |name: &str, depth| TreeNode {
+            name: name.to_owned(),
+            path: name.to_owned(),
+            depth,
+            kind: NodeKind::File,
+            counts: review_core::Counts::default(),
+            renamed_from: None,
+            tone: review_core::FileTone::Generated,
+            change: None,
+        };
+        assert_eq!(tree_cells(&[]), 0);
+        // `src` at depth 0 takes 2 + 3 cells, `main.rs` at depth 1 takes 2 + 2 + 7.
+        assert_eq!(tree_cells(&[node("src", 0), node("main.rs", 1)]), 11);
+        // `漢字.rs` takes 7 cells, though only 5 characters.
+        assert_eq!(
+            tree_cells(&[node("a", 0), node("漢字.rs", 1), node("b.rs", 0)]),
+            2 + 2 + 7
+        );
+    }
 
     /// A narrowing files pane drops the bar first, then the percent, then the label; the
     /// counts always show.

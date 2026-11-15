@@ -187,10 +187,10 @@ impl Model {
         }
     }
 
-    /// A double click on the divider between the files and the diff: the files' width goes
-    /// back to its default and is remembered.
+    /// A double click on the divider between the files and the diff: the files fit their tree
+    /// again, which is remembered.
     pub fn reset_sidebar_width(&mut self) {
-        self.layout.sidebar = self.settings.front_end.default_sidebar();
+        self.layout.sidebar = crate::panes::SidebarWidth::Fit;
         self.remember_layout();
     }
 }

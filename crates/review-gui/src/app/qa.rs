@@ -713,7 +713,11 @@ impl review_ui::qa::Screen for WindowScreen<'_> {
             "client_decorated": app.client_decorated,
             "window_events": app.regions.events(),
             "layout": {
-                "sidebar": app.sidebar_shown().then_some(app.layout.sidebar),
+                // The width the tree list was drawn at, which is the files pane's.
+                "sidebar": app.sidebar_shown().then(|| {
+                    f32::from(app.lists.handles.tree.viewport_bounds().size.width)
+                }),
+                "fit": app.layout.sidebar == review_ui::panes::SidebarWidth::Fit,
             },
         }))
     }

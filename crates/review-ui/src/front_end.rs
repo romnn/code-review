@@ -6,6 +6,7 @@
 
 use crate::config::LayoutConfig;
 use crate::model::Action;
+use crate::panes::SidebarWidth;
 
 /// A front end of the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,9 +16,6 @@ pub enum FrontEnd {
     /// review-tui: a terminal, measured in cells.
     Terminal,
 }
-
-/// The default width of the terminal's files pane, in cells.
-pub const DEFAULT_TERMINAL_SIDEBAR: f32 = 32.0;
 
 impl FrontEnd {
     /// What the front end can do.
@@ -46,21 +44,12 @@ impl FrontEnd {
         }
     }
 
-    /// The files pane's width when the configuration names none, in the front end's units.
+    /// The files pane's width `layout` remembers for the front end.
     #[must_use]
-    pub fn default_sidebar(self) -> f32 {
-        match self {
-            Self::Window => crate::config::DEFAULT_SIDEBAR_WIDTH,
-            Self::Terminal => DEFAULT_TERMINAL_SIDEBAR,
-        }
-    }
-
-    /// The files pane's width `layout` remembers for the front end, in its units.
-    #[must_use]
-    pub fn sidebar_width(self, layout: &LayoutConfig) -> f32 {
+    pub fn sidebar_width(self, layout: &LayoutConfig) -> SidebarWidth {
         match self {
             Self::Window => layout.sidebar,
-            Self::Terminal => layout.tui_sidebar.unwrap_or_else(|| self.default_sidebar()),
+            Self::Terminal => layout.tui_sidebar,
         }
     }
 }
@@ -113,24 +102,30 @@ mod tests {
         assert!(terminal.allows(Action::ToggleApprove));
     }
 
-    /// Each front end reads its own width, in its own units, and the terminal's has a default
-    /// of its own when the configuration has only the window's.
+    /// Each front end reads its own width, in its own units, and fits its tree when the
+    /// configuration has only the other's.
     #[test]
     fn sidebar_widths_are_each_front_ends_own() {
         let layout = LayoutConfig {
-            sidebar: 420.0,
+            sidebar: SidebarWidth::Set(420.0),
             ..LayoutConfig::default()
         };
-        assert_eq!(FrontEnd::Window.sidebar_width(&layout), 420.0);
         assert_eq!(
-            FrontEnd::Terminal.sidebar_width(&layout),
-            DEFAULT_TERMINAL_SIDEBAR
+            FrontEnd::Window.sidebar_width(&layout),
+            SidebarWidth::Set(420.0)
         );
+        assert_eq!(FrontEnd::Terminal.sidebar_width(&layout), SidebarWidth::Fit);
         let layout = LayoutConfig {
-            tui_sidebar: Some(40.0),
+            tui_sidebar: SidebarWidth::Set(40.0),
             ..layout
         };
-        assert_eq!(FrontEnd::Terminal.sidebar_width(&layout), 40.0);
-        assert_eq!(FrontEnd::Window.sidebar_width(&layout), 420.0);
+        assert_eq!(
+            FrontEnd::Terminal.sidebar_width(&layout),
+            SidebarWidth::Set(40.0)
+        );
+        assert_eq!(
+            FrontEnd::Window.sidebar_width(&layout),
+            SidebarWidth::Set(420.0)
+        );
     }
 }

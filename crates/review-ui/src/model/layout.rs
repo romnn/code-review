@@ -63,6 +63,7 @@ impl Model {
     /// Returns whether an eased scroll still runs, so the next frame follows.
     #[tracing::instrument(skip_all)]
     pub fn layout(&mut self, geometry: Geometry, now: Instant) -> bool {
+        let buffer_room = self.buffer_room();
         self.geometry = geometry;
         let grid = self.grid();
         // A resize, the sidebar or the screen mode can make the diff too narrow for side by
@@ -91,7 +92,11 @@ impl Model {
             }
         }
         if self.list_shown(List::Buffer) {
-            if self.buffer_column_waits {
+            // A cursor in view stays in view when its room changes under it: a resize, a
+            // dragged divider, or a files pane following its tree as files come and go. One
+            // the reviewer panned away from stays where they left it.
+            let resized = (self.buffer_room() - buffer_room).abs() > f64::EPSILON;
+            if self.buffer_column_waits || (resized && self.buffer_cursor_shown(buffer_room)) {
                 self.reveal_buffer_column();
             } else {
                 self.measure_buffer_text();

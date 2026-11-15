@@ -31,6 +31,8 @@ mod picker;
 mod settings;
 mod sheet;
 
+pub(crate) use files::fit_cells;
+
 pub use painter::{Brush, Painter};
 
 /// `color` as the opaque color it shows over black, for the colors that are the bottom layer.

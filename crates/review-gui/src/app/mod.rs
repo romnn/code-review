@@ -99,6 +99,29 @@ struct Latency {
 /// text.
 type PaintedRows = Rc<RefCell<HashMap<(Pane, text::Column, usize), PaintedLine>>>;
 
+/// What a frame's layout phase ran against: the grid, and the widths of the lists the code
+/// pans in, which the grid leaves out but the pan's room follows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LaidOut {
+    /// The grid.
+    grid: Grid,
+    /// The diff list's width.
+    diff_list: f32,
+    /// The buffer list's width.
+    buffer_list: f32,
+}
+
+impl LaidOut {
+    /// What a layout phase in `geometry` runs against, with the grid `grid` it makes.
+    fn of(grid: Grid, geometry: &review_ui::frame::Geometry) -> Self {
+        Self {
+            grid,
+            diff_list: geometry.diff_list,
+            buffer_list: geometry.buffer_list,
+        }
+    }
+}
+
 /// A line of code as the last frame painted it.
 #[derive(Clone)]
 struct PaintedLine {
@@ -161,8 +184,8 @@ pub struct ReviewApp {
     /// which turns the extent the model keeps in cells back into pixels for QA mode; the extent
     /// stays as it was while the diff shows unified.
     extent_cell: f32,
-    /// The grid the last frame's layout phase ran against.
-    laid_out: Option<Grid>,
+    /// What the last frame's layout phase ran against.
+    laid_out: Option<LaidOut>,
     /// Whether gpui laid the last frame out in other viewports than the layout phase expected,
     /// so the next frame lays out again.
     relayout: bool,
@@ -537,11 +560,26 @@ impl ReviewApp {
         if self.sidebar_shown() {
             review_ui::panes::sidebar_width(
                 self.layout.sidebar,
+                self.tree_fit(),
                 f32::from(window.viewport_size().width),
-                self.sizes().ui_cell(),
+                self.sidebar_cell(),
             )
         } else {
             0.0
+        }
+    }
+
+    /// The cell the files pane's width is measured in: the window's text's, or while the
+    /// settings list is open the one of the text size it opened with, so previewing a font
+    /// size moves neither the panel, which takes the files pane's place, nor the diff.
+    fn sidebar_cell(&self) -> f32 {
+        match &self.settings_panel {
+            Some(panel) => measure::Sizes {
+                code_size: panel.text_code_size,
+                ..self.sizes()
+            }
+            .ui_cell(),
+            None => self.sizes().ui_cell(),
         }
     }
 

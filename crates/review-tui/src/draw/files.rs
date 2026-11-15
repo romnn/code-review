@@ -14,6 +14,16 @@ use crate::measure::Sidebar;
 /// The cells the tree's state column takes: the glyph and a space.
 const COLUMN: u16 = 2;
 
+/// The files pane's width that fits a tree whose widest row takes `tree_cells` from its indent
+/// to the end of its name, as [`tree_row`] draws it: a cell before the indent, and after the
+/// name a space, the state column and a cell of room.
+#[must_use]
+pub fn fit_cells(tree_cells: usize) -> u16 {
+    u16::try_from(tree_cells)
+        .unwrap_or(u16::MAX)
+        .saturating_add(3 + COLUMN)
+}
+
 /// The files pane in `sidebar`.
 pub fn draw(painter: &mut Painter<'_>, model: &Model, palette: &Palette, sidebar: &Sidebar) {
     let surface = opaque(palette.surface);

@@ -34,11 +34,40 @@ use review_ui::rows::{Body, Cell, Note, Row};
 use review_ui::text::{Column, Pane};
 
 use super::measure::FRAME;
-use super::{ReviewApp, ink, measure, scroll};
+use super::{LaidOut, ReviewApp, ink, measure, scroll};
 use crate::color::to_gpui;
 
 /// The grid every spacing is a multiple of.
 pub const GRID: f32 = 4.0;
+
+/// The room before a tree row's indent.
+const TREE_ROW_LEFT: f32 = GRID * 2.0;
+
+/// The room after a tree row's state column.
+const TREE_ROW_RIGHT: f32 = GRID * 3.0;
+
+/// How a tree row lays out in cells `cell` pixels wide, rounded as it draws.
+struct TreeMetrics {
+    /// The marker's cell.
+    marker: f32,
+    /// The marker and the space after it, which lines a folder's children up under its name.
+    marker_room: f32,
+    /// One depth's indent, before rounding.
+    indent: f32,
+    /// The state column at the right.
+    column: f32,
+}
+
+impl TreeMetrics {
+    fn of(cell: f32) -> Self {
+        Self {
+            marker: cell.round(),
+            marker_room: (cell * scroll::float(files::TREE_MARKER_CELLS)).round(),
+            indent: cell * scroll::float(files::TREE_INDENT_CELLS),
+            column: (cell * 1.75).round(),
+        }
+    }
+}
 
 /// The accent bar along a note's left edge.
 const NOTE_ACCENT: f32 = 3.0;
@@ -588,14 +617,12 @@ impl ReviewApp {
     fn render_tree_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = self.palette();
         let row_height = self.sizes().row_height();
-        let cell = self.sizes().ui_cell();
-        // The marker's cell, and the space after it, which lines a folder's children up under
-        // its name.
-        let marker = cell.round();
-        let marker_room = (cell * scroll::float(files::TREE_MARKER_CELLS)).round();
-        let indent = cell * scroll::float(files::TREE_INDENT_CELLS);
-        // The state column at the right.
-        let column = (cell * 1.75).round();
+        let TreeMetrics {
+            marker,
+            marker_room,
+            indent,
+            column,
+        } = TreeMetrics::of(self.sizes().ui_cell());
         range
             .filter_map(|position| {
                 let row = files::tree_row(self, &colors, position)?;
@@ -605,8 +632,10 @@ impl ReviewApp {
                         .id(("tree-node", index))
                         .h(px(row_height))
                         .w_full()
-                        .pr(px(GRID * 3.0))
-                        .pl(px(GRID * 2.0 + (scroll::float(row.depth) * indent).round()))
+                        .pr(px(TREE_ROW_RIGHT))
+                        .pl(px(
+                            TREE_ROW_LEFT + (scroll::float(row.depth) * indent).round()
+                        ))
                         .cursor_pointer()
                         .when_some(row.background.map(to_gpui), gpui::Styled::bg)
                         .hover(|hovered| hovered.bg(to_gpui(colors.hairline)))
@@ -647,6 +676,25 @@ impl ReviewApp {
                 )
             })
             .collect()
+    }
+
+    /// The files pane's width that fits the tree's widest row with its name whole, in the
+    /// metrics [`Self::render_tree_rows`] draws it with, at the files pane's cell; see
+    /// [`ReviewApp::sidebar_cell`].
+    pub(super) fn tree_fit(&self) -> f32 {
+        let cell = self.sidebar_cell();
+        let TreeMetrics {
+            marker_room,
+            column,
+            ..
+        } = TreeMetrics::of(cell);
+        // The indent and the name in whole cells, the marker's room and the state column as
+        // rounded, and half a pixel for the rounded indent; rounded up, with a pixel for the
+        // snapping to device pixels.
+        let cells = self.tree_cells().saturating_sub(files::TREE_MARKER_CELLS);
+        let width =
+            TREE_ROW_LEFT + TREE_ROW_RIGHT + marker_room + column + scroll::float(cells) * cell;
+        (width + 0.5).ceil() + 1.0
     }
 
     /// The divider between the files and the diff: a hairline with a wider grip.
@@ -1305,7 +1353,7 @@ impl ReviewApp {
         } = self.driver.update(|model| model.layout(geometry, now));
         self.run(effects, window, cx);
         self.lists_code_size = self.code_size;
-        self.laid_out = Some(self.grid());
+        self.laid_out = Some(LaidOut::of(self.grid(), &geometry));
         // The model worked out the side-by-side text's extent at this code cell.
         if self.list_shown(List::Diff) && self.side_by_side() {
             self.extent_cell = self.sizes().code_cell();
@@ -1315,9 +1363,10 @@ impl ReviewApp {
     }
 
     /// An empty element after everything else that checks, once gpui laid the frame out, that
-    /// the lists got the viewports the layout phase expected; when they did not, as after a
-    /// resize, a bar coming or going, a list's first layout or a code size whose bars came out
-    /// otherwise than the model worked out, the next frame lays out again.
+    /// the lists got the viewports and widths the layout phase expected; when they did not, as
+    /// after a resize, the files pane fitting another tree, a bar coming or going, a list's
+    /// first layout or a code size whose bars came out otherwise than the model worked out, the
+    /// next frame lays out again.
     ///
     /// gpui lays the lists out only after the frame is built, so the layout phase can only
     /// run in the geometry of the frame before; this is the second pass for when that changed.
@@ -1332,7 +1381,8 @@ impl ReviewApp {
                             this.lists_code_size,
                             this.diff_width,
                         );
-                        this.relayout = this.laid_out != Some(this.grid_in(&geometry));
+                        let laid_out = LaidOut::of(this.grid_in(&geometry), &geometry);
+                        this.relayout = this.laid_out != Some(laid_out);
                         this.relayout
                     })
                     .unwrap_or(false);

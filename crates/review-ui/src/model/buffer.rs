@@ -306,12 +306,23 @@ impl Model {
         if self.buffer_column_waits {
             return;
         }
-        let Some(buffer) = &self.buffer else {
+        let Some(cell) = self.buffer_cursor_cell() else {
             return;
         };
-        let cell = DisplayLine::new(buffer.line(buffer.cursor.row)).cell_of(buffer.cursor.col);
         let room = self.buffer_room();
         self.buffer_text.reveal(cell, room, COLUMN_AIR);
+    }
+
+    /// The cell the buffer's cursor shows in on its line.
+    fn buffer_cursor_cell(&self) -> Option<usize> {
+        let buffer = self.buffer.as_ref()?;
+        Some(DisplayLine::new(buffer.line(buffer.cursor.row)).cell_of(buffer.cursor.col))
+    }
+
+    /// Whether the buffer's cursor shows in `room` cells at the code's offset now.
+    pub(super) fn buffer_cursor_shown(&self, room: f64) -> bool {
+        self.buffer_cursor_cell()
+            .is_some_and(|cell| self.buffer_text.shows(cell, room))
     }
 
     /// `w` and `b`: the next or previous identifier, across lines.

@@ -39,8 +39,8 @@
 //! ToggleOverview = []   # unbound
 //!
 //! [layout]          # remembered when the panes are resized or the sidebar toggled
-//! sidebar = 300     # review-gui's files pane, in logical pixels
-//! tui_sidebar = 32  # review-tui's files pane, in terminal cells
+//! sidebar = "fit"   # review-gui's files pane: "fit" to its tree, or logical pixels
+//! tui_sidebar = 32  # review-tui's files pane: "fit" to its tree, or terminal cells
 //! source = 600      # the definition pane; absent for 42% of the window
 //! sidebar_visible = true
 //! ```
@@ -52,6 +52,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::panes::SidebarWidth;
 
 /// Points per inch, and the pixels per inch that a logical pixel assumes: gpui's logical pixels
 /// are 1/96 inch before the display scale factor, which gpui applies itself.
@@ -172,23 +174,27 @@ enum KeyList {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct LayoutSection {
-    sidebar: Option<f32>,
-    tui_sidebar: Option<f32>,
+    sidebar: Option<WidthSetting>,
+    tui_sidebar: Option<WidthSetting>,
     source: Option<f32>,
     sidebar_visible: Option<bool>,
 }
 
-/// The sidebar's default width in logical pixels.
-pub const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
+/// A files pane's width as `[layout]` writes it: a number in the front end's units, or a word.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WidthSetting {
+    Width(f32),
+    Word(String),
+}
 
 /// The pane widths and whether the sidebar shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutConfig {
     /// The sidebar's width in logical pixels, as review-gui remembers it.
-    pub sidebar: f32,
-    /// The sidebar's width in terminal cells, as review-tui remembers it; `None` for its
-    /// default.
-    pub tui_sidebar: Option<f32>,
+    pub sidebar: SidebarWidth,
+    /// The sidebar's width in terminal cells, as review-tui remembers it.
+    pub tui_sidebar: SidebarWidth,
     /// The definition pane's width in logical pixels; `None` gives it 42% of the window.
     pub source: Option<f32>,
     /// Whether the sidebar shows.
@@ -198,8 +204,8 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            sidebar: DEFAULT_SIDEBAR_WIDTH,
-            tui_sidebar: None,
+            sidebar: SidebarWidth::Fit,
+            tui_sidebar: SidebarWidth::Fit,
             source: None,
             sidebar_visible: true,
         }
@@ -796,12 +802,8 @@ pub fn parse(text: &str) -> Result<Config, String> {
         language_servers: file.lsp.enabled.unwrap_or(defaults.language_servers),
         live: file.review.live.unwrap_or(defaults.live),
         layout: LayoutConfig {
-            sidebar: file
-                .layout
-                .sidebar
-                .filter(|width| width.is_finite())
-                .unwrap_or(DEFAULT_SIDEBAR_WIDTH),
-            tui_sidebar: file.layout.tui_sidebar.filter(|width| width.is_finite()),
+            sidebar: sidebar_width("sidebar", file.layout.sidebar)?,
+            tui_sidebar: sidebar_width("tui_sidebar", file.layout.tui_sidebar)?,
             source: file.layout.source.filter(|width| width.is_finite()),
             sidebar_visible: file.layout.sidebar_visible.unwrap_or(true),
         },
@@ -819,6 +821,18 @@ pub fn parse(text: &str) -> Result<Config, String> {
         styles,
         problems,
     })
+}
+
+/// The files pane's width that `[layout] key` sets: fitted to its tree unless it names a width,
+/// or what is wrong with it.
+fn sidebar_width(key: &str, setting: Option<WidthSetting>) -> Result<SidebarWidth, String> {
+    match setting {
+        Some(WidthSetting::Width(width)) if width.is_finite() => Ok(SidebarWidth::Set(width)),
+        Some(WidthSetting::Word(word)) if word != "fit" => Err(format!(
+            "[layout] {key} = {word:?} is neither a width nor \"fit\""
+        )),
+        _ => Ok(SidebarWidth::Fit),
+    }
 }
 
 /// A `[styles.<name>]` table, or what is wrong with it.
@@ -1059,7 +1073,10 @@ mod tests {
             value: 320.into(),
         };
         let widths = with_values(&added, &[width]).unwrap();
-        assert_eq!(parse(&widths).unwrap().layout.sidebar, 320.0);
+        assert_eq!(
+            parse(&widths).unwrap().layout.sidebar,
+            SidebarWidth::Set(320.0)
+        );
         // The terminal's width is a key of its own, which leaves the window's alone.
         let cells = Remembered {
             table: "layout",
@@ -1067,9 +1084,28 @@ mod tests {
             value: 40.into(),
         };
         let both = parse(&with_values(&widths, &[cells]).unwrap()).unwrap();
-        assert_eq!(both.layout.sidebar, 320.0);
-        assert_eq!(both.layout.tui_sidebar, Some(40.0));
-        assert_eq!(parse(&widths).unwrap().layout.tui_sidebar, None);
+        assert_eq!(both.layout.sidebar, SidebarWidth::Set(320.0));
+        assert_eq!(both.layout.tui_sidebar, SidebarWidth::Set(40.0));
+        assert_eq!(
+            parse(&widths).unwrap().layout.tui_sidebar,
+            SidebarWidth::Fit
+        );
+        // Fitting the tree is a word of its own, and any other word is a mistake.
+        let fit = Remembered {
+            table: "layout",
+            key: "sidebar",
+            value: "fit".into(),
+        };
+        let fitted = parse(&with_values(&widths, &[fit]).unwrap()).unwrap();
+        assert_eq!(fitted.layout.sidebar, SidebarWidth::Fit);
+        let wide = parse(indoc! {"
+            [layout]
+            tui_sidebar = \"wide\"
+        "});
+        assert_eq!(
+            wide.err().as_deref(),
+            Some("[layout] tui_sidebar = \"wide\" is neither a width nor \"fit\"")
+        );
     }
 
     /// A header with a comment is the same table, so remembering a value never appends a

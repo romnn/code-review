@@ -166,9 +166,12 @@ impl App {
         colors: Colors,
         log: Log,
     ) -> Self {
+        // The tree is not built yet, so a fitted files pane opens at its narrowest and the
+        // first frame fits it.
         let opening = Panes::lay_out(
             area,
             settings.layout,
+            0,
             settings.layout.sidebar_visible,
             false,
         );
@@ -647,7 +650,11 @@ impl App {
     /// selection extends there, scrolling a row at a time past the list's edges.
     fn drag_to(&mut self, panes: &Panes, position: Position) {
         if self.resizing {
-            let width = review_ui::panes::sidebar_cells(f32::from(position.x), panes.area.width);
+            let width = review_ui::panes::sidebar_cells(
+                review_ui::panes::SidebarWidth::Set(f32::from(position.x)),
+                0,
+                panes.area.width,
+            );
             self.update(|model| model.set_sidebar_width(f32::from(width)));
             return;
         }
