@@ -4,6 +4,7 @@
 //! A change counts when it could change what a capture records: a file created, written,
 //! removed, renamed or given other permissions where git does not ignore it, and the
 //! repository's `index` or `HEAD` rewritten.
+//! A directory's own times and permissions never count, since git records neither.
 //! Reads never count, so a capture, which reads the files it hashes, never wakes the watch.
 //! The git directory's other files, the capture's own temporary index among them, never count
 //! either.
@@ -246,6 +247,14 @@ impl Waiter {
                         ) {
                             gone.push(path.clone());
                         }
+                        // Git records no directory's times or permissions, and an entry made
+                        // in or removed from a directory has an event of its own; Windows
+                        // reports a directory's new modification time, at times seconds late.
+                        if matches!(event.kind, EventKind::Modify(kind) if !matches!(kind, ModifyKind::Name(_)))
+                            && is_plain_directory(path)
+                        {
+                            continue;
+                        }
                         if relative.rsplit('/').next() == Some(".gitignore") {
                             counts = true;
                             rewalk = true;
@@ -280,7 +289,9 @@ impl Waiter {
                 shared.rewalk()
             } else {
                 made.iter()
-                    .filter(|directory| shared.places.work_tree.join(directory).is_dir())
+                    .filter(|directory| {
+                        is_plain_directory(&shared.places.work_tree.join(directory))
+                    })
                     .try_for_each(|directory| shared.watch_under(directory))
             };
             if let Err(err) = watched {
@@ -418,9 +429,16 @@ fn forward(sender: Sender<notify::Result<Event>>) -> impl Fn(notify::Result<Even
 fn is_directory(kind: EventKind, path: &Path) -> bool {
     match kind {
         EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => true,
-        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => path.is_dir(),
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => is_plain_directory(path),
         _ => false,
     }
+}
+
+/// Whether `path` is a directory itself, not a link to one, which git records as the link:
+/// changed in place, as Windows can turn a directory into a link, the link counts as a file.
+fn is_plain_directory(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// Every directory at or under `start`, relative to `work_tree` (empty for its root), that git
@@ -497,6 +515,7 @@ fn causes(err: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
     use std::process::Command;
 
     use super::*;
@@ -540,16 +559,22 @@ mod tests {
             self.dir.path().join(relative)
         }
 
+        /// Writes a file through to the disk, as git does below with `core.fsync`: Windows
+        /// reports a write's new size and time when its cache is flushed, which can be seconds
+        /// later, while a wait expects quiet.
         fn write(&self, relative: &str, text: &str) {
             let path = self.path(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
+            let mut file = std::fs::File::create(path).unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+            file.sync_all().unwrap();
         }
 
         fn git(&self, args: &[&str]) {
             let status = Command::new("git")
                 .arg("-C")
                 .arg(self.dir.path())
+                .args(["-c", "core.fsync=all"])
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -584,6 +609,26 @@ mod tests {
         assert_eq!(waiter.wait_for(SILENT), None, "{what}");
     }
 
+    /// Records every event the system reports under the tree, unfiltered, so a wait that woke
+    /// when it should not can show what woke it.
+    fn record(tree: &Tree) -> (RecommendedWatcher, Arc<Mutex<Vec<String>>>) {
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let mut watcher = notify::recommended_watcher({
+            let reported = Arc::clone(&reported);
+            move |event: notify::Result<Event>| {
+                reported.lock().push(match event {
+                    Ok(event) => format!("{:?} {:?}", event.kind, event.paths),
+                    Err(err) => err.to_string(),
+                });
+            }
+        })
+        .unwrap();
+        watcher
+            .watch(tree.dir.path(), RecursiveMode::Recursive)
+            .unwrap();
+        (watcher, reported)
+    }
+
     /// On a platform that watches directory by directory, exactly the directories git does not
     /// ignore are watched: none of the build output's.
     #[test]
@@ -610,7 +655,16 @@ mod tests {
 
         tree.write("target/debug/build/3/out.o", "binary");
         tree.write("build.log", "noise");
-        stays_asleep(&mut waiter, "writes git ignores");
+        // Git records no directory's time, which Windows reports when an entry is made in it.
+        #[cfg(unix)]
+        std::fs::File::open(tree.path("src/nested"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        stays_asleep(
+            &mut waiter,
+            "writes git ignores, and a directory's new time",
+        );
 
         tree.write("src/lib.rs", "fn main() { edited(); }\n");
         wakes(&mut waiter, "an edit to a tracked file");
@@ -646,6 +700,26 @@ mod tests {
         wakes(&mut waiter, "an edit in the directory made again");
     }
 
+    /// A link to a directory is a file to git: made, it counts and is never walked as a
+    /// directory, and changed in place, it counts, though the directory it names is unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_directory_counts_as_a_file() {
+        let tree = Tree::new();
+        let (_watch, mut waiter) = tree.watch();
+        std::os::unix::fs::symlink("nested", tree.path("src/linked")).unwrap();
+        wakes(&mut waiter, "a link made");
+        // Walked as a directory, the link would have git asked about the paths beyond it.
+        assert_eq!(waiter.take_problem(), None);
+        let touched = Command::new("touch")
+            .arg("-h")
+            .arg(tree.path("src/linked"))
+            .status()
+            .unwrap();
+        assert!(touched.success());
+        wakes(&mut waiter, "a link changed in place");
+    }
+
     /// A capture reads the working tree and writes objects and a temporary index into the git
     /// directory, none of which wakes the wait, so a capture never triggers the next.
     #[test]
@@ -654,10 +728,16 @@ mod tests {
         tree.write("src/lib.rs", "fn main() { dirty(); }\n");
         tree.write("src/untracked.rs", "\n");
         let (_watch, mut waiter) = tree.watch();
+        let (_recorder, reported) = record(&tree);
         let repo = Repo::discover(tree.dir.path()).unwrap();
         repo.capture_worktree().unwrap();
         repo.capture_worktree().unwrap();
-        stays_asleep(&mut waiter, "a capture");
+        assert_eq!(
+            waiter.wait_for(SILENT),
+            None,
+            "a capture woke the wait; the system reported {:#?}",
+            reported.lock()
+        );
     }
 
     /// Dropping the watch ends a wait that would otherwise block for good.
