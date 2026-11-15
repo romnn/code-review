@@ -657,6 +657,12 @@ impl TextPan {
         self.offset = within(self.offset, self.extent);
     }
 
+    /// Whether cell `cell` shows whole in `room` cells at the offset now.
+    pub(crate) fn shows(&self, cell: usize, room: f64) -> bool {
+        let cell = scroll::rows(cell);
+        cell >= self.offset && cell + 1.0 <= self.offset + room
+    }
+
     /// Moves the code the least that shows cell `cell` in `room` cells with `margin` cells
     /// beside it where the line has them, as an editor follows its cursor sideways.
     pub(crate) fn reveal(&mut self, cell: usize, room: f64, margin: f64) {

@@ -127,9 +127,9 @@ pub struct Settings {
 /// The files pane's width and whether it shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PaneLayout {
-    /// The width, the front end's own, in its units: logical pixels in review-gui and cells
-    /// in review-tui; see [`FrontEnd::sidebar_key`].
-    pub sidebar: f32,
+    /// The width, the front end's own: fitted to the tree, or set in its units, logical pixels
+    /// in review-gui and cells in review-tui; see [`FrontEnd::sidebar_key`].
+    pub sidebar: crate::panes::SidebarWidth,
     /// Whether the files show, which every front end shares.
     pub sidebar_visible: bool,
 }
@@ -336,6 +336,8 @@ pub struct Model {
     pub revisions: Vec<overview::RevisionSummary>,
     /// The file tree with pending marks applied.
     pub tree: Vec<TreeNode>,
+    /// The cells the tree's widest row takes, from [`crate::paint::files::tree_cells`].
+    tree_cells: usize,
     /// The folded folders, saved with the review by the folders' saver.
     pub tree_collapsed: HashSet<String>,
     folders: folders::Saver,
@@ -470,6 +472,7 @@ impl Model {
             info: None,
             revisions: Vec::new(),
             tree: Vec::new(),
+            tree_cells: 0,
             tree_collapsed: HashSet::new(),
             folders: folders::Saver::default(),
             tree_visible: Arc::new(Vec::new()),
@@ -806,6 +809,7 @@ impl Model {
         let files = state::statuses(&view, &self.pending);
         let cursor = self.cursor_identity();
         self.tree = review_core::tree::file_tree(&files);
+        self.tree_cells = crate::paint::files::tree_cells(&self.tree);
         self.update_visible_tree();
         self.restore_cursor(cursor);
     }
@@ -934,26 +938,39 @@ impl Model {
     /// Sets the files pane's width, in the front end's units, as its divider is dragged; see
     /// [`Self::remember_layout`].
     pub fn set_sidebar_width(&mut self, width: f32) {
-        self.layout.sidebar = width;
+        self.layout.sidebar = crate::panes::SidebarWidth::Set(width);
+    }
+
+    /// The cells the tree's widest row takes from its start to the end of its name, with every
+    /// folder open, which a fitted files pane follows; see [`crate::paint::files::tree_cells`].
+    #[must_use]
+    pub fn tree_cells(&self) -> usize {
+        self.tree_cells
     }
 
     /// Writes the pane width to the configuration file, for the next launch: the front end's
-    /// own width, and whether the files show.
+    /// own width, or `"fit"`, and whether the files show.
     pub fn remember_layout(&mut self) {
         let Some(path) = self.settings.config_path.clone() else {
             return;
         };
         let layout = self.layout;
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a pane width in logical pixels or cells, clamped far below i64's range"
-        )]
-        let sidebar = layout.sidebar.round() as i64;
+        let sidebar = match layout.sidebar {
+            crate::panes::SidebarWidth::Fit => "fit".into(),
+            crate::panes::SidebarWidth::Set(width) => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a pane width in logical pixels or cells, clamped far below i64's range"
+                )]
+                let width = width.round() as i64;
+                width.into()
+            }
+        };
         let values = [
             crate::config::Remembered {
                 table: "layout",
                 key: self.settings.front_end.sidebar_key(),
-                value: sidebar.into(),
+                value: sidebar,
             },
             crate::config::Remembered {
                 table: "layout",

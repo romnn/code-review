@@ -107,9 +107,10 @@ impl ReviewApp {
         if self.resizing {
             if event.pressed_button == Some(MouseButton::Left) {
                 let width = review_ui::panes::sidebar_width(
-                    f32::from(event.position.x),
+                    review_ui::panes::SidebarWidth::Set(f32::from(event.position.x)),
+                    0.0,
                     f32::from(window.viewport_size().width),
-                    self.sizes().ui_cell(),
+                    self.sidebar_cell(),
                 );
                 self.update_model(window, cx, |model| model.set_sidebar_width(width));
             } else {

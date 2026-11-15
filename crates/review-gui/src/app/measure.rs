@@ -67,11 +67,11 @@ pub fn sign(cell: f32) -> f32 {
     (cell * SIGN_CELLS).round()
 }
 
-/// The diff pane's width in a window `window` wide, beside the sidebar when it shows, with the
-/// window's text in cells `ui_cell` pixels wide.
-fn pane_width(layout: PaneLayout, sidebar_shown: bool, window: f32, ui_cell: f32) -> f32 {
+/// The diff pane's width in a window `window` wide, beside the sidebar when it shows, `fit`
+/// wide when it fits its tree, with the sidebar's text in cells `cell` pixels wide.
+fn pane_width(layout: PaneLayout, fit: f32, sidebar_shown: bool, window: f32, cell: f32) -> f32 {
     if sidebar_shown {
-        window - review_ui::panes::sidebar_width(layout.sidebar, window, ui_cell) - (GRID + 1.0)
+        window - review_ui::panes::sidebar_width(layout.sidebar, fit, window, cell) - (GRID + 1.0)
     } else {
         window
     }
@@ -85,8 +85,10 @@ pub fn opening_width(settings: &Settings, advance: f32, window: f32) -> f32 {
         line_height: look::line_height(settings.appearance.shown().density),
         advance,
     };
+    // The tree is not built yet, so a fitted sidebar opens at its narrowest.
     pane_width(
         settings.layout,
+        0.0,
         settings.layout.sidebar_visible,
         window,
         sizes.ui_cell(),
@@ -98,9 +100,10 @@ impl ReviewApp {
     pub(super) fn diff_width_in(&self, window: f32) -> f32 {
         pane_width(
             self.layout,
+            self.tree_fit(),
             self.sidebar_shown(),
             window,
-            self.sizes().ui_cell(),
+            self.sidebar_cell(),
         )
     }
 }

@@ -1505,6 +1505,121 @@ fn the_buffer_waits_for_its_width_to_follow_its_cursor_sideways() {
     assert_eq!(offset(&host), panned);
 }
 
+/// A buffer cursor that showed keeps showing when its room narrows under it, as when the files
+/// pane widens to fit a file that just appeared: the code moves to show it again. A cursor
+/// the reviewer panned away from is left where it is.
+#[test]
+fn the_buffer_cursor_keeps_in_view_when_its_room_narrows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::ToggleBuffer);
+    let buffer = host.model().buffer.as_ref().unwrap();
+    let row = buffer
+        .lines
+        .lines
+        .iter()
+        .position(|line| line.contains("usize::MAX"))
+        .unwrap();
+    let column = buffer.line(row).find("MAX").unwrap();
+    let offset = |host: &Host| host.model().buffer_text.offset();
+    // Room for the cursor with twenty cells to spare, after the four digits of the numbers.
+    let window = fixed_window();
+    let wide = Geometry {
+        buffer_list: scroll::float(column) + 24.0,
+        ..window
+    };
+    host.update(|model| model.layout(wide, Instant::now()));
+    host.update(|model| model.set_buffer_cursor(row, column));
+    assert_eq!(offset(&host), 0.0, "the cursor shows at the left edge");
+
+    // The room narrows to forty cells, which end before the cursor.
+    host.update(|model| model.layout(window, Instant::now()));
+    assert_eq!(offset(&host), scroll::rows(column) + 1.0 + 4.0 - CODE_ROOM);
+
+    // A cursor the reviewer panned out of view stays out of view when the room changes.
+    host.update(|model| model.set_buffer_cursor(row, 0));
+    assert_eq!(offset(&host), 0.0);
+    host.update(|model| model.pan_buffer(3.0));
+    assert_eq!(offset(&host), 3.0);
+    let narrower = Geometry {
+        buffer_list: window.buffer_list - 2.0,
+        ..window
+    };
+    host.update(|model| model.layout(narrower, Instant::now()));
+    assert_eq!(offset(&host), 3.0, "the reviewer's pan is kept");
+}
+
+/// A fitted files pane follows the tree's widest row, every folder open: a nested file that
+/// starts changing in a live review widens it, folding never moves it, and the file's change
+/// going away narrows it again.
+#[test]
+fn the_tree_s_width_follows_the_files_that_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = "deep/nested/long_file_name.rs";
+    std::fs::create_dir_all(dir.path().join("repo/deep/nested")).unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", "fn a() {}\n"), (nested, "fn b() {}\n")],
+        &[("a.rs", "fn a() { 1 }\n")],
+    );
+    let mut host = Host::open(review);
+    // `a.rs` at the top: its marker and name.
+    assert_eq!(host.model().tree_cells(), 2 + 4);
+
+    std::fs::write(repo.join(nested), "fn b() { 2 }\n").unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    // `long_file_name.rs` two folders deep: two indents, its marker and its name.
+    assert_eq!(host.model().tree_cells(), 2 * 2 + 2 + 17);
+
+    host.update(|model| model.tree_cursor = 0);
+    host.dispatch(Action::FocusTree);
+    host.dispatch(Action::TreeCollapse);
+    assert!(host.model().tree_collapsed.contains("deep"));
+    assert_eq!(host.model().tree_cells(), 2 * 2 + 2 + 17, "a fold keeps it");
+
+    std::fs::write(repo.join(nested), "fn b() {}\n").unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(host.model().tree_cells(), 2 + 4);
+}
+
+/// Dragging the divider sets the files pane's width, which is remembered as a number, and a
+/// double click fits the tree again, which is remembered as `"fit"`.
+#[test]
+fn a_dragged_width_and_fitting_again_are_remembered() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.settings.config_path = Some(config.clone()));
+    let remembered = || {
+        crate::config::parse(&std::fs::read_to_string(&config).unwrap())
+            .unwrap()
+            .layout
+            .sidebar
+    };
+
+    host.update(|model| model.set_sidebar_width(420.0));
+    host.update(Model::remember_layout);
+    assert_eq!(
+        host.model().layout.sidebar,
+        crate::panes::SidebarWidth::Set(420.0)
+    );
+    assert_eq!(remembered(), crate::panes::SidebarWidth::Set(420.0));
+
+    host.update(Model::reset_sidebar_width);
+    assert_eq!(host.model().layout.sidebar, crate::panes::SidebarWidth::Fit);
+    assert_eq!(remembered(), crate::panes::SidebarWidth::Fit);
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("sidebar = \"fit\"")
+    );
+}
+
 /// The sheet keys ask the front end to scroll the sheet it lays out, a line or half its
 /// height at a time.
 #[test]

@@ -344,11 +344,8 @@ mod tests {
             keymap::keymap(&std::collections::BTreeMap::new()).0.len(),
             "a window keeps every key"
         );
-        assert_eq!(window.layout.sidebar, config::DEFAULT_SIDEBAR_WIDTH);
-        assert_eq!(
-            terminal.layout.sidebar,
-            crate::front_end::DEFAULT_TERMINAL_SIDEBAR
-        );
+        assert_eq!(window.layout.sidebar, crate::panes::SidebarWidth::Fit);
+        assert_eq!(terminal.layout.sidebar, crate::panes::SidebarWidth::Fit);
     }
 
     /// An error's causes follow it, as a report prints them.

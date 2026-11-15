@@ -514,8 +514,12 @@ impl review_ui::qa::Screen for CellScreen<'_> {
             .panes
             .and_then(|panes| panes.sidebar)
             .map(|sidebar| sidebar.area.width);
+        let fit = self.model.layout.sidebar == review_ui::panes::SidebarWidth::Fit;
         let mut entries = Map::new();
-        entries.insert("layout".to_owned(), json!({ "sidebar": sidebar }));
+        entries.insert(
+            "layout".to_owned(),
+            json!({ "sidebar": sidebar, "fit": fit }),
+        );
         let SheetScroll {
             offset,
             max,
