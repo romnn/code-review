@@ -584,12 +584,12 @@ impl Model {
         let Some(review) = self.review.clone() else {
             return;
         };
-        let Some(revision) = self.snapshot.as_ref().map(|snapshot| snapshot.revision) else {
+        if self.snapshot.is_none() {
             return;
-        };
+        }
         self.set_status(format!("Opening {path}…"));
         self.highlighting += 1;
-        self.spawn(Subject::Revision(revision), move || {
+        self.spawn(Subject::Shown(self.shown), move || {
             let text = read_text(&review, &oid);
             // A text blob under the size limit, which `read_text` checks, is highlighted
             // whatever its name: detection reads its first line too.

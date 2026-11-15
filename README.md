@@ -70,6 +70,9 @@ cr --worktree   # uncommitted and untracked changes, such as an agent's last tur
 cr --demo       # a built-in demo review to try it out
 ```
 
+A review of uncommitted work follows the working tree as it changes, as lazygit does: an edit
+shows within a second, keeping your place, and only what you mark is recorded.
+
 `review-gui` takes the same arguments. Press `?` for every key. The essentials:
 
 | Key | Action |

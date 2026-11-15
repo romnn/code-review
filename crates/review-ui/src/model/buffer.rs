@@ -4,8 +4,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use review_core::RevisionNumber;
-
 use super::effects::{Outcome, Subject};
 use super::{DEFINITION_DEADLINE, Mode, Model, Servers};
 use crate::frame::Request;
@@ -418,10 +416,10 @@ impl Model {
         ) else {
             return;
         };
-        // The answer lands only in the buffer and revision it was asked for.
+        // The answer lands only in the buffer and snapshot it was asked for.
         let lookup = Lookup {
             buffer: buffer.id,
-            revision: record.number,
+            shown: self.shown,
         };
         let servers = std::sync::Arc::clone(&self.servers);
         self.looking_up = true;
@@ -497,8 +495,8 @@ impl Model {
 pub(super) struct Lookup {
     /// The buffer the cursor was in.
     pub(super) buffer: u64,
-    /// The revision shown.
-    pub(super) revision: RevisionNumber,
+    /// The generation of the snapshot shown; see [`Model::shown`].
+    pub(super) shown: u64,
 }
 
 /// Where a definition is, with its file's text.

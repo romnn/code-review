@@ -5966,6 +5966,7 @@ version = "0.0.3"
 dependencies = [
  "clap",
  "color-eyre",
+ "futures-channel",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
@@ -6015,6 +6016,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "indoc",
+ "notify",
  "nucleo-matcher",
  "parking_lot",
  "regex",

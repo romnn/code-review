@@ -35,8 +35,8 @@ struct SyncPart {
 
 /// The bottom bar's left side at `now`, with the parts that fit `budget` when `width` measures
 /// a text, and ` · ` between them: the revision on screen and its head commit, a newer
-/// revision waiting, and when the review last synced, or what a running fetch is doing, or
-/// for a moment that it failed.
+/// revision waiting, and when the review last synced, or `live` for a review that follows the
+/// working tree, or what a running fetch is doing, or for a moment that it failed.
 ///
 /// When room runs out, the commit makes way first, then the time since the sync, then the
 /// newer revision; the revision and what a fetch is doing stay.
@@ -77,6 +77,9 @@ pub fn sync_label(
         parts.push(part(Piece::new(activity, palette.dim), 0));
     } else if model.sync.failing(now) {
         parts.push(part(Piece::new("sync failed", palette.error), 0));
+    } else if model.following() {
+        // A review that follows the working tree is as fresh as the disk.
+        parts.push(part(Piece::new("live", palette.faint), 2));
     } else if let Some(synced) = &model.sync.synced {
         parts.push(part(
             Piece::new(format!("synced {}", ago(synced, now)), palette.faint),

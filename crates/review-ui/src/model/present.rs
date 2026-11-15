@@ -102,6 +102,36 @@ impl RowKey {
                 || (self.base.is_some() && other.base == self.base))
     }
 
+    /// The unit the row belongs to.
+    #[must_use]
+    pub(crate) fn unit(self) -> review_core::UnitId {
+        self.unit
+    }
+
+    /// The head line the row shows, if it shows one.
+    #[must_use]
+    pub(crate) fn head(self) -> Option<usize> {
+        self.head
+    }
+
+    /// Does what [`Self::find`] does in the rows of another snapshot, where the row's unit went
+    /// to `unit`, or nowhere: then only the same line is looked for.
+    #[must_use]
+    pub(crate) fn find_moved(
+        self,
+        unit: Option<review_core::UnitId>,
+        layout: &Layout,
+    ) -> Option<usize> {
+        match unit {
+            Some(unit) => Self { unit, ..self }.find(layout),
+            None => layout
+                .rows
+                .iter()
+                .find(|row| self.same_line(row))
+                .map(|row| row.source),
+        }
+    }
+
     /// The unified row of `layout` that shows the same line, of the same unit when it can;
     /// or else the header of the same unit.
     #[must_use]

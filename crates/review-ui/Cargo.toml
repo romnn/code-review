@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 nucleo-matcher.workspace = true
+notify.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 review-core.workspace = true

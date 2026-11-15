@@ -29,6 +29,7 @@
 //!
 //! [review]
 //! auto_approve_formatting = true  # proven formatting-only hunks count as approved, unmarked
+//! live = true       # a review of the working tree follows it as it changes
 //!
 //! [lsp]
 //! enabled = true    # false never starts a language server; `g d` then says it is off
@@ -221,6 +222,7 @@ struct ThemeSection {
 #[serde(deny_unknown_fields)]
 struct ReviewSection {
     auto_approve_formatting: Option<bool>,
+    live: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -416,6 +418,8 @@ pub struct Config {
     /// Whether language servers may start, for go to definition; off keeps them from ever
     /// running, at the cost of that lookup.
     pub language_servers: bool,
+    /// Whether a review of the working tree follows it as it changes.
+    pub live: bool,
     /// The pane widths.
     pub layout: LayoutConfig,
     /// Key overrides: an action's name and the keys that replace its defaults.
@@ -442,6 +446,7 @@ impl Default for Config {
             token_emphasis: false,
             auto_approve_formatting: true,
             language_servers: true,
+            live: true,
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
             styles: BTreeMap::new(),
@@ -789,6 +794,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             .auto_approve_formatting
             .unwrap_or(defaults.auto_approve_formatting),
         language_servers: file.lsp.enabled.unwrap_or(defaults.language_servers),
+        live: file.review.live.unwrap_or(defaults.live),
         layout: LayoutConfig {
             sidebar: file
                 .layout

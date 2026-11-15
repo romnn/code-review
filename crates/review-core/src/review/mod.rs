@@ -7,6 +7,8 @@
 
 mod github;
 mod info;
+mod live;
+mod memo;
 
 pub use info::{Commit, PullRequest, ReviewInfo};
 pub(crate) use info::{LOG_FORMAT, parse_log};
@@ -364,10 +366,11 @@ pub enum RefreshStep {
     Describing,
 }
 
-/// Who writes a freshly computed analysis to the cache.
+/// Who writes a freshly computed analysis or correspondence to the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Publish {
-    /// The caller publishes it under the lock, as part of recording a revision.
+    /// The caller publishes it under the lock, as part of recording a revision; for a
+    /// provisional revision, that happens only if it is recorded.
     UnderLock,
     /// Write it right away.
     Now,
@@ -379,6 +382,7 @@ pub struct Review {
     dir: ReviewDir,
     repo: Repo,
     meta: ReviewMeta,
+    memo: memo::Memo,
 }
 
 impl Review {
@@ -410,7 +414,12 @@ impl Review {
             store::write_json_atomic(&dir.meta(), &meta, "review metadata")?;
         }
         drop(lock);
-        Ok(Self { dir, repo, meta })
+        Ok(Self {
+            dir,
+            repo,
+            meta,
+            memo: memo::Memo::default(),
+        })
     }
 
     /// Opens the review a front end opens when given no target: the one last opened for `repo`'s
@@ -439,7 +448,12 @@ impl Review {
         let meta: ReviewMeta = store::read_json(&dir.meta())?
             .ok_or_else(|| Error::UnknownReview(key.as_str().to_owned()))?;
         let repo = Repo::discover(&meta.repo)?;
-        Ok(Self { dir, repo, meta })
+        Ok(Self {
+            dir,
+            repo,
+            meta,
+            memo: memo::Memo::default(),
+        })
     }
 
     /// Returns the review's key.
@@ -614,10 +628,8 @@ impl Review {
                 self.record_snapshots(target, head, remote.as_deref(), progress)
             }
             ReviewTarget::Worktree { base } => {
-                let target = self.repo.resolve_commit(base)?;
-                let head = self.repo.capture_worktree()?;
-                let remote = self.repo.default_remote()?;
-                self.record_snapshots(target, head, remote.as_deref(), progress)
+                let input = self.worktree_input(base)?;
+                self.record_revision_reporting(input, progress)
             }
             ReviewTarget::PullRequest {
                 host,
@@ -650,6 +662,26 @@ impl Review {
         deepen_from: Option<&str>,
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Recorded, Error> {
+        let input = self.snapshot_input(target, head, deepen_from)?;
+        self.record_revision_reporting(input, progress)
+    }
+
+    /// The revision a working-tree review records now: the working tree, captured, against
+    /// its merge base with `base`.
+    fn worktree_input(&self, base: &str) -> Result<RevisionInput, Error> {
+        let target = self.repo.resolve_commit(base)?;
+        let head = self.repo.capture_worktree()?;
+        let remote = self.repo.default_remote()?;
+        self.snapshot_input(target, head, remote.as_deref())
+    }
+
+    /// The revision of `head` against its merge base with `target`.
+    fn snapshot_input(
+        &self,
+        target: ObjectId,
+        head: ObjectId,
+        deepen_from: Option<&str>,
+    ) -> Result<RevisionInput, Error> {
         let merge_bases = self.repo.merge_bases(&target, &head, deepen_from)?;
         let base = merge_bases
             .first()
@@ -658,15 +690,12 @@ impl Review {
                 target: target.clone(),
                 head: head.clone(),
             })?;
-        self.record_revision_reporting(
-            RevisionInput {
-                base,
-                head,
-                target: Some(target),
-                merge_bases,
-            },
-            progress,
-        )
+        Ok(RevisionInput {
+            base,
+            head,
+            target: Some(target),
+            merge_bases,
+        })
     }
 
     /// Records the revision `(base, head)` as the new current revision, unless it already is the
@@ -715,29 +744,19 @@ impl Review {
                 sync_error: None,
             });
         }
-        let number = match revisions.last() {
-            Some(last) => last.number.next().ok_or_else(|| Error::InconsistentLog {
-                path: self.dir.events(),
-                detail: "revision numbers exhausted".to_owned(),
-            })?,
-            None => RevisionNumber::FIRST,
-        };
-        self.repo
-            .update_ref(&self.pin_ref(&input.base), &input.base)?;
-        self.repo
-            .update_ref(&self.pin_ref(&input.head), &input.head)?;
-        let analysis_path = self.dir.analysis(&input.base, &input.head);
-        if !analysis_path.exists() {
-            store::write_json_atomic(&analysis_path, analysis.as_ref(), "analysis")?;
-        }
-        log.append(Event::Revision(RevisionEvent {
-            number,
-            base: input.base.clone(),
-            head: input.head.clone(),
-            target: input.target,
-            merge_bases: input.merge_bases.clone(),
-            recorded_at: store::now_seconds(),
-        }))?;
+        let number = self.next_number(revisions.last())?;
+        self.append_revision(
+            &mut log,
+            RevisionEvent {
+                number,
+                base: input.base.clone(),
+                head: input.head.clone(),
+                target: input.target,
+                merge_bases: input.merge_bases.clone(),
+                recorded_at: store::now_seconds(),
+            },
+            &analysis,
+        )?;
         Ok(Recorded {
             number,
             created: true,
@@ -749,9 +768,40 @@ impl Review {
         })
     }
 
-    /// Loads the analysis of `(base, head)` from the cache, or computes it, reporting
-    /// [`RefreshStep::Analyzing`] to `progress` first, and publishes it unless the caller
-    /// publishes it itself.
+    /// The number of the revision after `last`, or the first one.
+    fn next_number(&self, last: Option<&RevisionEvent>) -> Result<RevisionNumber, Error> {
+        match last {
+            Some(last) => last.number.next().ok_or_else(|| Error::InconsistentLog {
+                path: self.dir.events(),
+                detail: "revision numbers exhausted".to_owned(),
+            }),
+            None => Ok(RevisionNumber::FIRST),
+        }
+    }
+
+    /// Appends `revision` to the log under its lock, the commit point of recording it: pins
+    /// both snapshots and publishes the analysis first, which are idempotent, so a crash before
+    /// the append leaves nothing a later recording does not redo.
+    fn append_revision(
+        &self,
+        log: &mut LogWriter<'_>,
+        revision: RevisionEvent,
+        analysis: &Analysis,
+    ) -> Result<(), Error> {
+        self.repo
+            .update_ref(&self.pin_ref(&revision.base), &revision.base)?;
+        self.repo
+            .update_ref(&self.pin_ref(&revision.head), &revision.head)?;
+        let analysis_path = self.dir.analysis(&revision.base, &revision.head);
+        if !analysis_path.exists() {
+            store::write_json_atomic(&analysis_path, analysis, "analysis")?;
+        }
+        log.append(Event::Revision(revision))
+    }
+
+    /// Loads the analysis of `(base, head)` from the memo or the cache, or computes it,
+    /// reporting [`RefreshStep::Analyzing`] to `progress` first, and publishes it unless the
+    /// caller publishes it itself.
     fn analysis(
         &self,
         base: &ObjectId,
@@ -759,6 +809,9 @@ impl Review {
         publish: Publish,
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Arc<Analysis>, Error> {
+        if let Some(remembered) = self.memo.analysis(&(base.clone(), head.clone())) {
+            return Ok(remembered);
+        }
         let path = self.dir.analysis(base, head);
         // A cache file that fails to decode is recomputed rather than trusted.
         if let Ok(Some(cached)) = store::read_json::<Analysis>(&path)
@@ -776,7 +829,14 @@ impl Review {
         Ok(Arc::new(analysis))
     }
 
-    fn correspondence(&self, older: &Analysis, newer: &Analysis) -> Result<Correspondence, Error> {
+    /// Loads the correspondence between `older` and `newer` from the cache, or computes it, and
+    /// writes it to the cache unless the caller publishes the newer revision itself.
+    fn correspondence(
+        &self,
+        older: &Analysis,
+        newer: &Analysis,
+        publish: Publish,
+    ) -> Result<Correspondence, Error> {
         let path = self
             .dir
             .correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
@@ -787,7 +847,9 @@ impl Review {
             return Ok(cached);
         }
         let computed = correspond(&self.repo, older, newer)?;
-        store::write_json_atomic(&path, &computed, "correspondence")?;
+        if publish == Publish::Now {
+            store::write_json_atomic(&path, &computed, "correspondence")?;
+        }
         Ok(computed)
     }
 
@@ -797,25 +859,59 @@ impl Review {
     ///
     /// Returns an error when the log is corrupt or an analysis cannot be computed.
     pub fn history(&self) -> Result<History, Error> {
-        let events = LogTail::new(&self.dir).poll()?;
+        let mut tail = LogTail::new(&self.dir);
+        let events = tail.poll()?;
+        self.history_of(events, tail.offset(), None)
+    }
+
+    /// Derives the history from the log's `events`, read when the log was `version` bytes long,
+    /// followed by the provisional revision `live` when there is one.
+    ///
+    /// Analyses and correspondences come from the memo when the last history used them, then
+    /// from the cache; a provisional revision's are computed but never written, since nothing
+    /// may refer to a revision that is not recorded.
+    fn history_of(
+        &self,
+        mut events: Vec<Event>,
+        version: u64,
+        live: Option<RevisionEvent>,
+    ) -> Result<History, Error> {
+        let provisional = live.is_some();
+        events.extend(live.map(Event::Revision));
         let revisions = revision_events(&self.dir.events(), &events)?;
-        let analyses = revisions
-            .iter()
-            .map(|revision| {
-                self.analysis(&revision.base, &revision.head, Publish::Now, &mut |_| {})
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let correspondences = analyses
-            .windows(2)
-            .map(|pair| match pair {
-                [older, newer] => self.correspondence(older, newer),
-                _ => Err(Error::NoRevisions),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let publish = |index: usize| {
+            if provisional && index + 1 == revisions.len() {
+                Publish::UnderLock
+            } else {
+                Publish::Now
+            }
+        };
+        let mut analyses = Vec::with_capacity(revisions.len());
+        for (index, revision) in revisions.iter().enumerate() {
+            let pair = (revision.base.clone(), revision.head.clone());
+            analyses.push((
+                pair,
+                self.analysis(&revision.base, &revision.head, publish(index), &mut |_| {})?,
+            ));
+        }
+        let mut correspondences = Vec::with_capacity(revisions.len().saturating_sub(1));
+        for (index, window) in analyses.windows(2).enumerate() {
+            let [(older_pair, older), (newer_pair, newer)] = window else {
+                return Err(Error::NoRevisions);
+            };
+            let correspondence = match self.memo.correspondence(older_pair, newer_pair) {
+                Some(correspondence) => correspondence,
+                None => Arc::new(self.correspondence(older, newer, publish(index + 1))?),
+            };
+            correspondences.push(correspondence);
+        }
+        self.memo.keep(&analyses, &correspondences);
         Ok(History::new(HistoryInput {
             events,
-            analyses,
+            analyses: analyses.into_iter().map(|(_, analysis)| analysis).collect(),
             correspondences,
+            version,
+            provisional,
         }))
     }
 
@@ -860,15 +956,7 @@ impl Review {
             .collect::<Result<Vec<_>, Error>>()?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
         let mut log = LogWriter::open(&self.dir.events(), &lock)?;
-        let current = revision_events(&self.dir.events(), log.events())?
-            .last()
-            .map(|revision| revision.number);
-        if current != Some(view.number()) {
-            return Err(Error::NotCurrentRevision {
-                revision: view.number(),
-                current,
-            });
-        }
+        self.settle(&mut log, view, true)?;
         for event in events {
             log.append(event)?;
         }
@@ -933,7 +1021,10 @@ impl Review {
             text: text.to_owned(),
             at: store::now_seconds(),
         });
-        self.append(vec![event])
+        let lock = LockGuard::acquire(&self.dir.lock())?;
+        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
+        self.settle(&mut log, view, false)?;
+        log.append(event)
     }
 
     /// Validates and stores a walkthrough document.

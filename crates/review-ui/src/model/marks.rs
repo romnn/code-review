@@ -11,7 +11,7 @@ use std::sync::Arc;
 use review_core::{History, MarkVerdict, Recorded, UnitId};
 
 use super::effects::{Because, Outcome, Subject};
-use super::{Effect, Mode, Model, QuitKind, Quitting, SyncStep, overview, plural};
+use super::{Effect, Mode, Model, QuitKind, Quitting, SyncStep, live, overview, plural};
 use crate::rows;
 use crate::state::{self, MarkJob};
 
@@ -21,7 +21,7 @@ impl Model {
     /// here, so a key never acts on something other than what the reviewer sees: the tree's
     /// file must be the file whose diff shows, the diff's rows must be that file's, and the
     /// buffer must be that file's.
-    fn review_target(&self) -> Result<(Vec<UnitId>, String), String> {
+    pub(super) fn review_target(&self) -> Result<(Vec<UnitId>, String), String> {
         let nothing = || "Nothing here to review.".to_owned();
         let view = self.view().ok_or_else(nothing)?;
         let shown = self.rows.files.first().map(|section| section.path.as_str());
@@ -105,6 +105,9 @@ impl Model {
                 return;
             }
         };
+        if self.refuses_changed(&units, &what) {
+            return;
+        }
         let Some(view) = self.view() else {
             return;
         };
@@ -277,21 +280,44 @@ impl Model {
         self.rebuild();
     }
 
-    /// Installs a freshly read history for the shown revision; a newer revision is announced,
-    /// never switched to.
+    /// Installs a freshly read history that has the snapshot on screen, the same revision of
+    /// the same base and head; a newer revision is announced, never switched to, or, for a live
+    /// review, captured and shown with the reviewer's place kept.
+    ///
+    /// A history read before the one installed knows less, such as a mark saved since, and one
+    /// without the snapshot on screen would change what its rows mean, so neither is installed.
     pub(super) fn take_history(&mut self, history: History) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        if history.version() < self.version {
+            return;
+        }
+        let shown = live::same_snapshot(
+            &snapshot.history,
+            &history,
+            snapshot.revision,
+            snapshot.revision,
+        );
+        if !shown {
+            if self.following() {
+                self.capture(false);
+            }
+            return;
+        }
+        self.version = history.version();
         let Some(snapshot) = &mut self.snapshot else {
             return;
         };
-        if history.view(snapshot.revision).is_err() {
-            return;
-        }
         snapshot.history = Arc::new(history);
         self.revisions = overview::summarize(&snapshot.history, snapshot.policy);
-        if let Some(newer) = snapshot.newer() {
-            self.set_status(format!(
+        let newer = snapshot.newer();
+        match newer {
+            Some(_) if self.following() => self.capture(false),
+            Some(newer) => self.set_status(format!(
                 "Revision {newer} is available; press R to switch to it."
-            ));
+            )),
+            None => {}
         }
     }
 
@@ -299,7 +325,12 @@ impl Model {
     /// target's latest state in the background.
     pub(super) fn refresh(&mut self) {
         if let Some(newer) = self.snapshot.as_ref().and_then(state::Snapshot::newer) {
-            self.switch_revision(newer);
+            // A live review shows the newest snapshot as it captures it, keeping the place.
+            if self.following() {
+                self.capture(false);
+            } else {
+                self.switch_revision(newer);
+            }
             return;
         }
         let Some(review) = self.review.clone() else {
@@ -341,12 +372,18 @@ impl Model {
         match (refreshed.recorded, refreshed.history) {
             (Ok(recorded), Ok(history)) => {
                 self.take_history(history);
+                // The history may carry marks saved elsewhere since, which what shows derives
+                // from.
+                self.refresh_tree();
+                self.rebuild();
                 if let Some(err) = &recorded.sync_error {
                     self.effect(Effect::Log(format!(
                         "could not store when the review synced: {err}"
                     )));
                 }
-                if recorded.created {
+                if recorded.created && self.following() {
+                    self.set_status(format!("Revision {} recorded.", recorded.number));
+                } else if recorded.created {
                     self.set_status(format!(
                         "Revision {} recorded; press R to switch to it.",
                         recorded.number
@@ -381,6 +418,7 @@ impl Model {
             return;
         };
         snapshot.revision = revision;
+        self.shown += 1;
         if let Some(view) = snapshot.view() {
             self.blobs.retain_for(&view);
         }

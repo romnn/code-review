@@ -37,6 +37,9 @@ pub(super) enum Tick {
     Minute,
     /// The end of a failure's moment on the bar.
     Recovered,
+    /// The time for the periodic capture of a live review's working tree; it keeps itself
+    /// going.
+    Reconcile,
 }
 
 /// The review's freshness.
@@ -127,6 +130,7 @@ impl Model {
                 self.spin();
             }
             Tick::Minute => self.start_clock(),
+            Tick::Reconcile => self.reconcile(),
             Tick::Spin | Tick::Recovered => {}
         }
     }
