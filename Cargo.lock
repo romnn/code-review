@@ -4039,6 +4039,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-stats"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c73f5c649995a115e1a0220b35e4df0a1294500477f97a91d0660fb5abeb574a"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "metal"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4287,6 +4297,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5328,6 +5347,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ef0b569d1d907ab3a28596aee62cf1f61dacb0529a4bedcd8e7460e2d5228b4"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
+dependencies = [
+ "anyhow",
+ "itertools 0.11.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "psm"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6007,6 +6049,9 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tempfile",
+ "tracing",
+ "tracing-perfetto",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6030,6 +6075,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
+ "tracing",
  "tree-house",
  "tree-sitter-go",
  "tree-sitter-json",
@@ -7233,6 +7279,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread-id"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2010d27add3f3240c1fef7959f46c814487b216baee662af53be645ba7831c07"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "thread_local"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7532,14 +7588,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-perfetto"
+version = "0.2.0"
+source = "git+https://github.com/romnn/tracing-perfetto.git?rev=75dcd7480704cf6168891fb138c77188627ded7f#75dcd7480704cf6168891fb138c77188627ded7f"
+dependencies = [
+ "bytes",
+ "memory-stats",
+ "parking_lot",
+ "prost",
+ "rand 0.10.3",
+ "rustix",
+ "thread-id",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "nu-ansi-term",
  "sharded-slab",
+ "smallvec",
  "thread_local",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]

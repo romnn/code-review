@@ -61,6 +61,7 @@ fn app_options(options: &GlobalOptions, app: AppOptions) -> eyre::Result<review_
         terminal: app.terminal,
         qa: false,
         panic_after_first_frame: false,
+        trace_output: None,
     })
 }
 

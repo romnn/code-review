@@ -17,6 +17,9 @@ parking_lot.workspace = true
 ratatui.workspace = true
 review-ui.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+tracing-perfetto = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook.workspace = true
@@ -25,6 +28,10 @@ signal-hook.workspace = true
 indoc.workspace = true
 review-core.workspace = true
 tempfile.workspace = true
+
+[features]
+# `--trace-output`, a Perfetto trace of the app's spans for profiling.
+trace = ["dep:tracing-perfetto", "dep:tracing-subscriber"]
 
 [lints]
 workspace = true

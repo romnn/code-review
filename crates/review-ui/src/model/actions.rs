@@ -211,6 +211,7 @@ impl Action {
 impl Model {
     /// Does what `action` does where the keyboard is now; an action the front end cannot honor
     /// (see [`crate::front_end::Capabilities::allows`]) does nothing.
+    #[tracing::instrument(skip_all, fields(?action))]
     pub fn dispatch(&mut self, action: Action) {
         if !self.settings.front_end.capabilities().allows(action) {
             return;

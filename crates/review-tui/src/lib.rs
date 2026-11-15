@@ -20,6 +20,8 @@ mod log;
 mod measure;
 mod qa;
 mod terminal;
+#[cfg(feature = "trace")]
+mod trace;
 
 use std::path::PathBuf;
 
@@ -45,6 +47,12 @@ pub struct Options {
     /// Panic once the first frame is drawn, to check that the terminal comes back.
     #[arg(long, hide = true)]
     pub panic_after_first_frame: bool,
+    /// Write a Perfetto trace of where the app spends its time to this file, for profiling.
+    ///
+    /// Only a build with the `trace` feature takes it.
+    #[cfg_attr(feature = "trace", arg(long, value_name = "FILE"))]
+    #[cfg_attr(not(feature = "trace"), arg(skip))]
+    pub trace_output: Option<PathBuf>,
 }
 
 /// What the terminal and git's ssh are, as the environment says.
@@ -164,6 +172,22 @@ fn shell_quoted(word: &str) -> String {
 ///
 /// Returns an error when the review cannot be opened or the terminal cannot be used.
 pub fn run(options: &Options) -> eyre::Result<()> {
+    #[cfg(feature = "trace")]
+    let recording = options
+        .trace_output
+        .as_deref()
+        .map(trace::record)
+        .transpose()?;
+    let shown = show(options);
+    #[cfg(feature = "trace")]
+    if let Some(recording) = recording {
+        recording.finish()?;
+    }
+    shown
+}
+
+/// [`run`] apart from its trace.
+fn show(options: &Options) -> eyre::Result<()> {
     let settings = launch::settings(launch::load_config(&options.review), FrontEnd::Terminal)?;
     for problem in &settings.problems {
         eprintln!("cr: {problem}");

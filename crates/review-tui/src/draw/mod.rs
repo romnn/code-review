@@ -100,6 +100,7 @@ pub struct Scene<'a> {
 }
 
 /// Draws `model` as `scene` lays it out into `buffer` at `now`, in `colors`.
+#[tracing::instrument(skip_all)]
 pub fn frame(buffer: &mut Buffer, colors: Colors, model: &Model, scene: Scene<'_>, now: Instant) {
     let Scene {
         panes,
