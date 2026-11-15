@@ -56,7 +56,7 @@ fn tone_at(syntax: &SideSyntax, line: usize, column: usize) -> Tone {
 fn expect_tones(path: &str, text: &str, syntax: &Syntax, expected: &[(&str, Tone)]) {
     let resolved = resolve(path, text);
     assert_eq!(&resolved.syntax, syntax, "{path} resolves");
-    let highlighted = highlight(&resolved, text, None);
+    let highlighted = highlight_in(Languages::standard(), &resolved, text, far());
     for &(marked, tone) in expected {
         assert_eq!(
             tones_of(&highlighted, text, marked),
@@ -79,6 +79,12 @@ fn bat(name: &str) -> Syntax {
 /// A deadline no test reaches, so debug builds' slowness never turns highlights plain.
 fn far() -> Deadline<'static> {
     Deadline::after(Duration::from_secs(600))
+}
+
+/// [`analyze`] within [`far`], since a slow runner past the real budget would leave the rest
+/// plain.
+fn analyzed(path: &str, text: &str) -> SideSyntax {
+    highlight_in(Languages::standard(), &resolve(path, text), text, far())
 }
 
 /// Every tree-house-tier row's queries compile against its grammar through
@@ -918,8 +924,8 @@ fn identical_content_highlights_by_its_name() {
         # heading
         echo hi
     "};
-    let as_script = analyze("notes.sh", text);
-    let as_markdown = analyze("notes.md", text);
+    let as_script = analyzed("notes.sh", text);
+    let as_markdown = analyzed("notes.md", text);
     assert_eq!(tone_at(&as_script, 0, 0), Tone::Comment);
     assert_eq!(tone_at(&as_script, 1, 0), Tone::Function);
     assert_eq!(tone_at(&as_markdown, 0, 0), Tone::Heading);
@@ -935,7 +941,7 @@ fn multibyte_text_and_crlf_keep_their_offsets() {
         // é ünï\r
         let s = \"ß\";\r
     "};
-    let syntax = analyze("lib.rs", text);
+    let syntax = analyzed("lib.rs", text);
     assert_eq!(syntax.lines.len(), 3);
     assert_eq!(
         syntax.line(1),
@@ -1092,7 +1098,7 @@ fn a_demoted_language_stays_highlighted_in_files_and_fences() {
 fn bat_keeps_to_its_line_limit() {
     let near = format!("val s = \"{}\"\n", "x".repeat(bat::MAX_LINE_BYTES - 10));
     assert_eq!(near.trim_end().len(), bat::MAX_LINE_BYTES);
-    let syntax = analyze("Long.kt", &near);
+    let syntax = analyzed("Long.kt", &near);
     assert_eq!(tone_at(&syntax, 0, 0), Tone::Keyword, "a line at the limit");
 
     let over = formatdoc! {r#"
@@ -1100,7 +1106,7 @@ fn bat_keeps_to_its_line_limit() {
         val text = """{}
         val b = 2
     "#, "x".repeat(bat::MAX_LINE_BYTES)};
-    let syntax = analyze("Over.kt", &over);
+    let syntax = analyzed("Over.kt", &over);
     assert!(
         syntax.lines.iter().all(Vec::is_empty),
         "the whole input stays plain"
@@ -1115,7 +1121,7 @@ fn bat_keeps_to_its_line_limit() {
         val c = 3
         ```
     "};
-    let syntax = analyze("doc.md", &fenced);
+    let syntax = analyzed("doc.md", &fenced);
     assert_eq!(
         tone_at(&syntax, 1, 0),
         Tone::Plain,
@@ -1158,7 +1164,7 @@ fn malformed_input_still_highlights() {
           let = "
         }}}
     "#};
-    let syntax = analyze("broken.rs", broken);
+    let syntax = analyzed("broken.rs", broken);
     assert_eq!(tone_at(&syntax, 0, 0), Tone::Keyword);
     let fences = indoc! {r#"
         ```rust
@@ -1168,7 +1174,7 @@ fn malformed_input_still_highlights() {
         ~~~
         ```
     "#};
-    let syntax = analyze("broken.md", fences);
+    let syntax = analyzed("broken.md", fences);
     assert_eq!(syntax.lines.len(), fences.lines().count());
     let controls = "\u{1}fn\u{7f}\n";
     assert_eq!(analyze("odd.rs", controls).lines.len(), 1);
@@ -1266,7 +1272,7 @@ fn a_near_limit_file_keeps_to_the_budget() {
     let limit = usize::try_from(review_core::git::MAX_TEXT_BLOB_BYTES).unwrap();
     let text = unit.repeat((limit - 1024) / unit.len());
     let started = std::time::Instant::now();
-    let syntax = analyze("big.rs", &text);
+    let syntax = analyzed("big.rs", &text);
     let elapsed = started.elapsed();
     eprintln!(
         "{} bytes in {elapsed:?}, {} lines highlighted",
