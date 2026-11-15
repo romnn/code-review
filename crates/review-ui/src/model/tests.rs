@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
 use review_core::tree::NodeKind;
 use review_core::{MarkVerdict, Review};
@@ -73,8 +73,11 @@ struct Host {
     driver: Driver,
     jobs: VecDeque<Job>,
     timers: Vec<Completion>,
-    /// The minute clock's ticks, which only a test fires.
+    /// The minute clock's ticks, and a live review's periodic captures, which keep themselves
+    /// going, so only a test fires them.
     clocks: Vec<Completion>,
+    /// Jobs that wait for something outside the app, which only a test runs.
+    waits: Vec<Job>,
     copied: Vec<String>,
     /// How the model asked the front end to scroll its sheets.
     sheet_steps: Vec<SheetStep>,
@@ -99,6 +102,7 @@ impl Host {
             jobs: VecDeque::new(),
             timers: Vec::new(),
             clocks: Vec::new(),
+            waits: Vec::new(),
             copied: Vec::new(),
             sheet_steps: Vec::new(),
             quits: 0,
@@ -130,12 +134,13 @@ impl Host {
         for effect in effects {
             match effect {
                 Effect::Spawn(job) => self.jobs.push_back(job),
-                // The minute clock keeps itself going, so it waits apart from the timers that
-                // settle.
+                Effect::Wait(job) => self.waits.push(job),
+                // The minute clock and the periodic capture keep themselves going, so they
+                // wait apart from the timers that settle.
                 Effect::After(_, completion)
                     if matches!(
                         *completion.outcome,
-                        Outcome::Tick(super::sync::Tick::Minute)
+                        Outcome::Tick(super::sync::Tick::Minute | super::sync::Tick::Reconcile)
                     ) =>
                 {
                     self.clocks.push(completion);
@@ -215,6 +220,7 @@ fn settings() -> Settings {
             auto_approve_formatting: config.auto_approve_formatting,
         },
         language_servers: true,
+        live: config.live,
         removed: None,
         added: None,
         appearance: Appearance {
@@ -623,16 +629,16 @@ fn an_untrusted_lookup_is_dropped_centrally() {
     assert_eq!(model.status, status, "the dropped answer says nothing");
 }
 
-/// The central check drops a file read to open as a buffer for another revision than shows:
-/// no buffer opens, though the read still ends; one read for the revision that shows opens.
+/// The central check drops a file read to open as a buffer for another snapshot than shows:
+/// no buffer opens, though the read still ends; one read for the snapshot that shows opens.
 #[test]
 fn a_file_read_for_another_revision_is_dropped_centrally() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open(demo(dir.path()));
-    let shown = host.model().snapshot.as_ref().unwrap().revision;
-    let other = RevisionNumber::new(shown.get() + 1).unwrap();
-    let read = |revision| Completion {
-        subject: Subject::Revision(revision),
+    let shown = host.model().shown;
+    let other = shown + 1;
+    let read = |generation| Completion {
+        subject: Subject::Shown(generation),
         outcome: Box::new(Outcome::Unchanged(Unchanged {
             path: "README.md".to_owned(),
             line: 0,
@@ -666,7 +672,7 @@ fn buffer_on_a_name(host: &mut Host) {
 fn lookup(model: &Model) -> Lookup {
     Lookup {
         buffer: model.buffer.as_ref().unwrap().id,
-        revision: model.snapshot.as_ref().unwrap().revision,
+        shown: model.shown,
     }
 }
 
@@ -770,10 +776,10 @@ fn a_definition_lands_only_where_it_was_asked() {
         "The definition lookup finished for a file no longer shown."
     );
 
-    // An answer for another revision of the shown buffer is dropped too.
+    // An answer for another snapshot of the shown buffer is dropped too.
     let current = lookup(host.model());
     let other = Lookup {
-        revision: RevisionNumber::new(current.revision.get() + 1).unwrap(),
+        shown: current.shown + 1,
         ..current
     };
     host.update(|model| model.looking_up = true);
@@ -2131,6 +2137,7 @@ fn highlights_land_file_by_file() {
         jobs: VecDeque::new(),
         timers: Vec::new(),
         clocks: Vec::new(),
+        waits: Vec::new(),
         copied: Vec::new(),
         sheet_steps: Vec::new(),
         quits: 0,
@@ -2162,4 +2169,427 @@ fn highlights_land_file_by_file() {
     host.complete(second);
     assert!(side_syntax(host.model(), other, true).is_some());
     assert!(host.jobs.is_empty(), "nothing is left to highlight");
+}
+
+/// A review of the working tree of a repository in `dir`: `base` committed on `main`, and
+/// `worktree` written over it, uncommitted. Returns the review and the working tree.
+fn worktree_review_of(
+    dir: &Path,
+    base: &[(&str, &str)],
+    worktree: &[(&str, &str)],
+) -> (Review, std::path::PathBuf) {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    for (path, content) in base {
+        std::fs::write(repo.join(path), content).unwrap();
+    }
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    git(&["checkout", "--quiet", "-b", "feature"]);
+    for (path, content) in worktree {
+        std::fs::write(repo.join(path), content).unwrap();
+    }
+    let review = Review::open(
+        &dir.join("data"),
+        review_core::Repo::discover(&repo).unwrap(),
+        review_core::ReviewTarget::Worktree {
+            base: "main".to_owned(),
+        },
+    )
+    .unwrap();
+    review.refresh().unwrap();
+    (review, repo)
+}
+
+/// A file with a change near its top and one near its bottom, as `top` and `bottom`, which
+/// may span lines.
+fn two_hunks(top: &str, bottom: &str) -> String {
+    let filler = "// filler\n".repeat(20);
+    formatdoc! {"
+        fn a() {{
+            {top}
+        }}
+        {filler}fn z() {{
+            {bottom}
+        }}
+    "}
+}
+
+/// The window over a live review of `a.rs` changed at its top and bottom, with the diff of
+/// `a.rs` showing; returns it with the working tree.
+fn live_host(dir: &Path) -> (Host, std::path::PathBuf) {
+    let (review, repo) = worktree_review_of(
+        dir,
+        &[("a.rs", &two_hunks("1", "2"))],
+        &[("a.rs", &two_hunks("one", "two"))],
+    );
+    let mut host = Host::open(review);
+    assert!(host.model().following(), "a working-tree review follows it");
+    assert_eq!(host.waits.len(), 1, "the watch waits for changes");
+    host.update(|model| model.show_file("a.rs"));
+    host.dispatch(Action::FocusDiff);
+    (host, repo)
+}
+
+/// Writes `a.rs` and captures the working tree, as a change the watch saw does.
+fn edit_and_capture(host: &mut Host, repo: &Path, top: &str, bottom: &str) {
+    std::fs::write(repo.join("a.rs"), two_hunks(top, bottom)).unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+}
+
+/// The text the selected hunk adds.
+fn selected_text(model: &Model) -> String {
+    let view = model.view().unwrap();
+    model
+        .hunk_units()
+        .iter()
+        .filter_map(|&unit| {
+            view.unit(unit)
+                .ok()?
+                .chunk()
+                .map(|chunk| chunk.added.clone())
+        })
+        .collect()
+}
+
+/// An edit shows at once in place of the snapshot on screen, as a provisional revision, with
+/// the reviewer still on the same hunk of the same file and their fold kept, although the hunk
+/// moved down.
+#[test]
+fn a_live_review_shows_an_edit_and_keeps_the_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::NextHunk);
+    assert!(selected_text(host.model()).contains("two"));
+    host.dispatch(Action::ToggleFold);
+    let shown = host.model().shown;
+
+    edit_and_capture(&mut host, &repo, &["one", "    more"].join("\n"), "two");
+
+    let model = host.model();
+    let view = model.view().unwrap();
+    assert!(
+        view.is_provisional(),
+        "the capture shows without being recorded"
+    );
+    assert_eq!(model.shown, shown + 1);
+    assert_eq!(model.selected.as_deref(), Some("a.rs"));
+    assert_eq!(model.hunk, 1);
+    assert!(selected_text(model).contains("two"));
+    assert_eq!(
+        model.folds.units,
+        model.hunk_units().into_iter().collect(),
+        "the folded hunk stays folded"
+    );
+    assert!(model.status.starts_with("The working tree changed."));
+}
+
+/// A review key on a hunk that just changed under it is refused, and accepted once the change
+/// has been on screen for a moment; marking records the capture it was made on.
+#[test]
+fn a_review_key_on_a_hunk_that_just_changed_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert!(selected_text(host.model()).contains("uno"));
+
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().status.starts_with("Not marked"));
+    assert!(host.model().pending.is_empty() && host.model().marks.is_empty());
+
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
+    host.dispatch(Action::ToggleApprove);
+    assert!(!host.model().pending.is_empty(), "the mark is queued");
+    host.settle();
+    let review = host.model().review.clone().unwrap();
+    let recorded = review.history().unwrap();
+    assert_eq!(recorded.revisions().len(), 2, "the capture was recorded");
+    assert!(!host.model().view().unwrap().is_provisional());
+}
+
+/// A key held down since before a hunk changed never marks it, however long it repeats; a new
+/// press does.
+#[test]
+fn a_key_held_across_a_change_never_marks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    host.update(|model| {
+        let live = model.live.as_mut().unwrap();
+        live.age(Duration::from_secs(3));
+        live.hold_since(Duration::from_secs(5));
+    });
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().status.starts_with("Not marked"), "still held");
+    assert!(host.model().marks.is_empty());
+
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::ZERO));
+    host.dispatch(Action::ToggleApprove);
+    assert!(!host.model().pending.is_empty(), "a new press marks");
+}
+
+/// A capture waits while a mark is saved, and is taken again afterwards, since the mark may
+/// have recorded the snapshot it was compared with.
+#[test]
+fn a_capture_waits_for_marks_and_is_taken_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleApprove);
+    assert!(!host.model().marks.is_empty() || host.model().marking);
+
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
+    // Only the capture runs: the mark's save waits behind it.
+    host.update(|model| model.capture(false));
+    let capture = host.run_newest_job();
+    host.complete(capture);
+    assert!(host.model().live.as_ref().unwrap().has_waiting());
+    assert!(!selected_text(host.model()).contains("uno"));
+
+    host.settle();
+    let model = host.model();
+    assert!(!model.live.as_ref().unwrap().has_waiting());
+    let view = model.view().unwrap();
+    assert!(view.is_provisional());
+    assert!(
+        view.unit_ids()
+            .iter()
+            .filter_map(|&unit| view.unit(unit).ok()?.chunk())
+            .any(|chunk| chunk.added.contains("uno"))
+    );
+    let two = view
+        .unit_ids()
+        .into_iter()
+        .find(|&unit| {
+            view.unit(unit)
+                .ok()
+                .and_then(|unit| unit.chunk())
+                .is_some_and(|chunk| chunk.added.contains("two"))
+        })
+        .unwrap();
+    assert!(view.state(two).unwrap().is_reviewed(), "the mark carried");
+}
+
+/// A capture compared with a snapshot that is no longer on screen never lands: it is taken
+/// again from the snapshot that shows.
+#[test]
+fn a_capture_of_another_snapshot_is_taken_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    let shown = host.model().shown;
+    host.dispatch(Action::ToggleHelp);
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert!(
+        host.model().live.as_ref().unwrap().has_waiting(),
+        "help holds it back"
+    );
+
+    // A second capture is compared with the snapshot still on screen...
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "dos")).unwrap();
+    host.update(|model| model.capture(false));
+    // ...which the first replaces once help closes.
+    host.dispatch(Action::CloseOverlay);
+    assert_eq!(host.model().shown, shown + 1);
+    assert!(selected_text(host.model()).contains("uno"));
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
+
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown + 2, "the stale capture was taken again");
+    let view = model.view().unwrap();
+    assert!(
+        view.unit_ids()
+            .iter()
+            .filter_map(|&unit| view.unit(unit).ok()?.chunk())
+            .any(|chunk| chunk.added.contains("dos"))
+    );
+    // Compared with the snapshot on screen, the top hunk did not change, so it takes a mark;
+    // compared with the one before, it would have, and would refuse it.
+    host.dispatch(Action::FirstHunk);
+    assert!(selected_text(host.model()).contains("uno"));
+    host.dispatch(Action::ToggleApprove);
+    assert!(!host.model().pending.is_empty(), "{}", host.model().status);
+}
+
+/// A change on disk reaches the window through the watch: its wait ends, and the capture it
+/// starts shows the change.
+#[test]
+fn the_watch_brings_a_change_to_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
+    let wait = host.waits.pop().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(wait()).ok());
+    let waited = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the watch sees the change");
+    host.complete(waited);
+    assert_eq!(host.waits.len(), 1, "the next wait starts");
+    host.settle();
+    assert!(selected_text(host.model()).contains("uno"));
+}
+
+/// Reviews of a range never follow anything, and `[review] live = false` turns following off.
+#[test]
+fn only_a_working_tree_review_follows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::open(demo(dir.path()));
+    assert!(!host.model().following());
+
+    let dir = tempfile::tempdir().unwrap();
+    let (review, _) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", "fn a() {}\n")],
+        &[("a.rs", "fn a() { 1 }\n")],
+    );
+    let host = Host::open_with(
+        review,
+        Settings {
+            live: false,
+            ..settings()
+        },
+    );
+    assert!(!host.model().following());
+    assert!(host.waits.is_empty());
+}
+
+/// A capture cuts the way back from a definition into a buffer of the old snapshot, whose
+/// change markers number the old snapshot's hunks.
+#[test]
+fn a_capture_cuts_the_way_back_to_an_old_review_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::ToggleBuffer);
+    host.update(|model| model.looking_up = true);
+    let asked = lookup(host.model());
+    host.complete(found_for(asked));
+    assert!(host.model().buffer.as_ref().unwrap().previous.is_some());
+
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    let model = host.model();
+    assert_eq!(model.mode, Mode::Buffer);
+    let buffer = model.buffer.as_ref().unwrap();
+    assert_eq!(buffer.title(), "src/ledger.rs");
+    assert!(
+        buffer.previous.is_none(),
+        "no way back into the old snapshot"
+    );
+}
+
+/// In a review buffer, the cursor stays on the hunk the keys acted on when lines above it come
+/// and go, rather than on its old row.
+#[test]
+fn a_review_buffer_keeps_its_hunk_under_the_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().buffer_hunk(), Some(1));
+
+    let more = ["one", "    a", "    b", "    c", "    d"].join("\n");
+    edit_and_capture(&mut host, &repo, &more, "two");
+    let model = host.model();
+    assert_eq!(model.mode, Mode::Buffer);
+    assert_eq!(model.buffer_hunk(), Some(model.hunk));
+    assert!(selected_text(model).contains("two"));
+}
+
+/// A folder the tree cursor lands on because the one under it went is new under the keys, so
+/// a review key on it is refused at first, however unchanged its files are.
+#[test]
+fn a_folder_the_cursor_lands_on_refuses_review_keys_at_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", "fn a() {}\n")],
+        &[("a.rs", "fn a() { 1 }\n")],
+    );
+    for (path, text) in [("x/one.rs", "fn one() {}\n"), ("y/two.rs", "fn two() {}\n")] {
+        std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        std::fs::write(repo.join(path), text).unwrap();
+    }
+    review.refresh().unwrap();
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file("a.rs"));
+    let folder = host
+        .model()
+        .visible_tree()
+        .iter()
+        .position(|&index| host.model().tree[index].path == "x")
+        .unwrap();
+    host.update(|model| model.tree_cursor = folder);
+    assert_eq!(host.model().tree_node().unwrap().path, "x");
+
+    std::fs::remove_dir_all(repo.join("x")).unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(host.model().tree_node().unwrap().path, "y");
+    host.dispatch(Action::ToggleApprove);
+    assert!(
+        host.model().status.starts_with("Not marked"),
+        "{}",
+        host.model().status
+    );
+    assert!(host.model().marks.is_empty());
+}
+
+/// A capture of the snapshot on screen with marks another window saved since shows them, and
+/// so does `R`, which reads them first.
+#[test]
+fn marks_saved_elsewhere_show_with_the_next_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = live_host(dir.path());
+    assert_eq!(host.model().file_totals(), (0, 1));
+    let review = host.model().review.clone().unwrap();
+    let history = review.history().unwrap();
+    let view = history.current_view().unwrap();
+    review
+        .mark(&view, &view.unit_ids(), MarkVerdict::Accepted)
+        .unwrap();
+
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(host.model().file_totals(), (1, 1));
+
+    let history = review.history().unwrap();
+    let view = history.current_view().unwrap();
+    review
+        .mark(&view, &view.unit_ids(), MarkVerdict::Unseen)
+        .unwrap();
+    host.dispatch(Action::Refresh);
+    host.settle();
+    assert_eq!(host.model().file_totals(), (0, 1), "R shows the reset");
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(host.model().file_totals(), (0, 1));
+}
+
+/// A capture keeps the reviewer in the diff when they left the buffer for it.
+#[test]
+fn a_capture_does_not_reopen_a_buffer_left_for_the_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::ToggleBuffer);
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().mode, Mode::Diff);
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert_eq!(host.model().mode, Mode::Diff);
 }

@@ -280,9 +280,9 @@ impl ReviewApp {
         self.update_model(window, cx, |model| model.dispatch(action));
     }
 
-    /// Runs what the model asked for: jobs on gpui's background executor with their
-    /// completions handed back to the model on the UI thread, timers, the clipboard, the title,
-    /// the sheets' scrolling and quitting.
+    /// Runs what the model asked for: jobs on gpui's background executor, and jobs that wait
+    /// for long on threads of their own, with their completions handed back to the model on the
+    /// UI thread, timers, the clipboard, the title, the sheets' scrolling and quitting.
     fn run(&self, effects: Vec<Effect>, window: &mut Window, cx: &mut Context<Self>) {
         for effect in effects {
             match effect {
@@ -290,6 +290,25 @@ impl ReviewApp {
                     let work = cx.background_executor().spawn(async move { job() });
                     cx.spawn_in(window, async move |this, cx| {
                         let completion = work.await;
+                        this.update_in(cx, |this, window, cx| {
+                            this.update_model(window, cx, |model| model.complete(completion));
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                // A job that may wait for as long as the app runs gets a thread of its own, so it
+                // never holds one of the executor's.
+                Effect::Wait(job) => {
+                    let (sender, receiver) = futures_channel::oneshot::channel();
+                    std::thread::spawn(move || {
+                        // The window is gone once the app quits; nothing waits for this.
+                        sender.send(job()).ok();
+                    });
+                    cx.spawn_in(window, async move |this, cx| {
+                        let Ok(completion) = receiver.await else {
+                            return;
+                        };
                         this.update_in(cx, |this, window, cx| {
                             this.update_model(window, cx, |model| model.complete(completion));
                         })

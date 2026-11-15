@@ -54,3 +54,4 @@ pub mod state;
 pub mod syntax;
 pub mod text;
 pub mod theme;
+pub mod watch;

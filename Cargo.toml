@@ -67,9 +67,14 @@ rustix = { version = "1.1", default-features = false, features = ["process", "st
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false }
 gpui-component = { version = "=0.8.0", default-features = false }
+# Hands review-gui the completion of a job that runs on a thread of its own; the version gpui
+# links.
+futures-channel = "0.3.34"
 parking_lot = "0.12"
 # Fuzzy matching for the file finder.
 nucleo-matcher = "0.3"
+# Watches a reviewed working tree, so the review follows the disk; the version gpui links.
+notify = "8.2.1"
 # The icons gpui-component draws, such as the find bar's clear button.
 gpui-kit-assets = "=0.8.0"
 toml = "1"

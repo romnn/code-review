@@ -48,6 +48,7 @@ mod effects;
 mod fields;
 mod folders;
 mod layout;
+mod live;
 mod marks;
 pub mod overview;
 pub mod picker;
@@ -99,6 +100,9 @@ pub struct Settings {
     pub policy: review_core::ReviewPolicy,
     /// Whether a language server may start for go to definition, as `[lsp] enabled` sets it.
     pub language_servers: bool,
+    /// Whether a review of the working tree follows it as it changes, as `[review] live` sets
+    /// it.
+    pub live: bool,
     /// The removed-line background, as `0xRRGGBB`, when the configuration overrides the
     /// theme's.
     pub removed: Option<u32>,
@@ -391,6 +395,15 @@ pub struct Model {
     picker_runs: u64,
     /// The last text field identity handed out.
     field_ids: u64,
+    /// The generation of the snapshot on screen, which changes whenever what it shows does, so
+    /// work done for one snapshot never lands on another, even under the same revision number,
+    /// as successive live captures of the working tree have.
+    shown: u64,
+    /// The version of the newest history installed; an older one knows less, such as a mark
+    /// saved since, and is never installed over it.
+    version: u64,
+    /// Following the working tree, for a live review of it.
+    live: Option<live::Live>,
     /// Marks waiting for the engine, saved one at a time.
     pub marks: VecDeque<MarkJob>,
     /// Whether a mark is being saved.
@@ -492,6 +505,9 @@ impl Model {
             picker: None,
             picker_runs: 0,
             field_ids: 0,
+            shown: 0,
+            version: 0,
+            live: None,
             marks: VecDeque::new(),
             marking: false,
             pending: HashMap::new(),
@@ -539,6 +555,8 @@ impl Model {
                 self.review = Some(Arc::new(opened.review));
                 self.blobs.texts.extend(opened.texts);
                 self.revisions = overview::summarize(&opened.history, self.settings.policy);
+                self.shown += 1;
+                self.version = opened.history.version();
                 // The policy in use when the review shows, which the settings list may have
                 // changed while it opened.
                 self.snapshot = Some(Snapshot {
@@ -563,6 +581,7 @@ impl Model {
                 }
                 self.request_syntax();
                 self.start_clock();
+                self.start_live();
             }
             Err(err) => {
                 self.effect(Effect::Log(err.clone()));
@@ -576,6 +595,7 @@ impl Model {
     /// once nothing is left to save after the reviewer asked to, and hands over the effects
     /// queued since the last update.
     fn after_update(&mut self) -> Vec<Effect> {
+        self.show_waiting_capture();
         self.save_folders();
         self.finish_quitting();
         std::mem::take(&mut self.effects)
@@ -591,6 +611,7 @@ impl Model {
             || self.preview.is_some()
             || self.picker.as_ref().is_some_and(picker::Picker::busy)
             || self.refreshing
+            || self.live.as_ref().is_some_and(live::Live::capturing)
             || self.folders.busy()
             || self.diff_scroll.animating()
             || self.buffer_scroll.animating()

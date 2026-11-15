@@ -139,6 +139,8 @@ whose stat cannot show an edit; `git read-tree HEAD` when there is no index), `g
 and untracked files, respecting `.gitignore`), `git write-tree` and `git commit-tree` with a fixed
 identity and date produce a synthetic snapshot commit, pinned like any other. Staged and unstaged changes are captured together. Two captures of
 different contents are two revisions; a capture identical to the current revision deduplicates.
+A review that follows the working tree shows captures without recording them until one is
+marked (see "Live updates").
 Whether a working tree has uncommitted changes is decided by the same capture: its tree against
 `HEAD`'s, so the two can never disagree.
 
@@ -660,6 +662,22 @@ which would conflict with an embedder's own `libsqlite3-sys`.
 
 ### Live updates
 
+A review of the working tree follows it as it changes, the way lazygit does
+([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)):
+`review_ui::watch` watches what git does not ignore (on Linux each such directory on its own,
+found by asking `git check-ignore` about each level of the tree; on macOS and Windows the
+whole tree, filtering events by git's rules), and every change a capture records, never a read,
+starts a capture once the burst of changes goes quiet. `Review::live_history` shows the capture
+as a provisional revision after the last recorded one, which `Review::mark` and
+`Review::note` record first, under the lock, only while the log still ends where the capture
+was compared. The window shows each capture in place of the snapshot on screen, keeping the
+file, the hunk, the top row and the folds through the correspondence between the two; a
+capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
+way, and one compared with a snapshot no longer on screen is taken again. A hunk that changed
+refuses review keys for a second, and while a key pressed before the change repeats. A capture
+every 30 seconds catches what a watch cannot see, walking the tree again every 5 minutes;
+`[review] live = false` turns it off.
+
 For PR reviews, poll every 30 seconds (configurable): `git ls-remote` for the PR head and the target
 branch, and `gh pr view` for the target branch name, since a PR can be retargeted. A change of
 either side fetches into a temporary ref, verifies the fetched objects, records a revision and
@@ -841,7 +859,7 @@ it, muted, so it never reads as code.
   review's freshness at the left and every hinted key of the current mode at the right, in rank
   order with `? keys` last at the edge. The left side says which revision shows and its head
   commit, a newer revision waiting, and when the review last synced (`rev 1 · 08990e0 · synced
-  4m ago`); while a fetch runs it says what it does (`syncing…`, `analyzing rev 4…`, `carrying
+  4m ago`), or `live` for a review that follows the working tree; while a fetch runs it says what it does (`syncing…`, `analyzing rev 4…`, `carrying
   marks…`) with a spinner, and a failed fetch says so for five seconds before the last good
   sync shows again. The engine records each sync in `synced.json` (`Review::synced`) and reports
   a refresh's steps through `Review::refresh_reporting`; a minute timer keeps the time current

@@ -247,7 +247,8 @@ impl App {
     fn run(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::Spawn(job) => {
+                // A thread per job already, so a job that waits for long holds no other.
+                Effect::Spawn(job) | Effect::Wait(job) => {
                     let sender = self.sender.clone();
                     // A thread per job, so none waits behind a slow one.
                     std::thread::spawn(move || {

@@ -178,6 +178,7 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
             auto_approve_formatting: config.auto_approve_formatting,
         },
         language_servers: config.language_servers,
+        live: config.live,
         removed: config.removed,
         added: config.added,
         layout: PaneLayout {

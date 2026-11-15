@@ -15,9 +15,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use review_core::{ObjectId, RevisionNumber};
+use review_core::ObjectId;
 
 use super::buffer::{Definition, Lookup};
+use super::live::{Captured, Started, WaitedFor};
 use super::marks::{Marked, Refreshed};
 use super::picker::{Found, PreviewText, Query, Unchanged};
 use super::sync::Tick;
@@ -55,10 +56,10 @@ pub(super) enum Subject {
     Search(u64),
     /// The open picker with this identity.
     Picker(u64),
-    /// A definition lookup from this buffer of this revision, while the review is trusted.
+    /// A definition lookup from this buffer of this snapshot, while the review is trusted.
     Lookup(Lookup),
-    /// This revision, while it shows.
-    Revision(RevisionNumber),
+    /// The snapshot with this generation, while it shows; see [`Model::shown`].
+    Shown(u64),
 }
 
 /// Why an outcome lands whatever changed while its job ran.
@@ -76,6 +77,9 @@ pub(super) enum Because {
     /// It only marks the passing of time, for what shows how long ago something happened or
     /// that something runs.
     Clock,
+    /// It follows the working tree: a watch that started, a change, a capture, or the time for
+    /// the next capture; a capture checks for itself which snapshot it was compared with.
+    Live,
 }
 
 /// What a job or a timer produced.
@@ -106,6 +110,12 @@ pub(super) enum Outcome {
     Paused(Query),
     /// A tick of the clock, for what shows the time.
     Tick(Tick),
+    /// The watch on the working tree that started, or why it could not.
+    Watching(Result<Box<Started>, String>),
+    /// The working tree changed, or the watch ended.
+    Waited(Box<WaitedFor>),
+    /// A capture of the working tree, or why it failed.
+    Captured(Result<Box<Captured>, String>),
 }
 
 /// File texts read in the background, by blob.
@@ -138,6 +148,10 @@ pub enum Effect {
     /// Runs the job in the background and hands its completion to [`Model::complete`] on the
     /// UI thread.
     Spawn(Job),
+    /// Does what [`Self::Spawn`] does for a job that waits for something outside the app, such
+    /// as the working tree changing, and may block for as long as the app runs: it runs on a
+    /// thread of its own, never on one that other jobs share.
+    Wait(Job),
     /// Hands the completion to [`Model::complete`] after the delay, as a timer: the tree
     /// cursor's rest before a previewed diff is built, the content search's pause for typing,
     /// or a tick of the clock for what shows the time.
@@ -163,6 +177,7 @@ impl std::fmt::Debug for Effect {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Spawn(_) => formatter.write_str("Spawn"),
+            Self::Wait(_) => formatter.write_str("Wait"),
             Self::After(delay, _) => formatter.debug_tuple("After").field(delay).finish(),
             Self::Copy(text) => formatter.debug_tuple("Copy").field(text).finish(),
             Self::CopyPrimary(text) => formatter.debug_tuple("CopyPrimary").field(text).finish(),
@@ -299,6 +314,9 @@ impl Model {
             | Outcome::PreviewText(_)
             | Outcome::Paused(_)
             | Outcome::Tick(_)
+            | Outcome::Watching(_)
+            | Outcome::Waited(_)
+            | Outcome::Captured(_)
             | Outcome::Rested => {}
         }
     }
@@ -315,21 +333,15 @@ impl Model {
                 if !self.trusted {
                     return Freshness::Stale(None);
                 }
-                let shown = self
-                    .buffer
-                    .as_ref()
-                    .map(|buffer| buffer.id)
-                    .zip(self.snapshot.as_ref().map(|snapshot| snapshot.revision));
-                if shown != Some((lookup.buffer, lookup.revision)) {
+                let shown = self.buffer.as_ref().map(|buffer| (buffer.id, self.shown));
+                if shown != Some((lookup.buffer, lookup.shown)) {
                     return Freshness::Stale(Some(
                         "The definition lookup finished for a file no longer shown.",
                     ));
                 }
                 true
             }
-            Subject::Revision(revision) => {
-                self.snapshot.as_ref().map(|snapshot| snapshot.revision) == Some(revision)
-            }
+            Subject::Shown(generation) => self.snapshot.is_some() && self.shown == generation,
         };
         if current {
             Freshness::Current
@@ -354,6 +366,9 @@ impl Model {
             Outcome::Rested => self.finish_preview(),
             Outcome::Paused(query) => self.search_picker(query),
             Outcome::Tick(tick) => self.ticked(tick),
+            Outcome::Watching(started) => self.watching(started),
+            Outcome::Waited(waited) => self.waited(*waited),
+            Outcome::Captured(captured) => self.captured(captured),
         }
     }
 }
