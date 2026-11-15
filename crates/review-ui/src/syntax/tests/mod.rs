@@ -56,7 +56,7 @@ fn tone_at(syntax: &SideSyntax, line: usize, column: usize) -> Tone {
 fn expect_tones(path: &str, text: &str, syntax: &Syntax, expected: &[(&str, Tone)]) {
     let resolved = resolve(path, text);
     assert_eq!(&resolved.syntax, syntax, "{path} resolves");
-    let highlighted = highlight(&resolved, text);
+    let highlighted = highlight(&resolved, text, None);
     for &(marked, tone) in expected {
         assert_eq!(
             tones_of(&highlighted, text, marked),
@@ -77,7 +77,7 @@ fn bat(name: &str) -> Syntax {
 }
 
 /// A deadline no test reaches, so debug builds' slowness never turns highlights plain.
-fn far() -> Deadline {
+fn far() -> Deadline<'static> {
     Deadline::after(Duration::from_secs(600))
 }
 

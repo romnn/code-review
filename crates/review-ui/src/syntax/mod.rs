@@ -25,6 +25,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use review_core::scope::ScopeMap;
 use review_core::syntax::Language as Proof;
@@ -154,19 +155,19 @@ pub fn resolve(path: &str, text: &str) -> Resolved {
 ///
 /// A text larger than the blobs the engine reads as text stays plain.
 #[must_use]
-pub fn highlight(resolved: &Resolved, text: &str) -> SideSyntax {
+pub fn highlight(resolved: &Resolved, text: &str, cancel: Option<&AtomicBool>) -> SideSyntax {
     highlight_in(
         Languages::standard(),
         resolved,
         text,
-        Deadline::after(BUDGET),
+        Deadline::after(BUDGET).cancelled_by(cancel),
     )
 }
 
 /// Resolves and highlights `text` as the file at `path`, for a file shown on its own.
 #[must_use]
 pub fn analyze(path: &str, text: &str) -> SideSyntax {
-    highlight(&resolve(path, text), text)
+    highlight(&resolve(path, text), text, None)
 }
 
 /// [`resolve`] over `languages`.
@@ -351,7 +352,7 @@ fn highlight_in(
     languages: &Languages,
     resolved: &Resolved,
     text: &str,
-    deadline: Deadline,
+    deadline: Deadline<'_>,
 ) -> SideSyntax {
     let too_large =
         u64::try_from(text.len()).map_or(true, |len| len > review_core::git::MAX_TEXT_BLOB_BYTES);
@@ -361,7 +362,9 @@ fn highlight_in(
     let scopes_deadline = deadline.capped(BUDGET / 2).instant();
     let scopes = resolved
         .scopes
-        .and_then(|language| ScopeMap::until(language, text, Some(scopes_deadline)))
+        .and_then(|language| {
+            ScopeMap::until(language, text, Some(scopes_deadline), deadline.cancel())
+        })
         .unwrap_or_default();
     let row = |name: &str| {
         let index = languages.by_name(name)?;

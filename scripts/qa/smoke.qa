@@ -509,14 +509,15 @@ key space
 state
 expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Done"
 
-# Holding j in the tree previews files without building every diff; a space right after the
-# burst approves exactly the file whose diff shows.
+# Holding j in the tree shows each file's diff at once; a space right after the burst approves
+# exactly the file whose diff shows.
 file src/generated/schema.rs
 rapid key j
 rapid key j
 rapid key j
 rapid state
-expect "preview":true
+expect "selected":"src/format.rs","shown":"src/format.rs"
+expect "row_count":[1-9]
 rapid key space
 state
 expect "selected":"src/format.rs"
@@ -612,15 +613,16 @@ state
 expect "tag":"changed since revision 1"
 shot 09-revision-2
 
-# A mark that lands while a held key previews a file by its header never builds that file's
-# diff early: it still opens at its first hunk that needs the reviewer once the cursor rests.
+# Moving on while a mark is saved opens the next file at once, at its first hunk that needs the
+# reviewer, and the mark landing keeps it there.
 launch --demo
 file src/generated/schema.rs
 rapid key j
 rapid key space
 rapid key j
 rapid state
-expect "selected":"src/engine.rs","shown":"src/engine.rs","preview":true
+expect "selected":"src/engine.rs","shown":"src/engine.rs"
+expect "hunk":1,
 state
 expect "selected":"src/engine.rs"
 expect "hunk":1,

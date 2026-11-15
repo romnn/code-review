@@ -247,8 +247,6 @@ pub fn diff_state(model: &Model, palette: &Palette, now: Instant) -> Option<Stat
             err.clone(),
             palette.error,
         )),
-        // A previewed file's diff follows once the tree cursor rests.
-        Phase::Ready if model.preview.is_some() => None,
         Phase::Ready if model.rows.rows.is_empty() => Some(card(
             "Nothing to show",
             "Pick a file on the left.".to_owned(),

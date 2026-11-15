@@ -27,7 +27,7 @@ pub(super) fn highlight(
     languages: &Languages,
     language: tree_house::Language,
     text: &str,
-    deadline: Deadline,
+    deadline: Deadline<'_>,
 ) -> Vec<Run> {
     if languages.config_of(language).is_none() {
         return Vec::new();
@@ -35,11 +35,23 @@ pub(super) fn highlight(
     // Every offset below is in bytes: tree-sitter's coordinates are, and the rope is only read
     // through byte-indexed slices.
     let source = RopeSlice::from(text);
-    let Ok(syntax) = tree_house::Syntax::new(source, language, deadline.remaining(), languages)
-    else {
+    let whole = tree_house::tree_sitter::Range::new(
+        tree_house::tree_sitter::Point::ZERO,
+        tree_house::tree_sitter::Point::MAX,
+        0,
+        u32::MAX,
+    );
+    let Ok(syntax) = tree_house::Syntax::new_with_ranges_and_cancel(
+        source,
+        language,
+        deadline.remaining(),
+        deadline.cancel(),
+        languages,
+        vec![whole],
+    ) else {
         return Vec::new();
     };
-    let budget = Budget::new(deadline.remaining(), None);
+    let budget = Budget::new(deadline.remaining(), deadline.cancel());
     let host = host_runs(&syntax, source, languages, &budget);
     // A spent budget is a passed deadline: bat would not start anyway.
     if host.halted {
@@ -110,7 +122,7 @@ fn bridge(
     injections: &[UnresolvedInjection],
     languages: &Languages,
     text: &str,
-    deadline: Deadline,
+    deadline: Deadline<'_>,
 ) -> Vec<Run> {
     let mut cleared: Vec<Range<usize>> = Vec::new();
     let mut added: Vec<Run> = Vec::new();
@@ -223,7 +235,7 @@ impl<'a> Joined<'a> {
     ///
     /// The runs and the pieces are both in order, so one cursor walks the pieces once, and the
     /// work grows with the runs and the pieces, not with their product.
-    fn to_host(&self, runs: &[Run], deadline: Deadline) -> Option<Vec<Run>> {
+    fn to_host(&self, runs: &[Run], deadline: Deadline<'_>) -> Option<Vec<Run>> {
         let mut mapped = Vec::with_capacity(runs.len());
         let mut first = 0;
         for (index, run) in runs.iter().enumerate() {

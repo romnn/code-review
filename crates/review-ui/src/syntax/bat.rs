@@ -104,7 +104,7 @@ pub(super) fn fits(text: &str) -> bool {
 ///
 /// Nothing is highlighted when a line is too long, and nothing after the line at which
 /// `deadline` passes or syntect fails.
-pub(super) fn highlight(syntax: &SyntaxReference, text: &str, deadline: Deadline) -> Vec<Run> {
+pub(super) fn highlight(syntax: &SyntaxReference, text: &str, deadline: Deadline<'_>) -> Vec<Run> {
     let mut runs = Runs::default();
     if !fits(text) {
         return runs.into_vec();

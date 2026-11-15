@@ -478,6 +478,7 @@ pub struct Layout {
 /// The rows' sources, indices and widths are final once [`present`](fn@present) has projected
 /// them for a presentation, which the unified, compact one leaves as they are.
 #[must_use]
+#[tracing::instrument(skip_all, fields(units = units.len()))]
 pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout {
     let mut layout = Layout::default();
     let notes = view.notes();
@@ -568,16 +569,6 @@ fn file_groups(view: &RevisionView<'_>, units: &[UnitId]) -> Vec<Vec<UnitId>> {
         }
     }
     groups
-}
-
-/// The layout of a file's header alone, without its rows: what shows while the tree cursor
-/// moves too fast to lay out each file it passes.
-#[must_use]
-pub fn header_layout(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout {
-    Layout {
-        files: vec![file_section(view, units, folds)],
-        ..Layout::default()
-    }
 }
 
 /// Summarizes the file of `group` for its header.

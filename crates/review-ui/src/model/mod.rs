@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -47,6 +48,7 @@ mod diff;
 mod effects;
 mod fields;
 mod folders;
+mod highlights;
 mod layout;
 mod live;
 mod marks;
@@ -79,10 +81,6 @@ const DEFINITION_DEADLINE: Duration = Duration::from_secs(120);
 /// The smallest and largest code size zoom and the configuration allow, in the front end's
 /// units: logical pixels in a window.
 pub const ZOOM_RANGE: Range<f32> = 9.0..40.0;
-
-/// How long the tree cursor rests before a previewed file's diff is built; a held key repeats
-/// faster than this.
-const PREVIEW_REST: Duration = Duration::from_millis(120);
 
 /// View settings from the configuration file, and the look as the reviewer changes it.
 #[derive(Debug, Clone)]
@@ -247,8 +245,8 @@ pub(crate) struct Blobs {
     texts: HashMap<ObjectId, Arc<rows::FullText>>,
     /// The syntax each file version resolved to, from its path and text.
     resolved: HashMap<state::SideKey, crate::syntax::Resolved>,
-    /// Highlights by blob and syntax, as the same blob may be highlighted as two syntaxes.
-    syntax: HashMap<state::SyntaxKey, Arc<SideSyntax>>,
+    /// Highlights by blob, then by syntax, as the same blob may be highlighted as two syntaxes.
+    syntax: HashMap<ObjectId, HashMap<crate::syntax::Resolved, Arc<SideSyntax>>>,
 }
 
 impl Blobs {
@@ -258,23 +256,37 @@ impl Blobs {
         let sides: HashSet<state::SideKey> = shown_sides(view).collect();
         let shown: HashSet<&ObjectId> = sides.iter().map(|side| &side.oid).collect();
         self.texts.retain(|oid, _| shown.contains(oid));
-        self.syntax.retain(|key, _| shown.contains(&key.oid));
+        self.syntax.retain(|oid, _| shown.contains(oid));
         self.resolved.retain(|side, _| sides.contains(side));
     }
 
     /// The highlights of the file version `side`, once its syntax is resolved and highlighted.
     fn side_syntax(&self, side: &review_core::analysis::EntrySide) -> Option<Arc<SideSyntax>> {
-        let key = state::SideKey {
+        self.syntax_of(&state::SideKey {
             oid: side.oid.clone(),
             path: side.path.clone(),
-        };
-        let resolved = self.resolved.get(&key)?;
-        self.syntax
-            .get(&state::SyntaxKey {
-                oid: key.oid,
-                resolved: resolved.clone(),
+        })
+    }
+
+    /// [`Self::side_syntax`] by the version's key.
+    fn syntax_of(&self, side: &state::SideKey) -> Option<Arc<SideSyntax>> {
+        let resolved = self.resolved.get(side)?;
+        self.syntax.get(&side.oid)?.get(resolved).cloned()
+    }
+
+    /// The highlights already made for the blobs of `sides`, which a version that resolves to
+    /// the same syntax reuses.
+    fn known(&self, sides: &[state::SideKey]) -> HashSet<state::SyntaxKey> {
+        sides
+            .iter()
+            .filter_map(|side| Some((&side.oid, self.syntax.get(&side.oid)?)))
+            .flat_map(|(oid, made)| {
+                made.keys().map(|resolved| state::SyntaxKey {
+                    oid: oid.clone(),
+                    resolved: resolved.clone(),
+                })
             })
-            .cloned()
+            .collect()
     }
 
     /// Whether the file version `side` still needs highlighting: its syntax is not resolved
@@ -283,10 +295,10 @@ impl Blobs {
         match self.resolved.get(side) {
             None => true,
             Some(resolved) if resolved.syntax == crate::syntax::Syntax::Plain => false,
-            Some(resolved) => !self.syntax.contains_key(&state::SyntaxKey {
-                oid: side.oid.clone(),
-                resolved: resolved.clone(),
-            }),
+            Some(resolved) => !self
+                .syntax
+                .get(&side.oid)
+                .is_some_and(|made| made.contains_key(resolved)),
         }
     }
 }
@@ -343,13 +355,6 @@ pub struct Model {
     pub overlay: Option<Overlay>,
     /// The selected file's diff.
     pub rows: Arc<Layout>,
-    /// A file previewed while the tree cursor moves fast: only its header shows until the
-    /// cursor rests, then its diff is built. Holds the preview's number, so a later move
-    /// supersedes an earlier one.
-    pub preview: Option<u64>,
-    previews: u64,
-    /// When the tree cursor last moved, to tell a held key from a single press.
-    last_move: Option<Instant>,
     /// The presentation [`Self::build_selected`] projects the rows for; only
     /// [`Self::transition`] changes it.
     presented: rows::Presentation,
@@ -427,11 +432,10 @@ pub struct Model {
     pub failed_at: Option<Instant>,
     /// Whether a definition lookup runs.
     pub(crate) looking_up: bool,
-    /// Background reads and highlighting jobs still running.
+    /// Background reads of file text still running.
     pub(crate) highlighting: usize,
-    /// Whether a file is being highlighted: files are highlighted one at a time, and each
-    /// lands on its own.
-    highlight_running: bool,
+    /// The shown revision's highlighting in the background.
+    highlights: highlights::Highlights,
     /// Whether language servers may run on the reviewed code; see [`Review::trust`].
     pub trusted: bool,
     /// Whether trusting awaits a confirming second press.
@@ -476,9 +480,6 @@ impl Model {
             screen: Screen::Split,
             overlay: None,
             rows: Arc::new(Layout::default()),
-            preview: None,
-            previews: 0,
-            last_move: None,
             presented,
             code_size: settings.code_size,
             default_code_size: settings.code_size,
@@ -520,7 +521,7 @@ impl Model {
             failed_at: None,
             looking_up: false,
             highlighting: 0,
-            highlight_running: false,
+            highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
             trusted: false,
             trust_pending: false,
             selection: None,
@@ -608,7 +609,7 @@ impl Model {
             || !self.marks.is_empty()
             || self.looking_up
             || self.highlighting > 0
-            || self.preview.is_some()
+            || self.highlights.running()
             || self.picker.as_ref().is_some_and(picker::Picker::busy)
             || self.refreshing
             || self.live.as_ref().is_some_and(live::Live::capturing)
@@ -788,8 +789,6 @@ impl Model {
 
     /// Switches to `mode`, which then owns the keyboard.
     fn enter_mode(&mut self, mode: Mode) {
-        // A mode works on the diff of the selected file, never on a preview's header alone.
-        self.finish_preview();
         // A search belongs to the mode it searches.
         if self.find.as_ref().is_some_and(|find| find.target != mode) {
             self.find = None;
@@ -799,6 +798,7 @@ impl Model {
     }
 
     /// Recomputes the file tree from the shown revision and the pending marks.
+    #[tracing::instrument(skip_all)]
     fn refresh_tree(&mut self) {
         let Some(view) = self.view() else {
             return;
@@ -813,18 +813,12 @@ impl Model {
     /// Lays out the selected file's diff after something it shows changed (marks, folds, text
     /// or highlights arriving, a new revision), keeping the selected hunk.
     fn rebuild(&mut self) {
-        // A file previewed by its header keeps showing only its header: its diff is built at
-        // the file's place once the cursor rests.
-        if self.preview.is_some() {
-            self.show_header();
-            return;
-        }
         self.build_selected();
     }
 
     /// Lays out the selected file's diff.
+    #[tracing::instrument(skip_all)]
     fn build_selected(&mut self) {
-        self.preview = None;
         let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
@@ -854,6 +848,7 @@ impl Model {
     }
 
     /// Builds the layout of `path`'s diff, with its text and highlights from the caches.
+    #[tracing::instrument(skip_all, fields(%path))]
     fn lay_out(&mut self, view: &review_core::RevisionView<'_>, path: &str) -> Layout {
         let path = path.to_owned();
         let units = view.units_of_file(&path);
@@ -972,10 +967,10 @@ impl Model {
     }
 
     /// Reads, in the background, the head text of the shown revision's files that are not
-    /// cached yet, and highlights the next file that needs it.
+    /// cached yet, and highlights the files that need it.
     fn request_syntax(&mut self) {
         self.request_texts();
-        self.request_highlights();
+        self.pump_highlights();
     }
 
     /// Reads the head text of the shown revision's files that are not cached yet, for context
@@ -1008,6 +1003,7 @@ impl Model {
         let asked = wanted.clone();
         self.highlighting += 1;
         self.spawn(Subject::Always(Because::Content), move || {
+            let _reading = tracing::info_span!("read_texts", blobs = wanted.len()).entered();
             let mut texts = HashMap::new();
             if let Ok(mut reader) = review.repo().blob_reader() {
                 for oid in wanted {
@@ -1025,74 +1021,39 @@ impl Model {
         });
     }
 
-    /// Highlights, in the background, both versions of the next file of the shown revision
-    /// that needs it, the selected file first.
-    ///
-    /// One file is highlighted at a time and lands on its own, so an expensive file holds up
-    /// only itself, and each landing asks for the next file of whatever revision shows then, so
-    /// work for a revision no longer shown stops after the file it is on.
-    fn request_highlights(&mut self) {
-        if self.highlight_running {
-            return;
-        }
+    /// Starts the highlighting the shown revision needs now, the selected file first; see
+    /// [`highlights`].
+    fn pump_highlights(&mut self) {
         let Some(review) = self.review.clone() else {
             return;
         };
-        let Some(view) = self.view() else {
-            return;
-        };
-        let Some(analysis) = view.analysis() else {
-            return;
-        };
-        let selected = self.selected.as_deref();
-        let is_selected = |file: &&review_core::analysis::FileChange| {
-            [file.new.as_ref(), file.old.as_ref()]
-                .into_iter()
-                .flatten()
-                .any(|side| Some(side.path.as_str()) == selected)
-        };
-        let pending = |file: &review_core::analysis::FileChange| -> Vec<state::SideKey> {
-            [file.new.as_ref(), file.old.as_ref()]
-                .into_iter()
-                .flatten()
-                .filter(|side| is_regular(side))
-                .map(|side| state::SideKey {
-                    oid: side.oid.clone(),
-                    path: side.path.clone(),
-                })
-                .filter(|side| self.blobs.needs_highlighting(side))
-                .collect()
-        };
-        let sides = analysis
-            .files
-            .iter()
-            .find(is_selected)
-            .map(pending)
-            .filter(|sides| !sides.is_empty())
-            .or_else(|| {
-                analysis
-                    .files
-                    .iter()
-                    .map(pending)
-                    .find(|sides| !sides.is_empty())
-            });
-        let Some(sides) = sides else {
-            return;
-        };
-        // Highlights already made for these blobs, which a version that resolves to the same
-        // syntax reuses.
-        let known: HashSet<state::SyntaxKey> = self
-            .blobs
-            .syntax
-            .keys()
-            .filter(|key| sides.iter().any(|side| side.oid == key.oid))
-            .cloned()
-            .collect();
-        self.highlighting += 1;
-        self.highlight_running = true;
-        self.spawn(Subject::Always(Because::Content), move || {
-            Outcome::Highlighted(highlight_sides(&review, sides, &known))
+        if self.highlights.indexed_for() != Some(self.shown) {
+            let Some(view) = self.snapshot.as_ref().and_then(Snapshot::view) else {
+                return;
+            };
+            let files = highlight_files(&view);
+            self.blobs.retain_for(&view);
+            let blobs = &self.blobs;
+            self.highlights
+                .reindex(self.shown, files, |side| blobs.needs_highlighting(side));
+        }
+        let blobs = &self.blobs;
+        let starts = self.highlights.pump(self.selected.as_deref(), |side| {
+            blobs.needs_highlighting(side)
         });
+        for start in starts {
+            let known = self.blobs.known(&start.sides);
+            let review = Arc::clone(&review);
+            self.spawn(Subject::Always(Because::Content), move || {
+                Outcome::Highlighted(highlight_sides(
+                    &review,
+                    start.id,
+                    start.sides,
+                    &known,
+                    start.cancel.as_deref(),
+                ))
+            });
+        }
     }
 
     /// Takes in file texts read in the background.
@@ -1109,61 +1070,93 @@ impl Model {
     /// The versions of the selected file, base and head, each under its own path: a renamed
     /// file's base is under its old path, which is not the one the tree shows.
     fn selected_sides(&self) -> Vec<state::SideKey> {
-        let (Some(selected), Some(view)) = (self.selected.as_deref(), self.view()) else {
-            return Vec::new();
-        };
-        view.analysis()
-            .into_iter()
-            .flat_map(|analysis| &analysis.files)
-            .filter(|file| {
-                [file.new.as_ref(), file.old.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .any(|side| side.path == selected)
-            })
-            .flat_map(|file| [file.old.as_ref(), file.new.as_ref()])
-            .flatten()
-            .map(|side| state::SideKey {
-                oid: side.oid.clone(),
-                path: side.path.clone(),
-            })
-            .collect()
+        self.selected
+            .as_deref()
+            .map(|path| self.highlights.sides_at(path))
+            .unwrap_or_default()
     }
 
-    /// Takes in one file's highlights and asks for the next file's.
+    /// Takes in what a highlight job made, keeps it for the versions the shown revision has,
+    /// and starts what runs next.
+    ///
+    /// Every highlight job's completion lands here, so this is where each job ends; a cancelled
+    /// job's highlights may be partial and are not kept, so its versions are highlighted again.
     fn highlighted(&mut self, highlighted: Highlighted) {
         let Highlighted {
-            resolved, syntax, ..
+            job,
+            resolved,
+            syntax,
+            cancelled,
         } = highlighted;
-        let selected = self.selected_sides();
-        let shown = resolved.keys().any(|side| selected.contains(side));
-        self.blobs.resolved.extend(resolved);
-        self.blobs.syntax.extend(syntax);
-        // A late answer for a revision no longer shown is not kept.
-        if let Some(view) = self.snapshot.as_ref().and_then(state::Snapshot::view) {
-            self.blobs.retain_for(&view);
+        let sides = self.highlights.retire(job);
+        if !cancelled {
+            let resolved: HashMap<state::SideKey, crate::syntax::Resolved> = resolved
+                .into_iter()
+                .filter(|(side, _)| self.highlights.shows(side))
+                .collect();
+            let selected = self.selected_sides();
+            let shown = resolved.keys().any(|side| selected.contains(side));
+            let blobs: HashSet<&ObjectId> = resolved.keys().map(|side| &side.oid).collect();
+            for (key, highlights) in syntax {
+                if blobs.contains(&key.oid) {
+                    self.blobs
+                        .syntax
+                        .entry(key.oid)
+                        .or_default()
+                        .insert(key.resolved, highlights);
+                }
+            }
+            self.blobs.resolved.extend(resolved);
+            if shown {
+                self.rebuild();
+            }
+            self.refresh_buffer_syntax();
         }
-        if shown {
-            self.rebuild();
-        }
-        self.refresh_buffer_syntax();
-        self.request_highlights();
+        let blobs = &self.blobs;
+        self.highlights
+            .refresh(&sides, |side| blobs.needs_highlighting(side));
+        self.pump_highlights();
     }
 }
 
-/// Reads and highlights the file versions `sides` for [`Model::request_highlights`]; runs in
-/// the background.
+/// The versions of `view`'s files that can be highlighted, in review order.
+fn highlight_files(view: &review_core::RevisionView<'_>) -> Vec<highlights::FileSides> {
+    let key = |side: &review_core::analysis::EntrySide| state::SideKey {
+        oid: side.oid.clone(),
+        path: side.path.clone(),
+    };
+    view.analysis()
+        .into_iter()
+        .flat_map(|analysis| &analysis.files)
+        .map(|file| highlights::FileSides {
+            old: file.old.as_ref().filter(|side| is_regular(side)).map(key),
+            new: file.new.as_ref().filter(|side| is_regular(side)).map(key),
+        })
+        .collect()
+}
+
+/// Reads and highlights the file versions `sides` as job `job` of [`Model::pump_highlights`];
+/// runs in the background.
 ///
 /// A version that is binary, oversized, not UTF-8 or unreadable resolves to plain.
+/// Once `cancel` is set the job stops where it is and says it was cancelled, since what it made
+/// by then may be partial.
+#[tracing::instrument(skip_all, fields(sides = sides.len()))]
 fn highlight_sides(
     review: &Review,
+    job: highlights::JobId,
     sides: Vec<state::SideKey>,
     known: &HashSet<state::SyntaxKey>,
+    cancel: Option<&AtomicBool>,
 ) -> Highlighted {
+    let cancelled = || cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
     let mut resolved = HashMap::new();
     let mut syntax = HashMap::new();
     let mut reader = review.repo().blob_reader().ok();
     for side in sides {
+        if cancelled() {
+            break;
+        }
         let read = reader
             .as_mut()
             .and_then(|reader| reader.read(&side.oid).ok());
@@ -1177,7 +1170,7 @@ fn highlight_sides(
                     };
                     let made = known.contains(&key) || syntax.contains_key(&key);
                     if side_resolved.syntax != crate::syntax::Syntax::Plain && !made {
-                        let highlights = crate::syntax::highlight(&side_resolved, text);
+                        let highlights = crate::syntax::highlight(&side_resolved, text, cancel);
                         syntax.insert(key, Arc::new(highlights));
                     }
                     side_resolved
@@ -1190,7 +1183,12 @@ fn highlight_sides(
             side_resolved.unwrap_or(crate::syntax::Resolved::PLAIN),
         );
     }
-    Highlighted { resolved, syntax }
+    Highlighted {
+        job,
+        resolved,
+        syntax,
+        cancelled: cancelled(),
+    }
 }
 
 /// What opening a review produced.
