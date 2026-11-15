@@ -138,18 +138,29 @@ pub(crate) struct RevisionData {
 }
 
 /// Everything known about a review, with review state derived for every revision.
+///
+/// A history read for a live working-tree review may end in a provisional revision: the
+/// working tree as captured just now, numbered after the last recorded revision but not
+/// recorded, so it takes part in no other history; see [`Self::is_provisional`].
 pub struct History {
     revisions: Vec<RevisionData>,
     notes: Vec<NoteEvent>,
     walkthroughs: Vec<WalkthroughEvent>,
     warnings: Vec<String>,
+    version: u64,
+    provisional: bool,
 }
 
 /// The inputs to build a [`History`].
 pub(crate) struct HistoryInput {
+    /// The log's events, followed by the provisional revision's event when there is one.
     pub events: Vec<Event>,
     pub analyses: Vec<Arc<Analysis>>,
-    pub correspondences: Vec<Correspondence>,
+    pub correspondences: Vec<Arc<Correspondence>>,
+    /// The length of the log the events were read from, in bytes.
+    pub version: u64,
+    /// Whether the last revision is provisional.
+    pub provisional: bool,
 }
 
 impl History {
@@ -159,6 +170,8 @@ impl History {
             events,
             analyses,
             correspondences,
+            version,
+            provisional,
         } = input;
         let mut records = Vec::new();
         let mut marks = Vec::new();
@@ -205,6 +218,8 @@ impl History {
             notes: Vec::new(),
             walkthroughs: Vec::new(),
             warnings: Vec::new(),
+            version,
+            provisional,
         };
         history.notes = notes
             .into_iter()
@@ -309,6 +324,29 @@ impl History {
     #[must_use]
     pub fn current(&self) -> Option<RevisionNumber> {
         RevisionNumber::from_index(self.revisions.len().checked_sub(1)?)
+    }
+
+    /// Returns how much of the review's log this history was read from: the log's length in
+    /// bytes.
+    ///
+    /// The log only grows, so of two histories of one review, the one with the larger version
+    /// knows every mark and revision the other knows; one with an equal version knows the same,
+    /// apart from a provisional revision.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Returns whether revision `number` is provisional: the working tree as captured for a live
+    /// review, shown but not recorded.
+    ///
+    /// Only the [current](Self::current) revision can be provisional.
+    /// [`Review::mark`](crate::Review::mark) records it before its marks, provided the log
+    /// still ends at the revision before it, so a provisional revision is never marked unless
+    /// it is recorded exactly as shown.
+    #[must_use]
+    pub fn is_provisional(&self, number: RevisionNumber) -> bool {
+        self.provisional && self.current() == Some(number)
     }
 
     /// Returns warnings about marks, notes or walkthroughs that could not be applied.

@@ -534,6 +534,13 @@ impl<'h> RevisionView<'h> {
         self.number
     }
 
+    /// Returns whether this revision is provisional: the working tree as captured for a live
+    /// review, shown but not recorded; see [`History::is_provisional`].
+    #[must_use]
+    pub fn is_provisional(&self) -> bool {
+        self.history.is_provisional(self.number)
+    }
+
     /// Returns the revision's record.
     #[must_use]
     pub fn record(&self) -> Option<&'h RevisionRecord> {

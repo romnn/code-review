@@ -5,6 +5,7 @@
 
 mod blobs;
 mod diff_tree;
+mod ignore;
 mod snapshot;
 
 use std::collections::HashMap;
@@ -579,22 +580,46 @@ impl Repo {
         rev: &ObjectId,
         paths: &[&str],
     ) -> Result<HashMap<String, bool>, Error> {
-        use std::io::Write as _;
-
         if paths.is_empty() {
             return Ok(HashMap::new());
         }
+        let output = self.run_with_paths(
+            &[
+                "check-attr",
+                "-z",
+                "--stdin",
+                "--source",
+                rev.as_str(),
+                "linguist-generated",
+                "diff",
+            ],
+            paths.iter().copied(),
+            &[0],
+        )?;
+        Ok(parse_generated_attributes(&output.stdout))
+    }
+
+    /// Runs a git command that reads NUL-terminated `paths` on standard input, and returns its
+    /// standard output when it exits with one of the `success` codes.
+    fn run_with_paths<'a>(
+        &self,
+        args: &[&str],
+        paths: impl IntoIterator<Item = &'a str>,
+        success: &[i32],
+    ) -> Result<Output, Error> {
+        use std::io::Write as _;
+
+        let shown = args.join(" ");
         let mut child = self
             .command()
-            .args(["check-attr", "-z", "--stdin", "--source", rev.as_str()])
-            .args(["linguist-generated", "diff"])
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| Error::Spawn {
                 program: "git",
-                args: "check-attr".to_owned(),
+                args: shown.clone(),
                 source,
             })?;
         let mut input = Vec::new();
@@ -612,29 +637,35 @@ impl Repo {
         });
         let output = child.wait_with_output().map_err(|source| Error::Spawn {
             program: "git",
-            args: "check-attr".to_owned(),
+            args: shown.clone(),
             source,
         })?;
         let written = writer.join().map_err(|_| Error::UnexpectedOutput {
             program: "git",
-            command: "check-attr".to_owned(),
+            command: shown.clone(),
             detail: "stdin writer panicked".to_owned(),
         })?;
         if let Err(source) = written {
             return Err(Error::Spawn {
                 program: "git",
-                args: "check-attr".to_owned(),
+                args: shown,
                 source,
             });
         }
-        if !output.status.success() {
+        if !output
+            .status
+            .code()
+            .is_some_and(|code| success.contains(&code))
+        {
             return Err(Error::CommandFailed {
                 program: "git",
-                args: "check-attr".to_owned(),
+                args: shown,
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
-        Ok(parse_generated_attributes(&output.stdout))
+        Ok(Output {
+            stdout: output.stdout,
+        })
     }
 
     /// Fetches `refspecs` from `remote`, updating no ref outside the refspecs' destinations and
