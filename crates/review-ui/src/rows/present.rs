@@ -39,6 +39,7 @@ impl Default for Presentation {
 
 /// Projects the unified rows of `layout` for `presentation`, and finalizes the indices into them.
 #[must_use]
+#[tracing::instrument(skip_all, fields(rows = layout.rows.len()))]
 pub fn present(mut layout: Layout, presentation: Presentation) -> Layout {
     for (index, row) in layout.rows.iter_mut().enumerate() {
         row.source = index;

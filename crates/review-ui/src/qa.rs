@@ -128,7 +128,6 @@ fn put_review(answer: &mut Map<String, Value>, model: &Model) {
         ("screen", json!(format!("{:?}", model.screen))),
         ("selected", json!(model.selected)),
         ("shown", json!(shown.map(|section| section.path.clone()))),
-        ("preview", json!(model.preview.is_some())),
         (
             "highlighted",
             json!(

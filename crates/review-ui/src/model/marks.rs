@@ -86,8 +86,6 @@ impl Model {
             ));
             return;
         }
-        // What the keys act on is what the diff shows, so a preview is completed first.
-        self.finish_preview();
         // The selected hunk must be on screen; one scrolled away is shown first, not marked.
         if self.mode == Mode::Diff && !self.hunk_in_view() {
             self.reveal_hunk();
@@ -431,7 +429,6 @@ impl Model {
         self.places.clear();
         self.set_buffer(None);
         self.rows = std::sync::Arc::new(rows::Layout::default());
-        self.preview = None;
         self.hunk_rows.clear();
         self.hunk = 0;
         let previous = self.selected.take();

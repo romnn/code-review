@@ -280,52 +280,82 @@ fn path_at(model: &Model, position: usize) -> String {
     model.tree[index].path.clone()
 }
 
-/// Moves the tree cursor down as a held key does, faster than the cursor's rest.
-fn hold_down(host: &mut Host) {
-    host.update(|model| {
-        model.last_move = Some(Instant::now());
-        model.dispatch(Action::TreeDown);
-    });
-}
-
-/// A held key previews each file by its header; the rest after an earlier move lands after a
-/// newer move and builds nothing, and only the newest move's rest builds the diff, of the file
-/// under the cursor.
+/// A held key shows each file's diff the moment the cursor lands on it, with nothing left to
+/// wait for: the rows are always those of the file under the cursor.
 #[test]
-fn a_stale_preview_rest_builds_nothing() {
+fn a_held_key_shows_each_file_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open(demo(dir.path()));
     let [start, first, second] = three_files(host.model());
     let start_path = path_at(host.model(), start);
     host.update(|model| model.show_file(&start_path));
-
-    // Two moves of a held key: each shows its file's header alone and waits for a rest.
-    hold_down(&mut host);
-    hold_down(&mut host);
-    assert_eq!(host.timers.len(), 2);
-    let newest = host.model().preview;
-    assert!(newest.is_some());
-    let second_path = path_at(host.model(), second);
-    assert_ne!(path_at(host.model(), first), second_path);
-    assert_eq!(host.model().selected.as_deref(), Some(second_path.as_str()));
-
-    // The first move's rest comes late: the second file still shows its header alone.
-    host.fire(0);
-    assert_eq!(host.model().preview, newest);
-    assert!(host.model().rows.rows.is_empty(), "no diff is built early");
-    assert_eq!(host.model().rows.files[0].path, second_path);
-
-    // The second move's rest builds the second file's diff.
-    host.fire(0);
-    assert_eq!(host.model().preview, None);
-    assert_ne!(host.model().rows.rows.len(), 0, "the diff is built");
-    assert_eq!(host.model().rows.files[0].path, second_path);
+    for position in [first, second] {
+        host.dispatch(Action::TreeDown);
+        let path = path_at(host.model(), position);
+        assert_eq!(host.model().selected.as_deref(), Some(path.as_str()));
+        assert_eq!(host.model().rows.files[0].path, path);
+        assert_ne!(host.model().rows.rows.len(), 0, "the diff is built at once");
+    }
+    assert!(
+        host.timers.is_empty(),
+        "nothing waits for the cursor to rest"
+    );
 }
 
-/// A mark that lands while a file shows by its header alone keeps the header alone, and once
-/// the cursor rests the file opens at its first hunk that needs the reviewer.
+/// Moving quickly to the files around one and back returns to the hunk and the row left in it,
+/// and a mark made right away lands on the hunk that shows.
 #[test]
-fn a_mark_landing_during_a_preview_keeps_the_header_alone() {
+fn a_quick_round_trip_returns_to_the_place_left_and_marks_what_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    let engine = "src/engine.rs";
+    host.update(|model| model.show_file(engine));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::NextHunk);
+    lay_out(&mut host);
+    let hunk = host.model().hunk;
+    assert!(hunk > 0, "the engine has hunks to move through");
+    let units = host.model().hunk_units();
+    let top = host.model().diff_scroll.target();
+
+    // B → C → B → A → B, faster than any rest.
+    host.dispatch(Action::FocusTree);
+    for action in [
+        Action::TreeDown,
+        Action::TreeUp,
+        Action::TreeUp,
+        Action::TreeDown,
+    ] {
+        host.dispatch(action);
+        lay_out(&mut host);
+    }
+    let model = host.model();
+    assert_eq!(model.selected.as_deref(), Some(engine));
+    assert_eq!(model.rows.files[0].path, engine);
+    assert_eq!(model.hunk, hunk);
+    assert_eq!(model.hunk_units(), units);
+    assert!((model.diff_scroll.target() - top).abs() < f64::EPSILON);
+
+    // The mark lands on that hunk.
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleApprove);
+    let saved = host.run_job();
+    host.complete(saved);
+    let view = host.model().view().unwrap();
+    assert!(
+        state::badges(&view, &units, &host.model().pending)
+            .into_iter()
+            .all(state::is_approved),
+        "the hunk that showed is approved"
+    );
+}
+
+/// Moving on while a mark is saved shows the next file at once, at its first hunk that needs the
+/// reviewer, and the mark landing keeps it there.
+#[test]
+fn a_mark_landing_after_moving_on_keeps_the_next_file_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let review = demo(dir.path());
 
@@ -360,7 +390,7 @@ fn a_mark_landing_during_a_preview_keeps_the_header_alone() {
     host.dispatch(Action::ToggleApprove);
     assert_eq!(host.jobs.len(), 1, "the mark is being saved");
 
-    // Back in the tree, a held key moves on to the engine, which shows its header alone.
+    // Back in the tree, the cursor moves on to the engine, which shows at once.
     host.dispatch(Action::FocusTree);
     let engine_position = host
         .model()
@@ -369,23 +399,18 @@ fn a_mark_landing_during_a_preview_keeps_the_header_alone() {
         .position(|&index| host.model().tree[index].path == engine)
         .unwrap();
     host.update(|model| model.tree_cursor = engine_position - 1);
-    hold_down(&mut host);
+    host.dispatch(Action::TreeDown);
     assert_eq!(host.model().selected.as_deref(), Some(engine));
-    assert!(host.model().preview.is_some());
+    assert_eq!(host.model().rows.files[0].path, engine);
+    let opened_at = host.model().hunk;
 
-    // The mark lands: the tree takes it in, and the engine still shows its header alone.
+    // The mark lands: the tree takes it in, and the engine stays at the hunk it opened at.
     let saved = host.run_job();
     host.complete(saved);
     assert!(!host.model().marking);
-    assert!(host.model().preview.is_some());
-    assert!(host.model().rows.rows.is_empty(), "no diff is built early");
-    assert_eq!(host.model().rows.files[0].path, engine);
-
-    // The cursor rests: the engine opens at its first hunk that needs the reviewer.
-    host.fire(0);
     let model = host.model();
-    assert_eq!(model.preview, None);
     assert_eq!(model.rows.files[0].path, engine);
+    assert_eq!(model.hunk, opened_at);
     let view = model.view().unwrap();
     let approved = |hunk: usize| {
         crate::state::badges(&view, &model.rows.hunks[hunk], &model.pending)
@@ -492,33 +517,6 @@ fn the_content_search_waits_for_a_pause() {
             .iter()
             .all(|entry| entry.text.to_lowercase().contains("balance"))
     );
-}
-
-/// The central check drops a rest for a preview that a newer move superseded, so the newest
-/// preview keeps its header alone; the rest for the newest preview builds its diff.
-#[test]
-fn a_rest_for_an_older_preview_is_dropped_centrally() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
-    let [start, ..] = three_files(host.model());
-    let start_path = path_at(host.model(), start);
-    host.update(|model| model.show_file(&start_path));
-    hold_down(&mut host);
-    let newest = host.model().preview.unwrap();
-
-    host.complete(Completion {
-        subject: Subject::Preview(newest - 1),
-        outcome: Box::new(Outcome::Rested),
-    });
-    assert_eq!(host.model().preview, Some(newest));
-    assert!(host.model().rows.rows.is_empty(), "no diff is built");
-
-    host.complete(Completion {
-        subject: Subject::Preview(newest),
-        outcome: Box::new(Outcome::Rested),
-    });
-    assert_eq!(host.model().preview, None);
-    assert_ne!(host.model().rows.rows.len(), 0, "the diff is built");
 }
 
 /// The central check drops what an older search of the open picker found: its failure never
@@ -1645,7 +1643,7 @@ fn n_and_shift_n_step_through_the_visible_files() {
         path_at(host.model(), host.model().tree_cursor),
         "tools/notify.rb"
     );
-    assert_eq!(shown(host.model()), "tools/notify.rb", "the file previews");
+    assert_eq!(shown(host.model()), "tools/notify.rb", "the file shows");
     host.dispatch(Action::PreviousFile);
     host.settle();
     assert_eq!(
@@ -2077,14 +2075,13 @@ fn a_base_only_publish_rebuilds_a_renamed_file() {
             .find(|side| side.path == "old.rs")
             .unwrap();
         let resolved = model.blobs.resolved.remove(&key).unwrap();
-        model.blobs.syntax.remove(&crate::state::SyntaxKey {
-            oid: key.oid.clone(),
-            resolved,
-        });
+        if let Some(made) = model.blobs.syntax.get_mut(&key.oid) {
+            made.remove(&resolved);
+        }
         model.rebuild();
     });
     assert!(base_syntax(host.model()).is_none());
-    host.update(Model::request_highlights);
+    host.update(Model::pump_highlights);
     host.settle();
     assert!(
         base_syntax(host.model()).is_some(),
@@ -2117,16 +2114,9 @@ fn a_deleted_extensionless_script_is_highlighted_by_its_shebang() {
     assert_eq!(first_tone(&base, 1), crate::syntax::Tone::Function);
 }
 
-/// Files are highlighted one at a time, the selected one first, and each lands on its own
-/// before the next one starts.
-#[test]
-fn highlights_land_file_by_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let review = review_of(
-        dir.path(),
-        &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
-        &[("a.rs", "fn a() { 1 }\n"), ("b.rs", "fn b() { 2 }\n")],
-    );
+/// A host over `review` whose highlighting has `workers` workers, opened up to the jobs its
+/// opening starts, none of which has run.
+fn open_unsettled(review: Review, workers: usize) -> Host {
     let history = review.history().unwrap();
     let mut host = Host {
         driver: Driver::new(Model::new(
@@ -2150,25 +2140,189 @@ fn highlights_land_file_by_file() {
             found: None,
         })
     });
+    host.update(|model| model.highlights.workers = workers);
     host.update(|model| model.open(opener));
+    host
+}
+
+/// The selected file is highlighted at once in a lane of its own while a worker takes the other
+/// file, and each job lands on its own, in whichever order they end.
+#[test]
+fn the_selected_file_and_a_worker_highlight_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+        &[("a.rs", "fn a() { 1 }\n"), ("b.rs", "fn b() { 2 }\n")],
+    );
+    let mut host = open_unsettled(review, 1);
     let opening = host.run_job();
     host.complete(opening);
     let selected = host.model().selected.clone().unwrap();
     let other = if selected == "a.rs" { "b.rs" } else { "a.rs" };
-    // The opening read the texts; only the selected file's highlights wait.
-    assert_eq!(host.jobs.len(), 1, "one file is highlighted at a time");
-    let first = host.run_job();
-    host.complete(first);
-    assert!(side_syntax(host.model(), &selected, true).is_some());
-    assert!(
-        side_syntax(host.model(), other, true).is_none(),
-        "the other file waits for its own job"
+    // The opening read the texts; both files' highlights start, the selected one's first.
+    assert_eq!(
+        host.jobs.len(),
+        2,
+        "the selected file's lane and the worker"
     );
-    assert_eq!(host.jobs.len(), 1, "the next file's highlights start");
-    let second = host.run_job();
-    host.complete(second);
+    assert!(host.model().busy());
+
+    // The worker's job ends first: the other file is highlighted, the selected one not yet.
+    let worker = host.run_newest_job();
+    host.complete(worker);
     assert!(side_syntax(host.model(), other, true).is_some());
+    assert!(side_syntax(host.model(), &selected, true).is_none());
+    assert!(host.model().busy(), "the selected file's job still runs");
+
+    let lane = host.run_job();
+    host.complete(lane);
+    assert!(side_syntax(host.model(), &selected, true).is_some());
     assert!(host.jobs.is_empty(), "nothing is left to highlight");
+    assert!(!host.model().busy());
+}
+
+/// A cancelled highlight keeps nothing, since what it made may be partial: moving on cancels
+/// the selected file's job, and the file it had is highlighted again later.
+#[test]
+fn a_cancelled_highlight_is_highlighted_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [
+        ("a.rs", "fn a() {}\n"),
+        ("b.rs", "fn b() {}\n"),
+        ("c.rs", "fn c() {}\n"),
+    ];
+    let changed = [
+        ("a.rs", "fn a() { 1 }\n"),
+        ("b.rs", "fn b() { 1 }\n"),
+        ("c.rs", "fn c() { 1 }\n"),
+    ];
+    let mut host = open_unsettled(review_of(dir.path(), &files, &changed), 1);
+    let opening = host.run_job();
+    host.complete(opening);
+    let first = host.model().selected.clone().unwrap();
+    assert_eq!(
+        host.jobs.len(),
+        2,
+        "the selected file's lane and the worker"
+    );
+
+    // The first file's job makes its highlights, but the reviewer moves on to the last file
+    // before it ends, and it reports itself cancelled, as when the flag comes during its last
+    // version.
+    let mut cancelled = host.run_job();
+    match cancelled.outcome.as_mut() {
+        Outcome::Highlighted(highlighted) => {
+            assert!(!highlighted.syntax.is_empty(), "the job made highlights");
+            highlighted.cancelled = true;
+        }
+        _ => panic!("the selected file's highlight job runs first"),
+    }
+    let last = model_files(host.model()).last().cloned().unwrap();
+    assert_ne!(first, last);
+    host.update(|model| model.show_file(&last));
+    host.complete(cancelled);
+    assert!(
+        side_syntax(host.model(), &first, true).is_none(),
+        "a cancelled job keeps nothing"
+    );
+
+    host.settle();
+    for path in model_files(host.model()) {
+        assert!(
+            side_syntax(host.model(), &path, true).is_some(),
+            "{path} is highlighted"
+        );
+    }
+    assert!(!host.model().busy());
+}
+
+/// The blob of `path`'s head in the shown revision.
+fn head_blob(model: &Model, path: &str) -> ObjectId {
+    let view = model.view().unwrap();
+    view.analysis()
+        .unwrap()
+        .files
+        .iter()
+        .filter_map(|file| file.new.as_ref())
+        .find(|side| side.path == path)
+        .unwrap()
+        .oid
+        .clone()
+}
+
+/// The files of the shown revision, in review order.
+fn model_files(model: &Model) -> Vec<String> {
+    file_paths(&model.tree)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A highlight that lands after a working-tree capture keeps the versions the capture still
+/// has, so a file it did not touch is never highlighted twice, and drops the ones it replaced.
+#[test]
+fn a_highlight_landing_after_a_capture_keeps_what_the_capture_still_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+        &[("a.rs", "fn a() { 1 }\n"), ("b.rs", "fn b() { 1 }\n")],
+    );
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file("a.rs"));
+    host.settle();
+    // A capture whose highlight jobs wait, the newest of the jobs it starts being b.rs's.
+    let capture = |host: &mut Host| {
+        host.update(|model| model.capture(false));
+        let captured = host.run_job();
+        host.complete(captured);
+    };
+
+    // b.rs changes: its new head's highlight starts and is held back.
+    std::fs::write(repo.join("b.rs"), "fn b() { 2 }\n").unwrap();
+    capture(&mut host);
+    assert!(side_syntax(host.model(), "b.rs", true).is_none());
+    let held = host.jobs.pop_back().expect("b.rs's highlight waits");
+    host.settle();
+
+    // a.rs changes meanwhile; b.rs does not, so its version stays in flight with the held job.
+    std::fs::write(repo.join("a.rs"), "fn a() { 2 }\n").unwrap();
+    capture(&mut host);
+    host.settle();
+    assert!(side_syntax(host.model(), "a.rs", true).is_some());
+    assert!(
+        side_syntax(host.model(), "b.rs", true).is_none(),
+        "no second job highlights b.rs"
+    );
+    let landed = held();
+    host.complete(landed);
+    assert!(
+        side_syntax(host.model(), "b.rs", true).is_some(),
+        "the held job's highlights belong to the capture shown now"
+    );
+
+    // b.rs changes again under a held job: its old head's highlights are dropped, and the new
+    // head is highlighted by a job of its own.
+    std::fs::write(repo.join("b.rs"), "fn b() { 3 }\n").unwrap();
+    capture(&mut host);
+    let old_head = head_blob(host.model(), "b.rs");
+    let stale = host.jobs.pop_back().expect("b.rs's highlight waits");
+    host.settle();
+    std::fs::write(repo.join("b.rs"), "fn b() { 4 }\n").unwrap();
+    capture(&mut host);
+    let landed = stale();
+    host.complete(landed);
+    let blobs = &host.model().blobs;
+    assert!(
+        !blobs.syntax.contains_key(&old_head)
+            && !blobs.resolved.keys().any(|side| side.oid == old_head),
+        "the old head's highlights are not kept"
+    );
+    assert!(side_syntax(host.model(), "b.rs", true).is_none());
+    host.settle();
+    assert!(side_syntax(host.model(), "b.rs", true).is_some());
+    assert!(!host.model().busy());
 }
 
 /// A review of the working tree of a repository in `dir`: `base` committed on `main`, and

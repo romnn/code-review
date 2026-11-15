@@ -293,6 +293,7 @@ impl App {
     }
 
     /// Handles a terminal event.
+    #[tracing::instrument(skip_all)]
     pub fn input(&mut self, event: Event) {
         match event {
             Event::Key(event) => self.key(&event),
@@ -823,6 +824,7 @@ impl App {
     /// # Errors
     ///
     /// Returns the terminal's error when it cannot be measured or drawn to.
+    #[tracing::instrument(skip_all)]
     pub fn render<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), B::Error> {
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
@@ -846,6 +848,9 @@ impl App {
             ..
         } = self;
         let model = driver.model();
+        // Painting the buffer, then ratatui's diff of it against the last frame and the write of
+        // what changed to the terminal.
+        let _drawing = tracing::info_span!("terminal_draw").entered();
         terminal.draw(|frame| {
             let scene = Scene {
                 panes: &panes,

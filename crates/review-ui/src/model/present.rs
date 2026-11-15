@@ -254,9 +254,6 @@ impl Model {
     ///
     /// Changes of colors alone pass through without touching the rows.
     pub(super) fn transition(&mut self, change: impl FnOnce(&mut Self)) {
-        // A file previewed by its header alone is laid out first, so its place is a row of its
-        // own diff.
-        self.finish_preview();
         let places = self.places();
         self.transition_from(places, change);
     }

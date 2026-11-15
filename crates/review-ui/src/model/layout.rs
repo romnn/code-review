@@ -61,6 +61,7 @@ impl Model {
     /// module documentation.
     ///
     /// Returns whether an eased scroll still runs, so the next frame follows.
+    #[tracing::instrument(skip_all)]
     pub fn layout(&mut self, geometry: Geometry, now: Instant) -> bool {
         self.geometry = geometry;
         let grid = self.grid();

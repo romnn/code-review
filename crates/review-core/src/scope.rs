@@ -6,6 +6,7 @@
 //! state depends on them.
 
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -62,20 +63,26 @@ impl ScopeMap {
     /// Parses `text` as `language`.
     #[must_use]
     pub fn new(language: Language, text: &str) -> Self {
-        Self::until(language, text, None).unwrap_or_default()
+        Self::until(language, text, None, None).unwrap_or_default()
     }
 
-    /// Parses `text` as `language`, giving up at `deadline` when one is given: `None` when the
-    /// parse or the walk over its tree did not finish by then.
+    /// Parses `text` as `language`, giving up at `deadline` when one is given, or once `cancel`
+    /// is set: `None` when the parse or the walk over its tree did not finish before.
     ///
     /// A caller with a time budget for a file, such as a highlighter running in the
-    /// background, bounds the parse with it; [`ScopeMap::new`] has no deadline.
+    /// background, bounds the parse with it, and one that may stop wanting the result cancels
+    /// it; [`ScopeMap::new`] has neither.
     #[must_use]
-    pub fn until(language: Language, text: &str, deadline: Option<Instant>) -> Option<Self> {
-        let passed = |deadline: Option<Instant>| deadline.is_some_and(|at| Instant::now() >= at);
+    pub fn until(
+        language: Language,
+        text: &str,
+        deadline: Option<Instant>,
+        cancel: Option<&AtomicBool>,
+    ) -> Option<Self> {
+        let stop = Stop { deadline, cancel };
         // tree-sitter first asks for progress some way into the parse, which a small file
         // never reaches.
-        if passed(deadline) {
+        if stop.reached() {
             return None;
         }
         let mut parser = Parser::new();
@@ -86,7 +93,7 @@ impl ScopeMap {
         let mut read = |offset: usize, _| bytes.get(offset..).unwrap_or_default();
         // tree-sitter asks this every few hundred parser steps.
         let mut progress = |_: &tree_sitter::ParseState| {
-            if passed(deadline) {
+            if stop.reached() {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
@@ -94,7 +101,7 @@ impl ScopeMap {
         };
         let options = ParseOptions::new().progress_callback(&mut progress);
         let tree = parser.parse_with_options(&mut read, None, Some(options))?;
-        let scopes = collect(language, tree.root_node(), text, deadline)?;
+        let scopes = collect(language, tree.root_node(), text, stop)?;
         Some(Self { scopes })
     }
 
@@ -103,7 +110,16 @@ impl ScopeMap {
     #[must_use]
     pub fn from_tree(language: Language, tree: &Tree, text: &str) -> Self {
         Self {
-            scopes: collect(language, tree.root_node(), text, None).unwrap_or_default(),
+            scopes: collect(
+                language,
+                tree.root_node(),
+                text,
+                Stop {
+                    deadline: None,
+                    cancel: None,
+                },
+            )
+            .unwrap_or_default(),
         }
     }
 
@@ -137,26 +153,34 @@ pub fn breadcrumb(scopes: &[&Scope]) -> String {
 /// How many nodes the walk visits between looks at the clock.
 const NODES_PER_CHECK: usize = 4096;
 
+/// When a scope parse gives up: at its deadline, or once its caller cancels it.
+#[derive(Debug, Clone, Copy)]
+struct Stop<'a> {
+    deadline: Option<Instant>,
+    cancel: Option<&'a AtomicBool>,
+}
+
+impl Stop<'_> {
+    fn reached(self) -> bool {
+        self.cancel
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+            || self.deadline.is_some_and(|at| Instant::now() >= at)
+    }
+}
+
 /// The scopes at and below `root`, in document order: a node before its named children, and
 /// those in order, as a depth-first walk visits them.
 ///
 /// The walk keeps its own stack instead of recursing, so a deeply nested file, such as JSON
 /// with tens of thousands of nested arrays, cannot overflow the thread's stack.
-/// `None` when `deadline` passes first.
-fn collect(
-    language: Language,
-    root: Node<'_>,
-    text: &str,
-    deadline: Option<Instant>,
-) -> Option<Vec<Scope>> {
+/// `None` when `stop` is reached first.
+fn collect(language: Language, root: Node<'_>, text: &str, stop: Stop<'_>) -> Option<Vec<Scope>> {
     let mut scopes = Vec::new();
     let mut pending = vec![root];
     let mut visited = 0_usize;
     while let Some(node) = pending.pop() {
         visited += 1;
-        if visited.is_multiple_of(NODES_PER_CHECK)
-            && deadline.is_some_and(|at| Instant::now() >= at)
-        {
+        if visited.is_multiple_of(NODES_PER_CHECK) && stop.reached() {
             return None;
         }
         if let Some((kind, label)) = scope_of(language, node, text) {
@@ -433,10 +457,10 @@ mod tests {
     fn a_passed_deadline_stops_the_parse() {
         let text = "fn f() {}\n".repeat(20_000);
         assert_eq!(
-            ScopeMap::until(Language::Rust, &text, Some(Instant::now())),
+            ScopeMap::until(Language::Rust, &text, Some(Instant::now()), None),
             None
         );
-        let whole = ScopeMap::until(Language::Rust, &text, None).unwrap();
+        let whole = ScopeMap::until(Language::Rust, &text, None, None).unwrap();
         assert_eq!(whole.scopes().len(), 20_000);
         assert_eq!(whole, ScopeMap::new(Language::Rust, &text));
     }

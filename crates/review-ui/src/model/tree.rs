@@ -1,15 +1,12 @@
-//! The file tree: moving through it previews each file's diff, folders fold, and files and
-//! folders are approved as a whole.
+//! The file tree: moving through it shows each file's diff, folders fold, and files and folders
+//! are approved as a whole.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use review_core::tree::{NodeKind, TreeNode};
 
-use super::effects::{Outcome, Subject};
-use super::{Mode, Model, PREVIEW_REST, Place, file_paths};
+use super::{Mode, Model, Place, file_paths};
 use crate::frame::Request;
-use crate::rows;
 use crate::state::{self, Progress};
 
 impl Model {
@@ -21,6 +18,7 @@ impl Model {
     }
 
     /// Recomputes the visible tree nodes; call it whenever the tree or its folds change.
+    #[tracing::instrument(skip_all)]
     pub(super) fn update_visible_tree(&mut self) {
         self.tree_visible = Arc::new(self.compute_visible_tree());
     }
@@ -97,13 +95,13 @@ impl Model {
     /// that fold it open.
     pub fn show_file(&mut self, path: &str) {
         self.reveal_in_tree(path);
-        if self.selected.as_deref() == Some(path) {
-            self.finish_preview();
-        } else {
+        if self.selected.as_deref() != Some(path) {
             self.remember_place();
             self.selected = Some(path.to_owned());
             self.selection = None;
             self.show_selected();
+            // The selected file's highlights start at once, cancelling the previous file's.
+            self.pump_highlights();
         }
         if let Some(position) = self.visible_tree().iter().position(|&index| {
             // The file node, never a folder that shares its path.
@@ -162,61 +160,8 @@ impl Model {
         self.unified_text.reset();
     }
 
-    /// Previews the file the tree cursor lands on. A single press shows its diff at once; while
-    /// a held key repeats, only the file's header follows the cursor, and the diff is built
-    /// once the cursor rests, so no older file's rows ever show under a newer header.
-    fn preview_file(&mut self, path: &str) {
-        let now = Instant::now();
-        let repeating = self
-            .last_move
-            .is_some_and(|last| now.duration_since(last) < PREVIEW_REST);
-        self.last_move = Some(now);
-        if !repeating {
-            self.show_file(path);
-            return;
-        }
-        if self.selected.as_deref() == Some(path) {
-            return;
-        }
-        self.remember_place();
-        self.selected = Some(path.to_owned());
-        self.selection = None;
-        self.show_header();
-        self.previews += 1;
-        let preview = self.previews;
-        self.preview = Some(preview);
-        // A later move supersedes this preview with its own rest.
-        self.after(PREVIEW_REST, Subject::Preview(preview), Outcome::Rested);
-    }
-
-    /// Shows the selected file's header alone, while its diff waits for the cursor to rest.
-    pub(super) fn show_header(&mut self) {
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        if let Some(view) = self.view() {
-            let units = view.units_of_file(&path);
-            let header = rows::header_layout(&view, &units, &self.folds);
-            self.rows = Arc::new(rows::present(header, self.presented));
-        }
-        self.hunk_rows.clear();
-        self.hunk = 0;
-        self.text.reset();
-    }
-
-    /// Builds the diff of a previewed file now, if one is waiting.
-    pub(super) fn finish_preview(&mut self) {
-        if self.preview.is_some() {
-            self.show_selected();
-        }
-    }
-
     /// Remembers the selected hunk and the row at the top of the shown file.
     pub(super) fn remember_place(&mut self) {
-        // A previewed file was never shown, so it has no place to remember.
-        if self.preview.is_some() {
-            return;
-        }
         if let Some(path) = self.selected.clone() {
             let top = super::present::diff_anchor(&self.rows, self.diff_scroll.offset());
             self.places.insert(
@@ -235,7 +180,7 @@ impl Model {
         self.tree_scroll.request(Request::Top(self.tree_cursor));
     }
 
-    /// Moves the tree cursor by `offset`, previewing the file it lands on.
+    /// Moves the tree cursor by `offset`, showing the file it lands on.
     pub(super) fn tree_move(&mut self, offset: isize) {
         let count = self.visible_tree().len();
         let position = self
@@ -245,13 +190,13 @@ impl Model {
         self.tree_move_to(position);
     }
 
-    /// Moves the tree cursor to `position` among the visible nodes, previewing the file it
-    /// lands on.
+    /// Moves the tree cursor to `position` among the visible nodes, showing the file it lands
+    /// on.
     pub(super) fn tree_move_to(&mut self, position: usize) {
         self.tree_cursor = position;
         if let Some(node) = self.tree_node().filter(|node| node.kind == NodeKind::File) {
             let path = node.path.clone();
-            self.preview_file(&path);
+            self.show_file(&path);
             self.tree_cursor = position;
         }
         self.reveal_tree_cursor();

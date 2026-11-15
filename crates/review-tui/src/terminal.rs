@@ -282,6 +282,7 @@ fn show(
 }
 
 /// Draws one frame inside synchronized output.
+#[tracing::instrument(skip_all)]
 fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     let rendered = app.render(terminal);

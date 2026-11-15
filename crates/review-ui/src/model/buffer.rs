@@ -117,8 +117,6 @@ impl Model {
 
     /// Opens the selected file as a buffer, with the cursor on the selected hunk.
     pub(super) fn enter_buffer(&mut self) {
-        // The buffer's markers come from the selected file's hunks, never a preview's header.
-        self.finish_preview();
         let Some(path) = self.selected.clone() else {
             return;
         };
@@ -346,22 +344,14 @@ impl Model {
 
     /// Updates the review buffer's highlights once they are computed.
     pub(super) fn refresh_buffer_syntax(&mut self) {
-        let Some(view) = self.view() else {
-            return;
-        };
         let Some(Origin::Review(path)) = self.buffer.as_ref().map(|buffer| buffer.origin.clone())
         else {
             return;
         };
-        let units = view.units_of_file(&path);
-        let syntax = units
-            .first()
-            .and_then(|&unit| view.file(unit).ok())
-            .and_then(|file| {
-                file.new
-                    .as_ref()
-                    .and_then(|side| self.blobs.side_syntax(side))
-            });
+        let syntax = self
+            .highlights
+            .head_at(&path)
+            .and_then(|side| self.blobs.syntax_of(side));
         if let Some(buffer) = &mut self.buffer {
             buffer.syntax = syntax;
         }

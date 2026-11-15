@@ -285,8 +285,6 @@ impl Model {
         if self.picker.is_some() {
             self.close_picker();
         }
-        // A file previewed by its header is laid out first, so the place kept is in its diff.
-        self.finish_preview();
         let places = self.places();
         self.settings_panel = Some(Panel {
             id: self.next_field_id(),

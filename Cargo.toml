@@ -75,6 +75,12 @@ parking_lot = "0.12"
 nucleo-matcher = "0.3"
 # Watches a reviewed working tree, so the review follows the disk; the version gpui links.
 notify = "8.2.1"
+# Spans for profiling: without a subscriber, each costs only a check of its callsite.
+tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes"] }
+# Writes the spans as a Perfetto trace, for review-tui's `trace` feature. The layer is published
+# only on git, which crates that are never published may depend on.
+tracing-perfetto = { git = "https://github.com/romnn/tracing-perfetto.git", rev = "75dcd7480704cf6168891fb138c77188627ded7f" }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
 # The icons gpui-component draws, such as the find bar's clear button.
 gpui-kit-assets = "=0.8.0"
 toml = "1"

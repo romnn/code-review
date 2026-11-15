@@ -333,7 +333,6 @@ impl Model {
             || self.picker.is_some()
             || self.settings_panel.is_some()
             || self.dragging.is_some()
-            || self.preview.is_some()
             || self.find.as_ref().is_some_and(|find| find.editing)
             || self.filter.as_ref().is_some_and(|filter| filter.editing)
             || !matches!(self.phase, Phase::Ready)
@@ -459,7 +458,6 @@ impl Model {
         } else if let Some(buffer) = &mut self.buffer {
             buffer.previous = None;
         }
-        self.preview = None;
         self.rows = Arc::new(Layout::default());
         self.hunk_rows.clear();
         self.refresh_tree();

@@ -835,15 +835,12 @@ it, muted, so it never reads as code.
   listed with `git ls-tree`, never the worktree. Searches run in the background, a newer query
   cancels the older one (killing its `git grep`), and only the newest result lands. The picker
   is a list, a query and an optional preview, meant to host other searchable lists later.
-- **Holding a key.** Moving the tree cursor previews each file's diff. A single press builds it
-  at once; while a held key repeats, only the file's header follows the cursor and the diff is
-  built once the cursor rests (120 ms), so the cursor and header move every keypress. No
-  older file's rows ever show under a newer header, and any mark, mode change or buffer
-  completes the preview first, so a key pressed right after a burst acts on the file shown.
-  Anything that would rebuild the diff meanwhile (a mark landing, text arriving) keeps the
-  header alone, so the file still opens at its place once the cursor rests. Layouts are not
-  cached: a layout reads text, highlights and folds that change on their own,
-  and building one only when the cursor rests is fast enough.
+- **Holding a key.** Moving the tree cursor shows each file's diff at once, on every repeat of
+  a held key too, so the rows on screen are always those of the file under the cursor and a key
+  pressed right after a burst acts on the file shown. A release build lays out a file of 2,400
+  changed lines in under a millisecond, well within a key's repeat. Layouts are not cached: a
+  layout reads text, highlights and folds that change on their own, and building one per move is
+  fast enough.
 - **Keys act on what shows.** Every mark resolves its target from the screen in one place:
   in the tree, the file under the cursor must be the file whose diff shows; in the diff, the
   rows must be the selected file's and the selected hunk must be on screen (one scrolled away

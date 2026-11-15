@@ -50,8 +50,6 @@ pub type Job = Box<dyn FnOnce() -> Completion + Send>;
 pub(super) enum Subject {
     /// Lands whatever changed while the job ran, for the reason given.
     Always(Because),
-    /// The tree cursor's rest of the preview with this number, while it is the newest.
-    Preview(u64),
     /// The open picker's search with this generation, while it is the picker's newest.
     Search(u64),
     /// The open picker with this identity.
@@ -104,8 +102,6 @@ pub(super) enum Outcome {
     PreviewText(PreviewText),
     /// A file the review did not change, read to open as a buffer.
     Unchanged(Unchanged),
-    /// The tree cursor rested on a previewed file.
-    Rested,
     /// Typing paused in the content search, so its search can start.
     Paused(Query),
     /// A tick of the clock, for what shows the time.
@@ -127,6 +123,10 @@ pub(super) struct TextsRead {
 
 /// The versions of one file, highlighted in the background.
 pub(super) struct Highlighted {
+    /// The job that made it, which its landing retires.
+    pub(super) job: super::highlights::JobId,
+    /// Whether the job was cancelled, which leaves what it made possibly partial.
+    pub(super) cancelled: bool,
     /// The syntax each version resolved to, plain for binary and oversized ones.
     pub(super) resolved: HashMap<SideKey, Resolved>,
     /// The highlights made, by blob and syntax; a version that resolved to highlights already
@@ -244,10 +244,12 @@ impl Model {
         subject: Subject,
         job: impl FnOnce() -> Outcome + Send + 'static,
     ) {
+        // From the moment the job is queued, so the trace shows its wait for a thread too.
+        let span = tracing::info_span!("job", ?subject);
         self.effects
             .push(Effect::Spawn(Box::new(move || Completion {
                 subject,
-                outcome: Box::new(job()),
+                outcome: Box::new(span.in_scope(job)),
             })));
     }
 
@@ -269,6 +271,7 @@ impl Model {
 
     /// Takes in what a job or a timer handed back: its end stops what marks it as running,
     /// and its outcome lands only while the subject it was computed for still shows.
+    #[tracing::instrument(skip_all, fields(subject = ?completion.subject))]
     pub fn complete(&mut self, completion: Completion) {
         let Completion { subject, outcome } = completion;
         self.ended(&outcome);
@@ -289,10 +292,6 @@ impl Model {
                 self.highlighting = self.highlighting.saturating_sub(1);
                 self.requested.finish(&read.asked);
             }
-            Outcome::Highlighted(_) => {
-                self.highlighting = self.highlighting.saturating_sub(1);
-                self.highlight_running = false;
-            }
             Outcome::Unchanged(_) => self.highlighting = self.highlighting.saturating_sub(1),
             Outcome::Marked(_) => self.marking = false,
             Outcome::Refreshed(_) => {
@@ -308,16 +307,17 @@ impl Model {
                 }
             }
             // The opening ends when the review shows; a picker searches until its newest search
-            // lands, and reads a preview until that picker takes the text in.
+            // lands, and reads a preview until that picker takes the text in; every highlight job
+            // lands, and its landing retires it.
             Outcome::Opened(_)
+            | Outcome::Highlighted(_)
             | Outcome::Found(_)
             | Outcome::PreviewText(_)
             | Outcome::Paused(_)
             | Outcome::Tick(_)
             | Outcome::Watching(_)
             | Outcome::Waited(_)
-            | Outcome::Captured(_)
-            | Outcome::Rested => {}
+            | Outcome::Captured(_) => {}
         }
     }
 
@@ -325,7 +325,6 @@ impl Model {
     fn freshness(&self, subject: Subject) -> Freshness {
         let current = match subject {
             Subject::Always(_) => true,
-            Subject::Preview(preview) => self.preview == Some(preview),
             Subject::Search(generation) => self.picker_generation() == Some(generation),
             Subject::Picker(id) => self.picker.as_ref().is_some_and(|picker| picker.id == id),
             Subject::Lookup(lookup) => {
@@ -363,7 +362,6 @@ impl Model {
             Outcome::Found(found) => self.picker_found(found),
             Outcome::PreviewText(text) => self.preview_read(text),
             Outcome::Unchanged(unchanged) => self.unchanged_read(unchanged),
-            Outcome::Rested => self.finish_preview(),
             Outcome::Paused(query) => self.search_picker(query),
             Outcome::Tick(tick) => self.ticked(tick),
             Outcome::Watching(started) => self.watching(started),
