@@ -9,6 +9,9 @@
 file src/engine.rs
 state
 expect "selected":"src/engine.rs"
+# A folder holding only one folder shows as one row with it, as `.github/workflows` does.
+expect "tree":\[\{"path":".github/workflows","kind":"Directory"
+expect \{"path":"db/migrations","kind":"Directory"
 expect "hunks":3
 expect "scope":"impl Ledger › fn apply_batch"
 # The brace reflow at lines 27–29 is proven formatting-only beside the file's real changes, so

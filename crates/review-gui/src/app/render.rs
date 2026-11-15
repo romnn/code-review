@@ -46,6 +46,10 @@ const TREE_ROW_LEFT: f32 = GRID * 2.0;
 /// The room after a tree row's state column.
 const TREE_ROW_RIGHT: f32 = GRID * 3.0;
 
+/// The pixels a tree row's name keeps spare, for its bounds snapping to device pixels at a
+/// fractional scale: a name cut to the cells its row has never gets cut again at its end.
+const NAME_SLACK: f32 = 2.0;
+
 /// How a tree row lays out in cells `cell` pixels wide, rounded as it draws.
 struct TreeMetrics {
     /// The marker's cell.
@@ -601,7 +605,7 @@ impl ReviewApp {
                             "tree",
                             count,
                             cx.processor(move |this, range: Range<usize>, _, cx| {
-                                this.render_tree_rows(range, cx)
+                                this.render_tree_rows(range, width, cx)
                             }),
                         )
                         .track_scroll(&self.lists.handles.tree)
@@ -614,28 +618,38 @@ impl ReviewApp {
     /// The visible tree rows in `range`, as lazygit draws its file tree: the indent, one
     /// marker cell (a folder's arrow or a file's change kind), a cell of space and the name
     /// colored by review state, with one state glyph at the right.
-    fn render_tree_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_tree_rows(
+        &mut self,
+        range: Range<usize>,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let colors = self.palette();
         let row_height = self.sizes().row_height();
+        let cell = self.sizes().ui_cell();
         let TreeMetrics {
             marker,
             marker_room,
             indent,
             column,
-        } = TreeMetrics::of(self.sizes().ui_cell());
+        } = TreeMetrics::of(cell);
         range
             .filter_map(|position| {
                 let row = files::tree_row(self, &colors, position)?;
                 let index = row.index;
+                let left = TREE_ROW_LEFT + (scroll::float(row.depth) * indent).round();
+                // The name cut in its middle to the whole cells it has, so its end shows too, as
+                // a file's extension or a folder chain's deepest folder.
+                let room = width - left - marker_room - column - TREE_ROW_RIGHT - NAME_SLACK;
+                let name =
+                    paint::display::ellipsize_middle(&row.name.text, scroll::whole(room / cell));
                 Some(
                     h_flex()
                         .id(("tree-node", index))
                         .h(px(row_height))
                         .w_full()
                         .pr(px(TREE_ROW_RIGHT))
-                        .pl(px(
-                            TREE_ROW_LEFT + (scroll::float(row.depth) * indent).round()
-                        ))
+                        .pl(px(left))
                         .cursor_pointer()
                         .when_some(row.background.map(to_gpui), gpui::Styled::bg)
                         .hover(|hovered| hovered.bg(to_gpui(colors.hairline)))
@@ -654,7 +668,7 @@ impl ReviewApp {
                                 .truncate()
                                 .text_color(to_gpui(row.name.color))
                                 .when(row.deleted, gpui::Styled::line_through)
-                                .child(ink::shown(&row.name.text)),
+                                .child(SharedString::from(name)),
                         )
                         .child(
                             div()
@@ -689,12 +703,11 @@ impl ReviewApp {
             ..
         } = TreeMetrics::of(cell);
         // The indent and the name in whole cells, the marker's room and the state column as
-        // rounded, and half a pixel for the rounded indent; rounded up, with a pixel for the
-        // snapping to device pixels.
+        // rounded, half a pixel for the rounded indent and the name's slack; rounded up.
         let cells = self.tree_cells().saturating_sub(files::TREE_MARKER_CELLS);
         let width =
             TREE_ROW_LEFT + TREE_ROW_RIGHT + marker_room + column + scroll::float(cells) * cell;
-        (width + 0.5).ceil() + 1.0
+        (width + 0.5 + NAME_SLACK).ceil()
     }
 
     /// The divider between the files and the diff: a hairline with a wider grip.

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use review_core::Review;
-use review_core::tree::{NodeKind, TreeNode};
+use review_core::tree::TreeNode;
 use serde::{Deserialize, Serialize};
 
 /// The name the front ends keep their view state under: review-gui's name when it was
@@ -35,15 +35,11 @@ pub fn load(review: &Review) -> Result<Vec<String>, String> {
         .map_err(|err| format!("ignoring the saved folded folders: {err:#}"))
 }
 
-/// The saved folded folders that are still folders of `tree`; a folder the revision no longer
-/// changes anything in is dropped.
+/// The saved folded folders that are still folders of `tree`, on a node of their own or in a
+/// chain; a folder the revision no longer changes anything in is dropped.
 #[must_use]
 pub fn restored(saved: Vec<String>, tree: &[TreeNode]) -> HashSet<String> {
-    let folders: HashSet<&str> = tree
-        .iter()
-        .filter(|node| node.kind == NodeKind::Directory)
-        .map(|node| node.path.as_str())
-        .collect();
+    let folders: HashSet<&str> = tree.iter().flat_map(TreeNode::directories).collect();
     saved
         .into_iter()
         .filter(|path| folders.contains(path.as_str()))
@@ -60,7 +56,8 @@ mod tests {
     use super::{FRONT_END, ViewState, load, restored};
     use crate::state;
 
-    /// Saved folders fold again only while the shown revision still has them as folders: a
+    /// Saved folders fold again only while the shown revision still has them as folders, on a
+    /// node of their own or in a chain, as the demo's `.github` in `.github/workflows`: a
     /// folder that is gone, and a file at a saved path, are dropped.
     #[test]
     fn restores_saved_folders_the_revision_still_has() {
@@ -73,7 +70,7 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let tree = file_tree(&state::statuses(&view, &HashMap::new()));
-        let collapsed = ["src/generated", "gone", "Cargo.toml"]
+        let collapsed = ["src/generated", ".github", "gone", "Cargo.toml"]
             .map(str::to_owned)
             .to_vec();
         review
@@ -81,7 +78,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             restored(load(&review).unwrap(), &tree),
-            HashSet::from(["src/generated".to_owned()])
+            HashSet::from(["src/generated".to_owned(), ".github".to_owned()])
         );
     }
 

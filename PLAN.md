@@ -890,7 +890,12 @@ it, muted, so it never reads as code.
   (`pkg/gui/presentation/files.go`): two cells of indent per depth, then one marker cell, a
   space and the name, so a folder's children start under its name; the marker is lazygit's
   `▼`/`▶` for an open or folded folder and the change-kind letter, colored by kind, for a file,
-  and folder names have no trailing `/`, as lazygit's tree directories have none. Names are
+  and folder names have no trailing `/`, as lazygit's tree directories have none. A folder
+  whose only entry is one folder shows as one row with it, as VS Code's compact folders and
+  GitHub's file tree show them (`services/billing/internal/postgres`, one indent), folding and
+  unfolding as one: it is folded while any folder of it is, and unfolding it unfolds them all,
+  so none folds again when a change parts the chain. A name too wide for its row is cut in its
+  middle, so a file's extension and a chain's deepest folder still show. Names are
   colored by review state, as lazygit colors staged and unstaged files: a done file or folder
   is green whole, its kind letter and `✓` too, a flagged one red, one changed since reviewed
   purple, and one that still needs the reviewer bright; only state that needs action or

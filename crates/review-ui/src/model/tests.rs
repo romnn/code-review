@@ -1572,19 +1572,70 @@ fn the_tree_s_width_follows_the_files_that_change() {
     std::fs::write(repo.join(nested), "fn b() { 2 }\n").unwrap();
     host.update(|model| model.capture(false));
     host.settle();
-    // `long_file_name.rs` two folders deep: two indents, its marker and its name.
-    assert_eq!(host.model().tree_cells(), 2 * 2 + 2 + 17);
+    // `long_file_name.rs` under the chain `deep/nested`: an indent, its marker and its name.
+    assert_eq!(host.model().tree_cells(), 2 + 2 + 17);
 
     host.update(|model| model.tree_cursor = 0);
     host.dispatch(Action::FocusTree);
     host.dispatch(Action::TreeCollapse);
-    assert!(host.model().tree_collapsed.contains("deep"));
-    assert_eq!(host.model().tree_cells(), 2 * 2 + 2 + 17, "a fold keeps it");
+    assert!(host.model().tree_collapsed.contains("deep/nested"));
+    assert_eq!(host.model().tree_cells(), 2 + 2 + 17, "a fold keeps it");
 
     std::fs::write(repo.join(nested), "fn b() {}\n").unwrap();
     host.update(|model| model.capture(false));
     host.settle();
     assert_eq!(host.model().tree_cells(), 2 + 4);
+}
+
+/// A folded folder that a chain takes in keeps the chain folded; unfolding the chain unfolds
+/// every folder of it, so none folds again when the chain parts.
+#[test]
+fn a_chain_folds_with_its_folders_and_unfolds_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("repo/a/b")).unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[("a/side.rs", "fn s() {}\n"), ("a/b/f.rs", "fn f() {}\n")],
+        &[
+            ("a/side.rs", "fn s() { 1 }\n"),
+            ("a/b/f.rs", "fn f() { 1 }\n"),
+        ],
+    );
+    let mut host = Host::open(review);
+    let paths = |model: &Model| -> Vec<String> {
+        model
+            .visible_tree()
+            .iter()
+            .map(|&index| model.tree[index].path.clone())
+            .collect()
+    };
+    host.update(|model| model.tree_cursor = 0);
+    host.dispatch(Action::FocusTree);
+    host.dispatch(Action::TreeCollapse);
+    assert_eq!(paths(host.model()), ["a"]);
+
+    // `a/side.rs` changes no more, so `a` holds only `a/b`: one chain, still folded.
+    std::fs::write(repo.join("a/side.rs"), "fn s() {}\n").unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(paths(host.model()), ["a/b"]);
+    assert_eq!(host.model().tree[0].name, "a/b");
+
+    host.update(|model| model.tree_cursor = 0);
+    host.update(|model| {
+        model.tree_fold(Some(false));
+    });
+    assert_eq!(paths(host.model()), ["a/b", "a/b/f.rs"]);
+    assert!(
+        host.model().tree_collapsed.is_empty(),
+        "both folders unfold"
+    );
+
+    // `a/side.rs` changes again, parting the chain: nothing folds.
+    std::fs::write(repo.join("a/side.rs"), "fn s() { 2 }\n").unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(paths(host.model()), ["a", "a/b", "a/b/f.rs", "a/side.rs"]);
 }
 
 /// Dragging the divider sets the files pane's width, which is remembered as a number, and a

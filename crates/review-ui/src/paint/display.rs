@@ -65,6 +65,38 @@ pub fn display_width(text: &str) -> usize {
     cells
 }
 
+/// `text` as it shows, cut to `cells` with `…` in its middle when it is wider, so both its
+/// start and its end show, as a file name keeps its extension.
+///
+/// The end takes half the cells left beside the `…`, rounded down, and the start the rest; each
+/// keeps only whole glyphs, so a wide character that does not fit leaves its cells empty.
+#[must_use]
+pub fn ellipsize_middle(text: &str, cells: usize) -> String {
+    let shown = DisplayLine::new(text);
+    let width = shown.width();
+    if width <= cells {
+        return shown.text().to_owned();
+    }
+    let Some(room) = cells.checked_sub(1) else {
+        return String::new();
+    };
+    let tail = room / 2;
+    let head = room - tail;
+    let mut kept: String = shown
+        .glyphs()
+        .take_while(|glyph| glyph.cell + glyph.cells <= head)
+        .map(|glyph| glyph.text)
+        .collect();
+    kept.push('…');
+    kept.extend(
+        shown
+            .glyphs()
+            .skip_while(|glyph| glyph.cell < width - tail)
+            .map(|glyph| glyph.text),
+    );
+    kept
+}
+
 /// Where one part of a line shows: a cluster, or the part of one that draws as itself, a
 /// character shown by its code, or a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,6 +555,25 @@ fn push_hex(text: &mut String, code: u32, digits: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name too wide for its room keeps its start and its end around a `…`, the end taking
+    /// the smaller half; one that fits shows whole, and no room shows nothing.
+    #[test]
+    fn long_names_are_cut_in_the_middle() {
+        assert_eq!(
+            ellipsize_middle("InvoiceRepositoryImplementation.java", 22),
+            "InvoiceRepo…ation.java"
+        );
+        assert_eq!(ellipsize_middle("lib.rs", 6), "lib.rs");
+        assert_eq!(ellipsize_middle("lib.rs", 5), "li…rs");
+        assert_eq!(ellipsize_middle("lib.rs", 1), "…");
+        assert_eq!(ellipsize_middle("lib.rs", 0), "");
+        // A wide glyph that would straddle the cut leaves its cells empty: `漢` takes the
+        // third and fourth cells, past the head's two.
+        assert_eq!(ellipsize_middle("ab漢字cd.rs", 6), "ab…rs");
+        // Control characters count as the caret notation they show as.
+        assert_eq!(ellipsize_middle("a\u{1b}bcdefgh", 6), "a^[…gh");
+    }
 
     /// The texts and cells of `line`'s glyphs.
     fn glyphs(line: &str) -> Vec<(String, usize)> {

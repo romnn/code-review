@@ -150,8 +150,14 @@ pub fn cursor_position(
     kind: NodeKind,
 ) -> Option<usize> {
     let node = |position: usize| visible.get(position).and_then(|&index| tree.get(index));
+    // A folder is itself also as one of the folders of a chain.
+    let is_it = |node: &TreeNode| {
+        node.kind == kind
+            && (node.path == path
+                || (kind == NodeKind::Directory && node.directories().any(|folder| folder == path)))
+    };
     (0..visible.len())
-        .find(|&position| node(position).is_some_and(|node| node.kind == kind && node.path == path))
+        .find(|&position| node(position).is_some_and(is_it))
         .or_else(|| {
             (0..visible.len()).rev().find(|&position| {
                 node(position).is_some_and(|node| {
@@ -439,6 +445,27 @@ mod tests {
         assert_eq!(shown("top"), ["top.rs"]);
         assert_eq!(shown("a/c"), ["a", "a/c", "a/c/x.rs"]);
         assert_eq!(shown("absent"), Vec::<String>::new());
+    }
+
+    /// A folder's cursor follows it into the chain that took it in, while a file's never lands
+    /// on a chain whose folder has the file's old path.
+    #[test]
+    fn a_folder_cursor_follows_its_folder_into_a_chain() {
+        let file = |path: &str| FileStatus {
+            path: path.to_owned(),
+            counts: Counts {
+                units: 1,
+                new: 1,
+                ..Counts::default()
+            },
+            renamed_from: None,
+            change: review_core::FileChangeSummary::modified(),
+        };
+        let tree = review_core::tree::file_tree(&[file("a/b/one.rs"), file("a/b/two.rs")]);
+        let all: Vec<usize> = (0..tree.len()).collect();
+        let folder = cursor_position(&tree, &all, "a", NodeKind::Directory).unwrap();
+        assert_eq!(tree[all[folder]].path, "a/b");
+        assert_eq!(cursor_position(&tree, &all, "a", NodeKind::File), None);
     }
 
     /// The cursor keeps a node's kind: with a deleted file `foo` beside a folder `foo/`, the

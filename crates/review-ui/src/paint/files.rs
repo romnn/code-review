@@ -146,7 +146,7 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
     let node = model.tree.get(index)?;
     let directory = node.kind == NodeKind::Directory;
     let progress = Progress::of(&node.counts);
-    let collapsed = model.tree_collapsed.contains(&node.path);
+    let collapsed = model.folded(node);
     let shown = !directory && model.selected.as_deref() == Some(node.path.as_str());
     let cursor = model.tree_cursor.min(visible.len().saturating_sub(1));
     let on_cursor = position == cursor && tree_focused(model);

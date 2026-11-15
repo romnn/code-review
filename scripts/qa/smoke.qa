@@ -214,23 +214,23 @@ state
 expect "cursor":"Density: compact"
 expect "density":"compact","effective_density":"compact"
 expect "row_height":26.0
-expect "geometry":\{"width":280.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
+expect "geometry":\{"width":281.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
 key escape
 key j
 state
 expect "density":"normal"
 expect "row_height":28.0
-expect "geometry":\{"width":280.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":152.0\}
+expect "geometry":\{"width":281.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":152.0\}
 key j
 state
 expect "density":"comfortable","effective_density":"comfortable"
 expect "previewing":true
 expect "row_height":30.0
-expect "geometry":\{"width":280.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":178.0\}
+expect "geometry":\{"width":281.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":178.0\}
 shot 09b-density-preview
 key k k
 state
-expect "geometry":\{"width":280.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
+expect "geometry":\{"width":281.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
 key escape
 state
 expect "overlay":null
@@ -243,7 +243,7 @@ key f o n t space 2 0
 state
 expect "cursor":"Font size: 20 pt"
 expect "font":\{"family":"[^"]+","size":26.66
-expect "geometry":\{"width":280.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
+expect "geometry":\{"width":281.0,"text_size":15.0,"row_height":26.0,"list_top":100.0,"cursor_top":126.0\}
 key escape
 key escape
 state
@@ -366,7 +366,7 @@ state
 expect "layout":\{"sidebar":400.0,"fit":false\}
 click 402 500 2
 state
-expect "layout":\{"sidebar":280.0,"fit":true\}
+expect "layout":\{"sidebar":281.0,"fit":true\}
 
 # `/` in the tree filters it as lazygit does: typing narrows it, Enter keeps the filter and
 # returns to the list, Esc clears it.
