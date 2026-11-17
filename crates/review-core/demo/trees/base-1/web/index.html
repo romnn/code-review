@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ledger</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      body > header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        padding: 0.5rem 1rem;
+      }
+      h1 { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Ledger</h1>
+      <select id="currency" aria-label="Currency">
+        <option value="EUR" selected>EUR</option>
+        <option value="USD">USD</option>
+      </select>
+    </header>
+    <main id="root" data-api="/api/v1">
+      <noscript>The ledger needs JavaScript.</noscript>
+    </main>
+    <!-- The app reads the API's base URL from the root element. -->
+    <script type="module">
+      import { LedgerClient } from "./dist/api.js";
+      import { mount } from "./dist/main.js";
+      import { formatBalance } from "./dist/format.js";
+
+      const root = document.getElementById("root");
+      const client = new LedgerClient(root.dataset.api);
+      const currency = document.querySelector("#currency");
+      const show = () => mount(root, client, currency.value);
+      currency.addEventListener("input", show);
+      show();
+    </script>
+  </body>
+</html>

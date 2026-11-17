@@ -1,0 +1,13 @@
+# Settings for the ledger on {{ inventory_hostname }}.
+ledger:
+  name: {{ ledger_name | default('ledger') }}
+  port: {{ ledger_port }}
+{% if ledger_debug %}
+  log_level: debug
+{% else %}
+  log_level: warn
+{% endif %}
+  currencies:
+{% for currency in ledger_currencies %}
+    - {{ currency }}
+{% endfor %}

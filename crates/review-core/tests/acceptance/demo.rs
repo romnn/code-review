@@ -89,7 +89,7 @@ fn demo_is_deterministic() -> eyre::Result<()> {
     assert!(
         builds[0]
             .0
-            .contains("refs/demo/head-1 ee89ed68ca5599940656dc184d47a188226e2a52"),
+            .contains("refs/demo/head-1 344c96db67ad2a78ada172db0fd16d318e462512"),
         "{}",
         builds[0].0
     );
@@ -145,7 +145,15 @@ fn demo_covers_every_feature() -> eyre::Result<()> {
     let moves: Vec<MoveKind> = analysis.moves.iter().map(|found| found.kind).collect();
     assert_that!(
         moves,
-        unordered_elements_are![eq(&MoveKind::Moved), eq(&MoveKind::MovedWithEdits)]
+        unordered_elements_are![
+            eq(&MoveKind::Moved),
+            eq(&MoveKind::MovedWithEdits),
+            // `scheduler.rs`'s `line_error`, re-indented as it left `mod config`, and its
+            // `occupancy_line`, re-indented into `mod worker` with a line rustfmt wrapped anew
+            // there, each proven a plain move.
+            eq(&MoveKind::Moved),
+            eq(&MoveKind::Moved)
+        ]
     );
     assert!(
         analysis

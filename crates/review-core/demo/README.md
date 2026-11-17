@@ -26,6 +26,20 @@ The pull request has three revisions, one per force-push, each a pair of trees t
 N, keeping your marks. Between revisions, units carry over unchanged, change, appear, and
 return to an earlier form, so each revision shows how review progress follows the code.
 
+Each file is there for its language or file type, and most also for moving through a
+review: the pull request changes them in several small places, a few lines apart or far apart,
+adding, removing and replacing lines, some on a file's first or last line. Only files that are
+new in the pull request show as one added hunk: the moves' targets `src/format.rs` and
+`src/hash.rs`, the new migration, `tools/notify.rb`, `web/view.tsx`, `web/views/item.ejs` and
+`deploy/chart/Chart.yaml`. `bin/demo` also becomes executable, a change of its own beside its
+edits. `server.go` has twenty small changes over 318 lines, one new function taller than a terminal,
+and `scheduler.rs` is the long one: 98 changes over 1248 lines, a pull request that adds
+cancellation and per-queue limits to a job scheduler, for moving and scrolling through a
+long file. Two of its changes are moves within the file that only formatting tells apart, which
+the engine proves plain moves: `line_error` leaves `mod config` for the top level, re-indented,
+and `occupancy_line` moves into `mod worker`, where rustfmt wraps one of its lines anew. Both sort after every other file but the root's, so most tree rows the QA scripts
+click stay where they are.
+
 Snapshots duplicate the files a commit does not change, but each one reads and edits as plain
 files. A file the pull request adds is therefore in every `head-*` tree. Edit its copies in
 `head-2` and `head-3` only where those revisions should change it.

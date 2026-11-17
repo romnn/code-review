@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+upstream ledger {
+{% for host in groups['ledger'] %}
+    server {{ hostvars[host]['ansible_host'] }}:{{ ledger_port }} max_fails=3 fail_timeout=10s;
+{% endfor %}
+}
+
+server {
+    listen 8080;
+    server_name {{ server_name }};
+{% if tls_enabled %}
+    listen 443 ssl;
+    ssl_certificate     {{ tls_certificate }};
+    ssl_certificate_key {{ tls_certificate_key }};
+{% endif %}
+
+    location / {
+        proxy_pass http://ledger;
+        proxy_read_timeout 30s;
+        proxy_set_header Host $host;
+    }
+}

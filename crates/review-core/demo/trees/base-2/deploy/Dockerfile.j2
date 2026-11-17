@@ -1,0 +1,10 @@
+# The ledger image, rendered per environment.
+FROM rust:{{ rust_version }} AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked
+
+FROM debian:{{ debian_release }}-slim
+COPY --from=build /src/target/release/ledger /usr/local/bin/ledger
+EXPOSE 8080
+ENTRYPOINT ["ledger"]

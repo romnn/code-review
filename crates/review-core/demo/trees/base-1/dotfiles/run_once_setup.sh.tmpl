@@ -1,0 +1,10 @@
+#!/bin/bash
+# Installs the tools the ledger's development needs, once per machine.
+
+{{ if eq .chezmoi.os "linux" -}}
+sudo apt-get install --yes git ripgrep sqlite3
+{{ else if eq .chezmoi.os "darwin" -}}
+brew install git ripgrep
+{{ end -}}
+
+echo "Set up {{ .chezmoi.hostname }} for the ledger"
