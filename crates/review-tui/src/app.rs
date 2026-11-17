@@ -441,7 +441,8 @@ impl App {
 
     /// The mouse over the files, the diff and the buffer: the wheel scrolls the list under it
     /// and pans the code of the diff and the buffer sideways, or with Shift; a press acts as
-    /// review-gui's does on what is under it, and a drag selects text or moves the divider.
+    /// review-gui's does on what is under it, a drag selects text or moves the divider, and a
+    /// right click copies the selection.
     fn main_mouse(&mut self, panes: &Panes, event: MouseEvent, position: Position) {
         let list = self.list_at(panes, position);
         let shift = event.modifiers.contains(KeyModifiers::SHIFT);
@@ -479,6 +480,8 @@ impl App {
                     model.release_text();
                 });
             }
+            // A right click copies the selection, as `y` does, and leaves it as it is.
+            MouseEventKind::Up(MouseButton::Right) => self.dispatch(Action::Copy),
             // The button came up somewhere the terminal did not report: the drag ends.
             MouseEventKind::Moved if self.model().dragging.is_some() => {
                 self.update(Model::drop_drag);
@@ -1189,6 +1192,14 @@ mod tests {
                 .contains(&Outgoing::CopyPrimary(text[skip..skip + 5].to_owned())),
             "the selection is the five characters shown from the pan on: {:?}",
             &text[skip..skip + 5]
+        );
+        // A right click copies it to the clipboard, as `y` does.
+        mouse_at(&mut app, MouseEventKind::Up(MouseButton::Right), code_at, y);
+        settle(&mut app, &receiver, &mut terminal);
+        assert!(
+            app.take_outgoing()
+                .contains(&Outgoing::Copy(text[skip..skip + 5].to_owned())),
+            "a right click copies the selection"
         );
     }
 

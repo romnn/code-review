@@ -945,7 +945,7 @@ it, muted, so it never reads as code.
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
   changes), the lines it covers (`L27–29`) only when its code is folded away or no scope names
-  it, since the gutter numbers the shown lines (unit IDs stay out; `y i` copies one), and last
+  it, since the gutter numbers the shown lines (unit IDs stay out; `Y` copies one), and last
   at most one tag (`reformatted only`, `reformatted only · auto-approved`, `whitespace changed ·
   not proven equivalent`, `changed since revision 1`): the lines and the tag are asides, faint,
   the tag italic and in parentheses, four cells apart, on the header's own background, so
@@ -1305,8 +1305,13 @@ belongs in `review-core`, so that the engine stays usable on its own.
 The terminal app, which `cr` runs without a command (and the unreleased `review-tui` binary the
 QA scripts drive), draws `review-ui`'s model in a terminal and works as review-gui does: the same keys
 and `[keys]` overrides, configuration file, marks, folded folders, themes, diff styles, pickers,
-settings, find, file buffer, overview and `?` sheet, and mouse selection with copies through OSC
-52, which also works over ssh.
+settings, find, file buffer, overview and `?` sheet, and mouse selection. A drag selects text
+inside one pane, which goes to the primary selection when the button comes up; `y`, a right
+click, Ctrl+C or Ctrl+Insert copy it (Ctrl+Shift+C and Super+C too, where the terminal passes
+them on rather than keeping them for its own copy), Esc drops it, and the bar dims `y copy`
+while nothing is selected. A copy goes to the terminal through OSC 52, which also works over
+ssh, and on a local session also to `wl-copy`, `xclip` or `xsel` (`pbcopy` on macOS), in a process
+group of its own, since terminals such as GNOME Terminal ignore OSC 52, as micromux does.
 
 - **Stack.** ratatui 0.30 with its crossterm 0.29 backend. ratatui was chosen over lower-level
   crates such as crossterm alone or termwiz because it already gives a cell buffer and diffs

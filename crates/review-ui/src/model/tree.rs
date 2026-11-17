@@ -343,9 +343,19 @@ impl Model {
         }
     }
 
-    /// Esc or `h` in the diff: back to the files, with the shown file under the cursor; in
-    /// scroll mode, first out of it and back to the hunk it began at.
+    /// Esc or `h` in the diff: back to the files, with the shown file under the cursor; with
+    /// text selected, first drops the selection, and in scroll mode, first goes out of it and
+    /// back to the hunk it began at.
     pub(super) fn focus_tree(&mut self) {
+        // A selection goes first, as Esc drops it in the buffer.
+        if self.mode == Mode::Diff
+            && self
+                .selection
+                .take()
+                .is_some_and(|selection| !selection.is_empty())
+        {
+            return;
+        }
         if self.mode == Mode::Diff && self.scroll_mode {
             self.leave_scroll_mode();
             return;

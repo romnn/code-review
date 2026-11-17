@@ -451,7 +451,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "YankUnitId",
-        &["y i"],
+        &["shift-y"],
         DIFF,
         "Review",
         "copy unit ID",
@@ -897,11 +897,13 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "Copy",
-        &["ctrl-c", "ctrl-insert"],
+        // `y` yanks as vim does, the rest are the terminals' and the platforms' copy keys, which
+        // reach a terminal app only where the terminal does not keep them for itself.
+        &["y", "ctrl-c", "ctrl-insert", "ctrl-shift-c", "super-c"],
         REVIEW,
         "View",
-        "copy selection",
-        None,
+        "copy the selection · a right click too",
+        Some((9, "copy")),
         None,
     ),
     (

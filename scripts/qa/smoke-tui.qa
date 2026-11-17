@@ -71,18 +71,21 @@ state
 expect "row_count":38,
 
 # The mouse in the diff: a drag selects text across rows, which goes to the primary selection
-# when the button comes up, and Ctrl+C copies it; a press on a hunk's header selects that
-# hunk, and one on a rule of unchanged lines shows more of them.
+# when the button comes up, and `y`, as Ctrl+C, copies it; a press on a hunk's header selects
+# that hunk, and one on a rule of unchanged lines shows more of them.
 drag 44 6 59 8
 state
 expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[5,4\],"head":\[7,19\]\}
 primary
 expect ^"pub fn apply_batch\(&mut self, entries: &\[Entry\]\) -> usize \{\\n
-key ctrl-c
+key y
 clipboard
 expect ^"pub fn apply_batch
 state
 expect "status":"Copied 3 lines\."
+key ctrl-c
+clipboard
+expect ^"pub fn apply_batch
 shot 16-selection
 click 49 17
 state
@@ -99,6 +102,11 @@ click 44 20
 click 59 22 shift
 state
 expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[19,
+# Esc drops the selection first, and the next goes back to the files.
+key escape
+state
+expect "selection":null
+expect "mode":"Diff"
 key escape
 
 # A paste is text for a field, never keys: a pasted space in the files does not approve.

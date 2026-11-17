@@ -485,7 +485,7 @@ impl Model {
         })
     }
 
-    /// `y i`: copies the selected hunk's first unit ID, which the CLI and notes use.
+    /// `Y`: copies the selected hunk's first unit ID, which the CLI and notes use.
     pub(super) fn yank_unit_id(&mut self) {
         if let Some(unit) = self.hunk_units().first().copied() {
             self.effect(Effect::Copy(unit.to_string()));
