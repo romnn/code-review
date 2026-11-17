@@ -433,7 +433,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "Refresh",
-        &["shift-r"],
+        &["r", "shift-r"],
         MODES,
         "Review",
         "fetch · switch to a new revision",
