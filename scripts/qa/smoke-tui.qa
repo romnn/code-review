@@ -16,7 +16,7 @@ expect "revision":"1"
 expect "mode":"Tree"
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[6,52\],"hunks":\[13,74\],"auto_approved":6\}
+expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
 expect "layout":\{"sidebar":31,"fit":true\}
 expect "viewport":\[32,1,128,47\]
 shot 01-open
@@ -65,7 +65,7 @@ expect "row_count":38,
 key z a
 state
 expect "row_count":26,
-expect "hunk":1,
+expect "hunk":1,"hunks"
 key z a
 state
 expect "row_count":38,
@@ -86,7 +86,7 @@ expect "status":"Copied 3 lines\."
 shot 16-selection
 click 49 17
 state
-expect "hunk":2,
+expect "hunk":2,"hunks"
 click 49 3
 state
 expect "row_count":52,
@@ -149,7 +149,7 @@ key n
 state
 expect "mode":"Diff"
 expect "target":"Diff","query":"balance","matches":7,"current":3
-expect "hunk":2,
+expect "hunk":2,"hunks"
 expect "status":"Match 4 of 7"
 shot 11-diff-find
 key escape
@@ -185,7 +185,7 @@ key u s i z e : : M A X
 key enter
 state
 expect "line":"        let take = entries.len\(\).min\(usize::try_from\(LIMIT\)
-expect "buffer_offset":1[0-9]\.0
+expect "buffer_offset":[1-9][0-9]?\.0
 shot 18-buffer-panned
 key g g
 state
@@ -197,25 +197,25 @@ resize 160x50
 # A fresh demo for what follows, apart from the gaps shown and the marks made above.
 launch --demo
 
-# `|` cycles the diff styles, which are colors only: no style moves a row.
+# `S` cycles the diff styles, which are colors only: no style moves a row.
 file src/engine.rs
 key 0
 state
 expect "density":"normal"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
-key |
+key shift-s
 state
 expect "diff_style":"soft"
 expect "background":"muted","change_bar":false
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-soft
-key |
+key shift-s
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-plain
-key |
+key shift-s
 state
 expect "diff_style":"bold"
 
@@ -223,7 +223,7 @@ expect "diff_style":"bold"
 # selection in a half copies that side only; when the diff gets too narrow it shows unified
 # without changing the remembered layout, and side by side comes back when it is wide enough
 # again. Panning moves only code.
-key s
+key |
 state
 expect "layout":"side-by-side","effective_layout":"side-by-side"
 expect "row_count":19,
@@ -239,7 +239,7 @@ shot 11a-side-by-side-panned
 resize 90x50
 state
 expect "layout":"side-by-side","effective_layout":"unified"
-expect "viewport":\[32,1,58,47\]
+expect "viewport":\[23,1,67,47\]
 expect "selection":null
 shot 11c-narrow
 resize 160x50
@@ -258,7 +258,7 @@ state
 expect "current_column":"Right"
 shot 11b-side-by-side-find
 key escape
-key s
+key |
 state
 expect "layout":"unified"
 
@@ -296,7 +296,7 @@ shot 13-content-search
 key enter
 state
 expect "mode":"Diff"
-expect "hunk":2,
+expect "hunk":2,"hunks"
 expect "status":"src/engine.rs:44"
 key ctrl-g
 key tab
@@ -333,7 +333,7 @@ key shift-t
 state
 expect "overlay":"Settings"
 expect "cursor":"Theme: Carbonfox"
-expect "entries":28\}
+expect "entries":35\}
 expect "geometry":\{"width":31,"list_top":3,"cursor_top":4\}
 key j
 state
@@ -377,7 +377,7 @@ state
 expect "overlay":null
 
 # Every entry previews while the cursor rests on it, the layout through the same transition as
-# `s`; Escape drops the preview back to what was applied.
+# `|`; Escape drops the preview back to what was applied.
 key ,
 key tab
 key l a y o u t space s i d e
@@ -431,13 +431,13 @@ expect "approved":"folded"
 expect "row_count":3,
 
 # The mouse in the files: a click on a tree row shows that file, a double click opens its
-# diff, and the wheel scrolls the list under it, three rows a turn, on a screen too short for
+# diff, and the wheel scrolls the list under it, a row an event, on a screen too short for
 # all of it.
-click 10 23
+click 10 21
 state
 expect "selected":"src/format.rs"
 expect "mode":"Tree"
-click 10 23 2
+click 10 21 2
 state
 expect "selected":"src/format.rs"
 expect "mode":"Diff"
@@ -445,10 +445,10 @@ file src/compat.rs
 resize 160x12
 wheel 2
 state
-expect "scroll_offset":6\.0,
+expect "scroll_offset":2\.0,
 wheel -1
 state
-expect "scroll_offset":3\.0,
+expect "scroll_offset":1\.0,
 wheel 1 10 6
 state
 expect "tree":\[\{"path":".github/workflows","kind":"Directory","change":null,"progress":"Open","y":-26\}
@@ -535,10 +535,10 @@ rapid key space
 rapid key j
 rapid state
 expect "selected":"src/engine.rs","shown":"src/engine.rs"
-expect "hunk":1,
+expect "hunk":2,"hunks"
 state
 expect "selected":"src/engine.rs"
-expect "hunk":1,
+expect "hunk":2,"hunks"
 
 # The density comes from the configuration: compact rows leave out the blank row before each
 # hunk, which the normal density's 38 rows of this file have.
@@ -564,3 +564,5 @@ key escape
 resize 160x50
 
 include scripts/qa/smoke-quit.qa
+
+include scripts/qa/smoke-file.qa

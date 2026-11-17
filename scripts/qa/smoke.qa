@@ -9,7 +9,7 @@ expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[6,52\],"hunks":\[13,74\],"auto_approved":6\}
+expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
 shot 01-open
 
 include scripts/qa/smoke-common.qa
@@ -43,19 +43,19 @@ expect "path":"src/engine.rs","kind":"File","change":"M","progress":"Partial"
 file src/engine.rs
 key 0
 state
-expect "hunk":2,
+expect "hunk":2,"hunks"
 key k
 state
 expect "hunk_badges":\["Accepted"\]
 
-# `|` cycles the diff styles, which are colors only: soft (Zed's muted look with chips), plain
+# `S` cycles the diff styles, which are colors only: soft (Zed's muted look with chips), plain
 # (lazygit's red and green text) and back to bold (delta's). No style moves a row: the rows,
 # their height and their places stay as they were.
 state
 expect "density":"normal"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 expect "row_height":28.0
-key |
+key shift-s
 state
 expect "diff_style":"soft"
 expect "background":"muted","change_bar":false
@@ -63,13 +63,13 @@ expect "density":"normal"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 expect "row_height":28.0
 shot 06-soft
-key |
+key shift-s
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
 shot 06-plain
-key |
+key shift-s
 state
 expect "diff_style":"bold"
 expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
@@ -77,7 +77,7 @@ expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y"
 # Side by side: removed lines beside added ones, each side with its own line numbers; a
 # selection in a half copies that side only, and when the diff gets too narrow it shows
 # unified, dropping the selection rather than letting it copy other text.
-key s
+key |
 state
 expect "layout":"side-by-side","effective_layout":"side-by-side"
 expect "kind":"Pair"
@@ -92,7 +92,7 @@ expect "selection":null
 key ctrl-0
 state
 expect "effective_layout":"side-by-side"
-key s
+key |
 state
 expect "layout":"unified"
 
@@ -167,7 +167,7 @@ state
 expect "overlay":null
 
 # Every entry previews while the cursor rests on it: the layout through the same transition as
-# `s`, and token emphasis; Escape drops the preview back to what was applied.
+# `|`, and token emphasis; Escape drops the preview back to what was applied.
 key ,
 key tab
 key l a y o u t space s i d e
@@ -403,7 +403,7 @@ key n
 state
 expect "mode":"Diff"
 expect "target":"Diff","query":"balance","matches":5,"current":3
-expect "hunk":2,
+expect "hunk":2,"hunks"
 expect "status":"Match 4 of 5"
 shot 11-diff-find
 key escape
@@ -412,7 +412,7 @@ key escape
 # left, the moved lines numbered as in src/format.rs on the right. Panning moves only code, and
 # another file starts back at the left edge.
 file src/format.rs
-key s
+key |
 state
 expect "text":"↙ moved with edits from src/report.rs:9–19
 expect "left":\{"kind":"NestedSame","head":2,"base":9,"text":"/// Renders balances
@@ -424,13 +424,13 @@ expect "text_offset":100.0
 file src/parser.rs
 state
 expect "text_offset":0.0
-key s
+key |
 file src/engine.rs
 
 # Side by side, `/` finds each half's code apart, the base's half first in each row, and
 # highlights a match only in its own half.
 key 0
-key s
+key |
 key /
 key b a l a n c e
 key enter
@@ -442,7 +442,7 @@ state
 expect "current_column":"Right"
 shot 11b-side-by-side-find
 key escape
-key s
+key |
 state
 expect "layout":"unified"
 
@@ -475,7 +475,7 @@ shot 13-content-search
 key enter
 state
 expect "mode":"Diff"
-expect "hunk":2,
+expect "hunk":2,"hunks"
 expect "status":"src/engine.rs:44"
 key ctrl-g
 key tab
@@ -568,8 +568,8 @@ expect "pending":0,"queued":0
 expect "path":"src/util.rs","kind":"File","change":"M","progress":"Open"
 key escape
 
-# A match in unchanged code selects the hunk around it, and a hunk scrolled off screen is
-# shown before it can be marked.
+# A match in unchanged code selects the hunk around it; scrolled off screen, the selection
+# follows to a hunk in view, so Space marks only what shows.
 key escape
 file src/engine.rs
 key u
@@ -578,13 +578,12 @@ key /
 key i t e r
 key enter
 state
-expect "hunk":2,
+expect "hunk":2,"hunks"
 resize 1600x400
 scroll -5000
-key space
 state
-expect "hunk_badges":\["Unreviewed"\]
-expect "status":"Hunk 3 of 3 was off screen
+expect "hunk":0,"hunks"
+key shift-g
 key space
 state
 expect "status":"Approved hunk 3 of 3
@@ -623,10 +622,10 @@ rapid key space
 rapid key j
 rapid state
 expect "selected":"src/engine.rs","shown":"src/engine.rs"
-expect "hunk":1,
+expect "hunk":2,"hunks"
 state
 expect "selected":"src/engine.rs"
-expect "hunk":1,
+expect "hunk":2,"hunks"
 
 # A mistake in one diff style costs only that style, and the window says so where the reviewer
 # looks, not only on stderr.
@@ -643,3 +642,5 @@ key 0
 shot 30-largest-font
 
 include scripts/qa/smoke-quit.qa
+
+include scripts/qa/smoke-file.qa

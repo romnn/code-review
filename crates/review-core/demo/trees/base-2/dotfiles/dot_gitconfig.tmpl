@@ -1,0 +1,11 @@
+[user]
+	name = {{ .name }}
+{{- if eq .chezmoi.os "darwin" }}
+[credential]
+	helper = osxkeychain
+{{- else if eq .chezmoi.os "linux" }}
+[credential]
+	helper = cache --timeout=3600
+{{- end }}
+[pull]
+	rebase = false

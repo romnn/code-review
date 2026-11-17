@@ -344,6 +344,10 @@ fn view_state(model: &Model, screen: &dyn Screen) -> Value {
         "density": look.density.name(),
         "effective_density": model.rows.presentation.density.name(),
         "approved": model.folds.approved.name(),
+        "view": look.view.name(),
+        "effective_view": model.rows.presentation.view.name(),
+        "hunk_position": look.hunk_position.name(),
+        "cross_files": look.cross_files,
         "style": {
             "syntax": look.style.syntax,
             "background": look.style.background.name(),

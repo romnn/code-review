@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::palette::HunkTone;
 use super::{Layer, Palette, Piece, Run, Style};
 use crate::color::Hsla;
-use crate::config::Background;
+use crate::config::{Background, DiffView};
 use crate::find::Match;
 use crate::model::buffer::Marker;
 use crate::model::{Mode, Model};
@@ -26,6 +26,15 @@ pub enum Frame {
     Hunk,
     /// In the selected hunk, of its tone: a bar in the tone's solid color.
     Selected(HunkTone),
+    /// In a hunk of the file view, which draws no band, so the code reads as one file: the
+    /// selected hunk has a bar in its tone's solid color, and of the others only those the
+    /// reviewer decided on have one, quieter, so approved and flagged code shows as such.
+    Whole {
+        /// What the hunk asks of the reviewer.
+        tone: HunkTone,
+        /// Whether it is the selected hunk.
+        selected: bool,
+    },
 }
 
 impl Frame {
@@ -33,25 +42,61 @@ impl Frame {
     #[must_use]
     pub fn bar(self, palette: &Palette) -> Option<Hsla> {
         match self {
-            Self::Outside => None,
+            Self::Outside
+            | Self::Whole {
+                tone: HunkTone::Open,
+                selected: false,
+            } => None,
             Self::Hunk => Some(palette.faint),
-            Self::Selected(tone) => Some(palette.hunk_solid(tone)),
+            Self::Selected(tone)
+            | Self::Whole {
+                tone,
+                selected: true,
+            } => Some(palette.hunk_solid(tone)),
+            Self::Whole {
+                tone,
+                selected: false,
+            } => Some(palette.hunk_solid(tone).alpha(DECIDED_BAR_ALPHA)),
         }
     }
 
     /// The band behind a hunk's rows; a changed line's own background covers it.
     #[must_use]
     pub fn band(self, palette: &Palette) -> Option<Hsla> {
-        (self != Self::Outside).then_some(palette.band)
+        matches!(self, Self::Hunk | Self::Selected(_)).then_some(palette.band)
+    }
+
+    /// Whether the row is in the selected hunk.
+    #[must_use]
+    pub fn selected(self) -> bool {
+        matches!(self, Self::Selected(_) | Self::Whole { selected: true, .. })
+    }
+
+    /// How much of the frame's width the bar takes: all of it in the selected hunk, and a
+    /// sliver in the others, so the selected hunk shows at a glance.
+    #[must_use]
+    pub fn bar_share(self) -> f32 {
+        if self.selected() { 1.0 } else { THIN_BAR_SHARE }
     }
 }
+
+/// The share of the frame's width the bar of a hunk that is not selected takes.
+const THIN_BAR_SHARE: f32 = 0.4;
+
+/// How strongly the bar of a decided hunk that is not selected shows in the file view.
+const DECIDED_BAR_ALPHA: f32 = 0.6;
 
 /// Where diff row `index` is relative to the hunks: in the selected one only while the diff
 /// has the keys.
 #[must_use]
 pub fn frame(model: &Model, index: usize) -> Frame {
     let selected = (model.mode == Mode::Diff).then_some(model.hunk);
-    match hunk_at(model, index) {
+    let whole = model.rows.presentation.view == DiffView::File;
+    match hunk_at(model, index, !whole) {
+        Some(hunk) if whole => Frame::Whole {
+            tone: hunk_tone(model, hunk),
+            selected: Some(hunk) == selected,
+        },
         Some(hunk) if Some(hunk) == selected => Frame::Selected(hunk_tone(model, hunk)),
         Some(_) => Frame::Hunk,
         None => Frame::Outside,
@@ -70,8 +115,9 @@ pub fn hunk_tone(model: &Model, hunk: usize) -> HunkTone {
 }
 
 /// The hunk that diff row `index` belongs to for its band and bar: from the hunk's header
-/// through its last row and the unchanged lines right after it, up to the next gap or header.
-fn hunk_at(model: &Model, index: usize) -> Option<usize> {
+/// through its last row and, with `trailing`, the unchanged lines right after it, up to the next
+/// gap or header.
+fn hunk_at(model: &Model, index: usize, with_trailing: bool) -> Option<usize> {
     // Hunks are in row order, so the one that may hold the row is the last starting at or
     // before it.
     let hunk = model
@@ -81,7 +127,8 @@ fn hunk_at(model: &Model, index: usize) -> Option<usize> {
     let rows = model.hunk_rows.get(hunk)?;
     let trailing = |row: &Row| row.hunk.is_none() && !matches!(row.body, Body::Note(_));
     let within = rows.contains(&index)
-        || (index >= rows.end
+        || (with_trailing
+            && index >= rows.end
             && model
                 .rows
                 .rows
@@ -138,8 +185,35 @@ struct CellInk {
 /// Line of code `cell` as the diff draws it at `at`.
 #[must_use]
 pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeCell {
-    let ink = cell_ink(model, cell, palette);
-    let mut layers = vec![syntax_layer(model, palette, at.file, cell)];
+    let mut ink = cell_ink(model, cell, palette);
+    let frame = frame(model, at.row);
+    // Bold backgrounds only on the selected hunk, when asked, so it stands out.
+    let look = model.look();
+    if look.soft_unselected && look.style.background == Background::Bold && !frame.selected() {
+        ink.background = ink
+            .background
+            .map(|line| theme::mix(line, palette.background, crate::look::MUTED_SHARE));
+    }
+    // Approved code loses its diff colors in every style, its signs aside, so the code still to
+    // review is what stands out: added lines read as the file's code, and removed lines fade,
+    // as code that is gone.
+    let approved = hunk_at(model, at.row, false)
+        .is_some_and(|hunk| hunk_tone(model, hunk) == HunkTone::Approved);
+    let faded = approved && matches!(cell.kind, RowKind::Removed | RowKind::NestedOld);
+    if approved {
+        ink.background = None;
+        ink.text_color = faded.then_some(palette.faint);
+        ink.bar = None;
+    }
+    let syntax = if faded {
+        Vec::new()
+    } else {
+        syntax_layer(model, palette, at.file, cell)
+    };
+    let mut layers = vec![syntax];
+    if !approved {
+        layers.push(moved_edit_layer(cell, palette));
+    }
     if let Some(find) = model.search_of(Mode::Diff) {
         let current = find.current.and_then(|current| find.matches.get(current));
         layers.push(match_layer(
@@ -187,10 +261,14 @@ fn gutter(cell: &Cell, column: Column, palette: &Palette) -> Piece {
     let nested = is_nested(cell);
     // Each half of a pair numbers its own side: the left the base (or a nested diff's old
     // side), the right the head.
-    // Across the width, a nested line has no single number.
+    // Across the width, a nested line has no single number, except a line of moved code where
+    // it arrived, which is a line of this file: an old line of a move's edits has none.
     let line = match column {
         Column::Left => cell.base,
         Column::Right => cell.head.as_ref().map(|head| head.line),
+        Column::Whole if nested && cell.moved && cell.kind != RowKind::NestedOld => {
+            cell.head.as_ref().map(|head| head.line)
+        }
         Column::Whole if nested => None,
         Column::Whole => cell.head.as_ref().map(|head| head.line).or(cell.base),
     };
@@ -231,6 +309,19 @@ fn cell_ink(model: &Model, cell: &Cell, palette: &Palette) -> CellInk {
                 bar: bar(palette.faint),
             }
         }
+        // Moved code, and the lines a move with edits keeps, in the move's color; the edits
+        // themselves stay removed and added.
+        RowKind::Removed | RowKind::Added | RowKind::NestedSame if cell.moved => CellInk {
+            sign: match cell.kind {
+                RowKind::Removed => "−",
+                RowKind::Added => "+",
+                _ => " ",
+            },
+            sign_color: palette.moved,
+            background: line(palette.moved_line),
+            text_color: text(palette.moved),
+            bar: bar(palette.moved),
+        },
         RowKind::Removed | RowKind::NestedOld => CellInk {
             sign: "−",
             sign_color: palette.removed_sign,
@@ -321,6 +412,9 @@ fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> L
     let tint = match cell.kind {
         _ if style.background == Background::None => None,
         _ if cell.quiet => Some(palette.quiet_line),
+        RowKind::Removed | RowKind::Added | RowKind::NestedSame if cell.moved => {
+            Some(palette.moved_line)
+        }
         RowKind::Removed | RowKind::NestedOld => Some(palette.removed_line),
         RowKind::Added | RowKind::NestedNew => Some(palette.added_line),
         _ => None,
@@ -335,6 +429,30 @@ fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> L
     }
     layer
 }
+
+/// The words a move's edit changed, behind a stronger shade of the line's color, as delta marks
+/// them, so what the move edited stands out within the code it carried; and the indentation a
+/// re-indented line gained, in the move's color.
+fn moved_edit_layer(cell: &Cell, palette: &Palette) -> Layer {
+    let color = match cell.kind {
+        _ if !cell.moved => return Vec::new(),
+        RowKind::NestedOld => palette.removed_sign,
+        RowKind::NestedNew => palette.added_sign,
+        // The indentation a re-indented line gained.
+        RowKind::NestedSame => palette.moved,
+        _ => return Vec::new(),
+    };
+    cell.highlights
+        .iter()
+        .map(|range| Run {
+            range: range.clone(),
+            style: Style::behind(color.alpha(MOVED_EDIT_ALPHA)),
+        })
+        .collect()
+}
+
+/// How strongly the words a move's edit changed show behind their text.
+const MOVED_EDIT_ALPHA: f32 = 0.4;
 
 /// The underlines of the tokens a line really changed, when the look emphasizes them.
 fn emphasis_layer(model: &Model, cell: &Cell, palette: &Palette) -> Layer {

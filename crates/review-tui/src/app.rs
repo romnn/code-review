@@ -44,8 +44,10 @@ use crate::keys::{self, Focus};
 use crate::log::Log;
 use crate::measure::{self, FRAME, GUTTER, MARKER, Panes, SIGN, buffer_numbers, halves};
 
-/// How many rows one turn of the wheel scrolls a list, as terminals scroll their own.
-const WHEEL_ROWS: i32 = 3;
+/// How many rows one wheel event scrolls a list: one, as vim's default `mousescroll` does,
+/// since a terminal already sends several events for one notch (Alacritty three, by its
+/// `scrolling.multiplier`), so more would move many rows a notch and lose the reader's place.
+const WHEEL_ROWS: i32 = 1;
 
 /// How many cells one sideways turn of the wheel pans the code of the diff or the buffer.
 const WHEEL_CELLS: f64 = 6.0;

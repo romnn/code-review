@@ -261,6 +261,112 @@ fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A Rust function moved into a module, re-indented with it and with one of its lines wrapped
+/// anew as a formatter does at the deeper indent, differs only in formatting: a plain move.
+#[test]
+fn reformatted_rust_move_is_a_plain_move() -> eyre::Result<()> {
+    let wrapped = indoc! {"
+        mod inner {
+            fn moved_function(input: u32) -> u32 {
+                let doubled = input * 2;
+                let shifted = doubled + 7;
+                let masked =
+                    shifted & 0xff;
+                let scaled = masked * 3;
+                scaled - 1
+            }
+        }
+    "};
+    let (_repo, review) = setup(
+        &[
+            (
+                "a.rs",
+                &formatdoc!(
+                    "
+                        fn keep() {{}}
+                        {FUNCTION}fn tail() {{}}
+                    "
+                ),
+            ),
+            ("b.rs", "fn other() {}\n"),
+        ],
+        &[
+            (
+                "a.rs",
+                indoc! {"
+                    fn keep() {}
+                    fn tail() {}
+                "},
+            ),
+            (
+                "b.rs",
+                &formatdoc!(
+                    "
+                        fn other() {{}}
+                        {wrapped}"
+                ),
+            ),
+        ],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let moves = view.moves();
+    assert_that!(moves.len(), eq(1));
+    assert_that!(moves[0].kind, eq(MoveKind::Moved));
+    assert!(moves[0].inner.is_none());
+    Ok(())
+}
+
+/// A Python function moved into a class is re-indented too, but there it becomes a method, so
+/// its syntax tree changes: it stays a move with edits.
+#[test]
+fn python_moved_into_a_class_keeps_its_edits() -> eyre::Result<()> {
+    let function = indoc! {"
+        def moved_function(value):
+            doubled = value * 2
+            shifted = doubled + 7
+            masked = shifted & 0xFF
+            scaled = masked * 3
+            return scaled - 1
+    "};
+    let method = function
+        .lines()
+        .map(|line| format!("    {line}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let (_repo, review) = setup(
+        &[(
+            "a.py",
+            &formatdoc!(
+                "
+                    class Holder:
+                        pass
+
+
+                    {function}"
+            ),
+        )],
+        &[(
+            "a.py",
+            &formatdoc!(
+                "
+                    class Holder:
+                        pass
+
+                    {method}"
+            ),
+        )],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    assert!(
+        view.moves()
+            .iter()
+            .all(|found| found.kind != MoveKind::Moved)
+    );
+    Ok(())
+}
+
 /// Acknowledging a move that only partly covers a chunk leaves that chunk unreviewed.
 #[test]
 fn partial_move_acknowledgement_leaves_chunk_unreviewed() -> eyre::Result<()> {

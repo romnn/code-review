@@ -1,0 +1,89 @@
+# The file view, the diff's default, as both front ends check it alike: the whole file with its
+# changes in place and approved code still shown, j/k through every hunk, staying in the file
+# by default and on into the next one with `[diff] cross_files`, and ]/[ through the hunks that
+# need the reviewer, across files.
+# Every expectation reads the same in review-gui and review-tui: nothing here depends on the
+# geometry. smoke.qa and smoke-tui.qa include it last, after a fresh launch, and the walk
+# before it left the hunks view remembered, which `v` switches back.
+
+launch --demo
+key v
+state
+expect "view":"file","effective_view":"file"
+file src/engine.rs
+key 0
+state
+expect "mode":"Diff"
+expect "hunk":2,"hunks"
+expect "hunk_badges":\["Unreviewed"\]
+shot f01-whole-file
+# The file starts at its first line, unchanged code and all, and the approved first hunk still
+# shows its code.
+key g g
+state
+expect "rows":\[\{"row":0,"source":0,"kind":"Context","hunk":null
+expect "hunk":0,"hunks"
+expect "hunk_badges":\["Accepted"\]
+expect "kind":"Added","hunk":0,
+# j/k step through every hunk, approved ones too, and by default stop at the file's ends.
+key j
+state
+expect "hunk":1,"hunks"
+expect "hunk_badges":\["Auto"\]
+key k k
+state
+expect "selected":"src/engine.rs"
+expect "hunk":0,"hunks"
+expect "status":"This is the file's first hunk\."
+# With crossing files on in the settings list, they go on past the first hunk into the file
+# before it in the tree, at its last hunk.
+key ,
+key tab
+key g o space o n
+key enter
+key escape escape
+state
+expect "overlay":null
+expect "cross_files":true
+key k
+state
+expect "selected":"src/compat.rs"
+expect "status":"On to src/compat.rs\."
+key j
+state
+expect "selected":"src/engine.rs"
+expect "hunk":0,"hunks"
+# ] skips the approved hunks to the one that needs the reviewer, then goes on to the next file
+# that needs the reviewer, past finished ones; [ comes back.
+key ]
+state
+expect "hunk":2,"hunks"
+key ]
+state
+expect "selected":"src/format.rs"
+expect "status":"On to src/format.rs, which needs review\."
+key [
+state
+expect "selected":"src/engine.rs"
+expect "hunk":2,"hunks"
+shot f02-back-to-review
+# Approving the file's last open hunk keeps it in place, shown as approved, and names the next
+# file, which ] goes on to.
+key space
+state
+expect "hunk":2,"hunks"
+expect "hunk_badges":\["Accepted"\]
+expect "status":"This file is done; \] goes on to src/format\.rs\."
+shot f03-approved-in-place
+
+# s turns on scroll mode, where j and k scroll a line and the bar says so, and s again goes
+# back to moving between hunks.
+key s
+state
+expect "status":"Scroll mode: j and k scroll a line
+key j
+state
+expect "hunk":2,"hunks"
+key s
+state
+expect "status":"j and k move between hunks again\."

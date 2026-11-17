@@ -53,10 +53,27 @@ actions! {
     CloseAllFolds,
     /// Unfolds every folder.
     OpenAllFolds,
-    /// Selects the next hunk.
+    /// Scrolls the diff a line down; the selected hunk follows the view.
+    LineDown,
+    /// Scrolls the diff a line up; the selected hunk follows the view.
+    LineUp,
+    /// Scrolls the diff so the selected hunk is in its middle, as vim's `zz` centers a line.
+    CenterHunk,
+    /// Selects the next hunk, reviewed or not, going on into the next file after the last when
+    /// the hunk keys cross files; in scroll mode, scrolls the diff a line down instead.
     NextHunk,
-    /// Selects the previous hunk.
+    /// Selects the previous hunk, reviewed or not, going back into the previous file before
+    /// the first when the hunk keys cross files; in scroll mode, scrolls the diff a line up
+    /// instead.
     PreviousHunk,
+    /// Turns scroll mode on or off: while it is on, the hunk keys scroll the diff a line.
+    ToggleScrollMode,
+    /// Selects the next hunk that needs the reviewer, in this file or the next one that has
+    /// one.
+    NextOpenHunk,
+    /// Selects the previous hunk that needs the reviewer, in this file or the previous one that
+    /// has one.
+    PreviousOpenHunk,
     /// Selects the first hunk.
     FirstHunk,
     /// Selects the last hunk.
@@ -183,6 +200,8 @@ actions! {
     ToggleLayout,
     /// Shows approved hunks or folds them.
     ToggleApproved,
+    /// Shows the whole file around its changes, or each hunk apart.
+    ToggleView,
     /// Moves the settings cursor down, previewing the entry.
     SettingsNext,
     /// Moves the settings cursor up, previewing the entry.
@@ -233,8 +252,13 @@ impl Model {
             },
             Action::CloseAllFolds => self.tree_fold_all(true),
             Action::OpenAllFolds => self.tree_fold_all(false),
-            Action::NextHunk => self.select_hunk(self.hunk + 1),
-            Action::PreviousHunk => self.select_hunk(self.hunk.saturating_sub(1)),
+            Action::LineDown => self.scroll_diff_lines(1.0),
+            Action::LineUp => self.scroll_diff_lines(-1.0),
+            Action::CenterHunk => self.center_hunk(),
+            Action::NextHunk => self.step_hunk(true),
+            Action::PreviousHunk => self.step_hunk(false),
+            Action::NextOpenHunk => self.step_open_hunk(true),
+            Action::PreviousOpenHunk => self.step_open_hunk(false),
             Action::FirstHunk => self.select_hunk(0),
             Action::LastHunk => self.select_hunk(usize::MAX),
             Action::HalfPageDown => self.half_page(true),
@@ -295,6 +319,8 @@ impl Model {
             Action::OpenSettings => self.open_settings(),
             Action::ToggleLayout => self.toggle_layout(),
             Action::ToggleApproved => self.apply_approved(self.folds.approved.toggled()),
+            Action::ToggleView => self.toggle_view(),
+            Action::ToggleScrollMode => self.toggle_scroll_mode(),
             Action::SettingsNext => self.settings_step(true),
             Action::SettingsPrevious => self.settings_step(false),
             Action::SettingsApply => self.apply_cursor(),

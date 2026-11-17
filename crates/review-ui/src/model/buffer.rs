@@ -4,6 +4,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use review_core::UnitId;
+
 use super::effects::{Outcome, Subject};
 use super::{DEFINITION_DEADLINE, Mode, Model, Servers};
 use crate::frame::Request;
@@ -20,10 +22,21 @@ const COLUMN_AIR: f64 = 4.0;
 /// What a line of a review buffer changed, for its gutter marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Marker {
-    /// The line was added or changed, in this display hunk.
-    Added(usize),
-    /// Lines were removed just before this line, in this display hunk.
-    Removed(usize),
+    /// The line was added or changed by this unit.
+    Added(UnitId),
+    /// Lines were removed just before this line by this unit.
+    Removed(UnitId),
+}
+
+impl Marker {
+    /// The unit that changed the line. Markers name units, not display hunks, since which
+    /// hunk holds a unit depends on the view the diff shows.
+    #[must_use]
+    pub fn unit(self) -> UnitId {
+        match self {
+            Self::Added(unit) | Self::Removed(unit) => unit,
+        }
+    }
 }
 
 /// Where a buffer's text comes from.
@@ -93,16 +106,29 @@ impl Buffer {
 
 impl Model {
     /// The display hunk of the line under the buffer cursor, only in a review buffer of the
-    /// selected file, whose markers index that file's rows.
+    /// selected file: the hunk of the diff's rows now that holds the line's unit.
     #[must_use]
     pub fn buffer_hunk(&self) -> Option<usize> {
         let buffer = self.buffer.as_ref()?;
         if buffer.origin != Origin::Review(self.selected.clone()?) {
             return None;
         }
-        match buffer.markers.get(buffer.cursor.row).copied().flatten()? {
-            Marker::Added(hunk) | Marker::Removed(hunk) => Some(hunk),
-        }
+        let unit = buffer
+            .markers
+            .get(buffer.cursor.row)
+            .copied()
+            .flatten()?
+            .unit();
+        self.hunk_of(unit)
+    }
+
+    /// The display hunk of the shown rows that holds `unit`.
+    #[must_use]
+    pub(crate) fn hunk_of(&self, unit: UnitId) -> Option<usize> {
+        self.rows
+            .hunks
+            .iter()
+            .position(|units| units.contains(&unit))
     }
 
     /// `=`: the whole file at the selected hunk, or back to the diff at the hunk under the
@@ -149,12 +175,12 @@ impl Model {
                 if chunk.new.len == 0 {
                     let at = chunk.new.start.min(markers.len().saturating_sub(1));
                     if let Some(slot) = markers.get_mut(at) {
-                        slot.get_or_insert(Marker::Removed(hunk));
+                        slot.get_or_insert(Marker::Removed(unit));
                     }
                 }
                 for row in chunk.new.range() {
                     if let Some(slot) = markers.get_mut(row) {
-                        *slot = Some(Marker::Added(hunk));
+                        *slot = Some(Marker::Added(unit));
                     }
                 }
             }
@@ -214,10 +240,7 @@ impl Model {
                 .iter()
                 .take(row + 1)
                 .rev()
-                .find_map(|marker| match marker {
-                    Some(Marker::Added(hunk) | Marker::Removed(hunk)) => Some(*hunk),
-                    None => None,
-                })
+                .find_map(|marker| self.hunk_of(marker.as_ref()?.unit()))
         });
         self.find = None;
         self.enter_mode(Mode::Diff);

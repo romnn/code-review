@@ -1,10 +1,12 @@
 //! Computing an [`Analysis`] from a snapshot pair.
 
+use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use super::{
-    ANALYSIS_FORMAT, Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Unit, UnitKind,
-    hex_digest, moves, noise,
+    ANALYSIS_FORMAT, Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Move, Unit,
+    UnitKind, hex_digest, moves, noise,
 };
 use crate::error::Error;
 use crate::git::{Blob, BlobReader, ChangeStatus, EntryType, RawChange, RawSide, Repo};
@@ -52,9 +54,18 @@ pub fn analyze(repo: &Repo, base: &ObjectId, head: &ObjectId) -> Result<Analysis
         builder.add_file(change, is_generated)?;
     }
     let Builder {
-        files, mut units, ..
+        files,
+        mut units,
+        mut blobs,
     } = builder;
-    let moves = moves::detect(&mut units);
+    let mut proof = MoveProof {
+        blobs: &mut blobs,
+        texts: HashMap::new(),
+        budget: MOVE_PROOF_BUDGET,
+    };
+    let moves = moves::detect(&mut units, |found, units| {
+        move_is_formatting_only(found, units, &files, &mut proof)
+    });
     Ok(Analysis {
         format: ANALYSIS_FORMAT,
         base: base.clone(),
@@ -315,6 +326,130 @@ struct FileChunks {
     /// For each chunk, whether it is proven formatting-only, by the whole-file proof or its
     /// own.
     proven: Vec<bool>,
+}
+
+/// How many bytes the proofs that moves with edits differ only in formatting may parse, across
+/// a revision; the first move past the budget and every move after it keep their edits.
+const MOVE_PROOF_BUDGET: usize = 64 << 20;
+
+/// Whether the move with edits `found` differs only in formatting, by the same proof as a
+/// chunk's: its source block written into the target file in place of its target block leaves
+/// the target file's syntax tree as it is, and its target block written into the source file in
+/// place of the source block leaves that file's. Both files must be in one language the proof
+/// supports and parse; a re-indent that changes what the code means, as in Python, changes a
+/// tree, so it stays an edit.
+fn move_is_formatting_only(
+    found: &Move,
+    units: &[Unit],
+    files: &[FileChange],
+    proof: &mut MoveProof<'_>,
+) -> bool {
+    let side = |unit: UnitIndex| {
+        let unit = units.get(unit.get())?;
+        Some((unit.chunk()?, files.get(unit.file)?))
+    };
+    let (Some((source_chunk, source_file)), Some((target_chunk, target_file))) =
+        (side(found.source.unit), side(found.target.unit))
+    else {
+        return false;
+    };
+    let (Some(language), Some(target_language)) = (source_file.language, target_file.language)
+    else {
+        return false;
+    };
+    let (Some(old), Some(new)) = (source_file.old.as_ref(), target_file.new.as_ref()) else {
+        return false;
+    };
+    if language != target_language {
+        return false;
+    }
+    if proof.budget == 0 {
+        return false;
+    }
+    let (Some(old_text), Some(new_text)) = (proof.text(&old.oid), proof.text(&new.oid)) else {
+        return false;
+    };
+    let cost = 2 * (old_text.len() + new_text.len());
+    if cost > proof.budget {
+        // The first move that does not fit ends the proofs, so files read for moves that are
+        // never proven cannot pile up in the cache.
+        proof.budget = 0;
+        proof.texts.clear();
+        return false;
+    }
+    proof.budget -= cost;
+    let source_lines = source_chunk.old.start + found.source.offset;
+    let target_lines = target_chunk.new.start + found.target.offset;
+    let (Some(source), Some(target)) = (
+        line_bytes(&old_text, source_lines..source_lines + found.source.len),
+        line_bytes(&new_text, target_lines..target_lines + found.target.len),
+    ) else {
+        return false;
+    };
+    let (Some(source_text), Some(target_text)) =
+        (old_text.get(source.clone()), new_text.get(target.clone()))
+    else {
+        return false;
+    };
+    let splice = |text: &str, range: &Range<usize>, with: &str| {
+        Some([text.get(..range.start)?, with, text.get(range.end..)?].concat())
+    };
+    let canonical = |text: &str| syntax::parse(language, text).and_then(|parsed| parsed.canonical);
+    let (Some(forward), Some(backward)) = (
+        splice(&new_text, &target, source_text),
+        splice(&old_text, &source, target_text),
+    ) else {
+        return false;
+    };
+    let new_canonical = canonical(&new_text);
+    let old_canonical = canonical(&old_text);
+    new_canonical.is_some()
+        && old_canonical.is_some()
+        && canonical(&forward) == new_canonical
+        && canonical(&backward) == old_canonical
+}
+
+/// What the proofs of a revision's moves share: the blob reader, the texts already read, each
+/// read once however many moves it takes part in, and what is left of the parse budget, which
+/// bounds the texts kept too: a move past it ends the proofs and drops them.
+struct MoveProof<'a> {
+    blobs: &'a mut BlobReader,
+    texts: HashMap<ObjectId, Option<Rc<str>>>,
+    budget: usize,
+}
+
+impl MoveProof<'_> {
+    /// The text of blob `oid`, read once; `None` for one that is not UTF-8 text or cannot be
+    /// read.
+    fn text(&mut self, oid: &ObjectId) -> Option<Rc<str>> {
+        if let Some(text) = self.texts.get(oid) {
+            return text.clone();
+        }
+        let text = match self.blobs.read(oid) {
+            Ok(Blob::Content(bytes)) => String::from_utf8(bytes).ok().map(Rc::from),
+            _ => None,
+        };
+        self.texts.insert(oid.clone(), text.clone());
+        text
+    }
+}
+
+/// The bytes of `text` that its zero-based `lines` span, each with its line ending.
+fn line_bytes(text: &str, lines: Range<usize>) -> Option<Range<usize>> {
+    let mut starts = std::iter::once(0).chain(
+        text.match_indices('\n')
+            .map(|(at, _)| at + 1)
+            .filter(|&at| at < text.len()),
+    );
+    let start = starts.nth(lines.start)?;
+    let end = if lines.is_empty() {
+        start
+    } else {
+        starts
+            .nth(lines.end - lines.start - 1)
+            .unwrap_or(text.len())
+    };
+    Some(start..end)
 }
 
 /// How many bytes the per-chunk proofs of one file may parse, beyond the two whole files.

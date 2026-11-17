@@ -1,8 +1,8 @@
 //! The diff pane: the selected file's header, its rows, and the card of its loading, empty and
 //! error states.
 //!
-//! A code row is review-gui's: the bar along a hunk's left edge (`▎`), the line number, the
-//! sign and the code, on the line's background.
+//! A code row is review-gui's: the bar along a hunk's left edge (`▌` in the selected hunk, `▎`
+//! in the others), the line number, the sign and the code, on the line's background.
 //! Side by side, each half has its own gutter and sign, a `│` divides them, padding is hatched,
 //! and the code of every row moves by the model's text offset while gutters and the tool's own
 //! rows stay put.
@@ -110,7 +110,8 @@ fn draw_row(
 /// hunk; nothing between hunks.
 fn frame_bar(painter: &mut Painter<'_>, palette: &Palette, frame: Frame, x: u16, y: u16, bg: Rgba) {
     if let Some(color) = frame.bar(palette) {
-        painter.symbol(x, y, "▎", Brush::new(color, bg));
+        let symbol = if frame.selected() { "▌" } else { "▎" };
+        painter.symbol(x, y, symbol, Brush::new(color, bg));
     }
 }
 
@@ -613,6 +614,7 @@ fn file_header(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area
         kind,
         dir,
         name,
+        scope,
         details,
         lines,
         counts,
@@ -661,6 +663,13 @@ fn file_header(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area
     }
     let shown = ellipsize_end(&name.text, name_width);
     at += painter.text(at, y, name_width, &shown, Brush::piece(&name, surface));
+    if let Some(scope) = &scope
+        && at < left_end
+    {
+        let room = left_end - at;
+        let shown = ellipsize_start(&scope.text, room);
+        at += painter.text(at, y, room, &shown, Brush::piece(scope, surface));
+    }
     let details_at = at + HEADER_GAP;
     if !details.text.is_empty() && details_at < left_end {
         let shown = ellipsize_end(&details.text, left_end - details_at);

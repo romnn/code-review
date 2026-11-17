@@ -119,23 +119,30 @@ impl Model {
             return;
         }
         if self.mode == Mode::Diff && verdict == MarkVerdict::Accepted {
-            self.advance_after_approval();
+            self.after_approval();
         }
     }
 
-    /// After approving a hunk, selects the next one that needs the reviewer, or says the file is
-    /// done and which file is next.
-    fn advance_after_approval(&mut self) {
-        if let Some(next) = self.open_hunk_after(Some(self.hunk)) {
+    /// After approving a hunk, selects the next one in the file that needs the reviewer, as
+    /// lazygit moves on after staging a hunk, coming around from the file's start; or, when the
+    /// file has nothing left to review, keeps the hunk and says which file is next. It never
+    /// leaves the file by itself, so a held Space never approves code of a file the reviewer
+    /// has not seen.
+    fn after_approval(&mut self) {
+        if let Some(next) = self
+            .open_hunk_after(Some(self.hunk))
+            .or_else(|| self.open_hunk_after(None))
+        {
             self.select_hunk(next);
             return;
         }
-        if let Some(next) = self.open_hunk_after(None) {
-            self.select_hunk(next);
-            return;
-        }
+        // The approved hunk may have folded under the view; it stays in sight.
+        self.reveal_hunk();
         let next = self.next_open_file();
         self.set_status(match next {
+            Some(path) if self.look().cross_files => {
+                format!("This file is done; ] goes on to {path}.")
+            }
             Some(path) => format!("This file is done; {path} is next to review."),
             None => "This file is done, and so is every other file.".to_owned(),
         });
@@ -179,6 +186,9 @@ impl Model {
             history: snapshot.history,
         });
         self.refresh_tree();
+        // The mark shows at once: in the hunks view an approved hunk folds now, while the
+        // reviewer acts, so the save landing later moves no row.
+        self.rebuild();
         let done = match verdict {
             MarkVerdict::Accepted | MarkVerdict::Seen => "Approved",
             MarkVerdict::Flagged => "Flagged",

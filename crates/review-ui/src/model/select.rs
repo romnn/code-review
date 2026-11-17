@@ -212,6 +212,7 @@ mod tests {
             head: None,
             base: None,
             quiet: false,
+            moved: false,
         }
     }
 

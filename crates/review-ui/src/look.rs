@@ -4,7 +4,7 @@
 //! A diff style says how a diff is colored whatever the theme: syntax colors or not, what
 //! changed lines are drawn on, and whether changed lines have a bar in the gutter. It never moves a row, so cycling the styles never shifts the content; the
 //! rows' spacing is the density's alone.
-//! Three styles are built in, in the order `|` cycles them (`plain` as lazygit draws a diff,
+//! Three styles are built in, in the order `S` cycles them (`plain` as lazygit draws a diff,
 //! `bold` as delta does, `soft` as Zed does), and `[styles.<name>]` tables add more.
 //!
 //! The window keeps the look the reviewer applied and, while the settings list's cursor rests
@@ -13,13 +13,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::config::{Background, Density, DiffLayout, StyleConfig, points_to_pixels};
+use crate::config::{
+    Background, Density, DiffLayout, DiffView, HunkPosition, StyleConfig, points_to_pixels,
+};
 use crate::theme::Theme;
 
 /// How a diff is colored, whatever the theme; nothing in it moves a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffStyle {
-    /// The name `|`, the settings list and the configuration use.
+    /// The name `S`, the settings list and the configuration use.
     pub name: String,
     /// Where it comes from.
     pub origin: Origin,
@@ -69,7 +71,7 @@ fn bold() -> DiffStyle {
     }
 }
 
-/// The built-in diff styles, in the order `|` cycles them.
+/// The built-in diff styles, in the order `S` cycles them.
 fn built_in_styles() -> Vec<DiffStyle> {
     vec![
         DiffStyle {
@@ -133,7 +135,7 @@ pub fn find_style(styles: &[DiffStyle], name: &str) -> Result<DiffStyle, String>
         .ok_or_else(|| format!("there is no diff style {name:?}"))
 }
 
-/// The style after `current` in `styles`, wrapping around: what `|` switches to.
+/// The style after `current` in `styles`, wrapping around: what `S` switches to.
 #[must_use]
 pub fn next_style<'a>(styles: &'a [DiffStyle], current: &str) -> Option<&'a DiffStyle> {
     let at = styles.iter().position(|style| style.name == current);
@@ -152,6 +154,16 @@ pub struct Look {
     pub density: Density,
     /// The layout the reviewer asked for; a narrow window may still show the diff unified.
     pub layout: DiffLayout,
+    /// How much of a file its diff shows.
+    pub view: DiffView,
+    /// Where a hunk the keys go to lands.
+    pub hunk_position: HunkPosition,
+    /// Whether the hunk keys go on into the next or previous file past a file's last or first
+    /// hunk.
+    pub cross_files: bool,
+    /// Whether, in a style with bold line backgrounds, every hunk but the selected one has
+    /// soft ones, so the selected hunk stands out.
+    pub soft_unselected: bool,
     /// Whether changed tokens within a line are underlined.
     pub token_emphasis: bool,
 }
@@ -208,7 +220,7 @@ pub fn points_of(pixels: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// `|` cycles plain, bold and soft, then the user's styles, and back; a user style takes
+    /// `S` cycles plain, bold and soft, then the user's styles, and back; a user style takes
     /// the bold style's fields it leaves out, and replaces a built-in style of its name.
     #[test]
     fn styles_cycle_and_user_styles_fill_in_from_bold() {

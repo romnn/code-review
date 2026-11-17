@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use super::{Effect, GAP_STEP, Mode, Model};
-use crate::config::DiffLayout;
+use crate::config::{DiffLayout, HunkPosition};
 use crate::frame::List;
 use crate::rows::{Fold, RowKind};
 use crate::scroll;
@@ -21,6 +21,24 @@ impl Model {
         self.reveal_hunk();
     }
 
+    /// Selects hunk `hunk` of a file that just came to show and puts it in view at once, where
+    /// [`Self::reveal_hunk`] would ease it: nothing on screen leads from the file before to
+    /// this one, so a glide from the file's remembered place to the hunk would only read as a
+    /// second jump.
+    pub(super) fn select_hunk_at_once(&mut self, hunk: usize) {
+        let Some(last) = self.hunk_rows.len().checked_sub(1) else {
+            return;
+        };
+        self.hunk = hunk.min(last);
+        self.selection = None;
+        if let Some(target) = self.hunk_target(self.diff_scroll.offset()) {
+            let viewport = self.grid().viewports.diff;
+            self.diff_scroll.stop();
+            self.diff_scroll
+                .jump(crate::frame::clamp(target, self.rows.rows.len(), viewport));
+        }
+    }
+
     /// Whether any row of the selected hunk is in the diff's viewport, where it is or is
     /// heading; before the list is laid out, it counts as shown.
     pub(super) fn hunk_in_view(&self) -> bool {
@@ -31,26 +49,250 @@ impl Model {
         scroll::shows(rows, self.diff_scroll.target(), viewport)
     }
 
-    /// Scrolls the selected hunk into view, as much of it as fits, starting at its header.
+    /// Scrolls the selected hunk into view where `[diff] hunk_position` puts it: its start a
+    /// fifth down unless it already shows clear of the edges, so the code before it, the hunk
+    /// and what follows show and a long hunk is read from its beginning; or in the middle,
+    /// every time.
     pub(super) fn reveal_hunk(&mut self) {
-        let Some(rows) = self.hunk_rows.get(self.hunk).cloned() else {
-            return;
-        };
-        // A list not laid out yet has no height, and reveals as well as it can.
-        let viewport = self.grid().viewports.diff.unwrap_or(0.0);
-        let fits = scroll::whole_rows(viewport).saturating_sub(4).max(1);
-        // One row of air above the header, and as much of the hunk as fits.
-        let top = rows.start.saturating_sub(1);
-        let end = rows.end.min(top + fits);
-        if let Some(target) = scroll::reveal(
-            self.diff_scroll.target(),
-            viewport,
-            scroll::rows(top),
-            scroll::rows(end),
-            2.0,
-        ) {
+        if let Some(target) = self.hunk_target(self.diff_scroll.target()) {
             self.ease_diff_to(target);
         }
+    }
+
+    /// Where the diff first shows a file: its selected hunk at the reading line, or in the
+    /// middle, wherever it starts; `None` before the diff is laid out.
+    pub(super) fn hunk_landing(&self) -> Option<f64> {
+        let rows = self.hunk_rows.get(self.hunk)?;
+        let viewport = self.grid().viewports.diff.filter(|&rows| rows > 0.0)?;
+        let (top, bottom) = (scroll::rows(rows.start), scroll::rows(rows.end));
+        let target = match self.look().hunk_position {
+            HunkPosition::Margin => scroll::reading(viewport, top, scroll::READING_LINE),
+            HunkPosition::Center => scroll::centered(viewport, top, bottom, scroll::READING_LINE),
+        };
+        Some(crate::frame::clamp(
+            target,
+            self.rows.rows.len(),
+            Some(viewport),
+        ))
+    }
+
+    /// Where the diff goes to show the selected hunk from `offset`, or `None` where it stays.
+    fn hunk_target(&self, offset: f64) -> Option<f64> {
+        let rows = self.hunk_rows.get(self.hunk)?;
+        // A list not laid out yet has no height, and reveals as well as it can.
+        let viewport = self.grid().viewports.diff.unwrap_or(0.0);
+        let (top, bottom) = (scroll::rows(rows.start), scroll::rows(rows.end));
+        match self.look().hunk_position {
+            HunkPosition::Margin => {
+                scroll::within_margins(offset, viewport, top, bottom, scroll::READING_LINE)
+            }
+            HunkPosition::Center => Some(scroll::centered(
+                viewport,
+                top,
+                bottom,
+                scroll::READING_LINE,
+            )),
+        }
+    }
+
+    /// `z z`: the selected hunk in the middle of the diff once, as vim's `zz` centers a line.
+    pub(super) fn center_hunk(&mut self) {
+        let Some(rows) = self.hunk_rows.get(self.hunk) else {
+            return;
+        };
+        let viewport = self.grid().viewports.diff.unwrap_or(0.0);
+        let target = scroll::centered(
+            viewport,
+            scroll::rows(rows.start),
+            scroll::rows(rows.end),
+            scroll::READING_LINE,
+        );
+        self.ease_diff_to(target);
+    }
+
+    /// `j` and `k` in the diff: scrolls `lines` rows, down when positive, and the selected hunk
+    /// follows the view.
+    pub(super) fn scroll_diff_lines(&mut self, lines: f64) {
+        let target = self.diff_scroll.target() + lines;
+        self.ease_diff_to(target);
+        self.follow_view();
+    }
+
+    /// Selects the hunk on screen nearest the reading line a fifth down when the selected one
+    /// is neither on screen nor where an eased scroll is taking the diff, so the review keys
+    /// act on what shows. It looks only at what is on screen now, never where a scroll is
+    /// heading, so no key can act on a hunk before it shows. With no hunk on screen, the
+    /// selection stays, and a mark shows it first.
+    ///
+    /// Each frame's layout runs it, so every way the diff scrolls is covered: keys, the wheel,
+    /// the scrollbar's thumb and track, and eased scrolls as they move. Only while the diff has
+    /// the keys: a diff previewed from the tree keeps the hunk it opens at, which opening it
+    /// reveals.
+    pub(super) fn follow_view(&mut self) {
+        if self.mode != Mode::Diff {
+            return;
+        }
+        let Some(viewport) = self.grid().viewports.diff.filter(|&rows| rows > 0.0) else {
+            return;
+        };
+        let top = self.diff_scroll.offset();
+        let shown = |rows: &std::ops::Range<usize>, offset: f64| {
+            scroll::shows(rows, offset, Some(viewport))
+        };
+        if self
+            .hunk_rows
+            .get(self.hunk)
+            .is_none_or(|rows| shown(rows, top) || shown(rows, self.diff_scroll.target()))
+        {
+            return;
+        }
+        let reading = top + viewport * scroll::READING_LINE;
+        let distance = |rows: &std::ops::Range<usize>| {
+            let (start, end) = (scroll::rows(rows.start), scroll::rows(rows.end));
+            if reading < start {
+                start - reading
+            } else if reading >= end {
+                reading - end
+            } else {
+                0.0
+            }
+        };
+        if let Some((hunk, _)) = self
+            .hunk_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, rows)| shown(rows, top))
+            .min_by(|(_, first), (_, second)| distance(first).total_cmp(&distance(second)))
+        {
+            self.hunk = hunk;
+        }
+    }
+
+    /// `j` and `k`: the next or previous hunk, reviewed or not; past the file's last or first
+    /// hunk, with `[diff] cross_files`, the next or previous file in the tree's visible order, at
+    /// its first or last hunk. In scroll mode they scroll the diff a line instead.
+    pub(super) fn step_hunk(&mut self, forward: bool) {
+        if self.scroll_mode {
+            self.scroll_diff_lines(if forward { 1.0 } else { -1.0 });
+            return;
+        }
+        let count = self.hunk_rows.len();
+        if forward && self.hunk + 1 < count {
+            self.select_hunk(self.hunk + 1);
+            return;
+        }
+        if !forward && self.hunk > 0 && count > 0 {
+            self.select_hunk(self.hunk - 1);
+            return;
+        }
+        if !self.look().cross_files {
+            self.set_status(if forward {
+                "This is the file's last hunk."
+            } else {
+                "This is the file's first hunk."
+            });
+            return;
+        }
+        let Some(path) = self
+            .adjacent_file(forward)
+            .and_then(|position| self.visible_tree().get(position).copied())
+            .and_then(|index| self.tree.get(index))
+            .map(|node| node.path.clone())
+        else {
+            self.set_status(if forward {
+                "This is the last hunk of the last file."
+            } else {
+                "This is the first hunk of the first file."
+            });
+            return;
+        };
+        self.show_file(&path);
+        self.select_hunk_at_once(if forward { 0 } else { usize::MAX });
+        self.set_status(format!("On to {path}."));
+    }
+
+    /// `]` and `[`: the next or previous hunk that needs the reviewer; past the file's last or
+    /// first one, with `[diff] cross_files`, the next or previous file that needs the reviewer,
+    /// at its first or last such hunk, around the end of the tree.
+    pub(super) fn step_open_hunk(&mut self, forward: bool) {
+        let here = if forward {
+            self.open_hunk_after(Some(self.hunk))
+        } else {
+            self.open_hunk_before(self.hunk)
+        };
+        if let Some(hunk) = here {
+            self.select_hunk(hunk);
+            return;
+        }
+        if !self.look().cross_files {
+            let others =
+                (0..self.rows.hunks.len()).any(|hunk| hunk != self.hunk && self.hunk_open(hunk));
+            let status = match (others, self.hunk_open(self.hunk), self.next_open_file()) {
+                (true, _, _) if forward => {
+                    "No hunk further down needs review; some further up still do.".to_owned()
+                }
+                (true, _, _) => {
+                    "No hunk further up needs review; some further down still do.".to_owned()
+                }
+                (false, true, Some(path)) => {
+                    format!("This is the file's last hunk to review; {path} is next.")
+                }
+                (false, true, None) => "This is the last hunk left to review.".to_owned(),
+                (false, false, Some(path)) => {
+                    format!("This file is done; {path} is next to review.")
+                }
+                (false, false, None) => "Nothing left to review.".to_owned(),
+            };
+            self.set_status(status);
+            return;
+        }
+        let Some(path) = self.open_file_toward(forward) else {
+            self.set_status(if self.open_hunk_after(None).is_some() {
+                if forward {
+                    "No other file needs review; this one still has hunks to review further up."
+                } else {
+                    "No other file needs review; this one still has hunks to review further down."
+                }
+            } else {
+                "Nothing left to review."
+            });
+            return;
+        };
+        self.show_file(&path);
+        let hunk = if forward {
+            self.open_hunk_after(None)
+        } else {
+            self.open_hunk_before(usize::MAX)
+        };
+        self.select_hunk_at_once(hunk.unwrap_or(0));
+        self.set_status(format!("On to {path}, which needs review."));
+    }
+
+    /// `s`, or `a` as lazygit switches between hunks and lines: scroll mode on or off, where `j`
+    /// and `k` scroll the diff a line instead of moving between hunks.
+    pub(super) fn toggle_scroll_mode(&mut self) {
+        self.scroll_mode = !self.scroll_mode;
+        self.scrolled_from = self
+            .scroll_mode
+            .then(|| self.hunk_units().first().copied())
+            .flatten();
+        self.set_status(if self.scroll_mode {
+            "Scroll mode: j and k scroll a line; s stays here, Esc goes back to the hunk."
+        } else {
+            "j and k move between hunks again."
+        });
+    }
+
+    /// Esc in scroll mode: leaves it and goes back to the hunk selected when it began, or the
+    /// selected one when that hunk is gone; the next Esc goes to the files.
+    pub(super) fn leave_scroll_mode(&mut self) {
+        self.scroll_mode = false;
+        let from = self
+            .scrolled_from
+            .take()
+            .and_then(|unit| self.hunk_of(unit));
+        self.select_hunk(from.unwrap_or(self.hunk));
+        self.set_status("Back at the hunk; j and k move between hunks again.");
     }
 
     /// Ctrl+D and Ctrl+U: scroll half a page in the diff or the buffer.
@@ -68,6 +310,7 @@ impl Model {
         let half = viewports.diff.unwrap_or(0.0) / 2.0;
         let target = self.diff_scroll.target() + if forward { half } else { -half };
         self.ease_diff_to(target);
+        self.follow_view();
     }
 
     /// `za`: folds or unfolds the selected hunk. An approved hunk is folded by default, so
@@ -195,8 +438,8 @@ impl Model {
             return;
         };
         self.show_file(&path);
-        self.select_first_open_hunk();
-        self.reveal_hunk();
+        let hunk = self.open_hunk_after(None).unwrap_or(self.hunk);
+        self.select_hunk_at_once(hunk);
     }
 
     /// Selects the first hunk that still needs the reviewer, or keeps the selection.
@@ -208,14 +451,27 @@ impl Model {
 
     /// The first hunk after `after` (or from the start) that is not approved.
     pub(super) fn open_hunk_after(&self, after: Option<usize>) -> Option<usize> {
-        let view = self.view()?;
         let start = after.map_or(0, |hunk| hunk + 1);
-        (start..self.rows.hunks.len()).find(|&hunk| {
-            let units = self.rows.hunks.get(hunk).cloned().unwrap_or_default();
-            !state::badges(&view, &units, &self.pending)
-                .into_iter()
-                .all(state::is_approved)
-        })
+        (start..self.rows.hunks.len()).find(|&hunk| self.hunk_open(hunk))
+    }
+
+    /// The last hunk before `before` that is not approved.
+    pub(super) fn open_hunk_before(&self, before: usize) -> Option<usize> {
+        (0..before.min(self.rows.hunks.len()))
+            .rev()
+            .find(|&hunk| self.hunk_open(hunk))
+    }
+
+    /// Whether hunk `hunk` of the shown file still needs the reviewer: some unit of it is not
+    /// approved, counting the marks still saving.
+    fn hunk_open(&self, hunk: usize) -> bool {
+        let Some(view) = self.view() else {
+            return false;
+        };
+        let units = self.rows.hunks.get(hunk).map_or(&[][..], Vec::as_slice);
+        !state::badges(&view, units, &self.pending)
+            .into_iter()
+            .all(state::is_approved)
     }
 
     /// Whether the shown file still needs the reviewer.

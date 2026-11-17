@@ -107,12 +107,28 @@ pub const TREE_MARKER_CELLS: usize = 2;
 
 /// The cells the widest row of `tree` takes from its start to the end of its name: its
 /// indent, marker and name, with every folder open, so folding and filtering never change it.
+/// With `shorten`, a folder chain counts as [`tree_name`] shows it.
 #[must_use]
-pub fn tree_cells(tree: &[TreeNode]) -> usize {
+pub fn tree_cells(tree: &[TreeNode], shorten: bool) -> usize {
     tree.iter()
-        .map(|node| node.depth * TREE_INDENT_CELLS + TREE_MARKER_CELLS + display_width(&node.name))
+        .map(|node| {
+            node.depth * TREE_INDENT_CELLS
+                + TREE_MARKER_CELLS
+                + display_width(&tree_name(node, shorten))
+        })
         .max()
         .unwrap_or(0)
+}
+
+/// The name a tree row shows for `node`: a folder chain's with its middle folders shortened to
+/// their first letters when `shorten` asks, as `airtype-oauth/s/p/europace`, else the node's.
+#[must_use]
+pub fn tree_name(node: &TreeNode, shorten: bool) -> String {
+    if shorten && node.kind == NodeKind::Directory {
+        super::shorten_middle(&node.name)
+    } else {
+        node.name.clone()
+    }
 }
 
 /// A row of the file tree, drawn as lazygit draws its file tree: the indent, one marker cell,
@@ -183,7 +199,7 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
             .as_ref()
             .is_some_and(|change| change.kind == ChangeKind::Deleted),
         name: Piece::new(
-            node.name.clone(),
+            tree_name(node, model.settings.shorten_chains),
             if directory { folder_color } else { name_color },
         ),
         glyph: Piece::new(progress_glyph(progress), name_color),
@@ -395,12 +411,12 @@ mod tests {
             tone: review_core::FileTone::Generated,
             change: None,
         };
-        assert_eq!(tree_cells(&[]), 0);
+        assert_eq!(tree_cells(&[], false), 0);
         // `src` at depth 0 takes 2 + 3 cells, `main.rs` at depth 1 takes 2 + 2 + 7.
-        assert_eq!(tree_cells(&[node("src", 0), node("main.rs", 1)]), 11);
+        assert_eq!(tree_cells(&[node("src", 0), node("main.rs", 1)], false), 11);
         // `漢字.rs` takes 7 cells, though only 5 characters.
         assert_eq!(
-            tree_cells(&[node("a", 0), node("漢字.rs", 1), node("b.rs", 0)]),
+            tree_cells(&[node("a", 0), node("漢字.rs", 1), node("b.rs", 0)], false),
             2 + 2 + 7
         );
     }

@@ -484,11 +484,14 @@ mod tests {
             sidebar: panes::SidebarWidth::Fit,
             sidebar_visible: true,
         };
-        let panes = Panes::lay_out(area, fitted, 41, true, false);
-        assert_eq!(panes.sidebar.unwrap().area.width, 41);
-        assert_eq!(panes.main, Rect::new(42, 0, 118, 48));
-        let set = Panes::lay_out(area, layout(32.0), 41, true, false);
+        let panes = Panes::lay_out(area, fitted, 37, true, false);
+        assert_eq!(panes.sidebar.unwrap().area.width, 37);
+        assert_eq!(panes.main, Rect::new(38, 0, 122, 48));
+        let set = Panes::lay_out(area, layout(32.0), 37, true, false);
         assert_eq!(set.sidebar.unwrap().area.width, 32);
+        // A tree wider than a quarter of the screen gets the quarter.
+        let wide = Panes::lay_out(area, fitted, 60, true, false);
+        assert_eq!(wide.sidebar.unwrap().area.width, 40);
     }
 
     /// A screen too small for anything lays out empty panes instead of failing.

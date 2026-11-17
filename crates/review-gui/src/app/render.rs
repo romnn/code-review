@@ -794,7 +794,15 @@ impl ReviewApp {
                             .flex_shrink_0()
                             .max_w_full()
                             .truncate(),
-                    ),
+                    )
+                    .children(file.scope.map(|scope| {
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis_start()
+                            .text_color(to_gpui(scope.color))
+                            .child(ink::shown(&scope.text))
+                    })),
             )
             .child(
                 div()
@@ -1250,12 +1258,18 @@ fn scope_title(scope: Scope) -> Div {
         )
 }
 
-/// The bar along the left edge of a hunk's rows: gray, or the accent in the selected hunk.
+/// The bar along the left edge of a hunk's rows: across the frame in the selected hunk, a
+/// sliver of it in the others.
 pub(super) fn frame_bar(frame: Frame, colors: &Palette) -> Div {
-    let bar = div().w(px(FRAME)).h_full().flex_none();
+    let room = div().w(px(FRAME)).h_full().flex_none();
     match frame.bar(colors) {
-        Some(color) => bar.bg(to_gpui(color)),
-        None => bar,
+        Some(color) => room.child(
+            div()
+                .w(px((FRAME * frame.bar_share()).round()))
+                .h_full()
+                .bg(to_gpui(color)),
+        ),
+        None => room,
     }
 }
 

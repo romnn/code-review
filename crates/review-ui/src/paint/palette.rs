@@ -39,6 +39,10 @@ impl HunkTone {
 /// How far a note's background moves from the band toward the note's yellow.
 const NOTE_TINT: f32 = 0.08;
 
+/// How far a moved line's background moves from the move's color toward the editor's
+/// background, so it is about as strong as a changed line's.
+const MOVED_LINE_SHARE: f32 = 0.75;
+
 /// The colors of the window, by role, from the theme and the configured diff colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
@@ -72,6 +76,8 @@ pub struct Palette {
     pub error: Hsla,
     /// Review state: nothing reviewed yet.
     pub open: Hsla,
+    /// Review state: partly reviewed.
+    pub partial: Hsla,
     /// Review state: approved.
     pub accepted: Hsla,
     /// Review state: flagged.
@@ -100,6 +106,9 @@ pub struct Palette {
     pub added_line: Hsla,
     /// A formatting-only line's background.
     pub quiet_line: Hsla,
+    /// A moved line's background: the move's color as faint as a changed line's, after the
+    /// diff style's muting.
+    pub moved_line: Hsla,
     /// A removed line's text, in a style without syntax colors.
     pub removed_text: Hsla,
     /// An added line's text, likewise.
@@ -157,6 +166,7 @@ impl Palette {
             find: theme.ui.find.alpha(0.45),
             error: theme.ui.error,
             open: theme.review.open,
+            partial: theme.review.partial,
             accepted: theme.review.done,
             flagged: theme.review.flagged,
             changed: theme.review.changed,
@@ -171,6 +181,10 @@ impl Palette {
             removed_line: line(removed, theme.diff.removed_line),
             added_line: line(added, theme.diff.added_line),
             quiet_line: theme.diff.quiet_line,
+            moved_line: line(
+                None,
+                theme::mix(theme.kind.moved, theme.ui.background, MOVED_LINE_SHARE),
+            ),
             removed_text: theme.diff.removed_text,
             added_text: theme.diff.added_text,
             removed_sign: theme.diff.removed_sign,
@@ -196,7 +210,8 @@ impl Palette {
     #[must_use]
     pub fn progress(&self, progress: Progress) -> Hsla {
         match progress {
-            Progress::Open | Progress::Partial => self.open,
+            Progress::Open => self.open,
+            Progress::Partial => self.partial,
             Progress::Done => self.accepted,
             Progress::Flagged => self.flagged,
             Progress::Changed => self.changed,
@@ -271,6 +286,7 @@ impl Palette {
             faint: soft,
             kind_quiet: soft,
             open: ink,
+            partial: ink,
             accepted: ink,
             flagged: ink,
             changed: ink,

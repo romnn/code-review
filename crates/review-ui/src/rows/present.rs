@@ -10,7 +10,7 @@
 //! A nested diff (a move's edits, or what changed since a review) pairs the same way within its
 //! own block: its old side on the left, its new side on the right.
 
-use crate::config::{Density, DiffLayout};
+use crate::config::{Density, DiffLayout, DiffView};
 
 use super::{Body, Cell, Layout, Note, Pair, Row, RowKind};
 
@@ -24,6 +24,9 @@ pub struct Presentation {
     /// Whether a blank row also comes between each gap of unchanged lines and the hunk after
     /// it: the comfortable density's air where rows cannot be taller.
     pub roomy: bool,
+    /// How much of a file the rows show, which [`super::build`] decided from
+    /// [`super::Folds::view`].
+    pub view: DiffView,
 }
 
 impl Default for Presentation {
@@ -33,6 +36,7 @@ impl Default for Presentation {
             layout: DiffLayout::Unified,
             density: Density::Compact,
             roomy: false,
+            view: DiffView::Hunks,
         }
     }
 }
@@ -330,6 +334,7 @@ mod tests {
                 head: None,
                 base: None,
                 quiet: false,
+                moved: false,
             }),
         }
     }
@@ -355,6 +360,7 @@ mod tests {
         layout: DiffLayout::SideBySide,
         density: Density::Compact,
         roomy: false,
+        view: DiffView::Hunks,
     };
 
     /// The lines of each side, in order, with `None` for padding.
@@ -521,6 +527,7 @@ mod tests {
                 layout: DiffLayout::Unified,
                 density,
                 roomy: false,
+                view: DiffView::Hunks,
             },
         );
         let kinds: Vec<RowKind> = shown.rows.iter().map(Row::kind).collect();
@@ -555,6 +562,7 @@ mod tests {
             layout: DiffLayout::Unified,
             density,
             roomy,
+            view: DiffView::Hunks,
         };
         present(layout(rows), presentation)
             .rows
@@ -650,6 +658,7 @@ mod tests {
                 layout: DiffLayout::Unified,
                 density: Density::Normal,
                 roomy: false,
+                view: DiffView::Hunks,
             },
         );
         let kinds: Vec<RowKind> = shown.rows.iter().map(Row::kind).collect();

@@ -1,0 +1,12 @@
+{# A ledger entry. #}
+<article class="card">
+  <h2>{{ entry.title|e }}</h2>
+  {% if entry.tags is not empty %}
+    <ul class="tags">
+      {# Tags are listed in the order they were entered. #}
+      {% for tag in entry.tags %}
+        <li>{{ tag|lower }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</article>

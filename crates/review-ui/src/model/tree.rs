@@ -146,14 +146,33 @@ impl Model {
             return;
         };
         let place = self.places.get(&path).copied();
-        self.hunk = place.map_or(0, |place| place.hunk);
+        self.hunk = 0;
         self.build_selected();
+        if let Some(hunk) = place
+            .and_then(|place| place.unit)
+            .and_then(|unit| self.hunk_of(unit))
+        {
+            self.hunk = hunk;
+        }
         // A file seen for the first time starts at its first hunk that needs the reviewer.
         if place.is_none() {
             self.select_first_open_hunk();
         }
         self.diff_scroll.stop();
-        let offset = super::present::diff_offset(&self.rows, place.unwrap_or_default().top);
+        // A place taken in the other view names a row of other rows: it is found again by
+        // what it showed.
+        let top = place.map_or_else(super::present::Anchor::default, |place| match place.key {
+            Some(key) if place.view != self.presented.view => key
+                .find(&self.rows)
+                .map_or(place.top, |row| super::present::Anchor { row, ..place.top }),
+            _ => place.top,
+        });
+        // A file seen for the first time shows from its first change that needs the reviewer,
+        // not from its first line.
+        let offset = match place {
+            Some(_) => super::present::diff_offset(&self.rows, top),
+            None => self.hunk_landing().unwrap_or(0.0),
+        };
         self.diff_scroll.jump(offset);
         // Another file starts at the left edge, whichever layout shows it.
         self.text.reset();
@@ -163,12 +182,20 @@ impl Model {
     /// Remembers the selected hunk and the row at the top of the shown file.
     pub(super) fn remember_place(&mut self) {
         if let Some(path) = self.selected.clone() {
-            let top = super::present::diff_anchor(&self.rows, self.diff_scroll.offset());
+            let offset = self.diff_scroll.offset();
+            let top = super::present::diff_anchor(&self.rows, offset);
+            let key = self
+                .rows
+                .rows
+                .get(super::present::Anchor::at(offset).row)
+                .map(super::present::RowKey::of);
             self.places.insert(
                 path,
                 Place {
-                    hunk: self.hunk,
+                    unit: self.hunk_units().first().copied(),
                     top,
+                    key,
+                    view: self.presented.view,
                 },
             );
         }
@@ -316,8 +343,13 @@ impl Model {
         }
     }
 
-    /// Esc or `h` in the diff: back to the files, with the shown file under the cursor.
+    /// Esc or `h` in the diff: back to the files, with the shown file under the cursor; in
+    /// scroll mode, first out of it and back to the hunk it began at.
     pub(super) fn focus_tree(&mut self) {
+        if self.mode == Mode::Diff && self.scroll_mode {
+            self.leave_scroll_mode();
+            return;
+        }
         if !self.sidebar_shown() {
             self.screen = super::Screen::Split;
             self.layout.sidebar_visible = true;
@@ -388,15 +420,33 @@ impl Model {
     /// The next file after the shown one, wrapping around, that still needs the reviewer.
     #[must_use]
     pub fn next_open_file(&self) -> Option<String> {
+        self.open_file_toward(true)
+    }
+
+    /// The file after (`forward`) or before the shown one in tree order, wrapping around, that
+    /// still needs the reviewer; folded folders' files count too.
+    #[must_use]
+    pub fn open_file_toward(&self, forward: bool) -> Option<String> {
         let paths = file_paths(&self.tree);
-        let start = self
+        let count = paths.len();
+        let here = self
             .selected
             .as_deref()
-            .and_then(|selected| paths.iter().position(|path| *path == selected))
-            .map_or(0, |position| position + 1);
-        let count = paths.len();
+            .and_then(|selected| paths.iter().position(|path| *path == selected));
+        let start = match (here, forward) {
+            (Some(here), true) => here + 1,
+            (Some(here), false) => here + count.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => count.saturating_sub(1),
+        };
         (0..count)
-            .map(|step| (start + step) % count.max(1))
+            .map(|step| {
+                if forward {
+                    (start + step) % count.max(1)
+                } else {
+                    (start + count - step) % count.max(1)
+                }
+            })
             .filter_map(|index| paths.get(index))
             .find(|path| {
                 Some(**path) != self.selected.as_deref()

@@ -21,6 +21,7 @@ const BUILT_IN: &[&str] = &[
     include_str!("../themes/one-dark.toml"),
     include_str!("../themes/catppuccin-mocha.toml"),
     include_str!("../themes/rose-pine.toml"),
+    include_str!("../themes/github-dark.toml"),
     include_str!("../themes/catppuccin-latte.toml"),
     include_str!("../themes/rose-pine-dawn.toml"),
     include_str!("../themes/one-light.toml"),
@@ -84,6 +85,9 @@ pub struct Ui {
 pub struct Review {
     /// Still needs the reviewer.
     pub open: Hsla,
+    /// Partly reviewed: some of it approved, the rest still open. A theme file that leaves it
+    /// out gets its note yellow, as lazygit marks a partly staged file.
+    pub partial: Hsla,
     /// Approved.
     pub done: Hsla,
     /// Flagged for a closer look.
@@ -174,6 +178,11 @@ impl Theme {
                 .ok_or_else(|| format!("[syntax] {key} = {value:?} is not a #rrggbb color"))?;
             syntax.insert(key.clone(), parsed);
         }
+        let note = if file.ui.contains_key("note") {
+            ui("note")?
+        } else {
+            rgb(NOTE).into()
+        };
         Ok(Self {
             title: file.title.clone().unwrap_or_else(|| file.name.clone()),
             name: file.name.clone(),
@@ -190,14 +199,15 @@ impl Theme {
                 selection: ui("selection")?,
                 find: ui("find")?,
                 error: ui("error")?,
-                note: if file.ui.contains_key("note") {
-                    ui("note")?
-                } else {
-                    rgb(NOTE).into()
-                },
+                note,
             },
             review: Review {
                 open: review("open")?,
+                partial: if file.review.contains_key("partial") {
+                    review("partial")?
+                } else {
+                    note
+                },
                 done: review("done")?,
                 flagged: review("flagged")?,
                 changed: review("changed")?,
@@ -358,11 +368,28 @@ pub fn all(user_dir: Option<&Path>) -> (Vec<Theme>, Vec<String>) {
 mod tests {
     use super::*;
 
+    /// A partly reviewed file is the theme's note yellow unless the theme says otherwise, as
+    /// lazygit marks a partly staged file.
+    #[test]
+    fn partly_reviewed_defaults_to_the_note_yellow() {
+        let carbonfox = Theme::parse(BUILT_IN[0]).unwrap();
+        assert_eq!(carbonfox.review.partial, carbonfox.ui.note);
+        let own = BUILT_IN[0].replace(
+            "[review]\n",
+            indoc::indoc! {r##"
+                [review]
+                partial = "#ff8800"
+            "##},
+        );
+        let own = Theme::parse(&own).unwrap();
+        assert_eq!(own.review.partial, Hsla::from(rgb(0x00ff_8800)));
+    }
+
     /// Every built-in theme parses and colors every syntax tone but plain, and names no tone
     /// that does not exist.
     #[test]
     fn built_in_themes_are_complete() {
-        assert_eq!(BUILT_IN.len(), 14);
+        assert_eq!(BUILT_IN.len(), 15);
         for text in BUILT_IN {
             let theme = Theme::parse(text).unwrap();
             for tone in Tone::ALL.into_iter().filter(|tone| *tone != Tone::Plain) {
@@ -436,7 +463,7 @@ mod tests {
         std::fs::write(dir.path().join("mine.toml"), carbon).unwrap();
         std::fs::write(dir.path().join("broken.toml"), "name = \"x\"\n").unwrap();
         let (themes, problems) = all(Some(dir.path()));
-        assert_eq!(themes.len(), 14);
+        assert_eq!(themes.len(), 15);
         assert_eq!(themes[0].ui.background, rgb(0x0000_0000).into());
         assert_eq!(problems.len(), 1, "{problems:?}");
     }

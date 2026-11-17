@@ -597,7 +597,7 @@ fn waiting_keys_flush_before_a_key_that_does_not_continue_them() {
 fn overrides_rebind_and_unbind() {
     let matcher = defaults(&[("NextHunk", &["ctrl-j"]), ("ToggleOverview", &[])]);
     let mut keyboard = Keyboard::new(matcher, Area::Diff);
-    assert_eq!(keyboard.outcome("j"), Outcome::Unclaimed);
+    assert_eq!(keyboard.outcome("shift-j"), Outcome::Unclaimed);
     assert_eq!(
         keyboard.outcome("ctrl-j"),
         Outcome::Dispatch(Action::NextHunk)

@@ -9,11 +9,16 @@
 //!
 //! [view]
 //! context = 3       # unchanged lines around each hunk
+//! shorten_chains = true # folder chains as `first/s/p/last` in the files and the file header
 //!
 //! [diff]
-//! style = "bold"    # plain, bold, soft or one of [styles]; `|` cycles them
+//! style = "bold"    # plain, bold, soft or one of [styles]; `S` cycles them
 //! density = "normal"    # or "compact" or "comfortable": the rows' spacing
-//! layout = "unified"    # or "side-by-side"; `s` toggles it
+//! layout = "unified"    # or "side-by-side"; `|` toggles it
+//! view = "file"         # or "hunks": the whole file around its changes, or each hunk apart
+//! hunk_position = "margin" # or "center": where a hunk the keys go to lands
+//! cross_files = false  # whether j/k and ]/[ go on past a file's last or first hunk
+//! soft_unselected = true # in the bold style, hunks but the selected one on soft backgrounds
 //! approved = "folded"   # or "shown": approved hunks show their code; `zA` toggles it
 //! removed = "#5f1519"   # overrides the theme's line backgrounds
 //! added = "#14471f"
@@ -216,6 +221,7 @@ impl Default for LayoutConfig {
 #[serde(deny_unknown_fields)]
 struct ViewSection {
     context: Option<usize>,
+    shorten_chains: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -243,6 +249,10 @@ struct DiffSection {
     style: Option<String>,
     density: Option<Density>,
     layout: Option<DiffLayout>,
+    view: Option<DiffView>,
+    hunk_position: Option<HunkPosition>,
+    cross_files: Option<bool>,
+    soft_unselected: Option<bool>,
     approved: Option<Approved>,
     removed: Option<String>,
     added: Option<String>,
@@ -289,6 +299,65 @@ impl DiffLayout {
         match self {
             Self::Unified => "unified",
             Self::SideBySide => "side-by-side",
+        }
+    }
+}
+
+/// How much of a file its diff shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffView {
+    /// The whole file, its changes in place, with no headers between them and approved hunks
+    /// open, so every change shows in its context.
+    #[default]
+    File,
+    /// Each hunk under its own header, with a few unchanged lines around it, the rest folded
+    /// into gaps, and approved hunks folded as `[diff] approved` says.
+    Hunks,
+}
+
+impl DiffView {
+    /// The other view.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::File => Self::Hunks,
+            Self::Hunks => Self::File,
+        }
+    }
+
+    /// The view's name as the configuration file spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Hunks => "hunks",
+        }
+    }
+}
+
+/// Where a hunk the keys go to lands in the diff.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HunkPosition {
+    /// Its start a fifth down, whichever way the keys go, so the code before it, the hunk and
+    /// what follows it show; a hunk already shown with a fifth clear above and below it stays
+    /// put. `quarter`, its older name, reads as it.
+    #[default]
+    #[serde(alias = "quarter")]
+    Margin,
+    /// In the middle, every time, as vim keeps its cursor with `scrolloff=999`; a hunk too
+    /// tall for the middle still shows from its start a fifth down.
+    Center,
+}
+
+impl HunkPosition {
+    /// The choice's name as the configuration file spells it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Margin => "margin",
+            Self::Center => "center",
         }
     }
 }
@@ -401,6 +470,9 @@ pub struct Config {
     pub font: FontConfig,
     /// Unchanged lines shown around each hunk.
     pub context: usize,
+    /// Whether the files pane and the file header shorten a folder chain's middle folders to
+    /// their first letters, as `airtype-oauth/s/p/europace`.
+    pub shorten_chains: bool,
     /// The diff style's name, checked against the styles; `None` for the default.
     pub diff_style: Option<String>,
     /// How much air the diff's rows have.
@@ -408,7 +480,17 @@ pub struct Config {
     /// How the diff is laid out, as the reviewer asked for it; a narrow window may still show
     /// it unified.
     pub diff_layout: DiffLayout,
-    /// Whether approved hunks fold to their header.
+    /// How much of a file its diff shows.
+    pub diff_view: DiffView,
+    /// Where a hunk the keys go to lands.
+    pub hunk_position: HunkPosition,
+    /// Whether the hunk keys go on into the next or previous file past a file's last or first
+    /// hunk.
+    pub cross_files: bool,
+    /// Whether, in a style with bold line backgrounds, every hunk but the selected one has
+    /// soft ones, so the selected hunk stands out.
+    pub soft_unselected: bool,
+    /// Whether approved hunks fold to their header, in the hunks view.
     pub approved: Approved,
     /// The removed-line background, as `0xRRGGBB`, overriding the theme's.
     pub removed: Option<u32>,
@@ -442,9 +524,14 @@ impl Default for Config {
         Self {
             font: FontConfig::default(),
             context: 3,
+            shorten_chains: true,
             diff_style: None,
             density: Density::default(),
             diff_layout: DiffLayout::Unified,
+            diff_view: DiffView::File,
+            hunk_position: HunkPosition::Margin,
+            cross_files: false,
+            soft_unselected: true,
             approved: Approved::Folded,
             removed: None,
             added: None,
@@ -787,9 +874,17 @@ pub fn parse(text: &str) -> Result<Config, String> {
     Ok(Config {
         font: parse_font(file.font)?,
         context: file.view.context.unwrap_or(defaults.context).min(1000),
+        shorten_chains: file.view.shorten_chains.unwrap_or(defaults.shorten_chains),
         diff_style: file.diff.style,
         density: file.diff.density.unwrap_or(defaults.density),
         diff_layout: file.diff.layout.unwrap_or(defaults.diff_layout),
+        diff_view: file.diff.view.unwrap_or(defaults.diff_view),
+        hunk_position: file.diff.hunk_position.unwrap_or(defaults.hunk_position),
+        cross_files: file.diff.cross_files.unwrap_or(defaults.cross_files),
+        soft_unselected: file
+            .diff
+            .soft_unselected
+            .unwrap_or(defaults.soft_unselected),
         approved: file.diff.approved.unwrap_or(defaults.approved),
         removed: color(file.diff.removed)?,
         added: color(file.diff.added)?,
@@ -1468,6 +1563,57 @@ NextHunk = [\"j\"]
         assert_eq!(
             config.problems,
             ["presets are no longer supported; use the individual settings"]
+        );
+    }
+
+    /// A hunk keeps its margins unless the file asks for the middle; `quarter`, the older
+    /// name, still reads.
+    #[test]
+    fn hunks_keep_their_margins_by_default() {
+        assert_eq!(parse("").unwrap().hunk_position, HunkPosition::Margin);
+        let config = parse(indoc! {"
+            [diff]
+            hunk_position = \"center\"
+        "})
+        .unwrap();
+        assert_eq!(config.hunk_position, HunkPosition::Center);
+        let config = parse(indoc! {"
+            [diff]
+            hunk_position = \"quarter\"
+        "})
+        .unwrap();
+        assert_eq!(config.hunk_position, HunkPosition::Margin);
+    }
+
+    /// The hunk keys stay within a file unless the file asks them to go on into the next.
+    #[test]
+    fn hunk_keys_stay_within_a_file_by_default() {
+        assert!(!parse("").unwrap().cross_files);
+        let config = parse(indoc! {"
+            [diff]
+            cross_files = true
+        "})
+        .unwrap();
+        assert!(config.cross_files);
+    }
+
+    /// The diff shows whole files unless the file asks for hunks apart.
+    #[test]
+    fn diffs_show_whole_files_by_default() {
+        assert_eq!(parse("").unwrap().diff_view, DiffView::File);
+        let config = parse(indoc! {"
+            [diff]
+            view = \"hunks\"
+        "})
+        .unwrap();
+        assert_eq!(config.diff_view, DiffView::Hunks);
+        assert_eq!(config.diff_view.toggled(), DiffView::File);
+        assert!(
+            parse(indoc! {"
+                [diff]
+                view = \"lines\"
+            "})
+            .is_err()
         );
     }
 

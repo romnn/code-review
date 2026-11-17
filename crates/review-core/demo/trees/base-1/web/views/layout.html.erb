@@ -1,0 +1,13 @@
+<html>
+  <head>
+    <title><%= content_for?(:title) ? yield(:title) : "Ledger" %></title>
+    <%= stylesheet_link_tag "application" %>
+  </head>
+  <body data-page="ledger">
+    <% flash.each do |kind, message| %>
+      <div class="flash <%= kind %>"><%= message %></div>
+    <% end %>
+    <%= yield %>
+    <%= render "shared/footer" %>
+  </body>
+</html>

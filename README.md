@@ -77,14 +77,18 @@ shows within a second, keeping your place, and only what you mark is recorded.
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Next / previous file or hunk |
+| `j` / `k` | Next / previous file; in the diff, next / previous hunk |
+| `]` / `[` | Next / previous hunk to review |
+| `n` / `N` | Next / previous file, from the files or the diff |
+| `Ctrl+D` / `Ctrl+U`, `s` or `a` | Scroll half a page; scroll mode, where `j` / `k` scroll a line |
 | `0`, `Tab` | Focus the diff, switch between files and code |
 | `Space` | Approve or unapprove the hunk, file or folder |
 | `!` | Flag as needing review |
 | `u` | Back to unreviewed |
 | `=` | The whole file, with vim motions and `gd` to go to definition |
 | `/`, `Ctrl+P`, `Ctrl+G` | Find in the diff, find a file, search file contents |
-| `s`, `\|` | Side by side or unified, next diff style |
+| `v` | The whole file around its changes, or each hunk apart |
+| `\|`, `S` | Side by side or unified, next diff style |
 | `T` | Settings: themes, diff styles, density, layout |
 | `i` | Pull request overview |
 | `q` | Quit |

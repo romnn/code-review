@@ -3,3 +3,5 @@
 # The script only reads it; nothing in it remembers a setting, which would write here.
 [diff]
 density = "compact"
+# Each hunk apart, whose spacing this configuration is for.
+view = "hunks"

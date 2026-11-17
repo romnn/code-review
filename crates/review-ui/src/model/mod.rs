@@ -91,6 +91,8 @@ pub struct Settings {
     pub code_size: f32,
     /// Unchanged lines shown around each hunk.
     pub context: usize,
+    /// Whether the files pane and the file header shorten a folder chain's middle folders.
+    pub shorten_chains: bool,
     /// Whether approved hunks fold, as the configuration sets it.
     pub approved: crate::config::Approved,
     /// Which units still need the reviewer, as the configuration sets it: whether proven
@@ -110,7 +112,7 @@ pub struct Settings {
     pub appearance: crate::look::Appearance,
     /// Every theme the settings list offers.
     pub themes: Vec<crate::theme::Theme>,
-    /// Every diff style, in the order `|` cycles them.
+    /// Every diff style, in the order `S` cycles them.
     pub styles: Vec<crate::look::DiffStyle>,
     /// The pane widths remembered from the last session.
     pub layout: PaneLayout,
@@ -196,8 +198,13 @@ pub enum Phase {
 /// unified row at the top, which survives any change of layout, density or font.
 #[derive(Debug, Clone, Copy, Default)]
 struct Place {
-    hunk: usize,
+    /// The selected hunk's first unit: a hunk's index depends on the view, its units do not.
+    unit: Option<UnitId>,
     top: present::Anchor,
+    /// What the top row showed, to find it again in rows laid out in another view.
+    key: Option<present::RowKey>,
+    /// The view the rows were laid out in when the place was taken.
+    view: crate::config::DiffView,
 }
 
 /// A `/` search in the diff or the buffer.
@@ -430,6 +437,10 @@ pub struct Model {
     pub layout: PaneLayout,
     /// The status line.
     pub status: String,
+    /// Whether the diff is in scroll mode, where the hunk keys scroll a line.
+    pub scroll_mode: bool,
+    /// The first unit of the hunk selected when scroll mode began, which Esc goes back to.
+    scrolled_from: Option<UnitId>,
     /// When the status line last reported a failure, for tinting it.
     pub failed_at: Option<Instant>,
     /// Whether a definition lookup runs.
@@ -521,6 +532,8 @@ impl Model {
             quit_said: String::new(),
             layout: settings.layout,
             status: "Opening the review…".to_owned(),
+            scroll_mode: false,
+            scrolled_from: None,
             failed_at: None,
             looking_up: false,
             highlighting: 0,
@@ -571,8 +584,7 @@ impl Model {
                 self.effect(Effect::Title(self.title()));
                 self.phase = Phase::Ready;
                 self.refresh_tree();
-                self.restore_folders(opened.collapsed);
-                self.select_first_file();
+                self.restore_view_state(opened.view_state);
                 let (status, failed) = opening_status(
                     &self.summary(),
                     opened.found.as_deref(),
@@ -600,7 +612,7 @@ impl Model {
     /// queued since the last update.
     fn after_update(&mut self) -> Vec<Effect> {
         self.show_waiting_capture();
-        self.save_folders();
+        self.save_view_state();
         self.finish_quitting();
         std::mem::take(&mut self.effects)
     }
@@ -809,7 +821,7 @@ impl Model {
         let files = state::statuses(&view, &self.pending);
         let cursor = self.cursor_identity();
         self.tree = review_core::tree::file_tree(&files);
-        self.tree_cells = crate::paint::files::tree_cells(&self.tree);
+        self.tree_cells = crate::paint::files::tree_cells(&self.tree, self.settings.shorten_chains);
         self.update_visible_tree();
         self.restore_cursor(cursor);
     }
@@ -861,6 +873,8 @@ impl Model {
         // they always belong to what the units describe.
         self.folds.texts.clear();
         self.folds.syntax.clear();
+        self.folds.view = self.presented.view;
+        self.folds.pending.clone_from(&self.pending);
         if let Some(file) = file {
             if let Some(text) = file
                 .new
@@ -1211,9 +1225,9 @@ fn highlight_sides(
 /// What opening a review produced.
 pub(super) struct Opened {
     review: Review,
-    /// The folded folders saved with the review.
-    collapsed: Vec<String>,
-    /// Why the saved folded folders were ignored, for the developer's log.
+    /// The folded folders and the place saved with the review.
+    view_state: crate::folders::ViewState,
+    /// Why the saved view state was ignored, for the developer's log.
     ignored: Option<String>,
     found: Option<String>,
     trusted: bool,
@@ -1240,13 +1254,13 @@ fn open(opener: Opener) -> Result<Opened, String> {
     let revision = history.current().ok_or("the review has no revision yet")?;
     let history = Arc::new(history);
     let texts = read_texts(&review, &history, revision);
-    let (collapsed, ignored) = match crate::folders::load(&review) {
-        Ok(collapsed) => (collapsed, None),
-        Err(ignored) => (Vec::new(), Some(ignored)),
+    let (view_state, ignored) = match crate::folders::load(&review) {
+        Ok(view_state) => (view_state, None),
+        Err(ignored) => (crate::folders::ViewState::default(), Some(ignored)),
     };
     Ok(Opened {
         review,
-        collapsed,
+        view_state,
         ignored,
         found,
         trusted: trust.trusted,

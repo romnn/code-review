@@ -215,6 +215,7 @@ fn settings() -> Settings {
         config_path: None,
         code_size: 17.0,
         context: config.context,
+        shorten_chains: config.shorten_chains,
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -229,6 +230,11 @@ fn settings() -> Settings {
                 style,
                 density: config.density,
                 layout: config.diff_layout,
+                // These scenarios were written for hunks apart; the whole file's have their own.
+                view: crate::config::DiffView::Hunks,
+                hunk_position: config.hunk_position,
+                cross_files: config.cross_files,
+                soft_unselected: config.soft_unselected,
                 token_emphasis: config.token_emphasis,
             },
             preview: None,
@@ -312,7 +318,9 @@ fn a_quick_round_trip_returns_to_the_place_left_and_marks_what_shows() {
     host.update(|model| model.show_file(engine));
     host.dispatch(Action::FocusDiff);
     lay_out(&mut host);
-    host.dispatch(Action::NextHunk);
+    // It opens at its last hunk, the first that needs the reviewer; a step back and forth
+    // stays within it.
+    host.dispatch(Action::PreviousHunk);
     host.dispatch(Action::NextHunk);
     lay_out(&mut host);
     let hunk = host.model().hunk;
@@ -1190,7 +1198,320 @@ fn folder_saves_never_overtake_each_other() {
     assert_eq!(host.jobs.len(), 1, "the newest folds are saved next");
     host.settle();
     let review = host.model().review.clone().unwrap();
-    assert_eq!(crate::folders::load(&review), Ok(Vec::<String>::new()));
+    assert_eq!(
+        crate::folders::load(&review).map(|state| state.collapsed),
+        Ok(Vec::<String>::new())
+    );
+}
+
+/// Quitting saves where the reviewer was, and the review opens there again, at the same file
+/// and hunk; moving around saves nothing. A saved file the revision does not have opens the
+/// review as the first time, and a saved unit the file does not have opens the file at its
+/// first hunk that needs the reviewer.
+#[test]
+fn the_review_opens_where_the_reviewer_quit() {
+    let dir = tempfile::tempdir().unwrap();
+    let reopen = || {
+        prepare(
+            &DemoPaths::under(dir.path()),
+            &fixture_dir(),
+            DemoRequest::UpTo(RevisionNumber::new(1).unwrap()),
+        )
+        .unwrap()
+    };
+    let mut host = Host::open(demo(dir.path()));
+    let first = host.model().selected.clone();
+    host.update(|model| model.show_file("server.go"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::FirstHunk);
+    for _ in 0..5 {
+        host.dispatch(Action::NextHunk);
+    }
+    assert_eq!(host.model().hunk, 5);
+    assert!(host.jobs.is_empty(), "moving around saves nothing");
+    host.dispatch(Action::Quit);
+    host.settle();
+    assert_eq!(host.quits, 1);
+
+    let host = Host::open(reopen());
+    assert_eq!(host.model().selected.as_deref(), Some("server.go"));
+    assert_eq!(host.model().hunk, 5);
+
+    let review = reopen();
+    let save = |place: crate::folders::Place| {
+        review
+            .save_view_state(
+                crate::folders::FRONT_END,
+                &crate::folders::ViewState {
+                    collapsed: Vec::new(),
+                    place: Some(place),
+                },
+            )
+            .unwrap();
+    };
+    save(crate::folders::Place {
+        path: "gone.rs".to_owned(),
+        unit: None,
+    });
+    let host = Host::open(reopen());
+    assert_eq!(host.model().selected, first);
+
+    save(crate::folders::Place {
+        path: "src/engine.rs".to_owned(),
+        unit: Some("u1-9999".to_owned()),
+    });
+    let host = Host::open(reopen());
+    assert_eq!(host.model().selected.as_deref(), Some("src/engine.rs"));
+    assert_eq!(
+        host.model().hunk,
+        2,
+        "at its first hunk that needs the reviewer"
+    );
+}
+
+/// Approved code loses its diff colors, its signs aside, its removed lines fading as code that
+/// is gone; and in the bold style only the selected hunk keeps bold line backgrounds, the
+/// others soft ones, with a bar across the frame against a sliver.
+#[test]
+fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
+    use crate::paint::Palette;
+    use crate::paint::code::{At, CodeCell, Frame, code_cell, frame};
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    // The changed lines of `hunk`, painted.
+    let changed = |model: &Model, hunk: usize| -> Vec<(rows::RowKind, CodeCell, Frame)> {
+        let palette = Palette::of(model);
+        model.hunk_rows[hunk]
+            .clone()
+            .filter_map(|index| {
+                let row = &model.rows.rows[index];
+                let cell = row.cells().next()?;
+                matches!(cell.kind, rows::RowKind::Added | rows::RowKind::Removed).then(|| {
+                    let at = At {
+                        row: index,
+                        file: row.file,
+                        column: Column::Whole,
+                    };
+                    (
+                        cell.kind,
+                        code_cell(model, &palette, at, cell),
+                        frame(model, index),
+                    )
+                })
+            })
+            .collect()
+    };
+    host.dispatch(Action::FirstHunk);
+    let model = host.model();
+    let palette = Palette::of(model);
+    let approved = changed(model, 0);
+    assert_ne!(approved.len(), 0, "the first hunk has changed lines");
+    for (kind, cell, _) in &approved {
+        assert_eq!(
+            cell.background, None,
+            "approved code has no line background"
+        );
+        assert_ne!(cell.sign.text, " ", "its sign stays");
+        let faded = (*kind == rows::RowKind::Removed).then_some(palette.faint);
+        assert_eq!(cell.text_color, faded);
+    }
+    let soft = |line: crate::color::Hsla| {
+        crate::theme::mix(line, palette.background, crate::look::MUTED_SHARE)
+    };
+    let line = |kind: rows::RowKind| match kind {
+        rows::RowKind::Removed => palette.removed_line,
+        _ => palette.added_line,
+    };
+    for (kind, cell, frame) in changed(model, 2) {
+        assert_eq!(
+            cell.background,
+            Some(soft(line(kind))),
+            "a hunk not selected is soft"
+        );
+        assert!(frame.bar_share() < 1.0);
+    }
+    host.dispatch(Action::LastHunk);
+    let model = host.model();
+    for (kind, cell, frame) in changed(model, 2) {
+        assert_eq!(
+            cell.background,
+            Some(line(kind)),
+            "the selected hunk is bold"
+        );
+        assert!((frame.bar_share() - 1.0).abs() < f32::EPSILON);
+    }
+}
+
+/// The file view shows moved code at both ends of a move, in the move's color: the moved lines
+/// where they left, under their note, and where they arrived the lines the move kept, with its
+/// edits still removed and added.
+#[test]
+fn moved_code_shows_in_the_move_color() {
+    use crate::paint::Palette;
+    use crate::paint::code::{At, code_cell};
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    let painted = |model: &Model| -> Vec<(rows::RowKind, bool, Option<crate::color::Hsla>)> {
+        let palette = Palette::of(model);
+        model
+            .rows
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let cell = row.cells().next()?;
+                let at = At {
+                    row: index,
+                    file: row.file,
+                    column: Column::Whole,
+                };
+                Some((
+                    cell.kind,
+                    cell.moved,
+                    code_cell(model, &palette, at, cell).background,
+                ))
+            })
+            .collect()
+    };
+    host.update(|model| model.show_file("src/report.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let model = host.model();
+    let palette = Palette::of(model);
+    let source = painted(model);
+    assert!(
+        source.iter().filter(|(_, moved, _)| *moved).count() >= 10,
+        "the moved lines show where they left"
+    );
+    for (kind, moved, background) in &source {
+        if *moved {
+            assert_eq!(*kind, rows::RowKind::Removed);
+            assert_eq!(*background, Some(palette.moved_line));
+        }
+    }
+
+    host.update(|model| model.show_file("src/format.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let model = host.model();
+    let target = painted(model);
+    let kept = target
+        .iter()
+        .filter(|(kind, moved, _)| *moved && *kind == rows::RowKind::NestedSame)
+        .count();
+    assert!(kept >= 8, "the lines the move kept show in its color");
+    assert!(
+        target.iter().any(|(kind, moved, background)| *moved
+            && *kind == rows::RowKind::NestedNew
+            && *background == Some(palette.added_line)),
+        "its edits stay added"
+    );
+}
+
+/// The demo's `line_error`, moved out of `mod config` to the file's top level, differs only in
+/// its indentation, and its `occupancy_line`, moved into `mod worker`, also in a line rustfmt
+/// wrapped anew there, which the engine proves is formatting in Rust: plain moves within one
+/// file, both ends naming lines of this file, their lines in the move's color and none as an
+/// edit.
+#[test]
+fn a_reindented_rust_move_is_a_plain_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("scheduler.rs"));
+    lay_out(&mut host);
+    let model = host.model();
+    let notes: Vec<String> = model
+        .rows
+        .rows
+        .iter()
+        .filter(|row| row.kind() == rows::RowKind::Moved)
+        .map(|row| row.text().to_owned())
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("↗ moved to lines ") && note.ends_with(" of this file")),
+        "{notes:?}"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("↙ moved from lines ") && note.ends_with(" of this file")),
+        "{notes:?}"
+    );
+    let moved_kinds: Vec<rows::RowKind> = model
+        .rows
+        .rows
+        .iter()
+        .filter_map(|row| row.cells().next())
+        .filter(|cell| cell.moved && cell.text.contains("reason: reason.into()"))
+        .map(|cell| cell.kind)
+        .collect();
+    assert_eq!(
+        moved_kinds,
+        [rows::RowKind::Removed, rows::RowKind::Added],
+        "both ends show the line as moved, neither as an edit"
+    );
+    // `occupancy_line`, moved into `mod worker`, where rustfmt wrapped its last line anew: a
+    // plain move too.
+    let wrapped: Vec<(rows::RowKind, bool)> = model
+        .rows
+        .rows
+        .iter()
+        .filter_map(|row| row.cells().next())
+        .filter(|cell| cell.text.contains("still free"))
+        .map(|cell| (cell.kind, cell.moved))
+        .collect();
+    assert_eq!(
+        wrapped,
+        [(rows::RowKind::Removed, true), (rows::RowKind::Added, true)],
+        "the wrapped line shows as moved at both ends"
+    );
+}
+
+/// The demo's Python `spread`, moved into `main`, becomes a function of `main` there, so the
+/// engine keeps its edits: both ends say it moved, re-indented four deeper, and where it arrives
+/// each of its lines shows once, the indentation it gained marked.
+#[test]
+fn a_python_reindent_shows_each_line_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("tools/stats.py"));
+    lay_out(&mut host);
+    let model = host.model();
+    let notes: Vec<String> = model
+        .rows
+        .rows
+        .iter()
+        .filter(|row| row.kind() == rows::RowKind::Moved)
+        .map(|row| row.text().to_owned())
+        .collect();
+    for arrow in ["↗ moved to lines ", "↙ moved from lines "] {
+        assert!(
+            notes.iter().any(|note| note.starts_with(arrow)
+                && note.contains(" of this file, re-indented 4 deeper")),
+            "{notes:?}"
+        );
+    }
+    let shown: Vec<(rows::RowKind, Vec<std::ops::Range<usize>>)> = model
+        .rows
+        .rows
+        .iter()
+        .filter_map(|row| row.cells().next())
+        .filter(|cell| cell.moved && cell.text.contains("return max(values) - min(values)"))
+        .map(|cell| (cell.kind, cell.highlights.clone()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (rows::RowKind::Removed, Vec::new()),
+            (rows::RowKind::NestedSame, std::iter::once(4..8).collect()),
+        ],
+        "the source's line, then the line where it arrived with its gained indentation marked"
+    );
 }
 
 /// A copy hands the selected text to the clipboard, and a drag that selects text hands it to
@@ -1834,9 +2155,9 @@ fn n_and_shift_n_step_through_the_visible_files() {
     );
 
     // The ends stay put.
-    host.update(|model| model.show_file("Makefile"));
+    host.update(|model| model.show_file("server.go"));
     host.dispatch(Action::NextFile);
-    assert_eq!(shown(host.model()), "Makefile");
+    assert_eq!(shown(host.model()), "server.go");
     assert_eq!(host.model().status, "This is the last file.");
 
     // A search in the diff takes `n` and `N` for its matches.
@@ -2912,4 +3233,594 @@ fn a_capture_does_not_reopen_a_buffer_left_for_the_diff() {
     assert_eq!(host.model().mode, Mode::Diff);
     edit_and_capture(&mut host, &repo, "uno", "two");
     assert_eq!(host.model().mode, Mode::Diff);
+}
+
+/// The defaults with the whole file shown, as the apps open.
+fn whole_file() -> Settings {
+    let mut settings = settings();
+    settings.appearance.applied.view = crate::config::DiffView::File;
+    settings
+}
+
+/// The whole-file view with `[diff] cross_files` on.
+fn crossing_files() -> Settings {
+    let mut settings = whole_file();
+    settings.appearance.applied.cross_files = true;
+    settings
+}
+
+/// By default the hunk keys stay within the file: `n` on the last hunk and `]` past the last
+/// hunk to review keep the selection and say which file is next.
+#[test]
+fn hunk_keys_stay_in_the_file_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    let engine = "src/engine.rs";
+    host.update(|model| model.show_file(engine));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::LastHunk);
+    let last = host.model().hunk;
+    host.dispatch(Action::NextHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(engine));
+    assert_eq!(host.model().hunk, last);
+    assert_eq!(host.model().status, "This is the file's last hunk.");
+    host.dispatch(Action::FirstHunk);
+    host.dispatch(Action::PreviousHunk);
+    assert_eq!(host.model().hunk, 0);
+    assert_eq!(host.model().status, "This is the file's first hunk.");
+    // The engine's only open hunk is its last; past it `]` stays and names the next file, and
+    // once it is approved, says the file is done.
+    host.dispatch(Action::NextOpenHunk);
+    assert_eq!(host.model().hunk, 2);
+    let next = host.model().next_open_file().unwrap();
+    host.dispatch(Action::NextOpenHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(engine));
+    assert_eq!(host.model().hunk, 2);
+    assert_eq!(
+        host.model().status,
+        format!("This is the file's last hunk to review; {next} is next.")
+    );
+    host.dispatch(Action::ToggleApprove);
+    assert_eq!(
+        host.model().status,
+        format!("This file is done; {next} is next to review.")
+    );
+    host.dispatch(Action::NextOpenHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(engine));
+    assert_eq!(
+        host.model().status,
+        format!("This file is done; {next} is next to review.")
+    );
+}
+
+/// With `[diff] cross_files`, `n` past a file's last hunk goes on to the next file in the tree
+/// at its first hunk, and `N` comes back to the last hunk, reviewed or not.
+#[test]
+fn hunks_step_on_into_the_next_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), crossing_files());
+    let engine = "src/engine.rs";
+    host.update(|model| model.show_file(engine));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    assert!(
+        host.model()
+            .rows
+            .rows
+            .iter()
+            .all(|row| row.kind() != rows::RowKind::Header),
+        "the whole file shows without hunk headers"
+    );
+    host.dispatch(Action::FirstHunk);
+    assert_eq!(host.model().hunk, 0);
+    host.dispatch(Action::NextHunk);
+    assert_eq!(host.model().hunk, 1, "an approved hunk is a stop too");
+    host.dispatch(Action::LastHunk);
+    let last = host.model().hunk;
+    let next = host
+        .model()
+        .adjacent_file(true)
+        .map(|position| path_at(host.model(), position))
+        .unwrap();
+    host.dispatch(Action::NextHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(next.as_str()));
+    assert_eq!(host.model().rows.files[0].path, next);
+    assert_eq!(host.model().hunk, 0);
+    assert!(
+        !host.model().diff_scroll.animating(),
+        "another file shows at its hunk at once, without a glide from its last place"
+    );
+    host.dispatch(Action::PreviousHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(engine));
+    assert_eq!(host.model().hunk, last);
+}
+
+/// `]` skips approved hunks and, with `[diff] cross_files`, goes on into the next file that
+/// needs the reviewer, at its first such hunk, and `[` comes back.
+#[test]
+fn hunks_to_review_step_past_approved_ones_and_on_into_the_next_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), crossing_files());
+    let engine = "src/engine.rs";
+    host.update(|model| model.show_file(engine));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    // The demo accepted the first hunk and the reflow needs no mark, so the engine's only open
+    // hunk is its last.
+    host.dispatch(Action::FirstHunk);
+    host.dispatch(Action::NextOpenHunk);
+    let open = host.model().hunk;
+    assert_eq!(open, 2);
+    let next = host.model().next_open_file().unwrap();
+    host.dispatch(Action::NextOpenHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(next.as_str()));
+    let hunk = host.model().hunk;
+    assert!(
+        !hunk_badges(host.model(), hunk)
+            .into_iter()
+            .all(state::is_approved),
+        "it lands on a hunk that needs the reviewer"
+    );
+    // Back before the next file's first open hunk is the engine's last one.
+    while host.model().open_hunk_before(host.model().hunk).is_some() {
+        host.dispatch(Action::PreviousOpenHunk);
+    }
+    host.dispatch(Action::PreviousOpenHunk);
+    assert_eq!(host.model().selected.as_deref(), Some(engine));
+    assert_eq!(host.model().hunk, open);
+}
+
+/// By default a hunk the keys go to shows with a fifth of the diff clear above it and, as far
+/// as it fits, below it, landing a fifth down whichever way the keys go, so the code around it
+/// shows and a long hunk shows from its start.
+#[test]
+fn hunks_land_a_fifth_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("server.go"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let viewport = host.model().grid().viewports.diff.unwrap();
+    let margin = (viewport * scroll::READING_LINE).floor();
+    let max = crate::frame::max_offset(host.model().rows.rows.len(), Some(viewport));
+    let count = host.model().hunk_rows.len();
+    for hunk in (0..count).chain((0..count).rev()) {
+        host.update(|model| model.select_hunk(hunk));
+        let model = host.model();
+        let rows = &model.hunk_rows[hunk];
+        let (start, end) = (scroll::rows(rows.start), scroll::rows(rows.end));
+        let top = model.diff_scroll.target();
+        assert!(
+            start - top >= margin || top == 0.0,
+            "hunk {hunk} keeps its margin above: {start} at {top}"
+        );
+        assert!(
+            end - top <= viewport - margin || end - start > viewport - 2.0 * margin || top >= max,
+            "hunk {hunk} keeps its margin below: {end} at {top}"
+        );
+    }
+}
+
+/// A file seen for the first time shows from its first change that needs the reviewer, at the
+/// reading line, not from its first line.
+#[test]
+fn a_file_opens_at_its_first_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    lay_out(&mut host);
+    host.update(|model| model.show_file("src/engine.rs"));
+    lay_out(&mut host);
+    let model = host.model();
+    assert_eq!(model.hunk, 2, "the first hunk that needs the reviewer");
+    let viewport = model.grid().viewports.diff.unwrap();
+    let start = scroll::rows(model.hunk_rows[2].start);
+    let top = model.diff_scroll.offset();
+    let max = crate::frame::max_offset(model.rows.rows.len(), Some(viewport));
+    assert!(top > 0.0, "not from the file's first line");
+    assert!(
+        (start - top - (viewport * scroll::READING_LINE).floor()).abs() < f64::EPSILON
+            || (top - max).abs() < f64::EPSILON,
+        "its start at the reading line: {start} at {top}"
+    );
+}
+
+/// Lays the window out once every eased scroll has arrived.
+fn settle_scroll(host: &mut Host) {
+    host.update(|model| model.layout(fixed_window(), Instant::now() + scroll::DURATION));
+}
+
+/// The lines the diff's top row shows: its head and its base line.
+fn top_line(model: &Model) -> (Option<usize>, Option<usize>) {
+    let row = &model.rows.rows[scroll::whole_rows(model.diff_scroll.offset())];
+    let cell = row.cells().next().expect("the top row shows code");
+    (cell.head.as_ref().map(|head| head.line), cell.base)
+}
+
+/// `j` and `k` move between hunks, and in scroll mode, which `s` turns on and off, scroll the
+/// diff a line instead, keeping the selection while it shows.
+#[test]
+fn scroll_mode_makes_the_hunk_keys_scroll() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::FirstHunk);
+    settle_scroll(&mut host);
+    host.dispatch(Action::NextHunk);
+    assert_eq!(host.model().hunk, 1);
+    settle_scroll(&mut host);
+    host.dispatch(Action::ToggleScrollMode);
+    assert!(host.model().scroll_mode);
+    let top = host.model().diff_scroll.target();
+    host.dispatch(Action::NextHunk);
+    assert!((host.model().diff_scroll.target() - (top + 1.0)).abs() < f64::EPSILON);
+    assert_eq!(host.model().hunk, 1, "the selection stays while it shows");
+    host.dispatch(Action::PreviousHunk);
+    assert!((host.model().diff_scroll.target() - top).abs() < f64::EPSILON);
+    host.dispatch(Action::ToggleScrollMode);
+    assert!(!host.model().scroll_mode);
+    host.dispatch(Action::NextHunk);
+    assert_eq!(host.model().hunk, 2);
+}
+
+/// Esc in scroll mode leaves it and goes back to the hunk it began at, however far the view
+/// scrolled and whichever hunk the selection followed to; the next Esc goes to the files.
+#[test]
+fn escape_leaves_scroll_mode_at_its_hunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("scheduler.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::FirstHunk);
+    host.dispatch(Action::NextHunk);
+    settle_scroll(&mut host);
+    host.dispatch(Action::ToggleScrollMode);
+    for _ in 0..200 {
+        host.dispatch(Action::NextHunk);
+    }
+    settle_scroll(&mut host);
+    assert_ne!(host.model().hunk, 1, "the selection followed the view");
+    host.dispatch(Action::FocusTree);
+    assert!(!host.model().scroll_mode);
+    assert_eq!(host.model().mode, Mode::Diff);
+    assert_eq!(
+        host.model().hunk,
+        1,
+        "back at the hunk scroll mode began at"
+    );
+    host.dispatch(Action::FocusTree);
+    assert_eq!(host.model().mode, Mode::Tree);
+}
+
+/// Scrolling a line, and when the selected hunk leaves the view, the hunk on screen
+/// nearest the reading line becomes the selected one, so Space marks what shows; however the
+/// diff scrolls, the scrollbar's track included.
+#[test]
+fn the_selected_hunk_follows_the_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::FirstHunk);
+    settle_scroll(&mut host);
+    let top = host.model().diff_scroll.target();
+    host.dispatch(Action::LineDown);
+    assert!((host.model().diff_scroll.target() - (top + 1.0)).abs() < f64::EPSILON);
+    host.dispatch(Action::LineUp);
+    assert!((host.model().diff_scroll.target() - top).abs() < f64::EPSILON);
+    settle_scroll(&mut host);
+    let on_screen = |model: &Model, hunk: usize| {
+        scroll::shows(
+            &model.hunk_rows[hunk],
+            model.diff_scroll.offset(),
+            model.grid().viewports.diff,
+        )
+    };
+    let mut moved = false;
+    for _ in 0..host.model().rows.rows.len() {
+        host.dispatch(Action::LineDown);
+        settle_scroll(&mut host);
+        let model = host.model();
+        assert!(
+            on_screen(model, model.hunk)
+                || !(0..model.hunk_rows.len()).any(|hunk| on_screen(model, hunk)),
+            "the selected hunk shows whenever any does"
+        );
+        moved |= model.hunk > 0;
+    }
+    assert!(moved, "scrolling down selects later hunks");
+
+    // A click on the scrollbar's track pages too.
+    host.dispatch(Action::FirstHunk);
+    settle_scroll(&mut host);
+    let before = host.model().diff_scroll.offset();
+    host.update(|model| model.page_list_toward(List::Diff, 1000.0));
+    // The first frame takes the page and starts its scroll, the next one sees it arrive.
+    lay_out(&mut host);
+    settle_scroll(&mut host);
+    let model = host.model();
+    assert!(model.diff_scroll.offset() > before, "the track paged");
+    assert!(on_screen(model, model.hunk));
+}
+
+/// In the hunks view, an approved hunk folds the moment it is approved, while Space moves on to
+/// the next hunk, so the save landing later, even while that scroll is on its way, moves no
+/// row: the next hunk shows from its start and stays selected.
+#[test]
+fn a_saved_approval_keeps_the_line_at_the_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    let short = Geometry {
+        heights: Heights {
+            diff: Some(8.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let settle = |host: &mut Host| {
+        host.update(|model| model.layout(short, Instant::now() + scroll::DURATION));
+    };
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    settle(&mut host);
+    // The reflow needs a mark here; approving it moves on to the last hunk.
+    host.dispatch(Action::FirstHunk);
+    host.dispatch(Action::NextHunk);
+    settle(&mut host);
+    assert_eq!(host.model().hunk, 1);
+    host.dispatch(Action::ToggleApprove);
+    assert_eq!(host.model().hunk, 2);
+    let folded = |model: &Model| {
+        model
+            .rows
+            .rows
+            .iter()
+            .any(|row| row.hunk == Some(1) && row.note().is_some_and(|note| note.folded))
+    };
+    assert!(folded(host.model()), "the approved reflow folds at once");
+    let rows = host.model().rows.rows.len();
+    // The save lands before the scroll to the next hunk arrives.
+    let saved = host.run_job();
+    host.complete(saved);
+    assert_eq!(host.model().rows.rows.len(), rows, "the save moves no row");
+    settle(&mut host);
+    let model = host.model();
+    assert!(folded(model));
+    let start = scroll::rows(model.hunk_rows[2].start);
+    let top = model.diff_scroll.offset();
+    assert!(
+        start >= top && start < top + 8.0,
+        "the next hunk shows from its start"
+    );
+    assert_eq!(model.hunk, 2, "and stays selected");
+}
+
+/// While an eased scroll is still on its way, the selection follows only what is on screen,
+/// never where the scroll is heading, so Space cannot mark a hunk before it shows.
+#[test]
+fn a_scroll_on_its_way_selects_nothing_unseen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::FirstHunk);
+    settle_scroll(&mut host);
+    let first = host.model().hunk_units();
+    host.dispatch(Action::HalfPageDown);
+    host.dispatch(Action::HalfPageDown);
+    lay_out(&mut host);
+    assert_eq!(host.model().hunk_units(), first, "nothing else showed yet");
+    host.dispatch(Action::ToggleApprove);
+    let marked: Vec<UnitId> = host.model().pending.keys().copied().collect();
+    assert!(
+        marked.iter().all(|unit| first.contains(unit)),
+        "only the hunk that showed is marked, or nothing: {marked:?}"
+    );
+}
+
+/// Switching between the whole file and hunks apart keeps the line at the top, and a file left
+/// in one view comes back at its line in the other.
+#[test]
+fn the_view_keeps_the_place() {
+    let dir = tempfile::tempdir().unwrap();
+    // Approved hunks show in the hunks view too, so the first hunk's code shows in both.
+    let settings = Settings {
+        approved: crate::config::Approved::Shown,
+        ..whole_file()
+    };
+    let mut host = Host::open_with(demo(dir.path()), settings);
+    // A diff eight rows tall, so neither view of the engine fits it and each can put any of its
+    // lines at the top.
+    let short = Geometry {
+        heights: Heights {
+            diff: Some(8.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let settle = |host: &mut Host| {
+        host.update(|model| model.layout(short, Instant::now() + scroll::DURATION));
+    };
+    let engine = "src/engine.rs";
+    host.update(|model| model.show_file(engine));
+    host.dispatch(Action::FocusDiff);
+    settle(&mut host);
+    // The first hunk's first line at the top: a changed line, which both views show.
+    let start = host.model().hunk_rows[0].start;
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(start)));
+    settle(&mut host);
+    let line = top_line(host.model());
+    assert_eq!(line.1, Some(7), "the first hunk's removed line");
+    host.dispatch(Action::ToggleView);
+    settle(&mut host);
+    assert_eq!(host.model().presented.view, crate::config::DiffView::Hunks);
+    assert_eq!(top_line(host.model()), line, "hunks apart keep the line");
+    host.dispatch(Action::ToggleView);
+    settle(&mut host);
+    assert_eq!(top_line(host.model()), line, "the whole file keeps it too");
+
+    // Left in one view, the engine comes back at its line in the other, either way.
+    for _ in 0..2 {
+        host.update(|model| model.show_file("src/format.rs"));
+        host.dispatch(Action::ToggleView);
+        settle(&mut host);
+        host.update(|model| model.show_file(engine));
+        settle(&mut host);
+        assert_eq!(top_line(host.model()), line);
+    }
+}
+
+/// With `[diff] hunk_position = "center"`, every hunk the keys go to lands in the middle of the
+/// diff, and `z z` centers the selected hunk once in either position.
+#[test]
+fn hunks_can_land_in_the_middle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = whole_file();
+    settings.appearance.applied.hunk_position = crate::config::HunkPosition::Center;
+    let mut host = Host::open_with(demo(dir.path()), settings);
+    host.update(|model| model.show_file("scripts/install.sh"));
+    host.dispatch(Action::FocusDiff);
+    settle_scroll(&mut host);
+    let centered = |model: &Model| {
+        let rows = &model.hunk_rows[model.hunk];
+        let viewport = model.grid().viewports.diff.unwrap();
+        let expected = scroll::centered(
+            viewport,
+            scroll::rows(rows.start),
+            scroll::rows(rows.end),
+            scroll::READING_LINE,
+        );
+        let max = crate::frame::max_offset(model.rows.rows.len(), Some(viewport));
+        (model.diff_scroll.offset() - expected.min(max)).abs() < f64::EPSILON
+    };
+    host.dispatch(Action::FirstHunk);
+    settle_scroll(&mut host);
+    for _ in 1..host.model().hunk_rows.len() {
+        host.dispatch(Action::NextHunk);
+        settle_scroll(&mut host);
+        assert!(centered(host.model()), "hunk {}", host.model().hunk);
+    }
+
+    // With margins, `z z` still centers once.
+    host.update(|model| {
+        model.settings.appearance.applied.hunk_position = crate::config::HunkPosition::Margin;
+    });
+    host.dispatch(Action::FirstHunk);
+    settle_scroll(&mut host);
+    host.dispatch(Action::LineDown);
+    host.dispatch(Action::LineDown);
+    settle_scroll(&mut host);
+    host.dispatch(Action::CenterHunk);
+    settle_scroll(&mut host);
+    assert!(centered(host.model()));
+}
+
+/// The unit of `install.sh` that the hunks view joins with the changes above it, where the file
+/// view gives it a hunk of its own: its last change, the checksum download.
+fn joined_unit(model: &Model) -> UnitId {
+    let view = model.view().unwrap();
+    view.units_of_file("scripts/install.sh")
+        .into_iter()
+        .find(|&unit| {
+            view.unit(unit)
+                .ok()
+                .and_then(|record| {
+                    record
+                        .chunk()
+                        .map(|chunk| chunk.added.contains("checksums"))
+                })
+                .unwrap_or(false)
+        })
+        .unwrap()
+}
+
+/// A buffer's change markers name units, so after the view changes how hunks group, the hunk
+/// under the buffer's cursor is still the one holding the line's change.
+#[test]
+fn the_buffer_marks_the_unit_under_its_cursor_whatever_the_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("scripts/install.sh"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let unit = joined_unit(host.model());
+    let hunk = host.model().hunk_of(unit).unwrap();
+    host.update(|model| model.select_hunk(hunk));
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().buffer_hunk(), Some(hunk));
+    host.update(|model| model.apply_view(crate::config::DiffView::Hunks));
+    let joined = host.model().buffer_hunk().unwrap();
+    assert!(host.model().rows.hunks[joined].contains(&unit));
+    assert_ne!(joined, hunk, "the hunk's index changed with the view");
+    let hunk = joined;
+    assert!(
+        host.model().rows.hunks[hunk].len() > 1,
+        "the hunks view joins it"
+    );
+}
+
+/// A file left with a hunk selected comes back to the hunk holding the same change in the other
+/// view, whose hunks number differently.
+#[test]
+fn a_file_comes_back_at_its_change_in_the_other_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    let install = "scripts/install.sh";
+    host.update(|model| model.show_file(install));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let unit = joined_unit(host.model());
+    let hunk = host.model().hunk_of(unit).unwrap();
+    host.update(|model| model.select_hunk(hunk));
+    host.update(|model| model.show_file("scripts/release.sh"));
+    host.dispatch(Action::ToggleView);
+    host.update(|model| model.show_file(install));
+    let group = host.model().hunk_units();
+    assert!(group.contains(&unit) && group.len() > 1);
+    // And back: the hunks view selected the whole group, so the file view lands on its first
+    // change.
+    host.update(|model| model.show_file("scripts/release.sh"));
+    host.dispatch(Action::ToggleView);
+    host.update(|model| model.show_file(install));
+    assert_eq!(host.model().hunk_units(), group[..1]);
+}
+
+/// A file left with a later hunk selected comes back to it after a capture of an edit to another
+/// file: the place it kept follows its unit into the captured snapshot.
+#[test]
+fn a_capture_keeps_the_places_of_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[
+            ("a.rs", &two_hunks("1", "2")),
+            ("b.rs", &two_hunks("3", "4")),
+        ],
+        &[
+            ("a.rs", &two_hunks("one", "two")),
+            ("b.rs", &two_hunks("three", "four")),
+        ],
+    );
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file("a.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::LastHunk);
+    assert!(selected_text(host.model()).contains("two"));
+    host.update(|model| model.show_file("b.rs"));
+
+    std::fs::write(repo.join("b.rs"), two_hunks("three", "fourth")).unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert!(host.model().view().unwrap().is_provisional());
+
+    host.update(|model| model.show_file("a.rs"));
+    assert!(
+        selected_text(host.model()).contains("two"),
+        "a.rs comes back at the hunk it was left at"
+    );
 }
