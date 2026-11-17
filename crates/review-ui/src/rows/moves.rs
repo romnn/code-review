@@ -38,8 +38,6 @@ pub(super) struct Edits<'a> {
     /// How many columns deeper the move indented its code, fewer when negative, a tab as four;
     /// zero unless it is [`Self::reindented`].
     pub shift: isize,
-    /// Whether the move changed more than that.
-    pub edited: bool,
 }
 
 /// The edits of a move whose inner diff is `diff`.
@@ -71,7 +69,6 @@ pub(super) fn edits(diff: &SideDiff) -> Edits<'_> {
     let common = shifts.first().copied();
     let uniform = shifts.iter().all(|&shift| Some(shift) == common);
     let reindented = !beyond && uniform && common.is_some_and(|shift| shift != 0);
-    let edited = beyond || !uniform;
     // A line that changed only its indentation shows once when every line shifted alike, and as
     // old and new otherwise.
     let mut shown = Vec::with_capacity(lines.len());
@@ -94,7 +91,6 @@ pub(super) fn edits(diff: &SideDiff) -> Edits<'_> {
         lines: shown,
         reindented,
         shift: if reindented { common.unwrap_or(0) } else { 0 },
-        edited,
     }
 }
 
@@ -388,7 +384,7 @@ mod tests {
             (New, "    }"),
         ]);
         let edits = edits(&diff);
-        assert!(edits.reindented && !edits.edited);
+        assert!(edits.reindented);
         assert_eq!(edits.shift, 4);
         assert_eq!(
             shapes(&edits),
@@ -411,7 +407,7 @@ mod tests {
             (New, "    c()"),
         ]);
         let edits = edits(&diff);
-        assert!(!edits.reindented && edits.edited);
+        assert!(!edits.reindented);
         assert_eq!(
             shapes(&edits),
             ["= if a:", "=     b()", "- c()", "+     c()"]
@@ -435,7 +431,7 @@ mod tests {
             ending: LineEnding::CrLf,
         });
         let edits = edits(&diff);
-        assert!(edits.edited && !edits.reindented);
+        assert!(!edits.reindented);
         assert_eq!(
             shapes(&edits),
             ["-     let a = 1;", "+ let a = 1;", "- b();", "+ b();"]
@@ -458,7 +454,7 @@ mod tests {
             .collect();
         let huge = diff(&lines);
         let edits = edits(&huge);
-        assert!(edits.edited && !edits.reindented);
+        assert!(!edits.reindented);
         assert_eq!(edits.lines.len(), 2200);
         assert!(lcs(&[0; 2000], &[0; 2000]).is_none());
     }
@@ -472,7 +468,7 @@ mod tests {
             (New, "out.push_str(&format!(\"{a} | {b}\"));"),
         ]);
         let edits = edits(&diff);
-        assert!(edits.edited && !edits.reindented);
+        assert!(!edits.reindented);
         // Its old line changed only whitespace, which shows marked.
         assert_eq!(edits.lines[1].1, [span(26, 28)]);
         assert_eq!(edits.lines[2].1, [span(27, 28)]);
