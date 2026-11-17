@@ -66,7 +66,8 @@ struct WorktreeTree {
 
 impl Repo {
     /// Captures the working tree, staged and unstaged changes and untracked files that are not
-    /// ignored, as a synthetic commit whose parent is `HEAD`.
+    /// ignored, as a synthetic commit whose parent is `HEAD`, or as `HEAD` itself when nothing
+    /// is beyond it.
     ///
     /// The user's index is never touched: the capture works on a copy of it through
     /// `GIT_INDEX_FILE`.
@@ -78,6 +79,14 @@ impl Repo {
     /// Returns an error for a bare repository or when any git step fails.
     pub fn capture_worktree(&self) -> Result<ObjectId, Error> {
         let WorktreeTree { tree, head } = self.worktree_tree()?;
+        // A working tree with nothing beyond `HEAD` is `HEAD`, so a capture of committed work
+        // is the commit itself and deduplicates with a revision that recorded it.
+        if let Some(head) = &head
+            && self.run_text(["rev-parse", &format!("{}^{{tree}}", head.as_str())])?
+                == tree.as_str()
+        {
+            return Ok(head.clone());
+        }
         let mut commit_tree = self.command();
         commit_tree.envs(SNAPSHOT_ENV);
         let mut args = vec![

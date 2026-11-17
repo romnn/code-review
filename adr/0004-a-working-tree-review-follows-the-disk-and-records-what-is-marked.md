@@ -1,6 +1,7 @@
 # 4. A working-tree review follows the disk, and records a capture only when it is marked
 
-**Status:** accepted · **Date:** 2026-11-14
+**Status:** accepted, its scope widened by
+[ADR 5](0005-a-checkout-continues-the-review-of-its-branch.md) · **Date:** 2026-11-14
 
 ## Context
 

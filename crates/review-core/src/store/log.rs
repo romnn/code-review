@@ -14,6 +14,36 @@ use super::ReviewDir;
 use super::events::Event;
 use crate::error::Error;
 
+/// Writes `events` as the whole log of a review whose log is still empty, at once: the log is
+/// replaced in one rename, so it holds all of them or none, even across a crash. The caller
+/// holds `review.lock` exclusively, as `_lock` proves.
+///
+/// Returns `false`, writing nothing, when the log already holds a record.
+pub(crate) fn publish_initial(
+    dir: &ReviewDir,
+    _lock: &LockGuard,
+    events: &[Event],
+) -> Result<bool, Error> {
+    let path = dir.events();
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.len() > 0 => return Ok(false),
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(Error::io("read", &path, source)),
+    }
+    let mut bytes = Vec::new();
+    for event in events {
+        let record = serde_json::to_vec(event).map_err(|source| Error::Encode {
+            what: "event",
+            source,
+        })?;
+        bytes.extend(record);
+        bytes.push(b'\n');
+    }
+    super::write_atomic(&path, &bytes)?;
+    Ok(true)
+}
+
 /// Holds `review.lock` until dropped: exclusively for writers, shared for readers.
 pub struct LockGuard {
     file: File,

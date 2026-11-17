@@ -137,7 +137,8 @@ with a temporary `GIT_INDEX_FILE` holding a copy of the user's index (which keep
 and sparse-checkout entries, and the index's date, so git still rereads files as new as the index
 whose stat cannot show an edit; `git read-tree HEAD` when there is no index), `git add -A` (tracked
 and untracked files, respecting `.gitignore`), `git write-tree` and `git commit-tree` with a fixed
-identity and date produce a synthetic snapshot commit, pinned like any other. Staged and unstaged changes are captured together. Two captures of
+identity and date produce a synthetic snapshot commit, pinned like any other; a working tree with
+nothing beyond `HEAD` is captured as `HEAD` itself. Staged and unstaged changes are captured together. Two captures of
 different contents are two revisions; a capture identical to the current revision deduplicates.
 A review that follows the working tree shows captures without recording them until one is
 marked (see "Live updates").
@@ -683,7 +684,9 @@ which would conflict with an embedder's own `libsqlite3-sys`.
 ### Live updates
 
 A review of the working tree follows it as it changes, the way lazygit does
-([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)):
+([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)), and so
+does a pull request or range review opened in a checkout of its branch, through the checkout's
+continuation of it ([ADR 5](adr/0005-a-checkout-continues-the-review-of-its-branch.md)):
 `review_ui::watch` watches what git does not ignore (on Linux each such directory on its own,
 found by asking `git check-ignore` about each level of the tree; on macOS and Windows the
 whole tree, filtering events by git's rules), and every change a capture records, never a read,
@@ -751,7 +754,14 @@ review, whatever the shared configuration's `[review] auto_approve_formatting` s
 `review-core` (`Review::open_for_current_branch`), and say on standard error which rule fired
 (the apps also in their status line when the review opens, after any configuration problem):
 
-1. The review last opened for this repository and branch.
+1. The review last opened for this repository and branch. When that is a pull request or range
+   review, this checkout continues it in a review of its working tree
+   ([ADR 5](adr/0005-a-checkout-continues-the-review-of-its-branch.md)): its continuation opens
+   when it has one, whatever it holds now; otherwise, when the checkout is on the reviewed branch,
+   a local branch, and its `HEAD` contains the head of the review's current revision, the
+   continuation is created, seeded once with a copy of that revision and each unit's state there,
+   and opens, and is remembered from then on. The pull request or range review keeps only what
+   its target resolves to, and naming it opens it.
 2. Otherwise the branch's open pull request, as `gh pr view` resolves it, keyed exactly as when it
    is opened by number or URL so marks are shared.
    A merged or closed pull request is skipped, because its review would no longer follow the
@@ -1077,7 +1087,7 @@ it, muted, so it never reads as code.
   reviewer acts and shows at once as pending; marks are saved one at a time in the background,
   and each completion rebuilds the view from the current selection, so a slow save never acts on
   what is shown now. The engine refuses a mark against a revision that is no longer current. A
-  newer revision is announced in the status bar and never switched to by itself: `R` switches to
+  newer revision is announced in the status bar and never switched to by itself: `r` or `R` switches to
   it, or fetches when there is none. Language-server requests have deadlines.
 
 #### Implementation
@@ -1357,7 +1367,7 @@ tools copy through XWayland with a window that never shows.
   narrows the tree it shows at the header's right with how many files it leaves
   (`/engine 3/17`), taking room from the branch.
 - **Fetches.** The review opens before the terminal goes raw, so the first fetch can still ask
-  for credentials. Later fetches (`R`) run non-interactively through `Review::set_command_env`,
+  for credentials. Later fetches (`r` or `R`) run non-interactively through `Review::set_command_env`,
   because the app owns the terminal: `GIT_TERMINAL_PROMPT=0`, no ssh askpass helper, and the
   ssh git would run (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `GIT_SSH`, else `ssh`) in
   batch mode when git takes it for OpenSSH, by `GIT_SSH_VARIANT` or `ssh.variant`, else by its

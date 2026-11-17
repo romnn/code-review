@@ -645,7 +645,10 @@ impl Model {
             }
             _ => self.review.as_ref().map_or_else(
                 || "Code review".to_owned(),
-                |review| format!("Review of {}", review.key()),
+                |review| match review.continues() {
+                    Some(continues) => continues.describe(),
+                    None => format!("Review of {}", review.key()),
+                },
             ),
         }
     }

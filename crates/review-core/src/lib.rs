@@ -67,8 +67,8 @@ pub use git::Repo;
 pub use history::{History, RevisionRecord, UnitState, Verdict};
 pub use ids::{MoveId, ObjectId, ParseIdError, ReviewKey, RevisionNumber, UnitId, UnitIndex};
 pub use review::{
-    Commit, Detected, PullRequest, Recorded, RefreshStep, Review, ReviewInfo, ReviewMeta,
-    ReviewTarget, RevisionInput, Synced, Trust,
+    Commit, Continues, Detected, PullRequest, Recorded, RefreshStep, Review, ReviewInfo,
+    ReviewMeta, ReviewTarget, RevisionInput, Synced, Trust,
 };
 pub use standing::{ReviewPolicy, Standing};
 pub use store::events::MarkVerdict;

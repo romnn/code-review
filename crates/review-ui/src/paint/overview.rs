@@ -196,10 +196,12 @@ pub fn overview(model: &Model, palette: &Palette) -> Overview {
         }
         Some(ReviewInfo::Commits { commits }) => About::Commits {
             title: Piece::new(
-                model
-                    .review
-                    .as_ref()
-                    .map_or_else(String::new, |review| review.key().to_string()),
+                model.review.as_ref().map_or_else(String::new, |review| {
+                    review.continues().map_or_else(
+                        || review.key().to_string(),
+                        review_core::Continues::describe,
+                    )
+                }),
                 palette.text,
             )
             .weighted(Weight::Semibold),

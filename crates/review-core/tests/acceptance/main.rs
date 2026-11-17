@@ -3,6 +3,7 @@
 mod auto_approval;
 mod carry;
 mod common;
+mod continuation;
 mod current_branch;
 mod demo;
 mod fetch;

@@ -386,6 +386,20 @@ impl Repo {
         }
     }
 
+    /// Returns whether `ancestor` is `descendant` or one of its ancestors; an object that does
+    /// not resolve counts as not.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot be run.
+    pub fn is_ancestor(&self, ancestor: &ObjectId, descendant: &str) -> Result<bool, Error> {
+        match self.run(["merge-base", "--is-ancestor", ancestor.as_str(), descendant]) {
+            Ok(_) => Ok(true),
+            Err(Error::CommandFailed { .. }) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Lists every ref under `prefix` with its target.
     ///
     /// # Errors

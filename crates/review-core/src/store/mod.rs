@@ -207,11 +207,17 @@ pub(crate) fn write_json_atomic<T: Serialize>(
     value: &T,
     what: &'static str,
 ) -> Result<(), Error> {
+    let bytes = serde_json::to_vec(value).map_err(|source| Error::Encode { what, source })?;
+    write_atomic(path, &bytes)
+}
+
+/// Writes `bytes` to `path` through a synced temporary file in the same directory renamed over
+/// it, so readers see the old file or the complete new one.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     use std::io::Write as _;
 
     let directory = path.parent().unwrap_or(Path::new("."));
     create_dir(directory)?;
-    let bytes = serde_json::to_vec(value).map_err(|source| Error::Encode { what, source })?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
@@ -224,7 +230,7 @@ pub(crate) fn write_json_atomic<T: Serialize>(
     let result = (|| {
         let mut file = std::fs::File::create(&temporary)
             .map_err(|source| Error::io("create", &temporary, source))?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .map_err(|source| Error::io("write", &temporary, source))?;
         file.sync_data()
             .map_err(|source| Error::io("sync", &temporary, source))?;

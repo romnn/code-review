@@ -576,13 +576,21 @@ mod open_without_target {
         let (explicit, _) = cr_json_with_path(repo, data, &path, &["open", "main..feature"])?;
         assert_eq!(opened["review"], explicit["review"]);
 
-        // A second open without a target returns to the remembered review.
+        // A second open without a target continues the remembered range in this checkout of
+        // its branch, and a third returns to that continuation.
+        let (continued, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
+        assert_eq!(
+            stderr.trim(),
+            "cr: following this checkout's working tree, continuing main..feature from revision \
+             1 with its marks"
+        );
+        assert_ne!(continued["review"], opened["review"]);
         let (again, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
         assert_eq!(
             stderr.trim(),
             "cr: reopened the review last opened on this branch"
         );
-        assert_eq!(again["review"], opened["review"]);
+        assert_eq!(again["review"], continued["review"]);
         Ok(())
     }
 

@@ -5,6 +5,7 @@
 //! Analyses and correspondences are content-addressed caches that can be recomputed from git at any
 //! time.
 
+mod continuation;
 mod github;
 mod info;
 mod live;
@@ -268,6 +269,23 @@ pub enum Detected {
         /// Why the pull request rule did not apply, such as `gh is not installed`.
         no_pull_request: String,
     },
+    /// This checkout's continuation of a pull request or range review, because the checkout is
+    /// on the reviewed branch: its working tree, with the marks of the revision it continues.
+    Continued {
+        /// The continued review, such as `#1301` or `main..feature`.
+        label: String,
+        /// The revision of it the continuation started from.
+        revision: RevisionNumber,
+        /// Whether the continuation was created now, rather than reopened.
+        created: bool,
+    },
+    /// A pull request or range review, chosen by `rule`, that this checkout does not continue.
+    Unfollowed {
+        /// The rule that chose it.
+        rule: Box<Self>,
+        /// Why the checkout is not followed, such as being on another branch.
+        why: String,
+    },
 }
 
 impl fmt::Display for Detected {
@@ -294,6 +312,25 @@ impl fmt::Display for Detected {
                 f,
                 "reviewing the working tree against {base}: {no_pull_request}"
             ),
+            Self::Continued {
+                label,
+                revision,
+                created: true,
+            } => write!(
+                f,
+                "following this checkout's working tree, continuing {label} from revision \
+                 {revision} with its marks"
+            ),
+            Self::Continued {
+                label, revision, ..
+            } => write!(
+                f,
+                "following this checkout's working tree, continuing {label} from revision \
+                 {revision}"
+            ),
+            Self::Unfollowed { rule, why } => {
+                write!(f, "{rule}; not following this checkout: {why}")
+            }
         }
     }
 }
@@ -307,6 +344,33 @@ pub struct ReviewMeta {
     pub repo: PathBuf,
     /// What is reviewed.
     pub target: ReviewTarget,
+    /// The review this one continues in its checkout's working tree, if it is a continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<Continues>,
+}
+
+/// What a continuation continues: a pull request or range review, and the revision of it whose
+/// marks it started with; see [`Review::continues`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Continues {
+    /// The continued review.
+    pub review: ReviewKey,
+    /// The revision of it the continuation started from.
+    pub revision: RevisionNumber,
+    /// How the continued review is named, such as `#1301` or `main..feature`.
+    pub label: String,
+}
+
+impl Continues {
+    /// What the continuation is, for a title: this working tree continuing the review from its
+    /// revision, such as `#1301 in this working tree, from revision 3`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "{} in this working tree, from revision {}",
+            self.label, self.revision
+        )
+    }
 }
 
 /// The snapshot pair of a revision to record.
@@ -400,6 +464,7 @@ impl Review {
             key,
             repo: repo.work_tree().unwrap_or(repo.git_dir()).to_path_buf(),
             target,
+            continues: None,
         };
         store::create_dir(dir.root())?;
         // Two first opens of colliding targets must not both find no metadata and both write.
@@ -425,16 +490,28 @@ impl Review {
     /// Opens the review a front end opens when given no target: the one last opened for `repo`'s
     /// current branch, or else the target [`ReviewTarget::for_current_branch`] chooses.
     ///
+    /// A pull request or range review chosen so is continued in `repo`'s working tree when the
+    /// checkout has a continuation of it, or is on its branch and contains its current revision
+    /// (see [`Detected::Continued`]): the continuation opens instead, so callers that remember
+    /// what opened remember the continuation.
+    ///
     /// # Errors
     ///
     /// Returns the errors of [`ReviewTarget::for_current_branch`], [`Self::load`] and
-    /// [`Self::open`].
+    /// [`Self::open`], and an error when a continuation cannot be read or created.
     pub fn open_for_current_branch(data_dir: &Path, repo: Repo) -> Result<(Self, Detected), Error> {
-        if let Some(key) = store::remembered_review(data_dir, &repo)? {
-            return Ok((Self::load(data_dir, &key)?, Detected::Remembered));
-        }
-        let (target, detected) = ReviewTarget::for_current_branch(&repo)?;
-        Ok((Self::open(data_dir, repo, target)?, detected))
+        // A remembered review is loaded with the checkout it was opened in, which need not be
+        // this one; its continuation is always this checkout's.
+        let (review, detected, checkout) =
+            if let Some(key) = store::remembered_review(data_dir, &repo)? {
+                (Self::load(data_dir, &key)?, Detected::Remembered, repo)
+            } else {
+                let (target, detected) = ReviewTarget::for_current_branch(&repo)?;
+                let review = Self::open(data_dir, repo, target)?;
+                let checkout = review.repo().clone();
+                (review, detected, checkout)
+            };
+        review.continued_in(data_dir, &checkout, detected)
     }
 
     /// Loads the stored review `key`.
@@ -466,6 +543,13 @@ impl Review {
     #[must_use]
     pub fn target(&self) -> &ReviewTarget {
         &self.meta.target
+    }
+
+    /// Returns the review this one continues in its checkout's working tree, if it is a
+    /// continuation.
+    #[must_use]
+    pub fn continues(&self) -> Option<&Continues> {
+        self.meta.continues.as_ref()
     }
 
     /// Returns the review's repository.
@@ -792,6 +876,11 @@ impl Review {
             .update_ref(&self.pin_ref(&revision.base), &revision.base)?;
         self.repo
             .update_ref(&self.pin_ref(&revision.head), &revision.head)?;
+        // The target may lie beyond the merge base, reachable from neither; a continuation of
+        // this review compares from it later.
+        if let Some(target) = &revision.target {
+            self.repo.update_ref(&self.pin_ref(target), target)?;
+        }
         let analysis_path = self.dir.analysis(&revision.base, &revision.head);
         if !analysis_path.exists() {
             store::write_json_atomic(&analysis_path, analysis, "analysis")?;
@@ -1089,7 +1178,9 @@ impl Review {
     fn trusted_by_default(&self) -> Result<bool, Error> {
         match &self.meta.target {
             ReviewTarget::PullRequest { .. } => Ok(false),
-            ReviewTarget::Worktree { .. } => Ok(true),
+            // A continuation's trust is copied from the review it continues when it is created;
+            // without that decision, a checked-out pull request may be someone else's code.
+            ReviewTarget::Worktree { .. } => Ok(self.meta.continues.is_none()),
             // A remote-tracking ref or a bare commit may hold someone else's code.
             ReviewTarget::Range { head, .. } => {
                 let branch = head.strip_prefix("refs/heads/").unwrap_or(head);

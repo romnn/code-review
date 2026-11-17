@@ -45,7 +45,13 @@ pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
     // The pull request's metadata names its branch; before it is fetched, the target its
     // number.
     let target = model.review.as_ref().map(|review| review.target());
+    // A continuation follows this checkout's working tree from the review it continues, which
+    // names it; its own target is a fixed commit.
+    let continues = model.review.as_ref().and_then(|review| review.continues());
     let (number, name) = match (&model.info, target) {
+        _ if let Some(continues) = continues => {
+            (None, format!("{} · working tree", continues.label))
+        }
         (Some(ReviewInfo::PullRequest(pr)), _) => (Some(pr.number), pr.head_ref.clone()),
         (_, Some(ReviewTarget::PullRequest { number, .. })) => (Some(*number), String::new()),
         (_, Some(ReviewTarget::Range { base, head })) => (None, format!("{base}..{head}")),
