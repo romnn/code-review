@@ -261,10 +261,14 @@ fn gutter(cell: &Cell, column: Column, palette: &Palette) -> Piece {
     let nested = is_nested(cell);
     // Each half of a pair numbers its own side: the left the base (or a nested diff's old
     // side), the right the head.
-    // Across the width, a nested line has no single number.
+    // Across the width, a nested line has no single number, except a line of moved code where
+    // it arrived, which is a line of this file: an old line of a move's edits has none.
     let line = match column {
         Column::Left => cell.base,
         Column::Right => cell.head.as_ref().map(|head| head.line),
+        Column::Whole if nested && cell.moved && cell.kind != RowKind::NestedOld => {
+            cell.head.as_ref().map(|head| head.line)
+        }
         Column::Whole if nested => None,
         Column::Whole => cell.head.as_ref().map(|head| head.line).or(cell.base),
     };
@@ -427,12 +431,15 @@ fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> L
 }
 
 /// The words a move's edit changed, behind a stronger shade of the line's color, as delta marks
-/// them, so what the move edited stands out within the code it carried.
+/// them, so what the move edited stands out within the code it carried; and the indentation a
+/// re-indented line gained, in the move's color.
 fn moved_edit_layer(cell: &Cell, palette: &Palette) -> Layer {
     let color = match cell.kind {
         _ if !cell.moved => return Vec::new(),
         RowKind::NestedOld => palette.removed_sign,
         RowKind::NestedNew => palette.added_sign,
+        // The indentation a re-indented line gained.
+        RowKind::NestedSame => palette.moved,
         _ => return Vec::new(),
     };
     cell.highlights

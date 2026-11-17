@@ -1472,6 +1472,48 @@ fn a_reindented_rust_move_is_a_plain_move() {
     );
 }
 
+/// The demo's Python `spread`, moved into `main`, becomes a function of `main` there, so the
+/// engine keeps its edits: both ends say it moved, re-indented four deeper, and where it arrives
+/// each of its lines shows once, the indentation it gained marked.
+#[test]
+fn a_python_reindent_shows_each_line_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("tools/stats.py"));
+    lay_out(&mut host);
+    let model = host.model();
+    let notes: Vec<String> = model
+        .rows
+        .rows
+        .iter()
+        .filter(|row| row.kind() == rows::RowKind::Moved)
+        .map(|row| row.text().to_owned())
+        .collect();
+    for arrow in ["↗ moved to lines ", "↙ moved from lines "] {
+        assert!(
+            notes.iter().any(|note| note.starts_with(arrow)
+                && note.contains(" of this file, re-indented 4 deeper")),
+            "{notes:?}"
+        );
+    }
+    let shown: Vec<(rows::RowKind, Vec<std::ops::Range<usize>>)> = model
+        .rows
+        .rows
+        .iter()
+        .filter_map(|row| row.cells().next())
+        .filter(|cell| cell.moved && cell.text.contains("return max(values) - min(values)"))
+        .map(|cell| (cell.kind, cell.highlights.clone()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (rows::RowKind::Removed, Vec::new()),
+            (rows::RowKind::NestedSame, std::iter::once(4..8).collect()),
+        ],
+        "the source's line, then the line where it arrived with its gained indentation marked"
+    );
+}
+
 /// A copy hands the selected text to the clipboard, and a drag that selects text hands it to
 /// the primary selection when the button comes up; a click that selects nothing copies nothing.
 #[test]

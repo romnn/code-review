@@ -543,11 +543,14 @@ Moves are a presentation over review units, not units of their own:
   only its lines, as "moved to lines 40–48 of this file".
 - A move's edits show as delta shows edits: each edited line's old version above its new one,
   paired in order, with the words the edit changed behind a stronger shade of red or green, and
-  whitespace marked only on a line whose only change it is. Lines equal but for their leading
-  whitespace pair up first, old above new with only the indentation marked, since in Python or
-  YAML a re-indent may change what the code means; when every line shifts its indentation alike
-  and nothing else changed, the note says "moved and re-indented". Where the engine proves the
-  re-indent is formatting, the move is plain and shows no edits at all.
+  whitespace marked only on a line whose only change it is. A move that only re-indented its
+  code, every line by the same amount, shows each line once where it arrived, numbered there,
+  with the indentation it gained tinted in the move's color, and both notes say how far, as
+  "moved to lines 17–22 of this file, re-indented 4 deeper": the reviewer sees the code in its
+  new place and is told what changed on every line, which matters where indentation carries
+  meaning, as in Python. An uneven re-indent shows each changed line old above new with only
+  its indentation marked. Where the engine proves the re-indent is formatting, the move is plain
+  and shows no edits at all.
 - Any part of a unit not covered by a move stays visible as an ordinary change.
 
 ### Noise classification

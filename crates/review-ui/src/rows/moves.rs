@@ -1,11 +1,13 @@
 //! A move's edits as the diff shows them: the lines the move kept, and the lines it edited,
 //! paired old with new and with the words that changed marked, as delta marks them.
 //!
-//! A line whose only change is its indentation pairs with its old version too, with only the
-//! indentation marked: in Python or YAML a re-indent can change what the code means, so it is
-//! never shown as kept. A move that only re-indented its code by the same amount throughout is
-//! named so; the engine makes it a plain move where a syntax tree proves that formatting is all
-//! it changed.
+//! A move that only re-indented its code, by the same amount on every line, shows each line once,
+//! in its new indentation with the indentation it gained marked, and its note says how far it
+//! moved in: the reviewer sees the code where it now is and is told what changed on every line.
+//! The engine makes such a move plain where a syntax tree proves that formatting is all it
+//! changed; where it cannot, as in Python, the note still names the re-indent. A line whose
+//! indentation changed in an uneven re-indent pairs with its old version, only the indentation
+//! marked, since there the change differs line by line.
 
 use std::ops::Range;
 
@@ -16,6 +18,8 @@ use review_core::{DiffLine, DiffLineKind, SideDiff};
 pub(super) enum EditLine<'a> {
     /// A line the move kept as it was.
     Kept(&'a DiffLine),
+    /// A line of a move that re-indented every line alike, in its new indentation.
+    Shifted(&'a DiffLine),
     /// A line only the source has, or the old version of an edited line.
     Old(&'a DiffLine),
     /// A line only the target has, or the new version of an edited line.
@@ -31,6 +35,9 @@ pub(super) struct Edits<'a> {
     /// Whether all the move changed is the indentation of its code, by the same amount on every
     /// line.
     pub reindented: bool,
+    /// How many columns deeper the move indented its code, fewer when negative, a tab as four;
+    /// zero unless it is [`Self::reindented`].
+    pub shift: isize,
     /// Whether the move changed more than that.
     pub edited: bool,
 }
@@ -65,9 +72,28 @@ pub(super) fn edits(diff: &SideDiff) -> Edits<'_> {
     let uniform = shifts.iter().all(|&shift| Some(shift) == common);
     let reindented = !beyond && uniform && common.is_some_and(|shift| shift != 0);
     let edited = beyond || !uniform;
+    // A line that changed only its indentation shows once when every line shifted alike, and as
+    // old and new otherwise.
+    let mut shown = Vec::with_capacity(lines.len());
+    let mut pending: Option<&DiffLine> = None;
+    for (line, words) in lines {
+        match (line, pending.take()) {
+            // An indentation pair arrives as its old line, then its new one, both `Shifted`.
+            (EditLine::Shifted(old), None) => pending = Some(old),
+            (EditLine::Shifted(new), Some(old)) if reindented => {
+                shown.push((EditLine::Shifted(new), gained(&old.text, &new.text)));
+            }
+            (EditLine::Shifted(new), Some(old)) => {
+                shown.push((EditLine::Old(old), leading(&old.text)));
+                shown.push((EditLine::New(new), leading(&new.text)));
+            }
+            (line, _) => shown.push((line, words)),
+        }
+    }
     Edits {
-        lines,
+        lines: shown,
         reindented,
+        shift: if reindented { common.unwrap_or(0) } else { 0 },
         edited,
     }
 }
@@ -129,12 +155,14 @@ fn pair_run<'a>(
             beyond |= !same_ending;
             if old.text == new.text && same_ending {
                 lines.push((EditLine::Kept(new), Vec::new()));
-            } else if old.text == new.text {
+            } else if old.text == new.text || !same_ending {
                 lines.push((EditLine::Old(old), Vec::new()));
                 lines.push((EditLine::New(new), Vec::new()));
             } else {
-                lines.push((EditLine::Old(old), leading(&old.text)));
-                lines.push((EditLine::New(new), leading(&new.text)));
+                // Only the indentation changed: `edits` shows it once or as old and new, once it
+                // knows whether every line shifted alike.
+                lines.push((EditLine::Shifted(old), Vec::new()));
+                lines.push((EditLine::Shifted(new), Vec::new()));
             }
         }
         (old_at, new_at) = (old_end + 1, new_end + 1);
@@ -144,6 +172,17 @@ fn pair_run<'a>(
 
 /// The byte ranges of words in a line.
 type Words = Vec<Range<usize>>;
+
+/// The indentation `new` gained over `old`, as the range a re-indented line marks: none when
+/// it lost some.
+fn gained(old: &str, new: &str) -> Words {
+    let (old, new) = (indent(old), indent(new));
+    if new.len() <= old.len() {
+        return Vec::new();
+    }
+    let start = if new.starts_with(old) { old.len() } else { 0 };
+    std::iter::once(start..new.len()).collect()
+}
 
 /// The leading whitespace of `text` as the one range a line marks when only it changed.
 fn leading(text: &str) -> Words {
@@ -327,6 +366,7 @@ mod tests {
             .iter()
             .map(|(line, _)| match line {
                 EditLine::Kept(kept) => format!("= {}", kept.text),
+                EditLine::Shifted(shifted) => format!("~ {}", shifted.text),
                 EditLine::Old(old) => format!("- {}", old.text),
                 EditLine::New(new) => format!("+ {}", new.text),
             })
@@ -335,9 +375,8 @@ mod tests {
 
     use DiffLineKind::{New, Old, Same};
 
-    /// A block re-indented as a whole is named re-indented, with no other edits, and each line
-    /// still shows old and new with only its indentation marked: in Python or YAML a re-indent
-    /// can change what the code means.
+    /// A block re-indented as a whole is named re-indented by how far, and each line shows once
+    /// in its new indentation, the indentation it gained marked.
     #[test]
     fn a_block_shifted_as_one_is_reindented() {
         let diff = diff(&[
@@ -350,18 +389,13 @@ mod tests {
         ]);
         let edits = edits(&diff);
         assert!(edits.reindented && !edits.edited);
+        assert_eq!(edits.shift, 4);
         assert_eq!(
             shapes(&edits),
-            [
-                "- fn a() {",
-                "+     fn a() {",
-                "-     b();",
-                "+         b();",
-                "- }",
-                "+     }"
-            ]
+            ["~     fn a() {", "~         b();", "~     }"]
         );
-        assert_eq!(edits.lines[1].1, [span(0, 4)]);
+        assert_eq!(edits.lines[0].1, [span(0, 4)]);
+        assert_eq!(edits.lines[1].1, [span(4, 8)]);
     }
 
     /// An uneven re-indent may change what the code means, so its lines are edits of their

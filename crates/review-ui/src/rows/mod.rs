@@ -885,7 +885,9 @@ impl Pusher<'_> {
         for (line, changed) in moves::edits(diff).lines {
             // A kept line shows its new version, numbered on both sides.
             let (kind, shown) = match line {
-                moves::EditLine::Kept(kept) => (RowKind::NestedSame, kept),
+                moves::EditLine::Kept(line) | moves::EditLine::Shifted(line) => {
+                    (RowKind::NestedSame, line)
+                }
                 moves::EditLine::Old(old) => (RowKind::NestedOld, old),
                 moves::EditLine::New(new) => (RowKind::NestedNew, new),
             };
@@ -1199,16 +1201,26 @@ fn move_text(found: &MoveView, source: bool) -> String {
     } else {
         ("↙", "from", &found.source.location)
     };
-    let edits = match (found.kind, &found.inner) {
-        (review_core::analysis::MoveKind::Moved, _) => "",
+    // A move that only re-indented its code says how far, after where it went.
+    let (edits, shifted) = match (found.kind, &found.inner) {
+        (review_core::analysis::MoveKind::Moved, _) => ("", String::new()),
         (review_core::analysis::MoveKind::MovedWithEdits, Some(inner)) => {
             let edits = moves::edits(inner);
-            match (edits.edited, edits.reindented) {
-                (false, true) => " and re-indented",
-                _ => " with edits",
+            if edits.reindented {
+                let way = if edits.shift > 0 {
+                    "deeper"
+                } else {
+                    "shallower"
+                };
+                (
+                    "",
+                    format!(", re-indented {} {way}", edits.shift.unsigned_abs()),
+                )
+            } else {
+                (" with edits", String::new())
             }
         }
-        (review_core::analysis::MoveKind::MovedWithEdits, None) => " with edits",
+        (review_core::analysis::MoveKind::MovedWithEdits, None) => (" with edits", String::new()),
     };
     if found.source.location.path == found.target.location.path {
         let lines = if other.line == other.end_line {
@@ -1216,10 +1228,10 @@ fn move_text(found: &MoveView, source: bool) -> String {
         } else {
             format!("lines {}–{}", other.line, other.end_line)
         };
-        return format!("{arrow} moved{edits} {direction} {lines} of this file");
+        return format!("{arrow} moved{edits} {direction} {lines} of this file{shifted}");
     }
     format!(
-        "{arrow} moved{edits} {direction} {}:{}–{}",
+        "{arrow} moved{edits} {direction} {}:{}–{}{shifted}",
         other.path, other.line, other.end_line
     )
 }
