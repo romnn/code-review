@@ -78,11 +78,13 @@ impl Model {
         }))
     }
 
-    /// Copies the selected text.
+    /// Copies the selected text to the clipboard and the primary selection.
     pub(super) fn copy(&mut self) {
         match self.selected_text() {
             Some(text) => {
                 let lines = text.lines().count().max(1);
+                // Linux's primary selection too, pasted with the middle button.
+                self.effect(Effect::CopyPrimary(text.clone()));
                 self.effect(Effect::Copy(text));
                 self.set_status(format!("Copied {}.", plural(lines, "line")));
             }
@@ -176,14 +178,11 @@ impl Model {
         self.dragging = None;
     }
 
-    /// The button came up: a dragged selection ends, and its text goes to the primary
-    /// selection.
+    /// The button came up: a dragged selection ends, and with copy-on-select its text is
+    /// copied as an explicit copy does; without it, selecting copies nothing.
     pub fn release_text(&mut self) {
-        if self.dragging.take().is_some()
-            && let Some(text) = self.selected_text()
-        {
-            // Linux's primary selection, pasted with the middle button.
-            self.effect(Effect::CopyPrimary(text));
+        if self.dragging.take().is_some() && self.settings.copy_on_select {
+            self.copy();
         }
     }
 

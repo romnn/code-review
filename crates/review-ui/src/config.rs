@@ -39,6 +39,9 @@
 //! [lsp]
 //! enabled = true    # false never starts a language server; `g d` then says it is off
 //!
+//! [mouse]
+//! copy_on_select = false # whether ending a drag copies what it selected, as `y` does
+//!
 //! [keys]            # replace an action's keys; `?` in the app lists the actions
 //! NextUnit = ["n", "ctrl-j"]
 //! ToggleOverview = []   # unbound
@@ -161,6 +164,8 @@ struct File {
     review: ReviewSection,
     #[serde(default)]
     lsp: LspSection,
+    #[serde(default)]
+    mouse: MouseSection,
     /// Read table by table, so a mistake in one style leaves the others usable.
     #[serde(default)]
     styles: BTreeMap<String, toml::Value>,
@@ -241,6 +246,12 @@ struct ReviewSection {
 #[serde(deny_unknown_fields)]
 struct LspSection {
     enabled: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct MouseSection {
+    copy_on_select: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -508,6 +519,9 @@ pub struct Config {
     pub language_servers: bool,
     /// Whether a review of the working tree follows it as it changes.
     pub live: bool,
+    /// Whether ending a drag copies what it selected to the clipboard and the primary
+    /// selection, rather than only an explicit copy; off, selecting never touches either.
+    pub copy_on_select: bool,
     /// The pane widths.
     pub layout: LayoutConfig,
     /// Key overrides: an action's name and the keys that replace its defaults.
@@ -540,6 +554,7 @@ impl Default for Config {
             auto_approve_formatting: true,
             language_servers: true,
             live: true,
+            copy_on_select: false,
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
             styles: BTreeMap::new(),
@@ -896,6 +911,10 @@ pub fn parse(text: &str) -> Result<Config, String> {
             .unwrap_or(defaults.auto_approve_formatting),
         language_servers: file.lsp.enabled.unwrap_or(defaults.language_servers),
         live: file.review.live.unwrap_or(defaults.live),
+        copy_on_select: file
+            .mouse
+            .copy_on_select
+            .unwrap_or(defaults.copy_on_select),
         layout: LayoutConfig {
             sidebar: sidebar_width("sidebar", file.layout.sidebar)?,
             tui_sidebar: sidebar_width("tui_sidebar", file.layout.tui_sidebar)?,

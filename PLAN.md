@@ -1306,12 +1306,17 @@ The terminal app, which `cr` runs without a command (and the unreleased `review-
 QA scripts drive), draws `review-ui`'s model in a terminal and works as review-gui does: the same keys
 and `[keys]` overrides, configuration file, marks, folded folders, themes, diff styles, pickers,
 settings, find, file buffer, overview and `?` sheet, and mouse selection. A drag selects text
-inside one pane, which goes to the primary selection when the button comes up; `y`, a right
-click, Ctrl+C or Ctrl+Insert copy it (Ctrl+Shift+C and Super+C too, where the terminal passes
-them on rather than keeping them for its own copy), Esc drops it, and the bar dims `y copy`
-while nothing is selected. A copy goes to the terminal through OSC 52, which also works over
-ssh, and on a local session also to `wl-copy`, `xclip` or `xsel` (`pbcopy` on macOS), in a process
-group of its own, since terminals such as GNOME Terminal ignore OSC 52, as micromux does.
+inside one pane and copies nothing by itself; `y`, a right click, Ctrl+C or Ctrl+Insert copy it
+to the clipboard and the primary selection (Ctrl+Shift+C and Super+C too, where the terminal
+passes them on rather than keeping them for its own copy, as Ghostty's `performable:` binding
+does and Alacritty cannot), Esc drops it, and the bar dims `y copy` while nothing is selected.
+`[mouse] copy_on_select = true`, in the configuration file only, copies as a drag ends, as in
+micromux. Both front ends follow it. A copy goes to the terminal through OSC 52, which also works
+over ssh, and on a local session also to `wl-copy`, `xclip` or `xsel` (`pbcopy` on macOS), in a
+process group of its own, since terminals such as GNOME Terminal ignore OSC 52, as micromux
+does. On GNOME the X11 tools go first: GNOME offers no Wayland clipboard to a program without a
+window, so `wl-copy` maps one for a moment there, which flashes in the dock, while the X11
+tools copy through XWayland with a window that never shows.
 
 - **Stack.** ratatui 0.30 with its crossterm 0.29 backend. ratatui was chosen over lower-level
   crates such as crossterm alone or termwiz because it already gives a cell buffer and diffs

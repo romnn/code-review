@@ -93,6 +93,8 @@ pub struct Settings {
     pub context: usize,
     /// Whether the files pane and the file header shorten a folder chain's middle folders.
     pub shorten_chains: bool,
+    /// Whether ending a drag copies what it selected, as an explicit copy does.
+    pub copy_on_select: bool,
     /// Whether approved hunks fold, as the configuration sets it.
     pub approved: crate::config::Approved,
     /// Which units still need the reviewer, as the configuration sets it: whether proven

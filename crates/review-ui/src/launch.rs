@@ -178,6 +178,7 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
         styles,
         context: config.context,
         shorten_chains: config.shorten_chains,
+        copy_on_select: config.copy_on_select,
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,

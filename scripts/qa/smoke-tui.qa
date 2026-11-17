@@ -70,16 +70,19 @@ key z a
 state
 expect "row_count":38,
 
-# The mouse in the diff: a drag selects text across rows, which goes to the primary selection
-# when the button comes up, and `y`, as Ctrl+C, copies it; a press on a hunk's header selects
-# that hunk, and one on a rule of unchanged lines shows more of them.
+# The mouse in the diff: a drag selects text across rows and copies nothing by itself, since
+# copy-on-select is off by default, and `y`, as Ctrl+C, copies it to the clipboard and the
+# primary selection; a press on a hunk's header selects that hunk, and one on a rule of
+# unchanged lines shows more of them.
 drag 44 6 59 8
 state
 expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[5,4\],"head":\[7,19\]\}
 primary
-expect ^"pub fn apply_batch\(&mut self, entries: &\[Entry\]\) -> usize \{\\n
+expect ^null
 key y
 clipboard
+expect ^"pub fn apply_batch\(&mut self, entries: &\[Entry\]\) -> usize \{\\n
+primary
 expect ^"pub fn apply_batch
 state
 expect "status":"Copied 3 lines\."

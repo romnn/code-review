@@ -78,7 +78,10 @@ struct Host {
     clocks: Vec<Completion>,
     /// Jobs that wait for something outside the app, which only a test runs.
     waits: Vec<Job>,
+    /// What the model copied to the clipboard.
     copied: Vec<String>,
+    /// What the model put in the primary selection.
+    primary: Vec<String>,
     /// How the model asked the front end to scroll its sheets.
     sheet_steps: Vec<SheetStep>,
     /// How many times the model asked the front end to quit.
@@ -104,6 +107,7 @@ impl Host {
             clocks: Vec::new(),
             waits: Vec::new(),
             copied: Vec::new(),
+            primary: Vec::new(),
             sheet_steps: Vec::new(),
             quits: 0,
             logged: Vec::new(),
@@ -146,7 +150,8 @@ impl Host {
                     self.clocks.push(completion);
                 }
                 Effect::After(_, completion) => self.timers.push(completion),
-                Effect::Copy(text) | Effect::CopyPrimary(text) => self.copied.push(text),
+                Effect::Copy(text) => self.copied.push(text),
+                Effect::CopyPrimary(text) => self.primary.push(text),
                 Effect::ScrollSheet(step) => self.sheet_steps.push(step),
                 Effect::Quit => self.quits += 1,
                 Effect::Title(_) | Effect::Fullscreen => {}
@@ -216,6 +221,7 @@ fn settings() -> Settings {
         code_size: 17.0,
         context: config.context,
         shorten_chains: config.shorten_chains,
+        copy_on_select: config.copy_on_select,
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -1514,55 +1520,70 @@ fn a_python_reindent_shows_each_line_once() {
     );
 }
 
-/// A copy hands the selected text to the clipboard, and a drag that selects text hands it to
-/// the primary selection when the button comes up; a click that selects nothing copies nothing.
+/// A copy hands the selected text to the clipboard and the primary selection, while a drag
+/// only selects; a click that selects nothing copies nothing.
 #[test]
 fn selections_reach_the_clipboards() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open(demo(dir.path()));
+    let (row, line) = engine_line(&mut host);
+    host.update(|model| model.press_text(text_press(row, 0)));
+    host.update(|model| model.drag_text(Pane::Diff, TextPos { row, col: 4 }));
+    host.update(Model::release_text);
+    assert!(host.copied.is_empty() && host.primary.is_empty());
+
+    // Copying takes the text to both.
+    host.dispatch(Action::Copy);
+    assert_eq!(host.copied, [line[..4].to_owned()]);
+    assert_eq!(host.primary, [line[..4].to_owned()]);
+    assert_eq!(host.model().status, "Copied 1 line.");
+
+    // A click without a drag leaves an empty selection, which reaches neither clipboard.
+    host.update(|model| model.press_text(text_press(row, 2)));
+    host.update(Model::release_text);
+    host.dispatch(Action::Copy);
+    assert_eq!(host.copied.len(), 1);
+}
+
+/// With `[mouse] copy_on_select`, ending a drag copies what it selected, as `y` does.
+#[test]
+fn copy_on_select_copies_when_a_drag_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings();
+    settings.copy_on_select = true;
+    let mut host = Host::open_with(demo(dir.path()), settings);
+    let (row, line) = engine_line(&mut host);
+    host.update(|model| model.press_text(text_press(row, 0)));
+    host.update(|model| model.drag_text(Pane::Diff, TextPos { row, col: 4 }));
+    host.update(Model::release_text);
+    assert_eq!(host.copied, [line[..4].to_owned()]);
+    assert_eq!(host.primary, [line[..4].to_owned()]);
+    assert_eq!(host.model().status, "Copied 1 line.");
+}
+
+/// Shows `src/engine.rs` in the diff, and returns the first code row longer than four bytes
+/// and its text.
+fn engine_line(host: &mut Host) -> (usize, String) {
     host.update(|model| model.show_file("src/engine.rs"));
     host.dispatch(Action::FocusDiff);
-    let (row, line) = {
-        let model = host.model();
-        let row = (0..model.rows.rows.len())
-            .find(|&row| {
-                model.rows.rows[row].is_code()
-                    && model
-                        .copyable(Pane::Diff, Column::Whole, row)
-                        .is_some_and(|code| code.len() > 4)
-            })
-            .unwrap();
-        let line = model
-            .copyable(Pane::Diff, Column::Whole, row)
-            .unwrap()
-            .to_owned();
-        (row, line)
-    };
-    let press = |col| TextPress {
+    let model = host.model();
+    (0..model.rows.rows.len())
+        .find_map(|row| {
+            let code = model.copyable(Pane::Diff, Column::Whole, row)?;
+            (model.rows.rows[row].is_code() && code.len() > 4).then(|| (row, code.to_owned()))
+        })
+        .unwrap()
+}
+
+/// A single press in the diff's whole column at `row` and `col`.
+fn text_press(row: usize, col: usize) -> TextPress {
+    TextPress {
         pane: Pane::Diff,
         column: Column::Whole,
         pos: TextPos { row, col },
         clicks: 1,
         extend: false,
-    };
-
-    // A drag over the first four bytes of the line.
-    host.update(|model| model.press_text(press(0)));
-    host.update(|model| model.drag_text(Pane::Diff, TextPos { row, col: 4 }));
-    host.update(Model::release_text);
-    assert_eq!(host.copied, [line[..4].to_owned()]);
-
-    // Copying takes the same text.
-    host.dispatch(Action::Copy);
-    assert_eq!(host.copied.len(), 2);
-    assert_eq!(host.copied[1], line[..4]);
-    assert_eq!(host.model().status, "Copied 1 line.");
-
-    // A click without a drag leaves an empty selection, which reaches neither clipboard.
-    host.update(|model| model.press_text(press(2)));
-    host.update(Model::release_text);
-    host.dispatch(Action::Copy);
-    assert_eq!(host.copied.len(), 2);
+    }
 }
 
 /// Runs a frame's layout phase in the fixed window, as a front end does before it draws.
@@ -2616,6 +2637,7 @@ fn open_unsettled(review: Review, workers: usize) -> Host {
         clocks: Vec::new(),
         waits: Vec::new(),
         copied: Vec::new(),
+        primary: Vec::new(),
         sheet_steps: Vec::new(),
         quits: 0,
         logged: Vec::new(),

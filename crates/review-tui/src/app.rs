@@ -1127,8 +1127,7 @@ mod tests {
     }
 
     /// A drag over code panned sideways selects the characters drawn under the pointer, which
-    /// lie past the line's start by the pan, and the release puts them in the primary
-    /// selection as review-gui's does.
+    /// lie past the line's start by the pan, and a right click copies them.
     #[test]
     fn a_drag_over_panned_code_selects_what_shows() {
         let dir = tempfile::tempdir().unwrap();
@@ -1188,18 +1187,19 @@ mod tests {
         );
         settle(&mut app, &receiver, &mut terminal);
         assert!(
-            app.take_outgoing()
-                .contains(&Outgoing::CopyPrimary(text[skip..skip + 5].to_owned())),
-            "the selection is the five characters shown from the pan on: {:?}",
-            &text[skip..skip + 5]
+            !app.take_outgoing()
+                .iter()
+                .any(|out| matches!(out, Outgoing::Copy(_) | Outgoing::CopyPrimary(_))),
+            "selecting alone copies nothing"
         );
-        // A right click copies it to the clipboard, as `y` does.
+        // A right click copies the five characters shown from the pan on, as `y` does.
         mouse_at(&mut app, MouseEventKind::Up(MouseButton::Right), code_at, y);
         settle(&mut app, &receiver, &mut terminal);
         assert!(
             app.take_outgoing()
                 .contains(&Outgoing::Copy(text[skip..skip + 5].to_owned())),
-            "a right click copies the selection"
+            "a right click copies the selection: {:?}",
+            &text[skip..skip + 5]
         );
     }
 
