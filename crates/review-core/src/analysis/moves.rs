@@ -2,8 +2,10 @@
 //!
 //! Removed and added line runs are matched by their trimmed text, longest first, one-to-one and
 //! without overlap.
-//! A match is a plain move only when every line is byte-for-byte equal; anything else, including
-//! re-indentation, is at most a move with edits, whose differences stay visible.
+//! A match is a plain move when every line is byte-for-byte equal, or when the caller proves
+//! that the two blocks differ only in formatting, as a re-indented block or one whose lines a
+//! formatter wrapped anew does; anything else is at most a move with edits, whose differences
+//! stay visible.
 //! Nearby matches between the same two chunks merge into one move with edits when at least
 //! [`MIN_EQUAL_RATIO`] of the lines are equal.
 
@@ -59,7 +61,13 @@ struct Block {
 
 /// Detects moves among the chunk units and sets [`Unit::moved`] on units that plain moves cover
 /// completely.
-pub(super) fn detect(units: &mut [Unit]) -> Vec<Move> {
+///
+/// `formatting_only` says whether a move with edits differs only in formatting, which makes it a
+/// plain move.
+pub(super) fn detect(
+    units: &mut [Unit],
+    mut formatting_only: impl FnMut(&Move, &[Unit]) -> bool,
+) -> Vec<Move> {
     let chunks: Vec<ChunkLines<'_>> = units
         .iter()
         .enumerate()
@@ -75,10 +83,15 @@ pub(super) fn detect(units: &mut [Unit]) -> Vec<Move> {
         })
         .collect();
     let matches = assign(&chunks, candidates(&chunks));
-    let moves: Vec<Move> = merge(matches)
+    let mut moves: Vec<Move> = merge(matches)
         .into_iter()
         .filter_map(|block| finish(&chunks, &block))
         .collect();
+    for found in &mut moves {
+        if found.kind == MoveKind::MovedWithEdits && formatting_only(found, units) {
+            found.kind = MoveKind::Moved;
+        }
+    }
     for coverage in plain_coverage(&chunks, &moves) {
         if let Some(unit) = units.get_mut(coverage.unit.get()) {
             unit.moved = coverage.covered;
