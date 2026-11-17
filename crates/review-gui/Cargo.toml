@@ -20,6 +20,10 @@ review-ui.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 
+[dev-dependencies]
+# The keymap tests bind keys the way the app does, which takes an `App`.
+gpui = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true
 

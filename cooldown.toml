@@ -1,1 +1,6 @@
 min-age = "14d"
+
+[global]
+# The demo trees are a fixture's snapshots of an imaginary project, with hand-written lockfiles
+# that review-core's tests depend on, so they are never resolved or upgraded.
+exclude-folders = ["/crates/review-core/demo"]

@@ -61,12 +61,14 @@ rustix = { version = "1.1", default-features = false, features = ["process", "st
 
 # Front-end dependencies: gpui and gpui-component for review-gui, the rest for review-ui and
 # review-tui.
-# gpui-component pins an exact gpui-pre release.
-# Its optional tree-sitter highlighter stays off: it wants crates.io tree-sitter 0.26, which would
-# conflict (`links = "tree-sitter"`) with the tree-sitter review-core links.
-gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false }
-gpui-component = { version = "=0.8.0", default-features = false }
+# gpui-component, gpui-kit-assets and gpui-pre-platform each pin an exact gpui-pre release, which
+# keeps the family on one gpui-pre snapshot, so these caret requirements let an upgrade move the
+# whole family together.
+# gpui-component's optional tree-sitter highlighter stays off: it wants crates.io tree-sitter 0.26,
+# which would conflict (`links = "tree-sitter"`) with the tree-sitter review-core links.
+gpui = { package = "gpui-pre", version = "0.3.9" }
+gpui-platform = { package = "gpui-pre-platform", version = "0.3.9", default-features = false }
+gpui-component = { version = "0.9.0", default-features = false }
 # Hands review-gui the completion of a job that runs on a thread of its own; the version gpui
 # links.
 futures-channel = "0.3.34"
@@ -82,7 +84,7 @@ tracing = { version = "0.1.44", default-features = false, features = ["std", "at
 tracing-perfetto = { git = "https://github.com/romnn/tracing-perfetto.git", rev = "75dcd7480704cf6168891fb138c77188627ded7f" }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
 # The icons gpui-component draws, such as the find bar's clear button.
-gpui-kit-assets = "=0.8.0"
+gpui-kit-assets = "0.9.0"
 toml = "1"
 # Writes choices made in the app back into the configuration, keeping its comments; the same
 # TOML 1.1 grammar as `toml`, which reads it.

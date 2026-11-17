@@ -49,8 +49,8 @@ use std::time::Duration;
 
 use gpui::{
     AsyncWindowContext, Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PlatformInput, ScrollDelta, ScrollWheelEvent, WeakEntity, Window, point, px,
-    size,
+    MouseUpEvent, PlatformInput, ScrollDelta, ScrollEvent, ScrollSource, WeakEntity, Window, point,
+    px, size,
 };
 use gpui_component::scroll::ScrollbarHandle as _;
 use review_ui::frame::List;
@@ -340,14 +340,12 @@ async fn run(
         Command::Key(keystrokes) => {
             let mut result = Ok(());
             for keystroke in keystrokes {
-                result = match Keystroke::parse(keystroke) {
-                    Ok(keystroke) => cx
-                        .update(|window, cx| {
-                            window.dispatch_keystroke(keystroke, cx);
-                        })
-                        .map_err(|err| err.to_string()),
-                    Err(err) => Err(err.to_string()),
-                };
+                result = parse_keystroke(keystroke, cx).and_then(|keystroke| {
+                    cx.update(|window, cx| {
+                        window.dispatch_keystroke(keystroke, cx);
+                    })
+                    .map_err(|err| err.to_string())
+                });
                 if result.is_err() {
                     break;
                 }
@@ -434,11 +432,12 @@ async fn run(
                 )?;
                 dispatch(
                     cx,
-                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    PlatformInput::Scroll(ScrollEvent {
                         position,
                         delta: ScrollDelta::Pixels(point(px(0.0), px(-dy))),
                         modifiers: Modifiers::default(),
                         touch_phase: gpui::TouchPhase::Moved,
+                        source: ScrollSource::Pointer,
                     }),
                 )
             })
@@ -533,6 +532,14 @@ async fn run(
     reply.unwrap_or_else(|err| format!("error: {err}"))
 }
 
+/// Parses `source` as gpui parses a key binding, resolving `secondary-` for the host system.
+fn parse_keystroke(source: &str, cx: &mut AsyncWindowContext) -> Result<Keystroke, String> {
+    let os = cx
+        .update(|_, cx| cx.platform_info().os)
+        .map_err(|err| err.to_string())?;
+    Keystroke::parse_with_os(source, os).map_err(|err| err.to_string())
+}
+
 /// Types `keystroke` `count` times, one every `interval`, as a held key repeats, then waits for
 /// the window to settle and reports the handling time of each keystroke and the input-to-frame
 /// latency over the burst.
@@ -543,7 +550,7 @@ async fn repeat(
     this: &WeakEntity<ReviewApp>,
     cx: &mut AsyncWindowContext,
 ) -> Result<String, String> {
-    let keystroke = Keystroke::parse(keystroke).map_err(|err| err.to_string())?;
+    let keystroke = parse_keystroke(keystroke, cx)?;
     this.update(cx, |this, _| this.latency.samples.clear())
         .map_err(|err| err.to_string())?;
     let started = std::time::Instant::now();

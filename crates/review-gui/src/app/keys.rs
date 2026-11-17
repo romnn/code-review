@@ -454,7 +454,9 @@ mod tests {
 
     use std::time::Instant;
 
-    use gpui::{DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, KeyContext};
+    use gpui::{
+        KeyBinding, KeyBindingContextPredicate, KeyContext, OperatingSystem, TestAppContext,
+    };
     use review_ui::keymap::{Area, Binding, keymap};
     use review_ui::keys::{
         KeyDown, Keystroke, Matcher, Matches, Modifiers, Outcome, Resolution, Target,
@@ -465,9 +467,16 @@ mod tests {
 
     gpui::actions!(review_gui_test, [Bound]);
 
+    /// The system gpui resolves `secondary-` for, the one the port's grammar resolves it for.
+    const HOST_OS: OperatingSystem = if cfg!(target_os = "macos") {
+        OperatingSystem::Mac
+    } else {
+        OperatingSystem::Linux
+    };
+
     /// gpui's parse of one keystroke in the port's shape, or `None` when gpui rejects it.
     fn gpui_parse(source: &str) -> Option<Keystroke> {
-        gpui::Keystroke::parse(source)
+        gpui::Keystroke::parse_with_os(source, HOST_OS)
             .ok()
             .map(|parsed| keystroke(&parsed))
     }
@@ -546,7 +555,7 @@ mod tests {
 
     /// `bindings` bound in gpui as review-gui once bound them: each key of each entry in
     /// keymap order, in its area's key context, with the action's name as the binding's input.
-    fn gpui_keymap(bindings: &[Binding]) -> gpui::Keymap {
+    fn gpui_keymap(bindings: &[Binding], cx: &gpui::App) -> gpui::Keymap {
         let built = bindings.iter().flat_map(|binding| {
             let predicate = KeyBindingContextPredicate::parse(binding.area.context())
                 .map(Rc::new)
@@ -558,7 +567,7 @@ mod tests {
                     Some(Rc::clone(&predicate)),
                     false,
                     Some(binding.action.into()),
-                    &DummyKeyboardMapper,
+                    cx,
                 )
                 .ok()
             })
@@ -617,7 +626,7 @@ mod tests {
                 "shift-enter",
             ]);
         for source in sources {
-            let Ok(parsed) = gpui::Keystroke::parse(source) else {
+            let Ok(parsed) = gpui::Keystroke::parse_with_os(source, HOST_OS) else {
                 continue;
             };
             add(keystroke(&parsed));
@@ -681,7 +690,7 @@ mod tests {
         for overrides in [BTreeMap::new(), overrides] {
             let (bindings, _) = keymap(&overrides);
             let matcher = Matcher::<()>::new(&bindings);
-            let gpui = gpui_keymap(&bindings);
+            let gpui = TestAppContext::single().update(|cx| gpui_keymap(&bindings, cx));
             let typed = typed_keystrokes(&bindings);
 
             // Every keystroke alone, and after each key that begins a sequence.
@@ -766,8 +775,9 @@ mod tests {
             focus: (),
             takes_text: true,
         };
-        let gpui = |source: &str| gpui::Keystroke::parse(source).expect("a valid keystroke");
-        let key = |source: &str| KeyDown {
+        let gpui =
+            |source: &'static str| gpui::Keystroke::parse(source).expect("a valid keystroke");
+        let key = |source: &'static str| KeyDown {
             keystroke: keystroke(&gpui(source)),
             prefer_character_input: false,
         };

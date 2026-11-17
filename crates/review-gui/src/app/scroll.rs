@@ -13,7 +13,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Canvas, Context, DispatchPhase, Hitbox, HitboxBehavior, IsZero as _, Pixels,
-    Point, ScrollWheelEvent, Size, UniformListScrollHandle, WeakEntity, Window, canvas, point, px,
+    Point, ScrollEvent, Size, UniformListScrollHandle, WeakEntity, Window, canvas, point, px,
 };
 use gpui_component::scroll::ScrollbarHandle;
 pub use review_ui::scroll::{float, narrow, rows, whole};
@@ -266,7 +266,7 @@ pub fn wheel_layer(app: WeakEntity<ReviewApp>, list: List) -> Canvas<Hitbox> {
         move |_, hitbox, window, _| {
             let line_height = window.line_height();
             window.on_mouse_event(
-                move |event: &ScrollWheelEvent, phase, window: &mut Window, cx: &mut App| {
+                move |event: &ScrollEvent, phase, window: &mut Window, cx: &mut App| {
                     if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                         return;
                     }
@@ -305,7 +305,7 @@ impl ReviewApp {
     pub(super) fn wheel(
         &mut self,
         list: List,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         line_height: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,

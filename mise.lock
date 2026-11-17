@@ -198,42 +198,40 @@ url = "https://github.com/charmbracelet/freeze/releases/download/v0.2.2/freeze_0
 url_api = "https://api.github.com/repos/charmbracelet/freeze/releases/assets/242747196"
 
 [[tools."aqua:linebender/resvg"]]
-version = "0.49.0"
+version = "0.50.0"
 backend = "aqua:linebender/resvg"
 specifiers = ["latest"]
 
 [tools."aqua:linebender/resvg"."platforms.linux-x64"]
-checksum = "sha256:216637e75e909e53e3098b0875cd5f7da2fdc8b4359771b4a29b539afff9d3f5"
-checksum_source = "mise-versions"
-url = "https://github.com/linebender/resvg/releases/download/v0.49.0/resvg-linux-x86_64.tar.gz"
-url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/672458584"
+checksum = "sha256:5d1c9ffd43c82fb802d92cef8100055c612cd3e248d5a787c20079293a456e21"
+url = "https://github.com/linebender/resvg/releases/download/v0.50.0/resvg-linux-x86_64.tar.gz"
+url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/736379481"
 
 [tools."aqua:linebender/resvg"."platforms.macos-arm64"]
-checksum = "sha256:847acb5210c7c6244b5e8f07dd62fa1ce596108cce8193628ebfd5750504b259"
-checksum_source = "mise-versions"
-url = "https://github.com/linebender/resvg/releases/download/v0.49.0/resvg-macos-aarch64.zip"
-url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/672460044"
+checksum = "sha256:8155b569f2b93723ba3645b53536eead3b591c8faf62bdaafd3033ba37838837"
+url = "https://github.com/linebender/resvg/releases/download/v0.50.0/resvg-macos-aarch64.zip"
+url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/736385482"
 
 [[tools."aqua:nextest-rs/nextest/cargo-nextest"]]
-version = "0.9.151"
+version = "0.9.152"
 backend = "aqua:nextest-rs/nextest/cargo-nextest"
 specifiers = ["latest"]
 
 [tools."aqua:nextest-rs/nextest/cargo-nextest"."platforms.linux-x64"]
-checksum = "sha256:1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4"
+checksum = "sha256:d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"
 checksum_source = "mise-versions"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/703600788"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/745393873"
 
 [tools."aqua:nextest-rs/nextest/cargo-nextest"."platforms.macos-arm64"]
-checksum = "sha256:d1d7d025d4bfc9fb154cd76aea3949bd78534829a0589abefa6e5dd4edb135dd"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-universal-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/703616437"
+checksum = "sha256:2fadf57df4243e691f088ee3bff4f4ab9af16da0c95a1db84b5cb1685e098a76"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-universal-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/745423352"
 
 [tools."aqua:nextest-rs/nextest/cargo-nextest"."platforms.windows-x64"]
-checksum = "sha256:e51bdb4b5883df48f335381b287378edb244318fac65ae0adaf6b9e69298246b"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-pc-windows-msvc.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/703606897"
+checksum = "sha256:0384fc89a5a547d4fd5e183fcc101d31dba2837feafd8e64d5ea003a0ddb1941"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-pc-windows-msvc.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/745407479"
 
 [[tools."aqua:oxipng/oxipng"]]
 version = "10.2.1"
@@ -438,25 +436,24 @@ url = "https://github.com/romnn/cargo-feature-combinations/releases/download/v0.
 url_api = "https://api.github.com/repos/romnn/cargo-feature-combinations/releases/assets/730030589"
 
 [[tools."github:romnn/cooldown"]]
-version = "0.0.29"
+version = "0.0.31"
 backend = "github:romnn/cooldown"
 specifiers = ["latest"]
 
 [tools."github:romnn/cooldown"."platforms.linux-x64"]
-checksum = "sha256:b4f20f56ba0aa6059c4c0766e7d01fb712db0cdc912e7a8d600bcfa3c00a6cd2"
-checksum_source = "mise-versions"
-url = "https://github.com/romnn/cooldown/releases/download/v0.0.29/cooldown_0.0.29_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/romnn/cooldown/releases/assets/713606189"
+checksum = "sha256:f286878a7a5450944504e22cd917bead9d9b1d86c97380726cf658f1173aa0b0"
+url = "https://github.com/romnn/cooldown/releases/download/v0.0.31/cooldown_0.0.31_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/romnn/cooldown/releases/assets/756933255"
 
 [tools."github:romnn/cooldown"."platforms.macos-arm64"]
-checksum = "sha256:cdb24c8841bf8d53cc9c4b9ddd41c1efab4098c6849e39dcb671079f49392d86"
-url = "https://github.com/romnn/cooldown/releases/download/v0.0.29/cooldown_0.0.29_darwin_arm64.tar.gz"
-url_api = "https://api.github.com/repos/romnn/cooldown/releases/assets/713606253"
+checksum = "sha256:ad45e7fe7bca63c9babb90312cc74441601fd9045b1ff57a2c48ea18eb24f50d"
+url = "https://github.com/romnn/cooldown/releases/download/v0.0.31/cooldown_0.0.31_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/romnn/cooldown/releases/assets/756933220"
 
 [tools."github:romnn/cooldown"."platforms.windows-x64"]
-checksum = "sha256:0531e8f9f14125b47c842698f1c1328470b383a453b0194fc09bbf7058baf852"
-url = "https://github.com/romnn/cooldown/releases/download/v0.0.29/cooldown_0.0.29_windows_amd64.zip"
-url_api = "https://api.github.com/repos/romnn/cooldown/releases/assets/713606263"
+checksum = "sha256:6a429d7022c3bd879afbe62c7baad82cd379bd473a2542284de4c90b691f9509"
+url = "https://github.com/romnn/cooldown/releases/download/v0.0.31/cooldown_0.0.31_windows_amd64.zip"
+url_api = "https://api.github.com/repos/romnn/cooldown/releases/assets/756933221"
 
 [[tools."github:rust-cross/cargo-zigbuild"]]
 version = "0.24.1"
@@ -524,26 +521,26 @@ url = "https://github.com/crate-ci/typos/releases/download/v1.52.2/typos-v1.52.2
 url_api = "https://api.github.com/repos/crate-ci/typos/releases/assets/733790297"
 
 [[tools.uv]]
-version = "0.13.7"
+version = "0.13.8"
 backend = "aqua:astral-sh/uv"
 specifiers = ["latest"]
 
 [tools.uv."platforms.linux-x64"]
-checksum = "sha256:c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83"
-url = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/704009823"
+checksum = "sha256:5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.8/uv-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/740313966"
 provenance = "github-attestations"
 
 [tools.uv."platforms.macos-arm64"]
-checksum = "sha256:81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731"
-url = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/704009442"
+checksum = "sha256:6b71028a6b904f2ae3340ef52e595512de807d06c0a20eaef2f692581b246558"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.8/uv-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/740313603"
 provenance = "github-attestations"
 
 [tools.uv."platforms.windows-x64"]
-checksum = "sha256:0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021"
-url = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/704009796"
+checksum = "sha256:529e78a9cec6cd7e3e014f7ecd8bda0c113969d4ed0f2efeedb85c30943325b8"
+url = "https://github.com/astral-sh/uv/releases/download/0.13.8/uv-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/astral-sh/uv/releases/assets/740313927"
 provenance = "github-attestations"
 
 [[tools.zig]]
