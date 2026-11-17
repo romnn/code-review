@@ -86,6 +86,7 @@ shows within a second, keeping your place, and only what you mark is recorded.
 | `!` | Flag as needing review |
 | `u` | Back to unreviewed |
 | `=` | The whole file, with vim motions and `gd` to go to definition |
+| `y`, right click | Copy the text selected with the mouse; `Y` copies the hunk's unit ID |
 | `/`, `Ctrl+P`, `Ctrl+G` | Find in the diff, find a file, search file contents |
 | `v` | The whole file around its changes, or each hunk apart |
 | `\|`, `S` | Side by side or unified, next diff style |

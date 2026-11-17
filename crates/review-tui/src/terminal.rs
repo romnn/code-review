@@ -5,7 +5,8 @@
 //! bracketed paste and, where the terminal supports it, the kitty keyboard protocol's
 //! disambiguation; the title shows the review, on top of the title it had, which comes back.
 //! Every frame is wrapped in synchronized output, so the terminal never shows half of one.
-//! Copies go to the clipboard through OSC 52, which also works over ssh.
+//! Copies go to the clipboard through OSC 52, which also works over ssh, and on a local session
+//! also through the platform's clipboard command, for terminals that ignore OSC 52.
 //!
 //! Raw mode keeps the terminal's own keys from sending signals, so the ones that come are from
 //! outside: a hang-up, an interrupt or a termination quits once the marks queued and in flight
@@ -36,6 +37,7 @@ use ratatui::layout::Rect;
 use review_ui::model::{Loaded, QuitKind, Settings};
 
 use crate::app::{App, Message, Outgoing, next_batch};
+use crate::clipboard;
 use crate::color::Colors;
 use crate::log::Log;
 
@@ -244,6 +246,17 @@ fn show(
     loop {
         if lost.is_none() {
             let outgoing = app.take_outgoing();
+            for item in &outgoing {
+                match item {
+                    Outgoing::Copy(text) => {
+                        clipboard::copy_locally(text.clone(), clipboard::Board::Clipboard);
+                    }
+                    Outgoing::CopyPrimary(text) => {
+                        clipboard::copy_locally(text.clone(), clipboard::Board::Primary);
+                    }
+                    Outgoing::Title(_) => {}
+                }
+            }
             let reached =
                 send(terminal.backend_mut(), outgoing).and_then(|()| draw(&mut terminal, &mut app));
             if let Err(err) = reached {

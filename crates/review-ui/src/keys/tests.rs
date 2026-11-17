@@ -155,7 +155,6 @@ fn sequences_complete_on_their_last_key() {
         ("g g", Action::FirstHunk),
         ("z a", Action::ToggleFold),
         ("z shift-a", Action::ToggleApproved),
-        ("y i", Action::YankUnitId),
         ("shift-g", Action::LastHunk),
     ] {
         let strokes: Vec<&str> = keys.split_whitespace().collect();

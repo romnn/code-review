@@ -13,6 +13,7 @@
 //! which the QA scripts drive.
 
 mod app;
+mod clipboard;
 mod color;
 mod draw;
 mod keys;

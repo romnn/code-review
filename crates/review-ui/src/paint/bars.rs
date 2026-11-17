@@ -157,6 +157,7 @@ pub fn hint_available(model: &Model, action: &str) -> bool {
             Mode::Tree => true,
         },
         "Dismiss" => model.mode == Mode::Buffer,
+        "Copy" => model.selected_text().is_some_and(|text| !text.is_empty()),
         "ToggleDiffStyle" => model.mode != Mode::Buffer,
         _ => true,
     }
