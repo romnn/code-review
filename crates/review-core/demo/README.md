@@ -37,7 +37,10 @@ and `scheduler.rs` is the long one: 98 changes over 1248 lines, a pull request t
 cancellation and per-queue limits to a job scheduler, for moving and scrolling through a
 long file. Two of its changes are moves within the file that only formatting tells apart, which
 the engine proves plain moves: `line_error` leaves `mod config` for the top level, re-indented,
-and `occupancy_line` moves into `mod worker`, where rustfmt wraps one of its lines anew. Both sort after every other file but the root's, so most tree rows the QA scripts
+and `occupancy_line` moves into `mod worker`, where rustfmt wraps one of its lines anew. In
+`tools/stats.py`, `spread` moves into `main` the same way, but in Python that makes it a
+function of `main`, so its syntax tree changes and the move keeps its edits, each line shown old
+and new. Both sort after every other file but the root's, so most tree rows the QA scripts
 click stay where they are.
 
 Snapshots duplicate the files a commit does not change, but each one reads and edits as plain

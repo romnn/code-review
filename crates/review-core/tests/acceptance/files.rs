@@ -571,7 +571,8 @@ fn files_carry_their_change_kind() -> eyre::Result<()> {
             "src/format.rs",
             "src/hash.rs",
             "src/report.rs",
-            "src/util.rs"
+            "src/util.rs",
+            "tools/stats.py"
         ])
     );
     Ok(())

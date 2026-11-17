@@ -16,7 +16,7 @@ expect "revision":"1"
 expect "mode":"Tree"
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[6,54\],"hunks":\[13,290\],"auto_approved":6\}
+expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
 expect "layout":\{"sidebar":31,"fit":true\}
 expect "viewport":\[32,1,128,47\]
 shot 01-open

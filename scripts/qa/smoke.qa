@@ -9,7 +9,7 @@ expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
 expect "token_emphasis":false,"diff_style":"bold"
-expect "progress":\{"files":\[6,54\],"hunks":\[13,290\],"auto_approved":6\}
+expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
 shot 01-open
 
 include scripts/qa/smoke-common.qa
