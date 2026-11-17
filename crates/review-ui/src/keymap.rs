@@ -900,7 +900,9 @@ const DEFAULTS: &[Default] = &[
         // `y` yanks as vim does, the rest are the terminals' and the platforms' copy keys, which
         // reach a terminal app only where the terminal does not keep them for itself.
         &["y", "ctrl-c", "ctrl-insert", "ctrl-shift-c", "super-c"],
-        REVIEW,
+        // The files too: a selection stays while they have the keys, and a press in the diff
+        // leaves them there when the mouse may not navigate.
+        &[Area::Tree, Area::Diff, Area::Buffer],
         "View",
         "copy the selection · a right click too",
         Some((9, "copy")),

@@ -1311,7 +1311,13 @@ to the clipboard and the primary selection (Ctrl+Shift+C and Super+C too, where 
 passes them on rather than keeping them for its own copy, as Ghostty's `performable:` binding
 does and Alacritty cannot), Esc drops it, and the bar dims `y copy` while nothing is selected.
 `[mouse] copy_on_select = true`, in the configuration file only, copies as a drag ends, as in
-micromux. Both front ends follow it. A copy goes to the terminal through OSC 52, which also works
+micromux. The rest of `[mouse]` says what else the mouse may do, each part on by default:
+`select` (selecting text, and the right click that copies it), `navigate` (every click that acts
+on what it lands on: files, hunks, gaps, the buffer's cursor, picker entries, settings, the
+divider) and `scroll` (the wheel and the scrollbars), while `enabled = false` turns them all off,
+and review-tui then leaves the mouse to the terminal, whose own selection works. The model
+checks each part at its mouse entry points, so both front ends follow it, and `y` copies while
+the files have the keys, since a press in the diff leaves them there without `navigate`. A copy goes to the terminal through OSC 52, which also works
 over ssh, and on a local session also to `wl-copy`, `xclip` or `xsel` (`pbcopy` on macOS), in a
 process group of its own, since terminals such as GNOME Terminal ignore OSC 52, as micromux
 does. On GNOME the X11 tools go first: GNOME offers no Wayland clipboard to a program without a

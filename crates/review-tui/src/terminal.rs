@@ -2,7 +2,7 @@
 //! a signal and on a panic alike.
 //!
 //! While the review shows, the terminal is in raw mode on its alternate screen with the mouse,
-//! bracketed paste and, where the terminal supports it, the kitty keyboard protocol's
+//! unless the configuration lets it do nothing, bracketed paste and, where the terminal supports it, the kitty keyboard protocol's
 //! disambiguation; the title shows the review, on top of the title it had, which comes back.
 //! Every frame is wrapped in synchronized output, so the terminal never shows half of one.
 //! Copies go to the clipboard through OSC 52, which also works over ssh, and on a local session
@@ -50,6 +50,10 @@ static SCREEN: AtomicBool = AtomicBool::new(false);
 /// Whether the kitty keyboard protocol's flags were pushed, so they are popped again.
 static ENHANCED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the app captures the mouse, which it does unless the configuration lets the mouse do
+/// nothing; the terminal then keeps the mouse for its own selection.
+static MOUSE: AtomicBool = AtomicBool::new(true);
+
 /// Whether the terminal's title was pushed on its stack, so it is popped again.
 static TITLE: AtomicBool = AtomicBool::new(false);
 
@@ -61,9 +65,9 @@ static KEYBOARD: OnceLock<bool> = OnceLock::new();
 const PUSH_TITLE: &str = "\x1b[22;0t";
 const POP_TITLE: &str = "\x1b[23;0t";
 
-/// Takes the terminal over: raw mode, the alternate screen, the mouse, bracketed paste, the
-/// keyboard protocol where supported, and a saved title; each step is marked before it runs,
-/// so [`give_back`] undoes whatever a failure left behind.
+/// Takes the terminal over: raw mode, the alternate screen, the mouse unless it may do nothing,
+/// bracketed paste, the keyboard protocol where supported, and a saved title; each step is
+/// marked before it runs, so [`give_back`] undoes whatever a failure left behind.
 ///
 /// It takes the terminal again when the app continues after a stop, setting raw mode and the
 /// screen's modes anew, since the shell may have put its own modes back meanwhile.
@@ -79,10 +83,12 @@ fn take_over(stdout: &mut Stdout) -> io::Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
         EnableBracketedPaste,
         cursor::Hide
     )?;
+    if MOUSE.load(Ordering::SeqCst) {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     if enhanced && !ENHANCED.swap(true, Ordering::SeqCst) {
         execute!(
             stdout,
@@ -192,6 +198,7 @@ pub fn run(
     checks: Checks,
 ) -> io::Result<()> {
     let mut stdout = io::stdout();
+    MOUSE.store(settings.mouse.any(), Ordering::SeqCst);
     if let Err(err) = take_over(&mut stdout) {
         // The failure to take it over is the one to report.
         give_back().ok();

@@ -39,7 +39,12 @@
 //! [lsp]
 //! enabled = true    # false never starts a language server; `g d` then says it is off
 //!
-//! [mouse]
+//! [mouse]           # what the mouse may do; each part is on unless set off
+//! enabled = true    # false ignores the mouse, and review-tui leaves it to the terminal
+//! select = true     # a drag, double or triple click selects text; a right click copies it
+//! navigate = true   # a click selects files, hunks, entries and settings, opens gaps, and the
+//!                   # divider drags
+//! scroll = true     # the wheel and the scrollbars scroll and pan
 //! copy_on_select = false # whether ending a drag copies what it selected, as `y` does
 //!
 //! [keys]            # replace an action's keys; `?` in the app lists the actions
@@ -251,7 +256,67 @@ struct LspSection {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct MouseSection {
+    enabled: Option<bool>,
+    select: Option<bool>,
+    navigate: Option<bool>,
+    scroll: Option<bool>,
     copy_on_select: Option<bool>,
+}
+
+/// What the mouse may do, from the `[mouse]` table; `enabled = false` turns every part off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mouse {
+    /// Whether a drag, a double or a triple click selects text, and a right click copies it.
+    pub select: bool,
+    /// Whether a click acts on what it lands on: selects a file, a hunk, a picker entry or a
+    /// setting, opens a gap, moves the buffer's cursor, closes the settings or drags the
+    /// divider.
+    pub navigate: bool,
+    /// Whether the wheel and the scrollbars scroll and pan.
+    pub scroll: bool,
+    /// Whether ending a drag copies what it selected to the clipboard and the primary
+    /// selection, rather than only an explicit copy; off, selecting never touches either.
+    pub copy_on_select: bool,
+}
+
+impl Default for Mouse {
+    fn default() -> Self {
+        Self {
+            select: true,
+            navigate: true,
+            scroll: true,
+            copy_on_select: false,
+        }
+    }
+}
+
+impl Mouse {
+    /// Whether the mouse may do anything at all, which is when review-tui captures it.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.select || self.navigate || self.scroll
+    }
+
+    /// The mouse as `section` sets it: each part it leaves open on, but copy-on-select, which
+    /// needs selecting, and every part off when it is not enabled.
+    fn of(section: &MouseSection) -> Self {
+        if section.enabled == Some(false) {
+            return Self {
+                select: false,
+                navigate: false,
+                scroll: false,
+                copy_on_select: false,
+            };
+        }
+        let defaults = Self::default();
+        let select = section.select.unwrap_or(defaults.select);
+        Self {
+            select,
+            navigate: section.navigate.unwrap_or(defaults.navigate),
+            scroll: section.scroll.unwrap_or(defaults.scroll),
+            copy_on_select: select && section.copy_on_select.unwrap_or(defaults.copy_on_select),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -519,9 +584,8 @@ pub struct Config {
     pub language_servers: bool,
     /// Whether a review of the working tree follows it as it changes.
     pub live: bool,
-    /// Whether ending a drag copies what it selected to the clipboard and the primary
-    /// selection, rather than only an explicit copy; off, selecting never touches either.
-    pub copy_on_select: bool,
+    /// What the mouse may do.
+    pub mouse: Mouse,
     /// The pane widths.
     pub layout: LayoutConfig,
     /// Key overrides: an action's name and the keys that replace its defaults.
@@ -554,7 +618,7 @@ impl Default for Config {
             auto_approve_formatting: true,
             language_servers: true,
             live: true,
-            copy_on_select: false,
+            mouse: Mouse::default(),
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
             styles: BTreeMap::new(),
@@ -911,10 +975,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             .unwrap_or(defaults.auto_approve_formatting),
         language_servers: file.lsp.enabled.unwrap_or(defaults.language_servers),
         live: file.review.live.unwrap_or(defaults.live),
-        copy_on_select: file
-            .mouse
-            .copy_on_select
-            .unwrap_or(defaults.copy_on_select),
+        mouse: Mouse::of(&file.mouse),
         layout: LayoutConfig {
             sidebar: sidebar_width("sidebar", file.layout.sidebar)?,
             tui_sidebar: sidebar_width("tui_sidebar", file.layout.tui_sidebar)?,
@@ -1602,6 +1663,39 @@ NextHunk = [\"j\"]
         "})
         .unwrap();
         assert_eq!(config.hunk_position, HunkPosition::Margin);
+    }
+
+    /// The mouse may do everything but copy on select unless the file says otherwise: each
+    /// part goes off alone, `enabled = false` turns them all off, and copy-on-select needs
+    /// selecting.
+    #[test]
+    fn the_mouse_parts_go_off_one_by_one_or_all_at_once() {
+        let mouse = |text: &str| parse(text).unwrap().mouse;
+        assert_eq!(mouse(""), Mouse::default());
+        assert!(Mouse::default().any() && !Mouse::default().copy_on_select);
+        assert_eq!(
+            mouse(indoc! {"
+                [mouse]
+                navigate = false
+            "}),
+            Mouse {
+                navigate: false,
+                ..Mouse::default()
+            }
+        );
+        let off = mouse(indoc! {"
+            [mouse]
+            enabled = false
+            select = true
+            copy_on_select = true
+        "});
+        assert!(!off.any() && !off.copy_on_select);
+        let copying = mouse(indoc! {"
+            [mouse]
+            select = false
+            copy_on_select = true
+        "});
+        assert!(!copying.select && !copying.copy_on_select);
     }
 
     /// The hunk keys stay within a file unless the file asks them to go on into the next.

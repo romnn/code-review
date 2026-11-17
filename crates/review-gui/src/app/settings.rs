@@ -125,7 +125,9 @@ impl ReviewApp {
                         // The backdrop would take the focus after this listener and keep it
                         // once it is gone, leaving no key context; the mode takes it instead.
                         window.prevent_default();
-                        this.dispatch(Action::SettingsClose, window, cx);
+                        if this.settings.mouse.navigate {
+                            this.dispatch(Action::SettingsClose, window, cx);
+                        }
                     }),
                 )
                 .child(body)

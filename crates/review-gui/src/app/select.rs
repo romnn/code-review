@@ -171,6 +171,9 @@ impl ReviewApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         if click_count >= 2 {
             self.resizing = false;
             self.update_model(window, cx, Model::reset_sidebar_width);
