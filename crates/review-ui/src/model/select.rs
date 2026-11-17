@@ -92,9 +92,9 @@ impl Model {
         }
     }
 
-    /// A press in the diff or the buffer: selects the clicked hunk or moves the cursor, expands
-    /// a clicked gap, and starts a text selection; a double click selects a word, a triple
-    /// click a line.
+    /// A press in the diff or the buffer: selects the clicked hunk or moves the cursor and
+    /// expands a clicked gap, where the mouse may navigate, and starts a text selection, where
+    /// it may select; a double click selects a word, a triple click a line.
     pub fn press_text(&mut self, press: TextPress) {
         let TextPress {
             pane,
@@ -103,24 +103,29 @@ impl Model {
             clicks,
             extend,
         } = press;
-        match pane {
-            Pane::Diff => {
-                if self.mode != Mode::Diff {
-                    self.enter_mode(Mode::Diff);
+        if self.settings.mouse.navigate {
+            match pane {
+                Pane::Diff => {
+                    if self.mode != Mode::Diff {
+                        self.enter_mode(Mode::Diff);
+                    }
+                    if self.is_gap(pos.row) {
+                        self.expand_gap(pos.row);
+                        return;
+                    }
+                    if let Some(hunk) = self.rows.rows.get(pos.row).and_then(|row| row.hunk) {
+                        self.hunk = hunk;
+                    }
                 }
-                if self.is_gap(pos.row) {
-                    self.expand_gap(pos.row);
-                    return;
-                }
-                if let Some(hunk) = self.rows.rows.get(pos.row).and_then(|row| row.hunk) {
-                    self.hunk = hunk;
+                Pane::Source => {
+                    if let Some(buffer) = &mut self.buffer {
+                        buffer.cursor = pos;
+                    }
                 }
             }
-            Pane::Source => {
-                if let Some(buffer) = &mut self.buffer {
-                    buffer.cursor = pos;
-                }
-            }
+        }
+        if !self.settings.mouse.select {
+            return;
         }
         let line = self.copyable(pane, column, pos.row).unwrap_or_default();
         self.selection = Some(match clicks {
@@ -181,7 +186,7 @@ impl Model {
     /// The button came up: a dragged selection ends, and with copy-on-select its text is
     /// copied as an explicit copy does; without it, selecting copies nothing.
     pub fn release_text(&mut self) {
-        if self.dragging.take().is_some() && self.settings.copy_on_select {
+        if self.dragging.take().is_some() && self.settings.mouse.copy_on_select {
             self.copy();
         }
     }
@@ -189,6 +194,9 @@ impl Model {
     /// A double click on the divider between the files and the diff: the files fit their tree
     /// again, which is remembered.
     pub fn reset_sidebar_width(&mut self) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         self.layout.sidebar = crate::panes::SidebarWidth::Fit;
         self.remember_layout();
     }

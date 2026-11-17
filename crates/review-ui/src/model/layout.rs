@@ -184,6 +184,9 @@ impl Model {
     /// the list back to its target on the next frames, and scrolls by `delta` rows. In the
     /// diff, the selected hunk follows the view.
     pub fn wheel_list(&mut self, list: List, delta: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         if let Some(scroll) = self.list_scroll_mut(list) {
             scroll.stop();
         }
@@ -198,6 +201,9 @@ impl Model {
     /// A scrollbar's thumb dragged, or a short list's track clicked: `list` at `offset` rows,
     /// within its rows. In the diff, the selected hunk follows the view.
     pub fn drag_list_to(&mut self, list: List, offset: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         let count = self.list_rows(list);
         let viewport = self.grid().viewports.of(list);
         if let Some(scroll) = self.list_scroll_mut(list) {
@@ -210,6 +216,9 @@ impl Model {
 
     /// A click on the track of `list`'s scrollbar toward `toward` rows: a page that way.
     pub fn page_list_toward(&mut self, list: List, toward: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         let count = self.list_rows(list);
         let grid = self.grid();
         let viewport = grid.viewports.of(list);
@@ -240,23 +249,46 @@ impl Model {
     /// Moves the diff's code sideways by `delta` cells, right when positive: the wheel turned
     /// sideways over the diff.
     pub fn pan_text(&mut self, delta: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         self.diff_text_mut().pan(delta);
+    }
+
+    /// Moves the code of the diff or, in the buffer, the buffer's code sideways by `delta`
+    /// cells, as the pan keys do, whatever the mouse may do.
+    fn pan_by(&mut self, delta: f64) {
+        if self.mode == Mode::Buffer {
+            self.measure_buffer_text();
+            self.buffer_text.pan(delta);
+        } else {
+            self.diff_text_mut().pan(delta);
+        }
     }
 
     /// The diff's horizontal scrollbar dragged: its code `offset` cells left.
     pub fn set_text_offset(&mut self, offset: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         self.diff_text_mut().set(offset);
     }
 
     /// Moves the buffer's code sideways by `delta` cells, right when positive: the wheel
     /// turned sideways over the buffer.
     pub fn pan_buffer(&mut self, delta: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         self.measure_buffer_text();
         self.buffer_text.pan(delta);
     }
 
     /// The buffer's horizontal scrollbar dragged: its code `offset` cells left.
     pub fn set_buffer_offset(&mut self, offset: f64) {
+        if !self.settings.mouse.scroll {
+            return;
+        }
         self.measure_buffer_text();
         self.buffer_text.set(offset);
     }
@@ -272,11 +304,7 @@ impl Model {
         };
         let step = (room / 2.0).floor().max(1.0);
         let delta = if forward { step } else { -step };
-        if self.mode == Mode::Buffer {
-            self.pan_buffer(delta);
-        } else {
-            self.pan_text(delta);
-        }
+        self.pan_by(delta);
     }
 
     /// The code cells a line across the diff's width has room for.

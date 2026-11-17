@@ -93,8 +93,8 @@ pub struct Settings {
     pub context: usize,
     /// Whether the files pane and the file header shorten a folder chain's middle folders.
     pub shorten_chains: bool,
-    /// Whether ending a drag copies what it selected, as an explicit copy does.
-    pub copy_on_select: bool,
+    /// What the mouse may do.
+    pub mouse: crate::config::Mouse,
     /// Whether approved hunks fold, as the configuration sets it.
     pub approved: crate::config::Approved,
     /// Which units still need the reviewer, as the configuration sets it: whether proven
@@ -954,6 +954,9 @@ impl Model {
     /// Sets the files pane's width, in the front end's units, as its divider is dragged; see
     /// [`Self::remember_layout`].
     pub fn set_sidebar_width(&mut self, width: f32) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         self.layout.sidebar = crate::panes::SidebarWidth::Set(width);
     }
 

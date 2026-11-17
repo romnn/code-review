@@ -221,7 +221,7 @@ fn settings() -> Settings {
         code_size: 17.0,
         context: config.context,
         shorten_chains: config.shorten_chains,
-        copy_on_select: config.copy_on_select,
+        mouse: config.mouse,
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -1550,7 +1550,7 @@ fn selections_reach_the_clipboards() {
 fn copy_on_select_copies_when_a_drag_ends() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = settings();
-    settings.copy_on_select = true;
+    settings.mouse.copy_on_select = true;
     let mut host = Host::open_with(demo(dir.path()), settings);
     let (row, line) = engine_line(&mut host);
     host.update(|model| model.press_text(text_press(row, 0)));
@@ -1559,6 +1559,93 @@ fn copy_on_select_copies_when_a_drag_ends() {
     assert_eq!(host.copied, [line[..4].to_owned()]);
     assert_eq!(host.primary, [line[..4].to_owned()]);
     assert_eq!(host.model().status, "Copied 1 line.");
+}
+
+/// With `[mouse] navigate` off, a press in the diff still selects text but neither selects its
+/// hunk nor opens a gap, and a click in the files moves nothing; the keys still do.
+#[test]
+fn without_navigate_a_press_only_selects() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings();
+    settings.mouse.navigate = false;
+    let mut host = Host::open_with(demo(dir.path()), settings);
+    let (row, line) = engine_line(&mut host);
+    host.dispatch(Action::FirstHunk);
+    let hunk = host.model().hunk;
+    let other = (0..host.model().rows.rows.len())
+        .rev()
+        .find(|&other| {
+            host.model().rows.rows[other]
+                .hunk
+                .is_some_and(|found| found != hunk)
+        })
+        .unwrap();
+    host.update(|model| model.press_text(text_press(other, 0)));
+    assert_eq!(host.model().hunk, hunk, "the press selected no hunk");
+    host.update(|model| model.press_text(text_press(row, 0)));
+    host.update(|model| model.drag_text(Pane::Diff, TextPos { row, col: 4 }));
+    host.update(Model::release_text);
+    host.dispatch(Action::Copy);
+    assert_eq!(host.copied, [line[..4].to_owned()]);
+
+    host.dispatch(Action::FocusTree);
+    host.dispatch(Action::FocusTree);
+    let cursor = host.model().tree_cursor;
+    host.update(|model| model.click_tree_row(cursor + 1, cursor + 1, 1));
+    assert_eq!(host.model().tree_cursor, cursor, "the click moved nothing");
+    host.dispatch(Action::NextFile);
+    assert_ne!(host.model().tree_cursor, cursor, "the keys still move");
+}
+
+/// With `[mouse] select` off, a press starts no selection, so a drag selects nothing and a
+/// right click has nothing to copy, while the press still selects the hunk under it.
+#[test]
+fn without_select_a_press_only_navigates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings();
+    settings.mouse.select = false;
+    let mut host = Host::open_with(demo(dir.path()), settings);
+    engine_line(&mut host);
+    host.dispatch(Action::FirstHunk);
+    let first = host.model().hunk;
+    let (row, hunk) = (0..host.model().rows.rows.len())
+        .rev()
+        .find_map(|row| {
+            let hunk = host.model().rows.rows[row].hunk?;
+            (hunk != first).then_some((row, hunk))
+        })
+        .unwrap();
+    host.update(|model| model.press_text(text_press(row, 0)));
+    host.update(|model| model.drag_text(Pane::Diff, TextPos { row, col: 4 }));
+    host.update(Model::release_text);
+    assert_eq!(host.model().selection, None);
+    assert_eq!(host.model().hunk, hunk);
+}
+
+/// With `[mouse] scroll` off, the wheel and a sideways turn move nothing, while the scroll and
+/// pan keys still do.
+#[test]
+fn without_scroll_the_wheel_moves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = whole_file();
+    settings.mouse.scroll = false;
+    let mut host = Host::open_with(demo(dir.path()), settings);
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let top = |host: &Host| host.model().diff_scroll.offset();
+    let before = top(&host);
+    assert!(before > 0.0, "the file opens scrolled to its first change");
+    host.update(|model| model.wheel_list(List::Diff, -5.0));
+    host.update(|model| model.pan_text(4.0));
+    assert_eq!(top(&host), before);
+    assert_eq!(host.model().diff_text().offset(), 0.0);
+    host.dispatch(Action::HalfPageUp);
+    lay_out(&mut host);
+    settle_scroll(&mut host);
+    assert_ne!(top(&host), before, "the keys still scroll");
+    host.dispatch(Action::PanRight);
+    assert_ne!(host.model().diff_text().offset(), 0.0, "the keys still pan");
 }
 
 /// Shows `src/engine.rs` in the diff, and returns the first code row longer than four bytes

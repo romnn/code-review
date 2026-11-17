@@ -35,10 +35,7 @@ fn commands(board: Board) -> Vec<Command> {
         // code page.
         Vec::new()
     } else {
-        let wayland: Command = (
-            "wl-copy",
-            if primary { &["--primary"] } else { &[] },
-        );
+        let wayland: Command = ("wl-copy", if primary { &["--primary"] } else { &[] });
         let x11: [Command; 2] = [
             (
                 "xclip",
@@ -58,7 +55,11 @@ fn commands(board: Board) -> Vec<Command> {
             ),
         ];
         let has = |name| std::env::var_os(name).is_some();
-        let x11 = if has("DISPLAY") { x11.to_vec() } else { Vec::new() };
+        let x11 = if has("DISPLAY") {
+            x11.to_vec()
+        } else {
+            Vec::new()
+        };
         let wayland = if has("WAYLAND_DISPLAY") {
             vec![wayland]
         } else {

@@ -395,6 +395,9 @@ impl Model {
 
     /// Expands the gap at `row` by a step of unchanged lines, as a click on it does.
     pub fn expand_gap(&mut self, row: usize) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         let Some(Fold::Gap { file, at }) = self.rows.rows.get(row).and_then(|row| row.note()?.fold)
         else {
             return;

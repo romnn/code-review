@@ -371,6 +371,9 @@ impl Model {
     /// quick series: a folder folds or unfolds, a file shows and a double click opens its
     /// diff, and the files take the keys back from another mode.
     pub fn click_tree_row(&mut self, position: usize, index: usize, clicks: usize) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         self.tree_cursor = position;
         let directory = self
             .tree

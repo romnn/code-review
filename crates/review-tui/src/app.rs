@@ -429,7 +429,9 @@ impl App {
         let position = Position::new(event.column, event.row);
         match self.model().overlay {
             Some(Overlay::Help | Overlay::Overview) => {
-                if let Some(rows) = wheel_rows(event.kind) {
+                if let Some(rows) = wheel_rows(event.kind)
+                    && self.model().settings.mouse.scroll
+                {
                     self.sheet.scroll_by(rows);
                 }
             }
@@ -481,7 +483,9 @@ impl App {
                 });
             }
             // A right click copies the selection, as `y` does, and leaves it as it is.
-            MouseEventKind::Up(MouseButton::Right) => self.dispatch(Action::Copy),
+            MouseEventKind::Up(MouseButton::Right) if self.model().settings.mouse.select => {
+                self.dispatch(Action::Copy);
+            }
             // The button came up somewhere the terminal did not report: the drag ends.
             MouseEventKind::Moved if self.model().dragging.is_some() => {
                 self.update(Model::drop_drag);
@@ -532,6 +536,9 @@ impl App {
             return;
         }
         if event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        if !self.model().settings.mouse.navigate {
             return;
         }
         let in_panel =
@@ -603,6 +610,9 @@ impl App {
             .divider
             .is_some_and(|divider| divider.contains(position))
         {
+            if !self.model().settings.mouse.navigate {
+                return;
+            }
             if count >= 2 {
                 self.resizing = false;
                 self.update(Model::reset_sidebar_width);

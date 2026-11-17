@@ -588,6 +588,9 @@ impl Model {
 
     /// A click on the entry that sets `choice`: the cursor moves there and applies it.
     pub fn click_setting(&mut self, choice: Choice) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         if let Some(panel) = &mut self.settings_panel {
             panel.cursor = choice;
         }

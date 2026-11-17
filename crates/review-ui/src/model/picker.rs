@@ -437,6 +437,9 @@ impl Model {
 
     /// A click on the picker's entry `index`: selects it, and a double click opens it.
     pub fn click_picker_entry(&mut self, index: usize, clicks: usize) {
+        if !self.settings.mouse.navigate {
+            return;
+        }
         if let Some(picker) = &mut self.picker {
             picker.selected = index;
         }
