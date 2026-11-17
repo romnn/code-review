@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use super::display::display_width;
 use super::{Bar, Palette, Piece, Room, Weight, split_path};
-use crate::config::DiffLayout;
+use crate::config::{DiffLayout, DiffView};
 use crate::model::buffer::Origin;
 use crate::model::{Model, Phase};
 use crate::rows::FileSection;
@@ -76,6 +76,10 @@ pub struct FileHeader {
     pub dir: Piece,
     /// The file name, in bold.
     pub name: Piece,
+    /// In the file view, which has no hunk headers, the scopes around the selected hunk and
+    /// what kind of change it is, after ` › `, as the buffer's header names the scopes around
+    /// its cursor; it truncates from its start, so the innermost scope stays.
+    pub scope: Option<Piece>,
     /// A rename, entry changes, what kind of change it is, and why side by side shows
     /// unified, joined with ` · `.
     pub details: Piece,
@@ -117,7 +121,33 @@ pub fn file_header(
     let text = |text: &str| float(display_width(text)) * cell;
     let added = format!("+{}", section.added);
     let removed = format!("−{}", section.removed);
-    let lead = change.map_or(0.0, |_| cell + gap) + text(&section.path).min(cell * PATH_CELLS);
+    let (mut scopes, tag) = hunk_scope(model);
+    let scope_text = |scopes: &[String], dropped: bool| {
+        let mut parts: Vec<String> = Vec::new();
+        if dropped {
+            parts.push("…".to_owned());
+        }
+        parts.extend(scopes.iter().cloned());
+        let mut said = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" › {}", parts.join(" › "))
+        };
+        if let Some(tag) = &tag {
+            said.push_str(if said.is_empty() { " › " } else { " · " });
+            said.push_str(tag);
+        }
+        said
+    };
+    // The innermost scope keeps its room before the file's length, the line counts and the
+    // meter, which make way for it.
+    let innermost = scope_text(
+        scopes.last().map_or(&[][..], std::slice::from_ref),
+        scopes.len() > 1,
+    );
+    let lead = change.map_or(0.0, |_| cell + gap)
+        + text(&section.path).min(cell * PATH_CELLS)
+        + text(&innermost);
     let meter_room = gap + meter_width(units.len(), cell, meter_gap);
     let counts_room = gap + text(&added) + gap + text(&removed);
     let show_meter = lead + meter_room <= budget;
@@ -126,9 +156,31 @@ pub fn file_header(
         1 => "1 line".to_owned(),
         lines => format!("{lines} lines"),
     });
+    // The file's length shows only beside the whole scope.
+    let whole = lead - text(&innermost) + text(&scope_text(&scopes, false));
     let lines = lines.filter(|lines| {
-        show_counts && lead + meter_room + counts_room + gap + text(lines) <= budget
+        show_counts && whole + meter_room + counts_room + gap + text(lines) <= budget
     });
+    // The path and the scope fit what the right side leaves: the directory's middle folders
+    // shorten first, then the outer scopes make way, the innermost last; what still does not
+    // fit, the front end truncates.
+    let right = if show_meter { meter_room } else { 0.0 }
+        + if show_counts { counts_room } else { 0.0 }
+        + lines.as_ref().map_or(0.0, |lines| gap + text(lines));
+    let left = budget - right - change.map_or(0.0, |_| cell + gap);
+    let mut dir = dir.to_owned();
+    let mut dropped = false;
+    let needs = |dir: &str, scopes: &[String], dropped: bool| {
+        text(dir) + text(name) + text(&scope_text(scopes, dropped))
+    };
+    if model.settings.shorten_chains && needs(&dir, &scopes, dropped) > left {
+        dir = super::shorten_middle(&dir);
+    }
+    while scopes.len() > 1 && needs(&dir, &scopes, dropped) > left {
+        scopes.remove(0);
+        dropped = true;
+    }
+    let scope = scope_text(&scopes, dropped);
     Some(FileHeader {
         kind: change.map(|change| {
             Piece::new(
@@ -139,6 +191,7 @@ pub fn file_header(
         }),
         dir: Piece::new(dir, palette.dim),
         name: Piece::new(name, palette.text).weighted(Weight::Bold),
+        scope: (!scope.is_empty()).then(|| Piece::new(scope, palette.dim)),
         details: Piece::new(file_details(model, section).join(" · "), palette.faint),
         lines: lines.map(|lines| Piece::new(lines, palette.faint)),
         counts: show_counts.then(|| {
@@ -149,6 +202,23 @@ pub fn file_header(
         }),
         meter: show_meter.then(|| meter(palette, approved, units.len())),
     })
+}
+
+/// The selected hunk's scopes, outermost first, and label for the file header, in the file
+/// view only: the hunks view says them in each hunk's header.
+fn hunk_scope(model: &Model) -> (Vec<String>, Option<String>) {
+    if model.rows.presentation.view != DiffView::File {
+        return (Vec::new(), None);
+    }
+    let Some(note) = model.rows.hunk_notes.get(model.hunk) else {
+        return (Vec::new(), None);
+    };
+    let scopes = note
+        .scope
+        .as_deref()
+        .map(|scope| scope.split(" › ").map(str::to_owned).collect())
+        .unwrap_or_default();
+    (scopes, note.tag.clone())
 }
 
 /// What the file header says with no file selected.

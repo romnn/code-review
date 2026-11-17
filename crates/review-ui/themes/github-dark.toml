@@ -1,0 +1,74 @@
+# GitHub Dark, from primer/primitives' dark theme as github-vscode-theme ships it (MIT,
+# Copyright (c) 2020 Primer), with its diff line backgrounds and prettylights syntax colors.
+# The translucent selection and diff line backgrounds are composited over the background,
+# because a theme file takes opaque colors.
+name = "github-dark"
+title = "GitHub Dark"
+
+[ui]
+background = "#0d1117"
+panel = "#161b22"
+band = "#161b22"
+raised = "#21262d"
+hairline = "#30363d"
+text = "#e6edf3"
+dim = "#7d8590"
+faint = "#6e7681"
+accent = "#2f81f7"
+selection = "#132339"
+find = "#f2cc60"
+error = "#f85149"
+note = "#d29922"
+
+[review]
+open = "#e6edf3"
+done = "#3fb950"
+flagged = "#f85149"
+changed = "#db6d28"
+
+[kind]
+added = "#3fb950"
+modified = "#d29922"
+deleted = "#f85149"
+renamed = "#2f81f7"
+moved = "#a371f7"
+type = "#db6d28"
+quiet = "#6e7681"
+
+[diff]
+removed_line = "#301b1f"
+added_line = "#12261e"
+quiet_line = "#21262d"
+removed_text = "#ffa198"
+added_text = "#7ee787"
+removed_sign = "#ffa198"
+added_sign = "#7ee787"
+
+[syntax]
+keyword = "#ff7b72"
+function = "#d2a8ff"
+type = "#ffa657"
+string = "#a5d6ff"
+constant = "#79c0ff"
+comment = "#8b949e"
+parameter = "#e6edf3"
+attribute = "#79c0ff"
+operator = "#79c0ff"
+punctuation = "#e6edf3"
+property = "#79c0ff"
+special = "#ff7b72"
+tag = "#7ee787"
+escape = "#7ee787"
+# Markup colors as GitHub Dark Default picks them, but its theme file has no list marker,
+# so the list takes primer's prettylights color.
+# Emphasized and strong text keep the text color; quotes are dimmed.
+# Inserted and deleted lines take the diff's text colors.
+heading = "#79c0ff"
+emphasis = "#e6edf3"
+strong = "#e6edf3"
+link = "#a5d6ff"
+raw = "#79c0ff"
+list = "#f2cc60"
+quote = "#7d8590"
+inserted = "#7ee787"
+deleted = "#ffa198"

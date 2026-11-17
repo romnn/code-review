@@ -136,6 +136,51 @@ pub fn reveal(current: f64, height: f64, top: f64, bottom: f64, margin: f64) -> 
     }
 }
 
+/// The share of the viewport kept clear above and below a hunk the keys go to, as vim's
+/// `scrolloff` keeps lines around the cursor, so the code around it shows and a long hunk
+/// shows from its start this far down.
+pub const READING_LINE: f64 = 0.2;
+
+/// The offset that shows rows `top..bottom` in a viewport `height` rows tall at offset
+/// `current` from their start `share` of the viewport down, or `None` when they already show
+/// with that much clear above and below them.
+///
+/// Whichever way the keys go, a hunk lands with its start at that reading line, so the code
+/// before it shows, the hunk shows whole as far as the viewport allows, and so does what
+/// follows it; a hunk already shown so stays put, so short steps never jump. A view that would
+/// leave no more than the margin above it goes to the very top instead, never hiding a sliver
+/// of a file's start.
+#[must_use]
+pub fn within_margins(current: f64, height: f64, top: f64, bottom: f64, share: f64) -> Option<f64> {
+    let margin = (height * share).floor();
+    let shown = top >= current + margin && bottom <= current + height - margin;
+    if shown {
+        return None;
+    }
+    let target = reading(height, top, share);
+    ((target - current).abs() > f64::EPSILON).then_some(target)
+}
+
+/// The offset that shows rows from `top` at the reading line `share` of a viewport `height`
+/// rows tall down, or from the very top when that would hide no more than the rows above the
+/// reading line, so a file's start never shows cut by a sliver.
+#[must_use]
+pub fn reading(height: f64, top: f64, share: f64) -> f64 {
+    let margin = (height * share).floor();
+    let target = top - margin;
+    if target <= margin { 0.0 } else { target }
+}
+
+/// The offset that shows rows `top..bottom` in the middle of a viewport `height` rows tall,
+/// whole rows from the top, unless that would leave less than `share` of the viewport above
+/// them: rows too tall for the middle show from their start at the reading line instead.
+#[must_use]
+pub fn centered(height: f64, top: f64, bottom: f64, share: f64) -> f64 {
+    let above = (height * share).floor();
+    let middle = f64::midpoint(top, bottom) - height / 2.0;
+    middle.min(top - above).max(0.0).floor()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +219,42 @@ mod tests {
         assert!(
             !shows(&(5..5), 0.0, Some(10.0)),
             "an empty hunk never shows"
+        );
+    }
+
+    /// A hunk lands with its start a fifth down whichever way the keys go, and one already
+    /// shown with a fifth clear above and below stays put.
+    #[test]
+    fn hunks_land_a_fifth_down() {
+        // Within the band from 8 to 32 rows down: no scroll.
+        assert_eq!(within_margins(0.0, 40.0, 10.0, 14.0, 0.2), None);
+        assert_eq!(within_margins(0.0, 40.0, 8.0, 32.0, 0.2), None);
+        // Too close to the top: its start moves a fifth down.
+        assert_eq!(within_margins(20.0, 40.0, 25.0, 28.0, 0.2), Some(17.0));
+        // Near the very start of the file, at the top rather than a few rows down.
+        assert_eq!(within_margins(4.0, 40.0, 5.0, 8.0, 0.2), Some(0.0));
+        assert_eq!(within_margins(20.0, 40.0, 14.0, 18.0, 0.2), Some(0.0));
+        // Too close to the bottom or below the viewport: its start too, so it and what follows
+        // show.
+        assert_eq!(within_margins(0.0, 40.0, 30.0, 34.0, 0.2), Some(22.0));
+        assert_eq!(within_margins(0.0, 40.0, 100.0, 104.0, 0.2), Some(92.0));
+        // A hunk taller than the band shows from its start there, and stays once it does,
+        // never from its middle.
+        assert_eq!(within_margins(0.0, 40.0, 50.0, 200.0, 0.2), Some(42.0));
+        assert_eq!(within_margins(42.0, 40.0, 50.0, 200.0, 0.2), None);
+        assert_eq!(within_margins(45.0, 40.0, 50.0, 200.0, 0.2), Some(42.0));
+    }
+
+    /// A hunk shows in the middle, or from its start at the reading line when it is too tall
+    /// for the middle.
+    #[test]
+    fn centered_puts_a_hunk_in_the_middle() {
+        assert!((centered(40.0, 100.0, 104.0, 0.25) - 82.0).abs() < f64::EPSILON);
+        // Too tall for the middle: its start at the reading line.
+        assert!((centered(40.0, 100.0, 130.0, 0.25) - 90.0).abs() < f64::EPSILON);
+        assert!(
+            (centered(40.0, 2.0, 4.0, 0.25)).abs() < f64::EPSILON,
+            "never above the top"
         );
     }
 

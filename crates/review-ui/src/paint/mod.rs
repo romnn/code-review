@@ -257,6 +257,33 @@ pub fn split_path(path: &str) -> (&str, &str) {
     }
 }
 
+/// `path` with its middle folders shortened to their first letter, as fish shortens its prompt,
+/// its first and last whole: `airtype-oauth/src/providers/europace` as
+/// `airtype-oauth/s/p/europace`. A hidden folder keeps its dot, as `.c` for `.config`, and a
+/// trailing `/` stays.
+#[must_use]
+pub fn shorten_middle(path: &str) -> String {
+    let (body, slash) = match path.strip_suffix('/') {
+        Some(body) => (body, "/"),
+        None => (path, ""),
+    };
+    let parts: Vec<&str> = body.split('/').collect();
+    let Some((last, rest)) = parts.split_last() else {
+        return path.to_owned();
+    };
+    let Some((first, middle)) = rest.split_first() else {
+        return path.to_owned();
+    };
+    let initial = |part: &str| {
+        let letters = if part.starts_with('.') { 2 } else { 1 };
+        part.chars().take(letters).collect::<String>()
+    };
+    let mut shortened = vec![(*first).to_owned()];
+    shortened.extend(middle.iter().map(|part| initial(part)));
+    shortened.push((*last).to_owned());
+    format!("{}{slash}", shortened.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -293,6 +320,20 @@ mod tests {
         };
         assert_eq!(both.style.color, Some(red()));
         assert_eq!(both.style.background, Some(blue()));
+    }
+
+    /// A path keeps its first and last folders whole and shortens the ones between to their
+    /// first letter, a hidden one to its dot and letter.
+    #[test]
+    fn paths_shorten_their_middle_folders() {
+        assert_eq!(
+            shorten_middle("airtype-oauth/src/providers/europace"),
+            "airtype-oauth/s/p/europace"
+        );
+        assert_eq!(shorten_middle("a/.config/b/"), "a/.c/b/");
+        assert_eq!(shorten_middle("src/main"), "src/main");
+        assert_eq!(shorten_middle("src"), "src");
+        assert_eq!(shorten_middle(""), "");
     }
 
     /// An upper color with alpha blends over a lower one, and a background replaces the one

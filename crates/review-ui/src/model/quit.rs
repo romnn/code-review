@@ -35,7 +35,8 @@ pub enum Quitting {
     /// Nobody asked to quit.
     #[default]
     No,
-    /// Asked to quit; the marks queued and in flight and the folded folders are saved first.
+    /// Asked to quit; the marks queued and in flight, the folded folders and the place are
+    /// saved first.
     ///
     /// A failure stops only a [`QuitKind::Interactive`] wait. A reviewer who quits again after
     /// a failure stopped the quitting has seen it, so their quit waits as an unattended one
@@ -103,7 +104,7 @@ impl Model {
         if saving > 0 {
             format!("Saving {} before quitting…", plural(saving, "mark"))
         } else {
-            "Saving the folded folders before quitting…".to_owned()
+            "Saving the folded folders and your place before quitting…".to_owned()
         }
     }
 

@@ -15,7 +15,9 @@
 use review_core::ReviewPolicy;
 
 use super::{Model, Overlay, present::Places};
-use crate::config::{Approved, Density, DiffLayout, Remembered, points_to_pixels};
+use crate::config::{
+    Approved, Density, DiffLayout, DiffView, HunkPosition, Remembered, points_to_pixels,
+};
 use crate::frame::{ListScroll, Request};
 use crate::keymap::Area;
 use crate::look::{self, DiffStyle, FONT_SIZES, Look};
@@ -32,6 +34,12 @@ pub enum Choice {
     Density(Density),
     /// Unified or side-by-side diffs.
     Layout(DiffLayout),
+    /// The whole file or each hunk apart.
+    View(DiffView),
+    /// Where a hunk the keys go to lands.
+    HunkPosition(HunkPosition),
+    /// Whether the hunk keys go on into the next or previous file.
+    CrossFiles(bool),
     /// Whether changed tokens are underlined.
     Emphasis(bool),
     /// Whether approved hunks fold to their header.
@@ -135,91 +143,139 @@ pub fn entries(app: &Model) -> Vec<Entry> {
             section: "Diff style",
             label: style.name.clone(),
             detail: style.summary(),
-            keywords: "|".to_owned(),
+            keywords: "S".to_owned(),
             choice: Choice::Style(style.name.clone()),
         });
     }
-    let mut option = |section: &'static str, label: &str, detail: &str, choice: Choice| {
-        entries.push(Entry {
-            section,
-            label: label.to_owned(),
-            detail: detail.to_owned(),
-            keywords: String::new(),
-            choice,
-        });
+    entries.extend(options(app));
+    entries
+}
+
+/// The settings with a fixed set of options, after the densities and before the font sizes:
+/// each option's section, label, detail and what applying it sets.
+const OPTIONS: &[(&str, &str, &str, Choice)] = &[
+    (
+        "Layout",
+        "unified",
+        "removed lines above added lines · |",
+        Choice::Layout(DiffLayout::Unified),
+    ),
+    (
+        "Layout",
+        "side by side",
+        "base on the left, head on the right · |",
+        Choice::Layout(DiffLayout::SideBySide),
+    ),
+    (
+        "View",
+        "whole file",
+        "every line, changes in place, no hunk headers · v",
+        Choice::View(DiffView::File),
+    ),
+    (
+        "View",
+        "hunks",
+        "each hunk under its header, unchanged lines folded · v",
+        Choice::View(DiffView::Hunks),
+    ),
+    (
+        "Hunk position",
+        "with margins",
+        "its start a fifth down · the diff moves only when it has to",
+        Choice::HunkPosition(HunkPosition::Margin),
+    ),
+    (
+        "Hunk position",
+        "centered",
+        "every hunk the keys go to, in the middle · z z once",
+        Choice::HunkPosition(HunkPosition::Center),
+    ),
+    (
+        "Past a file's last hunk",
+        "stop",
+        "j/k and ]/[ stay in the file · n/N for the next file",
+        Choice::CrossFiles(false),
+    ),
+    (
+        "Past a file's last hunk",
+        "go on to the next file",
+        "j/k and ]/[ go on into the next or previous file",
+        Choice::CrossFiles(true),
+    ),
+    (
+        "Token emphasis",
+        "off",
+        "changed lines only",
+        Choice::Emphasis(false),
+    ),
+    (
+        "Token emphasis",
+        "on",
+        "underline the tokens that changed",
+        Choice::Emphasis(true),
+    ),
+    (
+        "Approved hunks",
+        "folded",
+        "their header alone · zA",
+        Choice::Approved(Approved::Folded),
+    ),
+    (
+        "Approved hunks",
+        "shown",
+        "with their code · zA",
+        Choice::Approved(Approved::Shown),
+    ),
+    (
+        "Reformatting",
+        "approved automatically",
+        "proven formatting-only hunks need no mark",
+        Choice::AutoApprove(true),
+    ),
+    (
+        "Reformatting",
+        "needs review",
+        "every hunk needs a mark",
+        Choice::AutoApprove(false),
+    ),
+];
+
+/// The entries of every setting but the theme and the diff style, in order.
+fn options(app: &Model) -> Vec<Entry> {
+    let entry = |section: &'static str, label: &str, detail: &str, choice: Choice| Entry {
+        section,
+        label: label.to_owned(),
+        detail: detail.to_owned(),
+        keywords: String::new(),
+        choice,
     };
-    for density in Density::ALL {
+    let densities = Density::ALL.into_iter().map(|density| {
         let detail = match density {
             Density::Compact => "terminal rows",
             Density::Normal => "a little more air",
             Density::Comfortable => "Zed's spacing",
         };
-        option("Density", density.name(), detail, Choice::Density(density));
-    }
-    option(
-        "Layout",
-        "unified",
-        "removed lines above added lines · s",
-        Choice::Layout(DiffLayout::Unified),
-    );
-    option(
-        "Layout",
-        "side by side",
-        "base on the left, head on the right · s",
-        Choice::Layout(DiffLayout::SideBySide),
-    );
-    option(
-        "Token emphasis",
-        "off",
-        "changed lines only",
-        Choice::Emphasis(false),
-    );
-    option(
-        "Token emphasis",
-        "on",
-        "underline the tokens that changed",
-        Choice::Emphasis(true),
-    );
-    option(
-        "Approved hunks",
-        "folded",
-        "their header alone · zA",
-        Choice::Approved(Approved::Folded),
-    );
-    option(
-        "Approved hunks",
-        "shown",
-        "with their code · zA",
-        Choice::Approved(Approved::Shown),
-    );
-    option(
-        "Reformatting",
-        "approved automatically",
-        "proven formatting-only hunks need no mark",
-        Choice::AutoApprove(true),
-    );
-    option(
-        "Reformatting",
-        "needs review",
-        "every hunk needs a mark",
-        Choice::AutoApprove(false),
-    );
+        entry("Density", density.name(), detail, Choice::Density(density))
+    });
+    let options = OPTIONS
+        .iter()
+        .map(|(section, label, detail, choice)| entry(section, label, detail, choice.clone()));
     // A front end without a code size, such as a terminal, offers no font sizes.
     let sizes = if app.settings.front_end.capabilities().code_size {
         FONT_SIZES
     } else {
         &[]
     };
-    for &size in sizes {
+    let sizes = sizes.iter().map(|&size| {
         let default = (look::points_of(app.default_code_size) - f32::from(size)).abs() < 0.5;
-        option(
+        entry(
             "Font size",
             &format!("{size} pt"),
             if default { "default" } else { "" },
             Choice::FontSize(size),
-        );
-    }
-    entries
+        )
+    });
+    densities.chain(options).chain(sizes).collect()
 }
 
 /// The lines of `entries`: each section's title before its first entry.
@@ -374,6 +430,18 @@ impl Model {
                 layout: *layout,
                 ..applied.clone()
             },
+            Choice::View(view) => Look {
+                view: *view,
+                ..applied.clone()
+            },
+            Choice::HunkPosition(position) => Look {
+                hunk_position: *position,
+                ..applied.clone()
+            },
+            Choice::CrossFiles(on) => Look {
+                cross_files: *on,
+                ..applied.clone()
+            },
             Choice::Emphasis(on) => Look {
                 token_emphasis: *on,
                 ..applied.clone()
@@ -478,6 +546,9 @@ impl Model {
             Choice::Style(name) => applied.style.name == *name,
             Choice::Density(density) => applied.density == *density,
             Choice::Layout(layout) => applied.layout == *layout,
+            Choice::View(view) => applied.view == *view,
+            Choice::HunkPosition(position) => applied.hunk_position == *position,
+            Choice::CrossFiles(on) => applied.cross_files == *on,
             Choice::Emphasis(on) => applied.token_emphasis == *on,
             Choice::Approved(approved) => self.approved_in_use() == *approved,
             Choice::AutoApprove(on) => self.policy_in_use().auto_approve_formatting == *on,
@@ -579,6 +650,15 @@ impl Model {
             Choice::Layout(layout) => {
                 return self.apply_layout(*layout);
             }
+            Choice::View(view) => {
+                return self.apply_view(*view);
+            }
+            Choice::HunkPosition(position) => {
+                return self.apply_hunk_position(*position);
+            }
+            Choice::CrossFiles(on) => {
+                return self.apply_cross_files(*on);
+            }
             Choice::Approved(approved) => {
                 return self.apply_approved(*approved);
             }
@@ -646,7 +726,7 @@ impl Model {
         self.apply_look(look, &remembered, &what);
     }
 
-    /// `|`: the next diff style, plain, bold, soft and then the user's, remembered.
+    /// `S`: the next diff style, plain, bold, soft and then the user's, remembered.
     pub(super) fn next_diff_style(&mut self) {
         let current = self.settings.appearance.applied.style.name.clone();
         if let Some(style) = look::next_style(&self.settings.styles, &current).cloned() {
@@ -677,6 +757,68 @@ impl Model {
                  give it room).",
             );
         }
+    }
+
+    /// Shows the whole file or each hunk apart, keeping the reviewer's place, and remembers it.
+    pub(super) fn apply_view(&mut self, view: DiffView) {
+        let look = Look {
+            view,
+            ..self.settings.appearance.applied.clone()
+        };
+        let remembered = [Remembered {
+            table: "diff",
+            key: "view",
+            value: view.name().into(),
+        }];
+        let what = match view {
+            DiffView::File => "Whole files, changes in place",
+            DiffView::Hunks => "Hunks apart, unchanged lines folded",
+        };
+        self.apply_look(look, &remembered, what);
+    }
+
+    /// Lands the hunks the keys go to where `position` says, and remembers it.
+    fn apply_hunk_position(&mut self, position: HunkPosition) {
+        let look = Look {
+            hunk_position: position,
+            ..self.settings.appearance.applied.clone()
+        };
+        let remembered = [Remembered {
+            table: "diff",
+            key: "hunk_position",
+            value: position.name().into(),
+        }];
+        let what = match position {
+            HunkPosition::Margin => "Hunks land a fifth down",
+            HunkPosition::Center => "Hunks land in the middle",
+        };
+        self.apply_look(look, &remembered, what);
+    }
+
+    /// Lets the hunk keys go on into the next or previous file, or keeps them in the file, and
+    /// remembers it.
+    fn apply_cross_files(&mut self, on: bool) {
+        let look = Look {
+            cross_files: on,
+            ..self.settings.appearance.applied.clone()
+        };
+        let remembered = [Remembered {
+            table: "diff",
+            key: "cross_files",
+            value: on.into(),
+        }];
+        let what = if on {
+            "Hunk keys go on into the next file"
+        } else {
+            "Hunk keys stay in the file"
+        };
+        self.apply_look(look, &remembered, what);
+    }
+
+    /// `v`: the whole file or each hunk apart.
+    pub(super) fn toggle_view(&mut self) {
+        let view = self.settings.appearance.applied.view.toggled();
+        self.apply_view(view);
     }
 
     /// Folds approved hunks or shows them, keeping the reviewer's place, and remembers it.
@@ -739,7 +881,7 @@ impl Model {
         }
     }
 
-    /// `s` in the files and the diff: side by side or unified.
+    /// `|` in the files and the diff: side by side or unified.
     pub(super) fn toggle_layout(&mut self) {
         let layout = self.settings.appearance.applied.layout.toggled();
         self.apply_layout(layout);
@@ -764,7 +906,7 @@ mod tests {
         let entry = Entry {
             section: "Layout",
             label: "side by side".to_owned(),
-            detail: "base on the left, head on the right · s".to_owned(),
+            detail: "base on the left, head on the right · |".to_owned(),
             keywords: "split".to_owned(),
             choice: Choice::Layout(DiffLayout::SideBySide),
         };

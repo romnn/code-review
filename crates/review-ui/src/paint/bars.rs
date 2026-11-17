@@ -204,7 +204,13 @@ pub fn bar_hints(
             hint.available = true;
         }
     }
-    // `|` says which diff style shows, the one it moves on from.
+    // In scroll mode, `j` and `k` scroll a line.
+    if area == Area::Diff && model.scroll_mode {
+        for hint in hints.iter_mut().filter(|hint| hint.action == "NextHunk") {
+            hint.label = "scroll";
+        }
+    }
+    // `S` says which diff style shows, the one it moves on from.
     let style = model.look().style.name.clone();
     let label = |hint: &keymap::Hint| match hint.action {
         "ToggleDiffStyle" => style.clone(),

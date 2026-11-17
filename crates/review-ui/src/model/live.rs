@@ -475,6 +475,16 @@ impl Model {
         if let Some(path) = self.selected.clone() {
             self.places.remove(&path);
         }
+        // Places kept for other files name units of the old snapshot; each follows its unit to
+        // the new one, or forgets it when the unit is gone.
+        let follow =
+            |unit: review_core::UnitId| moved.any(unit.index()).map(|index| view.id(index));
+        for place in self.places.values_mut() {
+            place.unit = place.unit.and_then(follow);
+            place.key = place
+                .key
+                .and_then(|key| follow(key.unit()).map(|unit| key.with_unit(unit)));
+        }
 
         self.hunk = 0;
         self.build_selected();

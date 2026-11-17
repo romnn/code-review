@@ -105,6 +105,7 @@ mod tests {
             } = theme.ui;
             let theme::Review {
                 open,
+                partial,
                 done,
                 flagged,
                 changed,
@@ -143,6 +144,7 @@ mod tests {
                     error,
                     note,
                     open,
+                    partial,
                     done,
                     flagged,
                     changed,

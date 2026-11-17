@@ -111,6 +111,9 @@ impl Model {
                 running |= scroll.lay_out(count, viewport, shown, now);
             }
         }
+        if self.list_shown(List::Diff) {
+            self.follow_view();
+        }
         running
     }
 
@@ -178,7 +181,8 @@ impl Model {
     }
 
     /// The wheel over `list`: it takes over from an eased scroll, which would otherwise pull
-    /// the list back to its target on the next frames, and scrolls by `delta` rows.
+    /// the list back to its target on the next frames, and scrolls by `delta` rows. In the
+    /// diff, the selected hunk follows the view.
     pub fn wheel_list(&mut self, list: List, delta: f64) {
         if let Some(scroll) = self.list_scroll_mut(list) {
             scroll.stop();
@@ -186,15 +190,21 @@ impl Model {
         if delta != 0.0 {
             self.scroll_list_by(list, delta);
         }
+        if list == List::Diff {
+            self.follow_view();
+        }
     }
 
     /// A scrollbar's thumb dragged, or a short list's track clicked: `list` at `offset` rows,
-    /// within its rows.
+    /// within its rows. In the diff, the selected hunk follows the view.
     pub fn drag_list_to(&mut self, list: List, offset: f64) {
         let count = self.list_rows(list);
         let viewport = self.grid().viewports.of(list);
         if let Some(scroll) = self.list_scroll_mut(list) {
             scroll.scroll_to(offset, count, viewport);
+        }
+        if list == List::Diff {
+            self.follow_view();
         }
     }
 

@@ -201,7 +201,7 @@ const DEFAULTS: &[Default] = &[
         &[Area::Tree, Area::Diff],
         "Files",
         "next file · next match",
-        Some((7, "file")),
+        Some((4, "file")),
         Some("PreviousFile"),
     ),
     (
@@ -242,12 +242,30 @@ const DEFAULTS: &[Default] = &[
     ),
     // One file's diff.
     (
+        "NextOpenHunk",
+        &["]"],
+        DIFF,
+        "Diff",
+        "next hunk to review",
+        Some((1, "to review")),
+        Some("PreviousOpenHunk"),
+    ),
+    (
+        "PreviousOpenHunk",
+        &["["],
+        DIFF,
+        "Diff",
+        "previous hunk to review",
+        None,
+        None,
+    ),
+    (
         "NextHunk",
         &["j", "down"],
         DIFF,
         "Diff",
-        "next hunk",
-        Some((1, "hunk")),
+        "next hunk · a line down in scroll mode",
+        Some((3, "hunk")),
         Some("PreviousHunk"),
     ),
     (
@@ -255,7 +273,43 @@ const DEFAULTS: &[Default] = &[
         &["k", "up"],
         DIFF,
         "Diff",
-        "previous hunk",
+        "previous hunk · a line up in scroll mode",
+        None,
+        None,
+    ),
+    (
+        "ToggleScrollMode",
+        &["s", "a"],
+        DIFF,
+        "Diff",
+        "scroll mode: j/k scroll a line",
+        None,
+        None,
+    ),
+    (
+        "LineDown",
+        &["ctrl-e"],
+        DIFF,
+        "Diff",
+        "scroll a line down",
+        None,
+        None,
+    ),
+    (
+        "LineUp",
+        &["ctrl-y"],
+        DIFF,
+        "Diff",
+        "scroll a line up",
+        None,
+        None,
+    ),
+    (
+        "CenterHunk",
+        &["z z"],
+        DIFF,
+        "Diff",
+        "center the selected hunk",
         None,
         None,
     ),
@@ -336,7 +390,7 @@ const DEFAULTS: &[Default] = &[
         &["escape", "h", "left"],
         DIFF,
         "Diff",
-        "back to the files",
+        "back to the files · out of scroll mode, back to its hunk",
         None,
         None,
     ),
@@ -552,7 +606,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "ToggleDiffStyle",
-        &["|"],
+        &["shift-s"],
         MODES,
         "View",
         "next diff style: plain, bold, soft, then yours",
@@ -562,7 +616,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "ToggleLayout",
-        &["s"],
+        &["|"],
         &[Area::Tree, Area::Diff],
         "View",
         "side by side or unified",
@@ -575,6 +629,15 @@ const DEFAULTS: &[Default] = &[
         &[Area::Tree, Area::Diff],
         "View",
         "show or fold approved hunks",
+        None,
+        None,
+    ),
+    (
+        "ToggleView",
+        &["v"],
+        &[Area::Tree, Area::Diff],
+        "View",
+        "whole file or hunks apart",
         None,
         None,
     ),
@@ -1173,7 +1236,10 @@ mod tests {
             .take(3)
             .map(|hint| (hint.keys.as_str(), hint.label))
             .collect();
-        assert_eq!(first, [("j/k", "hunk"), ("a", "approve"), ("/", "find")]);
+        assert_eq!(
+            first,
+            [("]/[", "to review"), ("a", "approve"), ("j/k", "hunk")]
+        );
         assert_eq!(
             shown.last().map(|hint| (hint.keys.as_str(), hint.label)),
             Some(("?", "keys")),

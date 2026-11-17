@@ -42,7 +42,7 @@ command here fails. Positions are terminal cells, starting on a 160×50 screen.
 | `paste <json string>` | Pastes as a terminal's bracketed paste; a paste must never act as keys. |
 | `click <column> <row> [count] [shift]` | Presses the left button on a cell, `count` times in a row. |
 | `drag <column> <row> <column> <row>` | Presses on the first cell, moves a cell at a time, releases on the second. |
-| `wheel <turns> [<column> <row>] [shift]` | Turns the wheel, three rows a turn, over the diff or at a cell. |
+| `wheel <turns> [<column> <row>] [shift]` | Sends wheel events, a row each, over the diff or at a cell. |
 | `scroll <rows>` / `pan <cells>` | Scrolls the diff by rows or moves its code left by cells. |
 | `file <path>` / `find <text>` | Shows a file's diff, or selects the hunk of the next row containing the text. |
 | `resize <columns>x<rows>` | Resizes the screen. |

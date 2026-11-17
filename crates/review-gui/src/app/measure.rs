@@ -29,7 +29,7 @@ const NUMBER_ROOM: f32 = 1.25;
 pub const PANEL_LINE_HEIGHT: f32 = 1.75;
 
 /// The accent bar along a row's left edge, in logical pixels.
-pub const FRAME: f32 = 5.0;
+pub const FRAME: f32 = 8.0;
 
 /// A code row's line-number gutter, in cells: four digits and the room after them.
 const GUTTER_CELLS: f32 = 5.0;

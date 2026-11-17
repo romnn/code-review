@@ -21,7 +21,7 @@
 //! density change lands on the same line.
 
 use super::{Model, ZOOM_RANGE};
-use crate::config::{Approved, Density, DiffLayout};
+use crate::config::{Approved, Density, DiffLayout, DiffView};
 use crate::frame::{self, Geometry, Grid, Metrics, Scale, Viewports};
 use crate::look;
 use crate::rows::{Layout, Presentation, Row, RowKind};
@@ -114,6 +114,13 @@ impl RowKey {
         self.head
     }
 
+    /// The same line as another unit's, for the rows of another snapshot, where the row's unit
+    /// went to `unit`.
+    #[must_use]
+    pub(crate) fn with_unit(self, unit: review_core::UnitId) -> Self {
+        Self { unit, ..self }
+    }
+
     /// Does what [`Self::find`] does in the rows of another snapshot, where the row's unit went
     /// to `unit`, or nowhere: then only the same line is looked for.
     #[must_use]
@@ -158,6 +165,8 @@ pub(crate) struct Places {
     pub(crate) approved: Approved,
     /// Which units counted as approved in those rows, which decides which of them folded.
     pub(crate) policy: review_core::ReviewPolicy,
+    /// How much of the file those rows showed.
+    pub(crate) view: DiffView,
     /// The file tree.
     pub(crate) tree: Anchor,
     /// The file buffer.
@@ -200,6 +209,7 @@ pub(crate) fn opening(
         layout: effective_layout(look.layout, grid.half_cells),
         density: look.density,
         roomy: look.density == Density::Comfortable && !grid.tall_rows,
+        view: look.view,
     }
 }
 
@@ -233,6 +243,7 @@ impl Model {
             layout: effective_layout(look.layout, grid.half_cells),
             density: look.density,
             roomy: look.density == Density::Comfortable && !grid.tall_rows,
+            view: look.view,
         }
     }
 
@@ -244,6 +255,7 @@ impl Model {
             diff_key: self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of),
             approved: self.folds.approved,
             policy: self.policy(),
+            view: self.presented.view,
             tree: Anchor::at(self.tree_scroll.offset()),
             buffer: Anchor::at(self.buffer_scroll.target()),
         }
@@ -268,6 +280,7 @@ impl Model {
             diff_key,
             approved,
             policy,
+            view,
             tree,
             buffer,
         } = places;
@@ -299,9 +312,14 @@ impl Model {
 
         // Every list back at its row, within the new extent.
         let diff = match diff_key {
-            Some(key) if self.folds.approved != approved || self.policy() != policy => key
-                .find(&self.rows)
-                .map_or(diff, |row| Anchor { row, ..diff }),
+            Some(key)
+                if self.folds.approved != approved
+                    || self.policy() != policy
+                    || self.presented.view != view =>
+            {
+                key.find(&self.rows)
+                    .map_or(diff, |row| Anchor { row, ..diff })
+            }
             _ => diff,
         };
         let Viewports {

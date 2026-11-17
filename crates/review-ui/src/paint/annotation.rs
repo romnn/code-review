@@ -219,7 +219,7 @@ fn hunk_header(
         .view()
         .is_some_and(|view| units.iter().all(|&unit| model.folds.is_folded(&view, unit)));
     let tone = HunkTone::of(&badges);
-    let selected = matches!(frame, Frame::Selected(_));
+    let selected = frame.selected();
     let (background, palette) = if selected {
         let solid = palette.hunk_solid(tone);
         (solid, palette.on(solid))

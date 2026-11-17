@@ -519,10 +519,15 @@ This keeps the overriding safety rule:
 Moves are a presentation over review units, not units of their own:
 
 - Across all files of a revision, removed and added line runs are matched by content, at least 3
-  lines and 20 tokens long. A plain move requires exact text in the MVP. Whitespace-trimmed
-  matching may only *propose* a moved with edits pairing, whose differences, including indentation,
-  stay visible. Recognizing re-indented moves as plain moves waits for the per-chunk formatting
-  proof.
+  lines and 20 tokens long. A plain move has exact text, or differs only in formatting by the
+  same proof as a formatting-only chunk: the source block written into the target file in place
+  of the target block leaves the target file's syntax tree unchanged, and the target block written
+  into the source file leaves that one's, both files in one language the proof supports. So a
+  block re-indented as it moves into or out of a module, or with lines a formatter wrapped anew
+  at its new depth, is a plain move in Rust, while a Python function moved into a class, which
+  becomes a method there, changes a tree and keeps its edits. Whitespace-trimmed matching
+  otherwise only *proposes* a moved with edits pairing, whose differences, including indentation,
+  stay visible. The moves' proofs share a parse budget per revision.
 - Assignments are one-to-one and non-overlapping: each removed run pairs with at most one added
   run. A block copied to two places shows one move and one plain addition.
 - **Moved**: both sides equal after normalization. Shown as one collapsed line, "moved from
@@ -531,6 +536,18 @@ Moves are a presentation over review units, not units of their own:
   the move stays unreviewed until those are reviewed too.
 - **Moved with edits**: at least 80 % of the lines equal. Shown expanded by default with the inner
   diff between the two blocks; never part of a noise category.
+- In the file view, which shows every line, moved code shows at both ends under its note rather
+  than folded into it, on a background of the theme's move color, so it reads as moved rather
+  than removed or added: where the lines left, and where they arrived the lines the move kept,
+  with a move's edits still removed and added inside the block. A move within one file names
+  only its lines, as "moved to lines 40–48 of this file".
+- A move's edits show as delta shows edits: each edited line's old version above its new one,
+  paired in order, with the words the edit changed behind a stronger shade of red or green, and
+  whitespace marked only on a line whose only change it is. Lines equal but for their leading
+  whitespace pair up first, old above new with only the indentation marked, since in Python or
+  YAML a re-indent may change what the code means; when every line shifts its indentation alike
+  and nothing else changed, the note says "moved and re-indented". Where the engine proves the
+  re-indent is formatting, the move is plain and shows no edits at all.
 - Any part of a unit not covered by a move stays visible as an ordinary change.
 
 ### Noise classification
@@ -800,15 +817,47 @@ it, muted, so it never reads as code.
     cannot be marked as a whole, since it hides some of its files. Folded folders are saved with
     the review whenever they change and fold again when it reopens, except folders the shown
     revision no longer has; the review opens at the first file that needs the reviewer outside
-    them, and unfolds one only when every such file is folded away.
-  - *Diff*: a file opens at its first hunk that needs the reviewer. `j`/`k` move between hunks,
-    `Ctrl+D`/`Ctrl+U` scroll, Space approves the hunk and moves to the next open one (and, at the
-    end of a file, names the next file to review), `!` flags, `za` folds, Tab, Esc or `h` goes
-    back to the files. `n`/`N` show the next and previous file in the tree's visible order, at
-    its first hunk that needs the reviewer, as the tree's cursor moves: folders are no stops, a
-    folded folder's files are skipped, and at either end it stays and says so. `/` searches the
-    diff's code as vim does, without leaving the diff: matches are highlighted, `n`/`N` step
-    through them (while a search is active they step rather than moving to another file), and
+    them, and unfolds one only when every such file is folded away. Quitting saves where the
+    reviewer was too, the shown file and its selected hunk's first unit, with the folds, and
+    the review opens there again; moving around writes nothing. A saved file the shown
+    revision no longer has, or one in a folded folder, opens the review as before, and a unit
+    the file no longer has opens the file at its first hunk that needs the reviewer. The place
+    only says where the review opens and never marks anything.
+  - *Diff*: a file opens at its first hunk that needs the reviewer, that hunk at the reading
+    line rather than the file's first line at the top. `j`/`k` step to the next
+    and previous hunk, reviewed or not, and `]`/`[` to the next and previous hunk that needs
+    the reviewer; past a file's last or first one they stop and say so, naming the next file
+    to review, which `n` shows. `Ctrl+D`/`Ctrl+U` scroll half a page, `Ctrl+E`/`Ctrl+Y` a line
+    as in vim, and `s` (or `a`, lazygit's key for going from hunks to lines) turns on scroll
+    mode, where `j`/`k` scroll a line until `s` again, or Esc, which goes back to the hunk
+    scroll mode began at, the next Esc going to the files. The wheel scrolls without a mode,
+    and in review-tui a row for each wheel event, since terminals already send several events
+    for one notch. Either way the
+    selected hunk follows the view: when it leaves it, the hunk in view nearest the reading
+    line a fifth down becomes the selected one, so the review keys act on what shows. With
+    `[diff] cross_files = true` (or the settings list) `j`/`k` go on
+    into the next or previous file in the tree's visible order instead, and `]`/`[` into the
+    next or previous file that needs the reviewer, around the end of the tree.
+    A hunk the keys go to lands with its start a fifth down the diff, whichever way the keys
+    go, so the eye stays at one reading line and the code before the hunk, the hunk whole as
+    far as it fits, and what follows it all show; a hunk already shown with a fifth clear above
+    and below it stays put, so short steps never jump. A hunk taller than the diff shows from
+    its start, never its middle, and one near the start of the file shows from the very top.
+    (Keeping a margin below a hunk going down, as `scrolloff` does for a cursor, left longer
+    hunks cut off at the bottom.) `[diff] hunk_position = "center"` (or the settings list) instead puts every hunk the
+    keys go to in the middle, as `scrolloff=999` does, and `z z` centers the selected hunk once
+    in either position. A hunk in another file shows at once where it lands, without a glide
+    from the file's remembered place. Space approves the hunk and moves on to the next one in
+    the file that needs the reviewer, as lazygit moves on after staging a hunk, coming around
+    from the file's start; once the file has nothing left to review, it stays and the status
+    line names the next file to review. It never leaves the file by itself, so a held Space
+    never approves code of a file the reviewer has not seen. `!` flags, `za` folds, Tab, Esc or `h` goes back
+    to the files.
+    `n`/`N` show the next and previous file in the tree's visible order, at its first hunk that
+    needs the reviewer, as the tree's cursor moves: folders are no stops, a folded folder's
+    files are skipped, and at either end it stays and says so. `/` searches the diff's code as
+    vim does, without leaving the diff: matches are highlighted, `n`/`N` step through them
+    (while a search is active they step rather than moving to another file), and
     the selected hunk follows the match, so Space acts on the hunk that holds it. Leaving the
     diff ends the search.
   - *File* (`=`): the whole head version as a read-only buffer at the selected hunk, with the
@@ -818,8 +867,9 @@ it, muted, so it never reads as code.
     as it does from the diff, since Tab switches between the files and the code.
   - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
     request overview and `?` the keys, both overlays that own the keyboard until closed.
-  - `s` shows the diff side by side or unified, `zA` shows or folds approved hunks, `|` cycles
-    the diff styles, and `T` or `,` opens the settings list (below).
+  - `|` shows the diff side by side or unified, `v` the whole file or hunks apart (below),
+    `zA` shows or folds approved hunks in the hunks view, `S` cycles the diff styles, and `T`
+    or `,` opens the settings list (below).
 - **Pickers.** Telescope's two most used, from every mode, as overlays that own the keyboard
   and the pointer: `Ctrl+P` finds a file by a fuzzy match of its path (`nucleo-matcher`, the
   matcher Helix uses), each entry with its change kind and review progress; `Ctrl+G` searches
@@ -865,6 +915,29 @@ it, muted, so it never reads as code.
   the file's header, so the bar does not repeat them. Keys that cannot act now are dimmed, not removed, and a
   narrow window drops whole hints from the highest rank down, so the bar never shifts as the
   selection changes.
+- **Views.** `[diff] view` says how much of a file its diff shows, and `v` or the settings list
+  switches it. `file`, the default, is the whole file with its changes in place, as an editor
+  shows it: no hunk headers, no gaps of unchanged lines, and approved hunks and reviewed files
+  open, so every change reads in its context and approving one never moves the code. A hunk
+  shows only by its lines and a bar along its left edge: the selected hunk's across the frame
+  in the solid color of its state, an approved one's a quieter green sliver and a flagged one's
+  a quieter red sliver, so the selected hunk shows at a glance. Approved code loses its diff
+  colors in every style, in either view: no line background, no red or green text and no
+  change bar, only its `+` and `−` signs, its added lines reading as the file's code and its
+  removed lines faded, as code that is gone; what still needs the reviewer is all that stays
+  in color. In the bold style, `[diff] soft_unselected` (on by default, in the configuration
+  file only) gives every hunk but the selected one soft line backgrounds, so the selected one
+  stands out the more. Each change is a hunk of its own, a stop for `j`/`k` and a
+  mark of its own, where the hunks view joins changes a few lines apart under one header with
+  the context they share. The file's header names the selected hunk's scopes and label
+  after the path (`src/engine.rs › impl Ledger › fn apply_batch`), what its header would say.
+  Short of room, the header keeps the file name and the innermost scope longest: the file's
+  length goes first, and only beside the whole scope; then the path's middle folders shorten;
+  then the outer scopes give way to `… ›`, outermost first; then the line counts and the meter.
+  A hunk the reviewer folds keeps its header alone, so it can still be selected and unfolded,
+  and so does a change without lines, such as a mode change. `hunks` is the view described
+  under the visual grammar below: each hunk under its header with a few unchanged lines around
+  it, the rest folded into gaps, and approved hunks folded as `[diff] approved` says.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
@@ -894,13 +967,19 @@ it, muted, so it never reads as code.
   whose only entry is one folder shows as one row with it, as VS Code's compact folders and
   GitHub's file tree show them (`services/billing/internal/postgres`, one indent), folding and
   unfolding as one: it is folded while any folder of it is, and unfolding it unfolds them all,
-  so none folds again when a change parts the chain. A name too wide for its row is cut in its
-  middle, so a file's extension and a chain's deepest folder still show. Names are
+  so none folds again when a change parts the chain. With `[view] shorten_chains` (on by
+  default, in the configuration file only) a chain of three or more folders shortens its middle
+  ones to their first letter, as fish's prompt does, keeping its first and last whole
+  (`airtype-oauth/s/p/europace`), and the file header shortens its path's folders the same way
+  when it runs short of room. A name too wide for its row is cut in its middle, so a file's
+  extension and a chain's deepest folder still show. Names are
   colored by review state, as lazygit colors staged and unstaged files: a done file or folder
   is green whole, its kind letter and `✓` too, a flagged one red, one changed since reviewed
   purple, and one that still needs the reviewer bright; only state that needs action or
   confirms done carries a glyph (`✓` done, `◐` partly reviewed, `!` flagged, `↻` changed since
-  reviewed), so unreviewed files are just bright names. Change details and counts live in the diff's header. Moves
+  reviewed), so unreviewed files are just bright names. A partly reviewed file or folder is
+  yellow, as lazygit marks a partly staged file (`[review] partial`, the theme's note yellow
+  unless it sets one), a folded folder included, since its color sums up the files in it. Change details and counts live in the diff's header. Moves
   are one quiet line naming the other end (Enter follows it); a move with edits also shows its edits
   where the code arrives. The file buffer's header names the scopes around the cursor
   (`src/engine.rs › impl Ledger › fn balance`). On tinted lines, syntax colors too dim to read are
@@ -909,12 +988,12 @@ it, muted, so it never reads as code.
   bundle of syntax colors (on or off), what changed lines are drawn on (`none`, `muted`, mixed
   toward the editor background, or `bold`), and whether a change bar marks changed lines in
   the gutter, which no built-in style has. A style is colors only: it never moves a row, so
-  cycling styles never shifts the content. Three are built in, in the order `|` cycles them: `plain`, lazygit's red and green
+  cycling styles never shifts the content. Three are built in, in the order `S` cycles them: `plain`, lazygit's red and green
   text without syntax or backgrounds; `bold` (the default), delta's syntax colors on its line
   backgrounds (`#5f1519`, `#14471f`, overridable per theme); and `soft`, the Zed prototype's
   muted look. `[styles.<name>]` tables add more (one that sets `density` is rejected with an
   error saying where it belongs, and one that sets the retired `headers` says it is gone),
-  `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `|`
+  `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `S`
   hint names the style in use. Changed-token emphasis is off by default
   (`[diff] token_emphasis`).
 - **Density.** The rows' spacing is its own setting, `[diff] density`: `compact`, a terminal's
@@ -925,7 +1004,7 @@ it, muted, so it never reads as code.
   after it. Every row keeps one height, and the air is whole blank rows, so places and
   scrolling stay row arithmetic; a half-line gap around notes would need rows of their own
   heights.
-- **Side by side.** `s` toggles `[diff] layout` between `unified` and `side-by-side`. Pairing is a
+- **Side by side.** `|` toggles `[diff] layout` between `unified` and `side-by-side`. Pairing is a
   projection after the rows are laid out (`rows::present`): a run of removed lines beside the
   added lines right after it in the same unit and hunk, line by line, with the shorter side
   padded; unchanged lines on both sides with each side's own line number. A nested diff pairs
@@ -976,10 +1055,10 @@ it, muted, so it never reads as code.
   or else its unit's header. Places kept for other files are row identities too, so a
   density change never lands a returning reviewer on another line.
 - **Themes as data.** A theme is a TOML file of semantic roles (`[ui]`, `[review]`, `[kind]`,
-  `[diff]`, `[syntax]`). Fourteen are built in under `crates/review-ui/themes/`, each citing its
+  `[diff]`, `[syntax]`). Fifteen are built in under `crates/review-ui/themes/`, each citing its
   source palette and license: the dark carbonfox (the default), nightfox, nordfox, terafox,
-  duskfox, tokyonight-night, One Dark, Catppuccin Mocha and Rosé Pine, and the light GitHub
-  Light, One Light, Catppuccin Latte, Solarized Light and Rosé Pine Dawn. Light themes whose
+  duskfox, tokyonight-night, One Dark, Catppuccin Mocha, Rosé Pine and GitHub Dark, and the light
+  GitHub Light, One Light, Catppuccin Latte, Solarized Light and Rosé Pine Dawn. Light themes whose
   source defines no diff backgrounds derive them by blending the base a fifth of the way to red
   and green, as nightfox's light palettes do. Files in
   `$XDG_CONFIG_HOME/code-review/themes/` add themes or replace a built-in one of the same name.
@@ -1087,10 +1166,10 @@ it, muted, so it never reads as code.
   lower-priority parts make way: the file header drops its line counts, then its meter. Only the
   title bar and its buttons keep the platform's fixed size, so previewing a font size never moves
   the settings panel. The files pane is as wide as its tree's widest row needs, every folder
-  open so folding and filtering never move it, at least 24 text cells and at most 40% of the
-  window; it follows the files as they change, a live working tree's included. Dragging its
+  open so folding and filtering never move it, at least 24 text cells and at most a quarter of
+  the window, a long name cut in its middle; it follows the files as they change, a live working tree's included. Dragging its
   divider sets a width of its own and a double click fits the tree again (limits keep it at
-  most 40% of the window and, within that, at least 180 px and 16 text cells wide and the diff
+  most a quarter of the window and, within that, at least 180 px and 16 text cells wide and the diff
   at least 400 px wide). While the settings panel is open, the pane is measured at the text
   size it opened with, so previewing a font size moves neither the panel nor the diff.
   `Ctrl+B` hides the pane, and
@@ -1249,7 +1328,7 @@ settings, find, file buffer, overview and `?` sheet, and mouse selection with co
   continues (`SIGCONT`), it takes the terminal again, raw mode included, and redraws it whole.
   A terminal that can no longer be drawn to, and input that ended, quit unattended too.
 - **Where a terminal differs.** No zoom, font size, fullscreen or smooth scrolling, and no
-  scrollbars. The files pane fits its tree as in the window, within 40% of the terminal and
+  scrollbars. The files pane fits its tree as in the window, within a quarter of the terminal and
   leaving the diff 44 cells, and its width is its own `[layout] tui_sidebar`, in cells. A paste
   goes
   only into a text field taking typing, never in as keys. A terminal has no title bar the app

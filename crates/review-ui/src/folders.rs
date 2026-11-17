@@ -1,8 +1,10 @@
-//! Remembering which folders of the file tree are folded, per review, across launches.
+//! Remembering which folders of the file tree are folded, and where the reviewer was, per
+//! review, across launches.
 //!
-//! The folded folders are the front ends' view state of the review (see
+//! The folded folders and the place are the front ends' view state of the review (see
 //! [`Review::view_state`]): loaded with the review, and saved by the front end in the background
-//! whenever they change, however they changed.
+//! whenever they change, however they changed. The place is only where the review opens: it
+//! never marks anything, and one the shown revision no longer has is ignored.
 
 use std::collections::HashSet;
 
@@ -15,24 +17,39 @@ use serde::{Deserialize, Serialize};
 pub const FRONT_END: &str = "review-lite";
 
 /// The front ends' view state of one review, as stored.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewState {
     /// The folded folders' paths, sorted.
     #[serde(default)]
     pub collapsed: Vec<String>,
+    /// Where the reviewer was when the review was last left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<Place>,
 }
 
-/// Loads the folded folders last saved for `review`; nothing saved folds nothing.
+/// Where the reviewer was: the file whose diff showed, and the first unit of its selected
+/// hunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The file's display path.
+    pub path: String,
+    /// The selected hunk's first unit, as its ID reads, such as `u1-0042`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Loads the view state last saved for `review`; nothing saved folds nothing and opens where a
+/// review opens the first time.
 ///
 /// # Errors
 ///
 /// Returns why, as a message for the developer's log, when the saved state cannot be read; the
-/// review then folds nothing.
-pub fn load(review: &Review) -> Result<Vec<String>, String> {
+/// review then opens as for the first time.
+pub fn load(review: &Review) -> Result<ViewState, String> {
     review
         .view_state::<ViewState>(FRONT_END)
-        .map(|state| state.unwrap_or_default().collapsed)
-        .map_err(|err| format!("ignoring the saved folded folders: {err:#}"))
+        .map(Option::unwrap_or_default)
+        .map_err(|err| format!("ignoring the saved view state: {err:#}"))
 }
 
 /// The saved folded folders that are still folders of `tree`, on a node of their own or in a
@@ -65,7 +82,7 @@ mod tests {
         let paths = DemoPaths::under(dir.path());
         let review = prepare(&paths, &fixture_dir(), DemoRequest::Fresh).unwrap();
         // A review opened for the first time folds nothing.
-        assert_eq!(load(&review), Ok(Vec::<String>::new()));
+        assert_eq!(load(&review), Ok(ViewState::default()));
 
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
@@ -74,10 +91,16 @@ mod tests {
             .map(str::to_owned)
             .to_vec();
         review
-            .save_view_state(FRONT_END, &ViewState { collapsed })
+            .save_view_state(
+                FRONT_END,
+                &ViewState {
+                    collapsed,
+                    place: None,
+                },
+            )
             .unwrap();
         assert_eq!(
-            restored(load(&review).unwrap(), &tree),
+            restored(load(&review).unwrap().collapsed, &tree),
             HashSet::from(["src/generated".to_owned(), ".github".to_owned()])
         );
     }
@@ -94,7 +117,7 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         let ignored = load(&review).unwrap_err();
         assert!(
-            ignored.starts_with("ignoring the saved folded folders: "),
+            ignored.starts_with("ignoring the saved view state: "),
             "{ignored}"
         );
     }

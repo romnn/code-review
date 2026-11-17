@@ -5,6 +5,14 @@
 # geometry, which each measures in its own units.
 # smoke.qa and smoke-tui.qa include it right after launching the demo.
 
+# The diff opens on whole files; this walk reads each hunk apart under its header, as `v`
+# shows it, which later launches remember. smoke-file.qa walks the whole file.
+state
+expect "view":"file","effective_view":"file"
+key v
+state
+expect "view":"hunks","effective_view":"hunks"
+
 # Moving through the files previews each one's diff.
 file src/engine.rs
 state
@@ -26,24 +34,25 @@ shot 02-engine
 key 0
 state
 expect "mode":"Diff"
-expect "hunk":2,
+expect "hunk":2,"hunks"
 expect "hunk_badges":\["Unreviewed"\]
 key k
 state
-expect "hunk":1,
+expect "hunk":1,"hunks"
 expect "hunk_badges":\["Auto"\]
 shot 03-auto-approved
 # Space on the reflow records an explicit reset, so it needs review; space then approves it
-# by hand and moves on to the next open hunk.
+# by hand and moves on to the next hunk that needs the reviewer.
 key space
 state
 expect "hunk_badges":\["Unreviewed"\]
 expect "tag":"reformatted only"
 key space
 state
-expect "hunk":2,
+expect "hunk":2,"hunks"
 key k
 state
+expect "hunk":1,"hunks"
 expect "hunk_badges":\["Accepted"\]
 shot 03-approved
 # Space again takes it back; ! flags and u resets.
@@ -80,7 +89,7 @@ key escape
 key escape
 state
 expect "mode":"Diff"
-expect "hunk":1,
+expect "hunk":1,"hunks"
 
 # Tab and Shift+Tab switch between the files and the code, and the buffer's Tab goes to the
 # files too.
@@ -91,7 +100,7 @@ expect "area":"Tree"
 key shift-tab
 state
 expect "mode":"Diff"
-expect "hunk":1,
+expect "hunk":1,"hunks"
 key =
 key tab
 state
@@ -100,8 +109,15 @@ key tab
 state
 expect "mode":"Diff"
 
-# n and N step through the files in the tree's order: from the diff each file shows at its
-# first hunk that needs the reviewer, and in the tree the cursor moves and previews it.
+# j and k step through the hunks in the diff; n and N step through the files in the tree's
+# order: from the diff each file shows at its first hunk that needs the reviewer, and in the
+# tree the cursor moves and previews it.
+key j
+state
+expect "hunk":2,"hunks"
+key k
+state
+expect "hunk":1,"hunks"
 key n
 state
 expect "selected":"src/format.rs"
@@ -109,7 +125,7 @@ expect "mode":"Diff"
 key shift-n
 state
 expect "selected":"src/engine.rs"
-expect "hunk":1,
+expect "hunk":1,"hunks"
 # A folded folder's files are skipped whole: around the folded src/, N and n go from the file
 # before it to the file after it.
 key tab
@@ -130,7 +146,7 @@ file src/engine.rs
 key 0
 state
 expect "mode":"Diff"
-expect "hunk":1,
+expect "hunk":1,"hunks"
 
 # Overlays own the keyboard: review keys under them do nothing.
 key ?
@@ -138,6 +154,6 @@ key space
 key j
 state
 expect "overlay":"Help"
-expect "hunk":1,
+expect "hunk":1,"hunks"
 expect "hunk_badges":\["Unreviewed"\]
 shot 05-help
