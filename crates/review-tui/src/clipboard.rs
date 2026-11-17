@@ -6,7 +6,7 @@
 //! clipboard command, as micromux does.
 
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Which clipboard a copy goes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,8 +17,11 @@ pub enum Board {
     Primary,
 }
 
-/// Clipboard commands to try in order for `board`, each taking the text on standard input.
-fn commands(board: Board) -> Vec<(&'static str, &'static [&'static str])> {
+/// A clipboard command and its arguments, which takes the text on standard input.
+type Command = (&'static str, &'static [&'static str]);
+
+/// Clipboard commands to try in order for `board`.
+fn commands(board: Board) -> Vec<Command> {
     let primary = board == Board::Primary;
     if cfg!(target_os = "macos") {
         // macOS has no primary selection.
@@ -32,30 +35,53 @@ fn commands(board: Board) -> Vec<(&'static str, &'static [&'static str])> {
         // code page.
         Vec::new()
     } else {
-        let mut commands: Vec<(&'static str, &'static [&'static str])> = Vec::new();
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            commands.push(("wl-copy", if primary { &["--primary"] } else { &[] }));
-        }
-        if std::env::var_os("DISPLAY").is_some() {
-            commands.push((
+        let wayland: Command = (
+            "wl-copy",
+            if primary { &["--primary"] } else { &[] },
+        );
+        let x11: [Command; 2] = [
+            (
                 "xclip",
                 if primary {
                     &["-selection", "primary"]
                 } else {
                     &["-selection", "clipboard"]
                 },
-            ));
-            commands.push((
+            ),
+            (
                 "xsel",
                 if primary {
                     &["--primary", "--input"]
                 } else {
                     &["--clipboard", "--input"]
                 },
-            ));
+            ),
+        ];
+        let has = |name| std::env::var_os(name).is_some();
+        let x11 = if has("DISPLAY") { x11.to_vec() } else { Vec::new() };
+        let wayland = if has("WAYLAND_DISPLAY") {
+            vec![wayland]
+        } else {
+            Vec::new()
+        };
+        // GNOME gives no Wayland clipboard to a program without a window, so `wl-copy` maps one
+        // for a moment there, which flashes in the dock; the X11 tools copy through XWayland,
+        // which passes the text on to Wayland, with a window that never shows.
+        if gnome() {
+            [x11, wayland].concat()
+        } else {
+            [wayland, x11].concat()
         }
-        commands
     }
+}
+
+/// Whether the desktop is GNOME, as `XDG_CURRENT_DESKTOP` names it, such as `ubuntu:GNOME`.
+fn gnome() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktops| {
+        desktops
+            .split(':')
+            .any(|desktop| desktop.eq_ignore_ascii_case("gnome"))
+    })
 }
 
 /// Whether the app runs over ssh, where a local clipboard command would copy on the remote
@@ -74,7 +100,7 @@ pub fn copy_locally(text: String, board: Board) {
         return;
     }
     for (program, args) in commands(board) {
-        let mut command = Command::new(program);
+        let mut command = std::process::Command::new(program);
         command
             .args(args)
             .stdin(Stdio::piped())
