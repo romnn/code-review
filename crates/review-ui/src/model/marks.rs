@@ -8,10 +8,12 @@
 
 use std::sync::Arc;
 
-use review_core::{History, MarkVerdict, Recorded, UnitId};
+use review_core::{History, MarkVerdict, Recorded, Review, TrustScope, UnitId};
 
 use super::effects::{Because, Outcome, Subject};
-use super::{Effect, Mode, Model, QuitKind, Quitting, SyncStep, live, overview, plural};
+use super::{
+    Effect, Grant, Mode, Model, QuitKind, Quitting, SyncStep, buffer, live, overview, plural,
+};
 use crate::rows;
 use crate::state::{self, MarkJob};
 
@@ -94,6 +96,10 @@ impl Model {
                 self.hunk + 1,
                 self.rows.hunks.len()
             ));
+            return;
+        }
+        if let Some(why) = self.live_refusal() {
+            self.set_status(why);
             return;
         }
         let (units, what) = match self.review_target() {
@@ -332,13 +338,14 @@ impl Model {
     /// `R`: switches to a newer revision when there is one, otherwise fetches and records the
     /// target's latest state in the background.
     pub(super) fn refresh(&mut self) {
+        // A live review shows the newest snapshot as it captures it, keeping the place, and
+        // records nothing until something is marked.
+        if self.following() {
+            self.recapture();
+            return;
+        }
         if let Some(newer) = self.snapshot.as_ref().and_then(state::Snapshot::newer) {
-            // A live review shows the newest snapshot as it captures it, keeping the place.
-            if self.following() {
-                self.capture(false);
-            } else {
-                self.switch_revision(newer);
-            }
+            self.switch_revision(newer);
             return;
         }
         let Some(review) = self.review.clone() else {
@@ -454,20 +461,33 @@ impl Model {
         };
         self.enter_mode(mode);
         self.request_syntax();
+        self.read_snapshot_trust();
         self.set_status(format!("Showing revision {revision}. {}", self.summary()));
     }
 
     /// `Ctrl+T`: trusts the review after a confirming second press, or revokes trust and stops
-    /// the language servers.
+    /// the language servers; for a review of the checkout, asks which grant to make, or
+    /// revokes the one that applies.
     pub(super) fn toggle_trust(&mut self) {
         let Some(review) = self.review.clone() else {
             return;
         };
-        let decision = match (self.trusted, self.trust_pending) {
+        if self.is_checkout() {
+            match self.grant {
+                Some(grant) => self.revoke(&review, grant),
+                None => self.ask_trust(false),
+            }
+            return;
+        }
+        // The confirmation holds only for the snapshot it was asked on.
+        let shown = self
+            .view()
+            .and_then(|view| view.record().map(|record| record.head.clone()));
+        let decision = match (self.trusted, self.trust_pending.take()) {
             (true, _) => false,
-            (false, true) => true,
-            (false, false) => {
-                self.trust_pending = true;
+            (false, Some(asked)) if shown.as_ref() == Some(&asked) => true,
+            (false, _) => {
+                self.trust_pending = shown;
                 self.set_status(
                     "Trusting runs a language server in a worktree of the reviewed head, and \
                      through it the review's own build configuration, which can run any \
@@ -476,20 +496,126 @@ impl Model {
                 return;
             }
         };
-        self.trust_pending = false;
-        match review.set_trusted(decision) {
+        // A review whose key another clone at the same path shares is trusted one snapshot at
+        // a time: the one on screen.
+        let tree = review.trusted_per_snapshot().then(|| {
+            self.view()
+                .and_then(|view| view.record().map(|record| record.head.clone()))
+                .ok_or_else(|| review_core::Error::InvalidTarget("no revision shows".to_owned()))
+                .and_then(|head| review.repo().tree_of(&head))
+        });
+        let record = || match tree {
+            Some(tree) => {
+                tree.and_then(|tree| review.set_trust(TrustScope::Snapshot { tree }, decision))
+            }
+            None => review.set_trusted(decision),
+        };
+        // A revocation stops the language servers as it records itself.
+        let recorded = if decision {
+            record()
+        } else {
+            buffer::revoke_servers(&self.servers, || record().map(|()| true))
+        };
+        match recorded {
             Ok(()) => {
                 self.trusted = decision;
-                // Dropping a server shuts it down; a lookup in flight holds the servers, and
-                // its completion stops them once it sees trust revoked.
-                if !decision && let Some(mut servers) = self.servers.try_lock() {
-                    servers.clear();
-                }
-                let done = if decision { "Trusted" } else { "Trust revoked" };
+                let done = match (decision, review.trusted_per_snapshot()) {
+                    (true, true) => "Trusted this snapshot",
+                    (true, false) => "Trusted",
+                    (false, _) => "Trust revoked",
+                };
                 self.set_status(format!("{done} · {}", self.summary()));
             }
             Err(err) => self.fail(format!("Cannot record trust: {err}")),
         }
+    }
+}
+
+impl Model {
+    /// Asks whether to trust the checkout's code, with a grant for this snapshot or the whole
+    /// checkout; with `resume`, go to definition runs once trusted.
+    pub(super) fn ask_trust(&mut self, resume: bool) {
+        if self.live.as_ref().and_then(|live| live.tree()).is_none() {
+            self.set_status("Nothing to trust yet: the working tree has not been captured.");
+            return;
+        }
+        self.trust_resumes = resume;
+        self.overlay = Some(super::Overlay::Trust);
+    }
+
+    /// `s` or `c` in the trust question: records the grant, for this snapshot or the whole
+    /// checkout, and goes on to what asked for it.
+    pub(super) fn grant_trust(&mut self, grant: Grant) {
+        if self.overlay != Some(super::Overlay::Trust) {
+            return;
+        }
+        let (Some(review), Some(tree)) = (
+            self.review.clone(),
+            self.live.as_ref().and_then(|live| live.tree()).cloned(),
+        ) else {
+            return;
+        };
+        self.overlay = None;
+        let scope = match grant {
+            Grant::Snapshot => TrustScope::Snapshot { tree },
+            Grant::Checkout => TrustScope::Checkout,
+        };
+        self.trust_decisions += 1;
+        if let Err(err) = review.set_trust(scope, true) {
+            self.fail(format!("Cannot record trust: {err}"));
+            return;
+        }
+        self.set_grant(Some(grant));
+        self.set_status(match grant {
+            Grant::Snapshot => {
+                "Trusted this snapshot: tools may run on it until the code changes. Ctrl+T \
+                 revokes."
+            }
+            Grant::Checkout => {
+                "Trusted this checkout: tools may run on whatever it holds until Ctrl+T \
+                 revokes it."
+            }
+        });
+        if std::mem::take(&mut self.trust_resumes) {
+            self.go_to_definition();
+        }
+    }
+
+    /// Revokes the checkout's `grant`, stopping the language servers, and says whether another
+    /// grant still applies.
+    fn revoke(&mut self, review: &Review, grant: Grant) {
+        let Some(tree) = self.live.as_ref().and_then(|live| live.tree()).cloned() else {
+            return;
+        };
+        let scope = match grant {
+            Grant::Snapshot => TrustScope::Snapshot { tree: tree.clone() },
+            Grant::Checkout => TrustScope::Checkout,
+        };
+        self.trust_decisions += 1;
+        let decisions = self.trust_decisions;
+        let mut still = None;
+        // The language servers stop as the revocation records itself, unless another grant
+        // still applies.
+        let revoked = buffer::revoke_servers(&self.servers, || {
+            review.set_trust(scope, false)?;
+            still = live::granted(review, &tree, decisions).grant;
+            Ok::<_, review_core::Error>(still.is_none())
+        });
+        if let Err(err) = revoked {
+            self.fail(format!("Cannot record trust: {err}"));
+            return;
+        }
+        self.set_grant(still);
+        let revoked = match grant {
+            Grant::Snapshot => "Trust in this snapshot revoked",
+            Grant::Checkout => "Trust in this checkout revoked",
+        };
+        self.set_status(match still {
+            Some(Grant::Snapshot) => {
+                format!("{revoked}; this snapshot stays trusted, which Ctrl+T revokes.")
+            }
+            Some(Grant::Checkout) | None => format!("{revoked}. {}", self.summary()),
+        });
     }
 }
 

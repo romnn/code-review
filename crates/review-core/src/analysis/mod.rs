@@ -21,7 +21,10 @@ use crate::syntax::Language;
 
 /// The version of the analysis format and algorithm; cached analyses of another version are
 /// recomputed.
-pub const ANALYSIS_FORMAT: u32 = 10;
+///
+/// Version 11 drops analyses read through git replace refs, which earlier versions followed, so
+/// a cached analysis may describe a replacement tree rather than the snapshot's own.
+pub const ANALYSIS_FORMAT: u32 = 11;
 
 /// Units within this many lines of each other are shown together as one hunk.
 pub const HUNK_MERGE_DISTANCE: usize = 3;

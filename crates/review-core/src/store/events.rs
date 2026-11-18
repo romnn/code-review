@@ -22,14 +22,31 @@ pub enum Event {
     Trust(TrustEvent),
 }
 
-/// A reviewer's trust decision; the latest one in the log applies.
+/// A reviewer's trust decision; the latest one of its scope applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustEvent {
     /// Whether tools that can execute code from the reviewed revisions, such as language servers
-    /// running Cargo, may run.
+    /// running Cargo, may run: a grant, or a revocation of the latest grant of the same scope.
     pub trusted: bool,
     /// Seconds since the Unix epoch.
     pub at: u64,
+    /// What the decision covers; `None`, as in logs written before scopes, is the whole review,
+    /// which a review of a checkout never takes from such a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<TrustScope>,
+}
+
+/// What a trust decision covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrustScope {
+    /// Exactly one captured snapshot, by its tree.
+    Snapshot {
+        /// The snapshot's tree.
+        tree: ObjectId,
+    },
+    /// Whatever the checkout holds, for as long as it is the same clone.
+    Checkout,
 }
 
 /// A newly observed revision.
@@ -47,6 +64,20 @@ pub struct RevisionEvent {
     pub merge_bases: Vec<ObjectId>,
     /// Seconds since the Unix epoch.
     pub recorded_at: u64,
+    /// The branch checked out when a capture of a working tree was taken, if one was.
+    ///
+    /// Like [`Self::head_commit`] and [`Self::pull_request`], it only describes the revision:
+    /// the snapshot pair is its identity, so the same pair seen on another branch is the same
+    /// revision, and keeps the branch it was first recorded on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit `HEAD` was at when a capture of a working tree was taken, if it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<ObjectId>,
+    /// The number of the branch's pull request when a capture of a working tree was taken, if
+    /// one was known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<u64>,
 }
 
 /// A reviewer's verdict on a unit.

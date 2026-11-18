@@ -155,11 +155,13 @@ impl ReviewApp {
             }
             About::Commits {
                 title: heading,
+                details,
                 section: commits_title,
                 commits,
             } => {
                 body = body
                     .child(ink::piece(heading).text_size(title))
+                    .children(details.into_iter().map(ink::shown_piece))
                     .child(section(commits_title))
                     .children(commits.into_iter().map(|commit| {
                         v_flex()

@@ -317,13 +317,38 @@ pub fn diff_state(model: &Model, palette: &Palette, now: Instant) -> Option<Stat
             err.clone(),
             palette.error,
         )),
-        Phase::Ready if model.rows.rows.is_empty() => Some(card(
-            "Nothing to show",
-            "Pick a file on the left.".to_owned(),
-            palette.dim,
-        )),
+        Phase::Ready if model.rows.rows.is_empty() => Some(empty_card(model, palette)),
         Phase::Ready => None,
     }
+}
+
+/// The diff's card while it shows no rows: why there is nothing to review in a view without
+/// files, else that a file is to be picked.
+fn empty_card(model: &Model, palette: &Palette) -> StateCard {
+    let card = |title: &str, detail: String| StateCard {
+        title: Piece::new(title, palette.text).weighted(Weight::Semibold),
+        detail: Piece::new(detail, palette.dim),
+    };
+    let live = model.live_state();
+    if live.is_some_and(|live| live.replaced) {
+        return card(
+            "This checkout was replaced",
+            "Another clone is at this path now; reopen cr to review it.".to_owned(),
+        );
+    }
+    let files = model
+        .tree
+        .iter()
+        .any(|node| node.kind == review_core::tree::NodeKind::File);
+    if files {
+        return card("Nothing to show", "Pick a file on the left.".to_owned());
+    }
+    let record = model.view().and_then(|view| view.record().cloned());
+    let detail = match (live.and_then(|live| live.subject), record) {
+        (Some(subject), Some(record)) => subject.nothing_to_review(&record.base, &record.head),
+        _ => "Nothing to review.".to_owned(),
+    };
+    card("Nothing to review", detail)
 }
 
 /// Animated dots for a loading state that started at `started`.

@@ -1,7 +1,6 @@
 # 2. Uncommitted work is reviewed against the default branch, under a branch-free key
 
-**Status:** accepted, rule 1 superseded by
-[ADR 5](0005-a-checkout-continues-the-review-of-its-branch.md) · **Date:** 2026-11-13
+**Status:** superseded by [ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md) · **Date:** 2026-11-13
 
 ## Context
 

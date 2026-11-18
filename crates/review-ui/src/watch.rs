@@ -1,13 +1,16 @@
 //! Watching a working tree for the changes a working-tree capture would record, so a review of
 //! the working tree follows the disk.
 //!
-//! A change counts when it could change what a capture records: a file created, written,
-//! removed, renamed or given other permissions where git does not ignore it, and the
-//! repository's `index` or `HEAD` rewritten.
+//! A change counts when it could change what a capture records or compares with: a file
+//! created, written, removed, renamed or given other permissions where git does not ignore it;
+//! the worktree's `index` or `HEAD` rewritten; git starting or finishing an operation that keeps
+//! a capture waiting, such as a merge or a rebase; and a branch or remote-tracking ref moving,
+//! made, renamed or removed, loose or in `packed-refs`, which a branch switch, a commit, a push
+//! and a fetch all do.
 //! A directory's own times and permissions never count, since git records neither.
 //! Reads never count, so a capture, which reads the files it hashes, never wakes the watch.
-//! The git directory's other files, the capture's own temporary index among them, never count
-//! either.
+//! The git directory's other files never count either: the capture's own temporary index, and
+//! the refs under `refs/code-review/` that pin what a capture shows.
 //!
 //! On Linux and the BSDs every directory git does not ignore gets a watch of its own, found by
 //! walking the tree level by level and asking git about each level's directories: a recursive
@@ -21,6 +24,7 @@
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -68,7 +72,11 @@ pub enum WatchError {
 /// What [`Waiter::wait`] saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Waited {
-    /// Something a capture would record may have changed.
+    /// A burst of changes started with something a capture would record: a capture taken
+    /// meanwhile may have caught it half-made. [`Self::Changed`] follows once the burst
+    /// settles.
+    Stirred,
+    /// A burst of changes settled, having changed something a capture would record.
     Changed,
     /// The [`Watch`] was dropped, so nothing will change any more.
     Closed,
@@ -88,23 +96,50 @@ pub struct Waiter {
     repo: Repo,
     /// Why the watch may have missed changes since the last wait, such as a refused watch.
     problem: Option<String>,
+    /// The branches and remote-tracking branches `packed-refs` held when last read, so a
+    /// rewrite that only packs or drops the refs of `refs/code-review/` does not count.
+    packed: Vec<String>,
+    /// When the burst that [`Waited::Stirred`] reported started, until it settles.
+    stirred: Option<Instant>,
 }
 
 /// What the watch and its waiter share.
 struct Shared {
     watcher: Mutex<RecommendedWatcher>,
+    /// Whether a directory or ref directory could not be watched since the watch started, so
+    /// a change there goes unseen.
+    incomplete: AtomicBool,
     /// The directories watched on their own, on a per-directory platform.
     watched: Mutex<HashSet<PathBuf>>,
     places: Places,
     repo: Repo,
 }
 
-/// Where the working tree and the git directory are, in the spelling the watches report.
+/// Where the working tree and the git directories are, in the spelling the watches report.
 #[derive(Clone)]
 struct Places {
     work_tree: PathBuf,
+    /// The worktree's own git directory, with its `HEAD` and `index`.
     git_dir: PathBuf,
+    /// The git directory every worktree of the clone shares, with the refs; the same as
+    /// `git_dir` for a clone's main worktree.
+    common_dir: PathBuf,
 }
+
+/// The files in a worktree's git directory whose coming or going starts or ends an operation
+/// that keeps a capture waiting; see [`review_core::Repo::busy`].
+const BUSY_MARKERS: [&str; 6] = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+];
+
+/// The directories of refs a capture reads, under the common git directory: branches and
+/// remote-tracking branches.
+const REF_DIRECTORIES: [&str; 2] = ["refs/heads", "refs/remotes"];
 
 impl Watch {
     /// Starts watching `repo`'s working tree, and returns the watch with the waiter that waits
@@ -121,22 +156,26 @@ impl Watch {
         let places = Places {
             work_tree: spelled(work_tree)?,
             git_dir: spelled(repo.git_dir())?,
+            common_dir: spelled(repo.common_dir())?,
         };
         let (sender, events) = channel();
         let watcher = notify::recommended_watcher(forward(sender))?;
         let shared = Arc::new(Shared {
             watcher: Mutex::new(watcher),
+            incomplete: AtomicBool::new(false),
             watched: Mutex::new(HashSet::new()),
             places: places.clone(),
             repo: repo.clone(),
         });
         shared.watch_all()?;
         let waiter = Waiter {
+            packed: packed_refs(&places.common_dir),
             events,
             shared: Arc::downgrade(&shared),
             places,
             repo,
             problem: None,
+            stirred: None,
         };
         Ok((Self { shared }, waiter))
     }
@@ -149,13 +188,27 @@ impl Watch {
     ///
     /// Returns an error when git cannot say which directories it ignores or a watch is refused.
     pub fn rewalk(&self) -> Result<(), WatchError> {
-        self.shared.rewalk()
+        self.shared
+            .rewalk()
+            .inspect_err(|_| self.shared.incomplete.store(true, Ordering::Relaxed))
+    }
+
+    /// Whether every directory the watch should cover has been watched since it started: once
+    /// one could not be, as when the system's limit on watches is reached, a change there goes
+    /// unseen, and a caller cannot rely on the watch to tell it about every change.
+    #[must_use]
+    pub fn covers_all(&self) -> bool {
+        !self.shared.incomplete.load(Ordering::Relaxed)
     }
 }
 
 impl Waiter {
-    /// Blocks until something a capture would record may have changed, gathering a burst of
-    /// changes into one, or until the [`Watch`] is dropped.
+    /// Blocks until something a capture would record may have changed, or until the [`Watch`]
+    /// is dropped.
+    ///
+    /// A burst of changes counts as one, and is reported twice: [`Waited::Stirred`] as soon as
+    /// its first change that counts arrives, and [`Waited::Changed`] from the next wait, once
+    /// the burst settles. Events are judged as they arrive, each batch already queued at once.
     pub fn wait(&mut self) -> Waited {
         self.wait_until(None).unwrap_or(Waited::Closed)
     }
@@ -172,6 +225,16 @@ impl Waiter {
     }
 
     fn wait_until(&mut self, deadline: Option<Instant>) -> Option<Waited> {
+        // The rest of a burst that stirred: it counts whatever else it holds, and what that
+        // made, such as directories, is watched.
+        if let Some(started) = self.stirred.take() {
+            let mut rest = Vec::new();
+            if !self.gather(started, &mut rest) {
+                return Some(Waited::Closed);
+            }
+            self.counts(rest);
+            return Some(Waited::Changed);
+        }
         loop {
             let first = match deadline {
                 None => match self.events.recv() {
@@ -189,23 +252,53 @@ impl Waiter {
                     }
                 }
             };
-            let mut burst = vec![first];
             let started = Instant::now();
+            let mut batch = vec![first];
             loop {
-                let left = GATHER_AT_MOST.saturating_sub(started.elapsed()).min(QUIET);
-                if left.is_zero() {
+                batch.extend(self.events.try_iter());
+                if self.counts(std::mem::take(&mut batch)) {
+                    self.stirred = Some(started);
+                    return Some(Waited::Stirred);
+                }
+                if !self.gather_one(started, &mut batch) {
+                    return Some(Waited::Closed);
+                }
+                // The burst settled without a change that counts.
+                if batch.is_empty() {
                     break;
                 }
-                match self.events.recv_timeout(left) {
-                    Ok(event) => burst.push(event),
-                    Err(RecvTimeoutError::Timeout) => break,
-                    Err(RecvTimeoutError::Disconnected) => return Some(Waited::Closed),
-                }
-            }
-            if self.counts(burst) {
-                return Some(Waited::Changed);
             }
         }
+    }
+
+    /// Gathers the events of the burst that `started` into `events` until it settles: the
+    /// working tree quiet for [`QUIET`], or [`GATHER_AT_MOST`] since it started; returns
+    /// false once the watch is gone.
+    fn gather(&self, started: Instant, events: &mut Vec<notify::Result<Event>>) -> bool {
+        loop {
+            let before = events.len();
+            if !self.gather_one(started, events) {
+                return false;
+            }
+            if events.len() == before {
+                return true;
+            }
+        }
+    }
+
+    /// Waits for the next event of the burst that `started`, adding it to `events`, and adds
+    /// nothing once the burst settled; returns false once the watch is gone.
+    fn gather_one(&self, started: Instant, events: &mut Vec<notify::Result<Event>>) -> bool {
+        let left = GATHER_AT_MOST.saturating_sub(started.elapsed()).min(QUIET);
+        if left.is_zero() {
+            return true;
+        }
+        match self.events.recv_timeout(left) {
+            Ok(event) => events.push(event),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
+        true
     }
 
     /// Whether a burst of events changed anything a capture records; watches the directories
@@ -216,6 +309,7 @@ impl Waiter {
         let mut paths: Vec<String> = Vec::new();
         let mut made: Vec<String> = Vec::new();
         let mut gone: Vec<PathBuf> = Vec::new();
+        let mut refs_made: Vec<PathBuf> = Vec::new();
         for event in burst {
             let event = match event {
                 Ok(event) => event,
@@ -233,8 +327,6 @@ impl Waiter {
             }
             for path in &event.paths {
                 match self.places.classify(path) {
-                    Place::GitInput => counts = true,
-                    Place::Elsewhere => {}
                     Place::WorkTree(relative) => {
                         // A directory removed or moved away loses its watch; one made at its
                         // path later needs a new one.
@@ -267,6 +359,7 @@ impl Waiter {
                             paths.push(relative);
                         }
                     }
+                    place => counts |= self.git_counts(&place, event.kind, path, &mut refs_made),
                 }
             }
         }
@@ -278,6 +371,19 @@ impl Waiter {
                 }
                 // A path git cannot judge, such as one inside a submodule, counts.
                 Err(_) => counts = true,
+            }
+        }
+        // A ref directory made since the watch started, such as `refs/remotes` on the first
+        // fetch, is watched from now on; one made under a watched one already is.
+        if let Some(shared) = self.shared.upgrade()
+            && let Err(err) = refs_made
+                .iter()
+                .try_for_each(|directory| shared.watch_refs_at(directory))
+        {
+            self.problem = Some(format!("{err}: {}", causes(&err)));
+            counts = true;
+            if let Some(shared) = self.shared.upgrade() {
+                shared.incomplete.store(true, Ordering::Relaxed);
             }
         }
         if PER_DIRECTORY && let Some(shared) = self.shared.upgrade() {
@@ -297,9 +403,46 @@ impl Waiter {
             if let Err(err) = watched {
                 self.problem = Some(format!("{err}: {}", causes(&err)));
                 counts = true;
+                shared.incomplete.store(true, Ordering::Relaxed);
             }
         }
         counts
+    }
+}
+
+impl Waiter {
+    /// Whether an event at `path` in a git directory, at `place`, changed what a capture
+    /// records or compares with; a ref directory it made joins `refs_made`.
+    fn git_counts(
+        &mut self,
+        place: &Place,
+        kind: EventKind,
+        path: &Path,
+        refs_made: &mut Vec<PathBuf>,
+    ) -> bool {
+        match place {
+            Place::GitInput => true,
+            // Every git command that reads the index takes its lock; only one that goes away
+            // can end a wait for it, and one that becomes the index rewrites the index, which
+            // counts on its own.
+            Place::IndexLock => matches!(
+                kind,
+                EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+            ),
+            Place::Ref => {
+                if matches!(kind, EventKind::Create(_)) && is_plain_directory(path) {
+                    refs_made.push(path.to_path_buf());
+                }
+                true
+            }
+            Place::PackedRefs => {
+                let packed = packed_refs(&self.places.common_dir);
+                let changed = packed != self.packed;
+                self.packed = packed;
+                changed
+            }
+            Place::WorkTree(_) | Place::Elsewhere => false,
+        }
     }
 }
 
@@ -307,16 +450,49 @@ impl Shared {
     /// Registers the first watches.
     fn watch_all(&self) -> Result<(), WatchError> {
         let mut watcher = self.watcher.lock();
+        let places = &self.places;
         if !PER_DIRECTORY {
-            watcher.watch(&self.places.work_tree, RecursiveMode::Recursive)?;
-            if !self.places.git_dir.starts_with(&self.places.work_tree) {
-                watcher.watch(&self.places.git_dir, RecursiveMode::NonRecursive)?;
+            watcher.watch(&places.work_tree, RecursiveMode::Recursive)?;
+        }
+        // Inside the working tree, a recursive watch covers the git directory already.
+        if PER_DIRECTORY || !places.git_dir.starts_with(&places.work_tree) {
+            watcher.watch(&places.git_dir, RecursiveMode::NonRecursive)?;
+        }
+        if places.common_dir != places.git_dir
+            && (PER_DIRECTORY || !places.common_dir.starts_with(&places.work_tree))
+        {
+            watcher.watch(&places.common_dir, RecursiveMode::NonRecursive)?;
+        }
+        // `refs` itself, so a ref directory made later is seen and watched then.
+        watcher.watch(&places.common_dir.join("refs"), RecursiveMode::NonRecursive)?;
+        drop(watcher);
+        for directory in REF_DIRECTORIES {
+            let path = places.common_dir.join(directory);
+            if path.is_dir() {
+                self.watch_refs_at(&path)?;
             }
+        }
+        if PER_DIRECTORY {
+            self.watch_under("")?;
+        }
+        Ok(())
+    }
+
+    /// Watches the ref directory `path` and every directory under it, when it is one of
+    /// [`REF_DIRECTORIES`]; the watch follows the directories made in it later.
+    fn watch_refs_at(&self, path: &Path) -> Result<(), WatchError> {
+        let watched = REF_DIRECTORIES
+            .iter()
+            .any(|directory| path == self.places.common_dir.join(directory));
+        if !watched {
             return Ok(());
         }
-        watcher.watch(&self.places.git_dir, RecursiveMode::NonRecursive)?;
-        drop(watcher);
-        self.watch_under("")
+        match self.watcher.lock().watch(path, RecursiveMode::Recursive) {
+            Ok(()) => Ok(()),
+            // Removed again since it was made.
+            Err(err) if matches!(err.kind, notify::ErrorKind::PathNotFound) => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Watches `directory`, relative to the working tree (empty for its root), and every
@@ -375,8 +551,15 @@ impl Shared {
 
 /// Where an event's path is.
 enum Place {
-    /// The git directory's `index` or `HEAD`, which a capture reads.
+    /// The git directory's `index` or `HEAD`, which a capture reads, or a marker of an
+    /// operation that keeps a capture waiting.
     GitInput,
+    /// The worktree's `index.lock`.
+    IndexLock,
+    /// A branch or remote-tracking ref, or a directory of them.
+    Ref,
+    /// The common git directory's `packed-refs`, or its lock.
+    PackedRefs,
     /// A path of the working tree, relative to it with `/` between components.
     WorkTree(String),
     /// Anywhere else: the git directory's other files, a nested repository's own git
@@ -386,13 +569,38 @@ enum Place {
 
 impl Places {
     fn classify(&self, path: &Path) -> Place {
+        if let Ok(inside) = path.strip_prefix(&self.common_dir) {
+            if REF_DIRECTORIES
+                .iter()
+                .any(|directory| inside.starts_with(directory))
+            {
+                return Place::Ref;
+            }
+            // Any other ref, such as the pins under `refs/code-review`.
+            if inside.starts_with("refs") {
+                return Place::Elsewhere;
+            }
+            if inside == Path::new("packed-refs") || inside == Path::new("packed-refs.lock") {
+                return Place::PackedRefs;
+            }
+        }
         if let Ok(inside) = path.strip_prefix(&self.git_dir) {
-            let input = inside == Path::new("index") || inside == Path::new("HEAD");
+            if inside == Path::new("index.lock") {
+                return Place::IndexLock;
+            }
+            let input = inside == Path::new("index")
+                || inside == Path::new("HEAD")
+                || BUSY_MARKERS
+                    .iter()
+                    .any(|marker| inside == Path::new(marker));
             return if input {
                 Place::GitInput
             } else {
                 Place::Elsewhere
             };
+        }
+        if path.starts_with(&self.common_dir) {
+            return Place::Elsewhere;
         }
         let Ok(relative) = path.strip_prefix(&self.work_tree) else {
             return Place::Elsewhere;
@@ -410,6 +618,24 @@ impl Places {
         }
         Place::WorkTree(parts.join("/"))
     }
+}
+
+/// The branches and remote-tracking branches `packed-refs` in `common_dir` holds, with their
+/// targets, as its lines; none when it cannot be read.
+fn packed_refs(common_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(common_dir.join("packed-refs")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|line| {
+            line.split_once(' ').is_some_and(|(_, name)| {
+                REF_DIRECTORIES
+                    .iter()
+                    .any(|directory| name.starts_with(&format!("{directory}/")))
+            })
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The event handler: drops what only reads, and forwards the rest to the waiter.
@@ -601,6 +827,7 @@ mod tests {
     }
 
     fn wakes(waiter: &mut Waiter, what: &str) {
+        assert_eq!(waiter.wait_for(DELIVERED), Some(Waited::Stirred), "{what}");
         assert_eq!(waiter.wait_for(DELIVERED), Some(Waited::Changed), "{what}");
         settle(waiter);
     }
@@ -724,6 +951,28 @@ mod tests {
         wakes(&mut waiter, "a link changed in place");
     }
 
+    /// A directory made later that cannot be watched, here one nobody may read, leaves the
+    /// watch short of covering the tree, and it says so.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_that_cannot_be_watched_leaves_the_watch_short() {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let tree = Tree::new();
+        let (watch, mut waiter) = tree.watch();
+        assert!(watch.covers_all());
+        std::fs::DirBuilder::new()
+            .mode(0o000)
+            .create(tree.path("src/sealed"))
+            .unwrap();
+        if std::fs::read_dir(tree.path("src/sealed")).is_ok() {
+            eprintln!("skipped: permissions do not apply to this user");
+            return;
+        }
+        wakes(&mut waiter, "a directory made");
+        assert!(!watch.covers_all());
+    }
+
     /// A capture reads the working tree and writes objects and a temporary index into the git
     /// directory, none of which wakes the wait, so a capture never triggers the next.
     #[test]
@@ -742,6 +991,52 @@ mod tests {
             "a capture woke the wait; the system reported {:#?}",
             reported.lock()
         );
+    }
+
+    /// Branches and remote-tracking branches moving wake the wait, loose or packed, and so do
+    /// git starting and finishing an operation; the refs that pin captures never do.
+    #[test]
+    fn refs_and_operations_wake_the_wait() {
+        let tree = Tree::new();
+        let (_watch, mut waiter) = tree.watch();
+
+        tree.git(&[
+            "update-ref",
+            "refs/code-review/key/live/session/head",
+            "HEAD",
+        ]);
+        tree.git(&["update-ref", "-d", "refs/code-review/key/live/session/head"]);
+        stays_asleep(&mut waiter, "a pin made and removed");
+
+        tree.git(&["checkout", "--quiet", "-b", "feat/x"]);
+        wakes(&mut waiter, "a new branch checked out");
+        tree.git(&["branch", "--quiet", "other"]);
+        wakes(&mut waiter, "a branch made, in a directory made before");
+        tree.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        wakes(&mut waiter, "the first remote-tracking branch");
+        tree.git(&[
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "--allow-empty",
+            "-m",
+            "next",
+        ]);
+        wakes(&mut waiter, "a commit");
+        tree.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        wakes(&mut waiter, "a fetch moving a remote-tracking branch");
+        tree.git(&["pack-refs", "--all"]);
+        wakes(&mut waiter, "packing the refs");
+        tree.git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
+        wakes(&mut waiter, "a packed remote-tracking branch moved");
+
+        tree.write(
+            ".git/MERGE_HEAD",
+            "0000000000000000000000000000000000000000\n",
+        );
+        wakes(&mut waiter, "a merge stopping");
+        std::fs::remove_file(tree.path(".git/MERGE_HEAD")).unwrap();
+        wakes(&mut waiter, "a merge finishing");
     }
 
     /// Dropping the watch ends a wait that would otherwise block for good.

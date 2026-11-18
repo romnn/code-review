@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::analysis::{
     Analysis, EntrySide, FileChange, FileUnit, Move, MoveKind, NoiseCategory, Unit, UnitKind,
 };
-use crate::correspond::LinkKind;
+use crate::correspond::{LinkKind, same_entry};
 use crate::error::Error;
 use crate::git::{Blob, BlobReader, ChangeStatus};
 use crate::history::{History, RevisionData, RevisionRecord, UnitState, Verdict};
@@ -119,6 +119,9 @@ pub struct Interdiff {
     pub base: SideDiff,
     /// The added side: differences here mean the change itself changed.
     pub head: SideDiff,
+    /// Whether the file's base entry (path, mode or content) differs from the reviewed one's:
+    /// the code around the unit changed in the base, even where both sides of the change did not.
+    pub base_file_changed: bool,
 }
 
 /// Where a note is attached in the viewed revision.
@@ -861,6 +864,7 @@ impl<'h> RevisionView<'h> {
             reviewed,
             base,
             head,
+            base_file_changed: !same_entry(reviewed_file.old.as_ref(), current_file.old.as_ref()),
         }))
     }
 

@@ -10,12 +10,14 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::time::{Duration, Instant};
+
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir};
-use review_core::{Repo, Review, ReviewTarget, RevisionNumber};
+use review_core::{Busy, Capture, LiveCapture, Repo, Review, ReviewTarget, RevisionNumber};
 
 use crate::config::{self, Config};
 use crate::front_end::FrontEnd;
-use crate::model::{Loaded, PaneLayout, Settings, ZOOM_RANGE};
+use crate::model::{Following, Loaded, PaneLayout, Settings, ZOOM_RANGE};
 use crate::{keymap, look, theme};
 
 /// The command line that names a review and where its data and settings are.
@@ -26,10 +28,8 @@ use crate::{keymap, look, theme};
 pub struct Options {
     /// A pull request number or URL, or a `base..head` range.
     ///
-    /// Without one (and without --worktree), reopens the review last opened on this branch, or
-    /// else reviews the branch's open pull request, or else, when the branch has uncommitted
-    /// changes, the working tree against the default branch, or else
-    /// `<default branch>..<branch>`.
+    /// Without one (and without --worktree), reviews this checkout: whatever its working tree
+    /// holds, on whatever branch, against the default branch.
     pub target: Option<String>,
     /// Review the working tree, including uncommitted and untracked files, against a ref.
     #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "target")]
@@ -232,36 +232,114 @@ enum OpenError {
     DemoRevision,
     #[error("cannot find a data directory; pass --data-dir")]
     NoDataDir,
+    #[error("git is busy in this checkout ({0}); open it again once that is done")]
+    Busy(Busy),
+    #[error("git kept changing the checkout while it was captured; open it again")]
+    Moved,
+    #[error("the checkout was replaced by another clone while it opened; open it again")]
+    Replaced,
     #[error(transparent)]
     Core(#[from] review_core::Error),
 }
 
+/// How many times the opening capture is taken again when git moved while it was taken.
+const OPENING_ATTEMPTS: u32 = 5;
+
+/// How long the opening waits for git to finish what it is busy with, when the review has no
+/// revision to show meanwhile.
+const BUSY_WAIT: Duration = Duration::from_secs(10);
+
 /// Opens the review the options name, records its current revision and reads its history, as
 /// the model's opener does.
 ///
-/// With neither a target nor a worktree, `say` is told how the review was found for the
-/// current branch as soon as it is, such as the branch's pull request; it is also in
-/// [`Loaded::found`].
+/// With neither a target nor a worktree, the review is the checkout's, opened as
+/// [`open_checkout`] does, which records nothing, and `say` is told so as soon as it opens; it
+/// is also in [`Loaded::found`].
 ///
 /// # Errors
 ///
 /// Returns why the review could not be opened, with every cause.
 pub fn open(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, String> {
-    let (review, found) = open_review(options, say).map_err(|err| chain(&err))?;
-    let history = review.history().map_err(|err| err.to_string())?;
-    Ok(Loaded {
-        review,
-        history,
-        found,
-    })
+    open_review(options, say).map_err(|err| chain(&err))
 }
 
-/// Opens the review the options name and records its current revision; with neither a target
-/// nor a worktree, also says how it was found for the current branch.
-fn open_review(
-    options: &Options,
-    say: &dyn Fn(&str),
-) -> Result<(Review, Option<String>), OpenError> {
+/// Opens the review of the checkout `repo` is, with data under `data_dir`, as the model's
+/// opener does: starts the session that pins what it shows, and captures the working tree
+/// under it, recording nothing.
+///
+/// While git is busy in the checkout, the review opens on its last recorded revision, or
+/// waits a moment for git without one.
+///
+/// # Errors
+///
+/// Returns why the review could not be opened, with every cause.
+pub fn open_checkout(data_dir: &Path, repo: Repo) -> Result<Loaded, String> {
+    checkout(data_dir, repo, None).map_err(|err| chain(&err))
+}
+
+/// See [`open_checkout`]; `found` is how the review was found, for the status line.
+fn checkout(data_dir: &Path, repo: Repo, found: Option<String>) -> Result<Loaded, OpenError> {
+    let review = Review::open_checkout(data_dir, repo)?;
+    let session = review.start_session()?;
+    let started = Instant::now();
+    let mut moved = 0;
+    loop {
+        // No watch tells the opening of a change made while it captures, so the capture looks
+        // twice.
+        match review.confirmed_live_history(&session, &[], &[])? {
+            Capture::Captured(captured) => {
+                let LiveCapture {
+                    history,
+                    subject,
+                    filtered,
+                } = *captured;
+                return Ok(Loaded {
+                    review,
+                    history,
+                    found,
+                    following: Some(Following {
+                        session,
+                        subject: Some(subject),
+                        filtered,
+                        busy: None,
+                    }),
+                });
+            }
+            Capture::Moved => {
+                moved += 1;
+                if moved >= OPENING_ATTEMPTS {
+                    return Err(OpenError::Moved);
+                }
+            }
+            Capture::Busy(busy) => {
+                let history = review.history()?;
+                if history.current().is_some() {
+                    return Ok(Loaded {
+                        review,
+                        history,
+                        found,
+                        following: Some(Following {
+                            session,
+                            subject: None,
+                            filtered: Vec::new(),
+                            busy: Some(busy),
+                        }),
+                    });
+                }
+                if started.elapsed() >= BUSY_WAIT {
+                    return Err(OpenError::Busy(busy));
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Capture::Replaced => return Err(OpenError::Replaced),
+        }
+    }
+}
+
+/// Opens the review the options name: the checkout's (see [`open_checkout`]), saying so, with
+/// neither a target nor a worktree, and otherwise the one named, recording its current
+/// revision.
+fn open_review(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, OpenError> {
     let demo = match (options.demo, options.demo_revision) {
         (true, _) => Some(DemoRequest::Fresh),
         (false, Some(revision)) => Some(DemoRequest::UpTo(
@@ -278,7 +356,7 @@ fn open_review(
             &fixture_dir(),
             request,
         )?;
-        return Ok((review, None));
+        return loaded(review, None);
     }
     let data_dir = match &options.data_dir {
         Some(data_dir) => data_dir.clone(),
@@ -289,22 +367,30 @@ fn open_review(
         .ok_or(OpenError::NoDataDir)?,
     };
     let repo = Repo::discover(&options.repo)?;
-    let (review, found) = if options.target.is_none() && options.worktree.is_none() {
-        let (review, detected) = Review::open_for_current_branch(&data_dir, repo)?;
-        let found = detected.to_string();
+    if options.target.is_none() && options.worktree.is_none() {
+        let found = "following this checkout's working tree".to_owned();
         say(&found);
-        (review, Some(found))
-    } else {
-        let target = ReviewTarget::from_arguments(
-            options.target.as_deref(),
-            options.worktree.as_deref(),
-            &repo,
-        )?;
-        (Review::open(&data_dir, repo, target)?, None)
-    };
+        return checkout(&data_dir, repo, Some(found));
+    }
+    let target = ReviewTarget::from_arguments(
+        options.target.as_deref(),
+        options.worktree.as_deref(),
+        &repo,
+    )?;
+    let review = Review::open(&data_dir, repo, target)?;
     review.refresh()?;
-    review_core::store::remember_review(&data_dir, review.repo(), review.key())?;
-    Ok((review, found))
+    loaded(review, None)
+}
+
+/// The review with its history, for a review that is not of the checkout.
+fn loaded(review: Review, found: Option<String>) -> Result<Loaded, OpenError> {
+    let history = review.history()?;
+    Ok(Loaded {
+        review,
+        history,
+        found,
+        following: None,
+    })
 }
 
 /// `err` and every cause under it, joined by `: `.

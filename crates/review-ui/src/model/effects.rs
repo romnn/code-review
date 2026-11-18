@@ -18,9 +18,10 @@ use std::time::Duration;
 use review_core::ObjectId;
 
 use super::buffer::{Definition, Lookup};
-use super::live::{Captured, Started, WaitedFor};
+use super::live::{Captured, Missed, Started, WaitedFor};
 use super::marks::{Marked, Refreshed};
 use super::picker::{Found, PreviewText, Query, Unchanged};
+use super::pulls::Looked;
 use super::sync::Tick;
 use super::{Model, Opened};
 use crate::rows::FullText;
@@ -76,7 +77,8 @@ pub(super) enum Because {
     /// that something runs.
     Clock,
     /// It follows the working tree: a watch that started, a change, a capture, or the time for
-    /// the next capture; a capture checks for itself which snapshot it was compared with.
+    /// the next capture; a capture checks for itself which snapshot it was compared with, and
+    /// a lookup of the pull request which branch it asked about.
     Live,
 }
 
@@ -110,8 +112,10 @@ pub(super) enum Outcome {
     Watching(Result<Box<Started>, String>),
     /// The working tree changed, or the watch ended.
     Waited(Box<WaitedFor>),
-    /// A capture of the working tree, or why it failed.
-    Captured(Result<Box<Captured>, String>),
+    /// A capture of the working tree, or why it shows nothing new.
+    Captured(Result<Box<Captured>, Missed>),
+    /// A lookup of the checked-out branch's pull request.
+    PullRequest(Box<Looked>),
 }
 
 /// File texts read in the background, by blob.
@@ -317,7 +321,8 @@ impl Model {
             | Outcome::Tick(_)
             | Outcome::Watching(_)
             | Outcome::Waited(_)
-            | Outcome::Captured(_) => {}
+            | Outcome::Captured(_)
+            | Outcome::PullRequest(_) => {}
         }
     }
 
@@ -367,6 +372,7 @@ impl Model {
             Outcome::Watching(started) => self.watching(started),
             Outcome::Waited(waited) => self.waited(*waited),
             Outcome::Captured(captured) => self.captured(captured),
+            Outcome::PullRequest(looked) => self.looked_up(*looked),
         }
     }
 }

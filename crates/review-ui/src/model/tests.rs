@@ -88,6 +88,8 @@ struct Host {
     quits: usize,
     /// The diagnostics the model logged.
     logged: Vec<String>,
+    /// The window titles the model asked for, in order.
+    titles: Vec<String>,
 }
 
 impl Host {
@@ -100,6 +102,19 @@ impl Host {
     /// The window over `review` with `settings`, opened and settled.
     fn open_with(review: Review, settings: Settings) -> Self {
         let history = review.history().unwrap();
+        Self::open_loaded(
+            Loaded {
+                review,
+                history,
+                found: None,
+                following: None,
+            },
+            settings,
+        )
+    }
+
+    /// The window over the review `loaded` opens, with `settings`, opened and settled.
+    fn open_loaded(loaded: Loaded, settings: Settings) -> Self {
         let mut host = Self {
             driver: Driver::new(Model::new(settings, Scale::fixed(cells()), fixed_window())),
             jobs: VecDeque::new(),
@@ -111,14 +126,9 @@ impl Host {
             sheet_steps: Vec::new(),
             quits: 0,
             logged: Vec::new(),
+            titles: Vec::new(),
         };
-        let opener: Opener = Box::new(move || {
-            Ok(Loaded {
-                review,
-                history,
-                found: None,
-            })
-        });
+        let opener: Opener = Box::new(move || Ok(loaded));
         host.update(|model| model.open(opener));
         host.settle();
         assert!(
@@ -144,7 +154,11 @@ impl Host {
                 Effect::After(_, completion)
                     if matches!(
                         *completion.outcome,
-                        Outcome::Tick(super::sync::Tick::Minute | super::sync::Tick::Reconcile)
+                        Outcome::Tick(
+                            super::sync::Tick::Minute
+                                | super::sync::Tick::Reconcile
+                                | super::sync::Tick::PullRequest
+                        )
                     ) =>
                 {
                     self.clocks.push(completion);
@@ -154,7 +168,8 @@ impl Host {
                 Effect::CopyPrimary(text) => self.primary.push(text),
                 Effect::ScrollSheet(step) => self.sheet_steps.push(step),
                 Effect::Quit => self.quits += 1,
-                Effect::Title(_) | Effect::Fullscreen => {}
+                Effect::Title(title) => self.titles.push(title),
+                Effect::Fullscreen => {}
                 Effect::Log(message) => self.logged.push(message),
             }
         }
@@ -607,7 +622,7 @@ fn go_to_definition_is_off_without_language_servers() {
             ..settings()
         },
     );
-    assert!(host.model().trusted, "the demo's head is a local branch");
+    trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
     let model = host.model();
@@ -627,8 +642,10 @@ fn go_to_definition_is_off_without_language_servers() {
 fn an_untrusted_lookup_is_dropped_centrally() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open(demo(dir.path()));
+    trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
+    assert!(host.model().looking_up);
     let asked = lookup(host.model());
     host.dispatch(Action::ToggleTrust);
     assert!(!host.model().trusted);
@@ -672,6 +689,14 @@ fn a_file_read_for_another_revision_is_dropped_centrally() {
 }
 
 /// Opens the selected file in the buffer with the cursor on a name, ready for a lookup.
+/// Trusts the review on screen, which no review is until the reviewer decides, as `Ctrl+T`
+/// pressed twice does.
+fn trust(host: &mut Host) {
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::ToggleTrust);
+    assert!(host.model().trusted, "{}", host.model().status);
+}
+
 fn buffer_on_a_name(host: &mut Host) {
     host.update(|model| model.show_file("src/engine.rs"));
     host.dispatch(Action::FocusDiff);
@@ -716,14 +741,14 @@ fn definition() -> Definition {
     }
 }
 
-/// A definition that arrives after trust was revoked is dropped, and the servers the lookup
-/// held stop once it ends.
+/// A definition that arrives after trust was revoked is dropped, and the server the lookup
+/// used stops once the lookup lets go of it.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_definition_after_trust_is_revoked_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open(demo(dir.path()));
-    assert!(host.model().trusted, "the demo's head is a local branch");
+    trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
     assert!(host.model().looking_up);
@@ -731,19 +756,25 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
     let asked = lookup(host.model());
     let buffer = host.model().buffer.as_ref().unwrap().id;
 
-    // A language server runs, which the lookup holds while it waits for the answer; `cat`
+    // A language server runs, which the lookup uses while it waits for the answer; `cat`
     // stands in for it, a process that runs until it is stopped.
-    let server = crate::lsp::LanguageServer::stand_in("cat", dir.path()).unwrap();
+    let server = crate::lsp::LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
     let process = server.process_id();
+    let running = super::Running::new(server);
+    let server = Arc::clone(&running.server);
     let servers = Arc::clone(&host.model().servers);
-    let mut held = servers.lock();
-    held.insert(("rust", dir.path().to_owned()), server);
+    servers
+        .lock()
+        .insert(("rust", dir.path().to_owned()), running);
+    let in_use = server.lock();
 
-    // Trust is revoked while the language server answers, so the servers cannot stop yet.
+    // Trust is revoked while the language server answers: the revocation stops every server,
+    // the one in use included, and that one is reaped once the lookup lets go of it.
     host.dispatch(Action::ToggleTrust);
     assert!(!host.model().trusted);
-    drop(held);
-    assert_eq!(servers.lock().len(), 1, "the lookup still held the server");
+    assert!(servers.lock().is_empty());
+    drop(in_use);
+    drop(server);
     let status = host.model().status.clone();
     host.complete(found_for(asked));
 
@@ -756,8 +787,6 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
     );
     assert!(model.buffer.as_ref().unwrap().previous.is_none());
     assert_eq!(model.status, status, "the answer says nothing");
-    // The answer stopped the server: it is gone from the map and its process from the system.
-    assert!(model.servers.lock().is_empty());
     assert!(
         !Path::new(&format!("/proc/{process}")).exists(),
         "the server's process {process} still runs"
@@ -770,6 +799,7 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
 fn a_definition_lands_only_where_it_was_asked() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open(demo(dir.path()));
+    trust(&mut host);
     buffer_on_a_name(&mut host);
 
     // The buffer is left and opened again while the lookup runs: another buffer now.
@@ -2728,12 +2758,14 @@ fn open_unsettled(review: Review, workers: usize) -> Host {
         sheet_steps: Vec::new(),
         quits: 0,
         logged: Vec::new(),
+        titles: Vec::new(),
     };
     let opener: Opener = Box::new(move || {
         Ok(Loaded {
             review,
             history,
             found: None,
+            following: None,
         })
     });
     host.update(|model| model.highlights.workers = workers);
@@ -3185,16 +3217,51 @@ fn the_watch_brings_a_change_to_the_window() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
-    let wait = host.waits.pop().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || sender.send(wait()).ok());
-    let waited = receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the watch sees the change");
-    host.complete(waited);
-    assert_eq!(host.waits.len(), 1, "the next wait starts");
+    // The watch says a change started, then that it settled.
+    for _ in 0..2 {
+        let wait = host.waits.pop().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(wait()).ok());
+        let waited = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the watch sees the change");
+        host.complete(waited);
+        assert_eq!(host.waits.len(), 1, "the next wait starts");
+    }
     host.settle();
     assert!(selected_text(host.model()).contains("uno"));
+}
+
+/// Once the watch could not watch a directory, as when the system's limit on watches is
+/// reached, captures look twice, as without a watch.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_watch_short_of_the_tree_confirms_its_captures() {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    assert!(!host.model().live.as_ref().unwrap().confirms());
+    std::fs::DirBuilder::new()
+        .mode(0o000)
+        .create(repo.join("sealed"))
+        .unwrap();
+    if std::fs::read_dir(repo.join("sealed")).is_ok() {
+        eprintln!("skipped: permissions do not apply to this user");
+        return;
+    }
+    // The watch says a change started, then that it settled, having tried to watch the new
+    // directory.
+    for _ in 0..2 {
+        let wait = host.waits.pop().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(wait()).ok());
+        let waited = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the watch sees the directory");
+        host.complete(waited);
+    }
+    assert!(host.model().live.as_ref().unwrap().confirms());
 }
 
 /// Reviews of a range never follow anything, and `[review] live = false` turns following off.
@@ -3221,12 +3288,114 @@ fn only_a_working_tree_review_follows_it() {
     assert!(host.waits.is_empty());
 }
 
+/// A review of the working tree is trusted one snapshot at a time: `Ctrl+T` grants the
+/// snapshot on screen, never the whole review, and a capture of other code is untrusted again.
+#[test]
+fn a_working_tree_review_is_trusted_one_snapshot_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
+    assert_eq!(
+        host.model().status.split(" · ").next(),
+        Some("Trusted this snapshot")
+    );
+    let review = host.model().review.clone().unwrap();
+    assert!(
+        !review.trust().unwrap().trusted,
+        "no grant for the whole review"
+    );
+
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert!(!host.model().trusted, "the grant was for the old code");
+}
+
+/// A confirmation of trust asked for on one snapshot does not trust another that shows before
+/// the second press: that press asks again, for the snapshot on screen.
+#[test]
+fn a_trust_confirmation_holds_only_for_its_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::ToggleTrust);
+    assert!(host.model().status.contains("Press Ctrl+T again"));
+
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    host.dispatch(Action::ToggleTrust);
+    assert!(!host.model().trusted, "the other snapshot is not trusted");
+    assert!(host.model().status.contains("Press Ctrl+T again"));
+    host.dispatch(Action::ToggleTrust);
+    assert!(host.model().trusted);
+}
+
+/// Whether the process `id` has stopped: gone, or a zombie that only its owner's wait reaps.
+#[cfg(target_os = "linux")]
+fn stopped(id: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{id}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// A language server stops as it leaves the servers, here when another head shows, even while
+/// a lookup still holds it, so no server runs where a revocation cannot find it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_server_stops_as_it_leaves_the_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    let server = crate::lsp::LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
+    let process = server.process_id();
+    let running = super::Running::new(server);
+    let held = Arc::clone(&running.server);
+    host.model()
+        .servers
+        .lock()
+        .insert(("rust", dir.path().to_owned()), running);
+
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert!(host.model().servers.lock().is_empty());
+    assert!(stopped(process), "the server held by a lookup still runs");
+    drop(held);
+}
+
+/// When a capture reads the trust again and finds it gone, as when another window revoked
+/// it, the language servers stop as they do on a revocation here.
+#[cfg(target_os = "linux")]
+#[test]
+fn trust_lost_elsewhere_stops_the_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    assert!(host.model().trusted);
+    let server = crate::lsp::LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
+    let process = server.process_id();
+    host.model()
+        .servers
+        .lock()
+        .insert(("rust", dir.path().to_owned()), super::Running::new(server));
+
+    // Another window revokes the grant.
+    let review = host.model().review.clone().unwrap();
+    review
+        .set_trust(review_core::TrustScope::Checkout, false)
+        .unwrap();
+    host.update(Model::changed);
+    host.settle();
+    assert!(!host.model().trusted);
+    assert!(host.model().servers.lock().is_empty());
+    assert!(stopped(process));
+}
+
 /// A capture cuts the way back from a definition into a buffer of the old snapshot, whose
 /// change markers number the old snapshot's hunks.
 #[test]
 fn a_capture_cuts_the_way_back_to_an_old_review_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
     host.dispatch(Action::ToggleBuffer);
     host.update(|model| model.looking_up = true);
     let asked = lookup(host.model());
@@ -3931,5 +4100,621 @@ fn a_capture_keeps_the_places_of_other_files() {
     assert!(
         selected_text(host.model()).contains("two"),
         "a.rs comes back at the hunk it was left at"
+    );
+}
+
+/// Runs git in `repo`, as a reviewer does in their terminal.
+fn git_in(repo: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+}
+
+/// The window over the review of a checkout in `dir`, on a clean `main` with `a.rs`, which
+/// `origin/main` is level with; the repository has no remote to look a pull request up on.
+/// Returns it with the working tree.
+fn checkout_host(dir: &Path) -> (Host, std::path::PathBuf) {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(repo.join("a.rs"), two_hunks("1", "2")).unwrap();
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "base"]);
+    git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let loaded = crate::launch::open_checkout(
+        &dir.join("data"),
+        review_core::Repo::discover(&repo).unwrap(),
+    )
+    .unwrap();
+    let host = Host::open_loaded(loaded, settings());
+    assert!(host.model().following(), "the checkout's review follows it");
+    (host, repo)
+}
+
+/// The files pane's header, as review-tui shows it.
+fn header(model: &Model) -> String {
+    let header = crate::paint::files::files_header(model, &crate::paint::Palette::of(model));
+    match header.number {
+        Some(number) => format!("{} {}", number.text, header.name.text),
+        None => header.name.text,
+    }
+}
+
+/// The diff's card, when it shows one.
+fn card(model: &Model) -> Option<(String, String)> {
+    crate::paint::header::diff_state(model, &crate::paint::Palette::of(model), Instant::now())
+        .map(|card| (card.title.text, card.detail.text))
+}
+
+/// The bottom bar's left side, as one line.
+fn bar(model: &Model) -> String {
+    crate::paint::bars::sync_label(
+        model,
+        &crate::paint::Palette::of(model),
+        std::time::SystemTime::now(),
+        f32::MAX,
+        |text| scroll::float(text.chars().count()),
+    )
+    .into_iter()
+    .map(|piece| piece.text)
+    .collect()
+}
+
+/// A clean default branch opens empty and says why; an edit shows at once, without a restart.
+#[test]
+fn a_clean_checkout_opens_empty_and_shows_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    let model = host.model();
+    assert_eq!(file_paths(&model.tree), Vec::<&str>::new());
+    assert_eq!(header(model), "main → origin/main");
+    assert_eq!(
+        card(model),
+        Some((
+            "Nothing to review".to_owned(),
+            "main is level with origin/main. Nothing to review; changes appear here as you \
+             make them."
+                .to_owned()
+        ))
+    );
+    assert_eq!(model.title(), "repo · main");
+    assert!(
+        bar(model).ends_with(" · live · untrusted"),
+        "{}",
+        bar(model)
+    );
+    assert!(
+        model.status.starts_with("Following main → origin/main"),
+        "{}",
+        model.status
+    );
+
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert_eq!(file_paths(&model.tree), ["a.rs"]);
+    assert!(
+        model.view().unwrap().is_provisional(),
+        "nothing is recorded"
+    );
+    assert_eq!(card(model), None);
+}
+
+/// A branch made from the checkout, then renamed, shows in the header and the title, and is
+/// announced, while the files stay as they are: the code did not change.
+#[test]
+fn a_new_branch_is_announced_and_moves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    let shown = host.model().shown;
+
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown, "the same snapshot stays");
+    assert_eq!(header(model), "feat → origin/main");
+    assert_eq!(model.title(), "repo · feat");
+    assert_eq!(model.status, "Now on feat.");
+
+    git_in(&repo, &["branch", "-m", "feat/renamed"]);
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(header(host.model()), "feat/renamed → origin/main");
+    assert_eq!(host.model().status, "Now on feat/renamed.");
+}
+
+/// A capture taken before the watch saw another change never shows: the view on screen stays,
+/// as updating, and refuses marks until the capture of the change lands.
+#[test]
+fn a_capture_older_than_a_change_never_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.update(|model| model.show_file("a.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
+    let shown = host.model().shown;
+
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
+    host.update(Model::changed);
+    let first = host.run_newest_job();
+    // The watch sees another change while the first capture runs.
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "dos")).unwrap();
+    host.update(Model::changed);
+    assert!(host.model().live.as_ref().unwrap().updating());
+    host.complete(first);
+    assert_eq!(host.model().shown, shown, "the older capture does not show");
+    assert!(bar(host.model()).contains("updating…"));
+    host.dispatch(Action::ToggleApprove);
+    assert!(
+        host.model()
+            .status
+            .starts_with("Not marked: the working tree changed"),
+        "{}",
+        host.model().status
+    );
+    assert!(host.model().marks.is_empty() && host.model().pending.is_empty());
+
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown + 1, "the newest capture shows");
+    assert!(!model.live.as_ref().unwrap().updating());
+    assert!(
+        model
+            .view()
+            .unwrap()
+            .unit_ids()
+            .iter()
+            .filter_map(|&unit| model.view().unwrap().unit(unit).ok()?.chunk().cloned())
+            .any(|chunk| chunk.added.contains("dos"))
+    );
+}
+
+/// While git is busy in the checkout, the view stays and takes no marks; once git is done,
+/// the checkout is captured again.
+#[test]
+fn a_busy_checkout_keeps_the_view_and_refuses_marks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.update(|model| model.show_file("a.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
+    let shown = host.model().shown;
+
+    let merge_head = repo.join(".git/MERGE_HEAD");
+    std::fs::write(&merge_head, "0000000000000000000000000000000000000000\n").unwrap();
+    std::fs::write(repo.join("a.rs"), two_hunks("conflict", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown, "the view stays");
+    assert_eq!(
+        model.status,
+        "Git is busy: merge in progress. What shows stays until it finishes."
+    );
+    assert!(bar(model).contains("git: merging"), "{}", bar(model));
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().status.starts_with("Not marked: git is busy"));
+    assert!(host.model().marks.is_empty());
+
+    std::fs::remove_file(&merge_head).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown + 1);
+    assert!(model.live.as_ref().unwrap().busy().is_none());
+    assert!(bar(model).contains("live"));
+}
+
+/// A checkout replaced by another clone stops being captured and says to reopen.
+#[test]
+fn a_replaced_checkout_stops_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["update-ref", "-d", "refs/code-review/clone-id"]);
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert!(model.live.as_ref().unwrap().replaced());
+    assert!(model.status.starts_with("This checkout was replaced"));
+    assert_eq!(
+        card(model).map(|(title, _)| title).as_deref(),
+        Some("This checkout was replaced")
+    );
+    host.update(Model::changed);
+    assert!(host.jobs.is_empty(), "nothing is captured any more");
+}
+
+/// The pull request's lookup: an answer for another branch is dropped, the branch's lands with
+/// news and a capture that may move the base, and its merge is news too; a failure keeps what
+/// was found, as stale.
+#[test]
+fn the_pull_request_follows_the_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    host.update(Model::changed);
+    host.settle();
+    let association = host
+        .model()
+        .live
+        .as_ref()
+        .unwrap()
+        .pulls
+        .association()
+        .cloned()
+        .unwrap();
+    assert_eq!(association.branch, "feat");
+    let pull_request = |state| review_core::github::BranchPullRequest {
+        number: 12,
+        url: "https://github.com/owner/repo/pull/12".to_owned(),
+        state,
+        base_branch: "main".to_owned(),
+        base_repository: review_core::github::Repository {
+            host: "github.com".to_owned(),
+            owner: "owner".to_owned(),
+            name: "repo".to_owned(),
+        },
+        head_branch: "feat".to_owned(),
+        head_repository: None,
+        author: None,
+    };
+    let looked = |looked: super::pulls::Looked| Completion {
+        subject: Subject::Always(super::effects::Because::Live),
+        outcome: Box::new(Outcome::PullRequest(Box::new(looked))),
+    };
+    let open = review_core::github::PullRequestState::Open;
+
+    let other = review_core::BranchIdentity {
+        branch: "other".to_owned(),
+        remote: None,
+        merge: None,
+        push_remote: None,
+        upstream: None,
+    };
+    host.complete(looked(super::pulls::Looked::found(
+        other,
+        Some(pull_request(open)),
+    )));
+    assert_eq!(header(host.model()), "feat → origin/main", "dropped");
+
+    host.complete(looked(super::pulls::Looked::found(
+        association.clone(),
+        Some(pull_request(open)),
+    )));
+    assert_eq!(host.model().status, "feat has pull request #12 (open).");
+    assert!(
+        host.model().live.as_ref().unwrap().updating(),
+        "a capture with the pull request follows"
+    );
+    host.settle();
+    let model = host.model();
+    assert!(!model.live.as_ref().unwrap().updating());
+    assert_eq!(header(model), "#12 feat → origin/main");
+    assert_eq!(model.title(), "repo · feat #12");
+    // The window's title follows the pull request once the capture that used it shows.
+    assert_eq!(
+        host.titles.last().map(String::as_str),
+        Some("repo · feat #12")
+    );
+
+    host.complete(looked(super::pulls::Looked::failed(association.clone())));
+    let state = host.model().live_state().unwrap();
+    assert!(state.pull_request.unwrap().stale.is_some());
+    assert_eq!(header(host.model()), "#12 feat → origin/main", "kept");
+
+    host.complete(looked(super::pulls::Looked::found(
+        association,
+        Some(pull_request(review_core::github::PullRequestState::Merged)),
+    )));
+    assert_eq!(host.model().status, "#12 merged.");
+    host.settle();
+    assert_eq!(header(host.model()), "#12 merged · feat → origin/main");
+}
+
+/// A capture that lands only after the notice of a write it overlapped never takes marks: the
+/// watch says so at the burst's first change, before it settles, and a capture that lands
+/// while the burst is under way does not show.
+#[test]
+fn a_change_under_way_refuses_marks_on_the_capture_it_overlapped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.update(|model| model.show_file("a.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
+    let shown = host.model().shown;
+
+    // A capture completes and shows; the notice of a write it overlapped arrives after it.
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    host.complete(capture);
+    assert_eq!(host.model().shown, shown + 1);
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "dos")).unwrap();
+    host.update(Model::stirred);
+    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
+    host.dispatch(Action::ToggleApprove);
+    assert!(
+        host.model()
+            .status
+            .starts_with("Not marked: the working tree changed"),
+        "{}",
+        host.model().status
+    );
+    assert!(host.model().marks.is_empty() && host.model().pending.is_empty());
+
+    // A capture taken while the burst is under way does not show either.
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(host.model().shown, shown + 1, "nothing shows mid-burst");
+    assert!(host.model().live.as_ref().unwrap().updating());
+
+    // Once the burst settles, its capture shows and takes marks.
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown + 2);
+    assert!(!model.live.as_ref().unwrap().updating());
+}
+
+/// A capture resolves its base with the pull request found for the branch it sees checked out,
+/// whichever branch the lookups are about when it is taken, and the header shows the pull
+/// request that capture used.
+#[test]
+fn a_capture_takes_the_pull_request_of_the_branch_it_sees() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    host.update(Model::changed);
+    host.settle();
+    let feat = host
+        .model()
+        .live
+        .as_ref()
+        .unwrap()
+        .pulls
+        .association()
+        .cloned()
+        .unwrap();
+    let pull_request = review_core::github::BranchPullRequest {
+        number: 12,
+        url: "https://github.com/owner/repo/pull/12".to_owned(),
+        state: review_core::github::PullRequestState::Open,
+        base_branch: "main".to_owned(),
+        base_repository: review_core::github::Repository {
+            host: "github.com".to_owned(),
+            owner: "owner".to_owned(),
+            name: "repo".to_owned(),
+        },
+        head_branch: "feat".to_owned(),
+        head_repository: None,
+        author: None,
+    };
+    host.complete(Completion {
+        subject: Subject::Always(super::effects::Because::Live),
+        outcome: Box::new(Outcome::PullRequest(Box::new(super::pulls::Looked::found(
+            feat,
+            Some(pull_request),
+        )))),
+    });
+    host.settle();
+    assert_eq!(header(host.model()), "#12 feat → origin/main");
+
+    // Off to another branch, which has no pull request found, and back.
+    git_in(&repo, &["checkout", "--quiet", "-b", "other"]);
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(header(host.model()), "other → origin/main");
+    git_in(&repo, &["checkout", "--quiet", "feat"]);
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    host.complete(capture);
+    let model = host.model();
+    let subject = model.live_state().unwrap().subject.unwrap();
+    assert_eq!(
+        subject.pull_request.as_ref().map(|found| found.number),
+        Some(12),
+        "the first capture back on feat has its pull request"
+    );
+    assert_eq!(header(model), "#12 feat → origin/main");
+    assert_eq!(model.title(), "repo · feat #12");
+}
+
+/// A pull request found while a capture of its branch runs, which was taken without it, sends
+/// a capture again, though nothing about the pull request is news by the time it shows.
+#[test]
+fn a_pull_request_found_during_a_capture_captures_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    // The switch's capture runs, given no pull request.
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    let feat = host
+        .model()
+        .review
+        .as_ref()
+        .unwrap()
+        .repo()
+        .branch_identity("feat")
+        .unwrap();
+    let pull_request = review_core::github::BranchPullRequest {
+        number: 12,
+        url: "https://github.com/owner/repo/pull/12".to_owned(),
+        state: review_core::github::PullRequestState::Open,
+        base_branch: "main".to_owned(),
+        base_repository: review_core::github::Repository {
+            host: "github.com".to_owned(),
+            owner: "owner".to_owned(),
+            name: "repo".to_owned(),
+        },
+        head_branch: "feat".to_owned(),
+        head_repository: None,
+        author: None,
+    };
+    // A lookup answers for feat while the window still follows main.
+    host.complete(Completion {
+        subject: Subject::Always(super::effects::Because::Live),
+        outcome: Box::new(Outcome::PullRequest(Box::new(super::pulls::Looked::found(
+            feat,
+            Some(pull_request),
+        )))),
+    });
+    host.complete(capture);
+    host.settle();
+    assert_eq!(header(host.model()), "#12 feat → origin/main");
+}
+
+/// Where no lookup of the pull request can run, it runs again once the branch moves, or after
+/// the longest wait, without `r`.
+#[test]
+fn an_unavailable_lookup_is_tried_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    host.update(Model::changed);
+    host.settle();
+    let feat = host
+        .model()
+        .live
+        .as_ref()
+        .unwrap()
+        .pulls
+        .association()
+        .cloned()
+        .unwrap();
+    let looked = |looked: super::pulls::Looked| Completion {
+        subject: Subject::Always(super::effects::Because::Live),
+        outcome: Box::new(Outcome::PullRequest(Box::new(looked))),
+    };
+    host.complete(looked(super::pulls::Looked::unavailable(feat)));
+    let state = host.model().live_state().unwrap();
+    assert!(state.lookup.is_some());
+    assert!(!state.looking_up);
+
+    // Not before its time.
+    host.update(Model::look_up_pull_request);
+    assert!(!host.model().live_state().unwrap().looking_up);
+    // Once due, as after `gh auth login`.
+    host.update(|model| model.live.as_mut().unwrap().pulls.make_due());
+    host.update(Model::pull_request_due);
+    assert!(host.model().live_state().unwrap().looking_up);
+    host.settle();
+    assert!(host.model().live_state().unwrap().lookup.is_some());
+
+    // On another branch, at once.
+    git_in(&repo, &["checkout", "--quiet", "-b", "other"]);
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    host.complete(capture);
+    let state = host.model().live_state().unwrap();
+    assert!(state.looking_up);
+    assert!(state.lookup.is_none());
+}
+
+/// The checkout is never trusted by default: the first tool asks, a grant for the snapshot
+/// ends when the code changes, and one for the checkout lasts until revoked.
+#[test]
+fn trust_in_the_checkout_is_asked_for_and_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    assert!(!host.model().trusted);
+
+    host.dispatch(Action::ToggleTrust);
+    assert_eq!(host.model().overlay, Some(Overlay::Trust));
+    // A capture read while the question shows waits behind it, with the grant it read then.
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    host.complete(capture);
+    assert!(host.model().live.as_ref().unwrap().has_waiting());
+    host.dispatch(Action::TrustSnapshot);
+    assert!(!host.model().live.as_ref().unwrap().has_waiting());
+    let model = host.model();
+    assert_eq!(model.overlay, None);
+    assert_eq!(model.grant, Some(Grant::Snapshot));
+    assert!(model.trusted);
+    assert!(bar(model).ends_with("trusted: this snapshot"));
+
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(host.model().grant, None, "the grant was for the old code");
+    assert!(!host.model().trusted);
+
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    assert_eq!(host.model().grant, Some(Grant::Checkout));
+    std::fs::write(repo.join("a.rs"), two_hunks("eins", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(host.model().grant, Some(Grant::Checkout), "it lasts");
+
+    host.dispatch(Action::ToggleTrust);
+    assert_eq!(host.model().grant, None);
+    assert!(
+        host.model()
+            .status
+            .starts_with("Trust in this checkout revoked")
+    );
+}
+
+/// A capture that waits behind an overlay never shows once the watch saw a change after it:
+/// the view stays, as updating, until the capture of that change lands.
+#[test]
+fn a_waiting_capture_older_than_a_change_never_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    let shown = host.model().shown;
+    host.dispatch(Action::ToggleHelp);
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    host.complete(capture);
+    assert!(host.model().live.as_ref().unwrap().has_waiting());
+
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "two")).unwrap();
+    host.update(Model::changed);
+    host.dispatch(Action::CloseOverlay);
+    let model = host.model();
+    assert_eq!(
+        model.shown, shown,
+        "the waiting capture is older than the change"
+    );
+    assert!(model.live.as_ref().unwrap().updating());
+
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.shown, shown + 1);
+    assert!(!model.live.as_ref().unwrap().updating());
+    assert_eq!(
+        model.totals(),
+        (0, 2),
+        "the newest capture shows, with both hunks"
     );
 }

@@ -182,8 +182,30 @@ fn put_panes(answer: &mut Map<String, Value>, model: &Model, screen: &dyn Screen
         ("selection", selection(model)),
         ("selected_text", json!(model.selected_text())),
         ("trusted", json!(model.trusted)),
+        ("live", live(model)),
     ];
     answer.extend(entries.map(|(key, value)| (key.to_owned(), value)));
+}
+
+/// What a review that follows the working tree shows besides its diff, or `null`: the branch
+/// and base of the capture on screen, its pull request, and what keeps it from updating.
+fn live(model: &Model) -> Value {
+    let Some(live) = model.live_state() else {
+        return Value::Null;
+    };
+    json!({
+        "subject": live.subject.map(crate::model::branch_and_base),
+        "pull_request": live
+            .pull_request
+            .and_then(|found| found.pull_request.as_ref())
+            .map(|pull_request| pull_request.number),
+        "lookup": live.lookup,
+        "updating": live.updating,
+        "busy": live.busy.map(|busy| busy.to_string()),
+        "replaced": live.replaced,
+        "filtered": live.filtered.len(),
+        "grant": model.grant.map(|grant| format!("{grant:?}")),
+    })
 }
 
 /// The diff rows in `range`: where each comes from, what it is and where it is.

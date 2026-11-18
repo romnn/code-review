@@ -63,7 +63,7 @@ Wayland, a Vulkan driver, `libxkbcommon` and `fontconfig`.
 Run it in a repository:
 
 ```bash
-cr              # the branch's open pull request, its uncommitted work, or <default branch>..<branch>
+cr              # this checkout, whatever is checked out, against the default branch
 cr 128          # a pull request by number or URL (needs the GitHub CLI, `gh`)
 cr main..HEAD   # a range
 cr --worktree   # uncommitted and untracked changes, such as an agent's last turn
@@ -126,14 +126,18 @@ shows within a second, keeping your place, and only what you mark is recorded.
 
 ## Commands for scripts and agents
 
-`cr`'s commands drive the same reviews from scripts and agents, with `--json` output:
+`cr`'s commands drive the same reviews from scripts and agents, with `--json` output. They act
+on this checkout's review, or on the one `--review <key>` names, such as the key `cr open 128`
+prints. `cr show` prints unit IDs with the review's tag, and marks take them back as printed, so
+an ID from one review never marks another's:
 
 ```bash
-cr open 128          # start or refresh a review
+cr open              # record what this checkout holds
 cr status            # counts per file and in total
-cr show              # render the changes, step by step
-cr mark u1-0003 accepted   # seen, accepted, flagged or unseen
-cr note u1-0003 "Why 250?"
+cr show              # render the changes, step by step: u1-0003@3fa2b1c0, ...
+cr mark u1-0003@3fa2b1c0 accepted   # seen, accepted, flagged or unseen
+cr note u1-0003@3fa2b1c0 "Why 250?"
+cr mark --file src --revision 1@3fa2b1c0 seen   # every unit below src in the revision shown
 cr export            # flagged, accepted and annotated units, for an agent
 ```
 

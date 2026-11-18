@@ -4,7 +4,10 @@
 use color_eyre::eyre;
 use googletest::prelude::*;
 use indoc::formatdoc;
-use review_core::{Error, MarkVerdict, ObjectId, Repo, Review, ReviewTarget, UnitState};
+use review_core::{
+    Capture, Error, History, MarkVerdict, Repo, Review, ReviewTarget, RevisionRecord, Session,
+    UnitState,
+};
 
 use crate::common::{TestRepo, find, summaries};
 
@@ -33,6 +36,29 @@ fn worktree_review() -> eyre::Result<(TestRepo, Review)> {
     )?;
     review.refresh()?;
     Ok((repo, review))
+}
+
+/// Captures the working tree for `session`, keeping the pins of the captures `keep` records,
+/// and returns the history.
+fn capture(review: &Review, session: &Session, keep: &[RevisionRecord]) -> eyre::Result<History> {
+    match review.live_history(session, keep, &[])? {
+        Capture::Captured(captured) => Ok(captured.history),
+        Capture::Busy(busy) => eyre::bail!("git is busy: {busy}"),
+        Capture::Moved => eyre::bail!("the repository moved during the capture"),
+        Capture::Replaced => eyre::bail!("the clone was replaced"),
+    }
+}
+
+/// The ref that pins the head of the capture `record` is of, for `session`.
+fn head_pin(session: &Session, record: &RevisionRecord) -> String {
+    format!("{}/head", session.pins_of(record))
+}
+
+/// The last revision of `history`.
+fn last_revision(history: &History) -> eyre::Result<RevisionRecord> {
+    let revisions = history.revisions();
+    let last = revisions.last().ok_or_else(|| eyre::eyre!("no revision"))?;
+    Ok((*last).clone())
 }
 
 /// The names of the review's refs, sorted.
@@ -68,19 +94,27 @@ fn walk(dir: &std::path::Path) -> eyre::Result<Vec<String>> {
 }
 
 /// An unchanged working tree gives the recorded history; an edit gives one more, provisional
-/// revision that records nothing: no event, no snapshot pin, no cache file, only its live pin.
+/// revision that records nothing: no event, no snapshot pin, no cache file, only its session's
+/// pins of its base, head and target.
 #[gtest]
 fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let unchanged = review.live_history(&[])?;
+    let session = review.start_session()?;
+    let unchanged = capture(&review, &session, &[])?;
     expect_that!(unchanged.revisions().len(), eq(1));
     expect_false!(unchanged.is_provisional(unchanged.current().unwrap()));
 
     let events = std::fs::read(review.dir().events())?;
-    let refs_before = refs(&repo)?;
+    let not_live = |names: Vec<String>| -> Vec<String> {
+        names
+            .into_iter()
+            .filter(|name| !name.starts_with(session.pins()))
+            .collect()
+    };
+    let refs_before = not_live(refs(&repo)?);
     let cache_before = cached(&repo)?;
     repo.write("a.rs", &two_functions("first();", "second();"))?;
-    let live = review.live_history(&[])?;
+    let live = capture(&review, &session, &[])?;
     let tip = live.current().unwrap();
     expect_that!(tip.get(), eq(2));
     expect_true!(live.is_provisional(tip));
@@ -89,11 +123,20 @@ fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Resul
 
     expect_that!(std::fs::read(review.dir().events())?, eq(&events));
     expect_that!(cached(&repo)?, eq(&cache_before));
-    let head = &live.revisions()[1].head;
-    let mut refs_expected = refs_before;
-    refs_expected.push(review.live_pin(head));
-    refs_expected.sort();
-    expect_that!(refs(&repo)?, eq(&refs_expected));
+    expect_that!(not_live(refs(&repo)?), eq(&refs_before));
+    let record = &live.revisions()[1];
+    let pins = session.pins_of(record);
+    let mut expected = vec![format!("{pins}/base"), format!("{pins}/head")];
+    if record.target.is_some() {
+        expected.push(format!("{pins}/target"));
+    }
+    let mut live_refs: Vec<String> = refs(&repo)?
+        .into_iter()
+        .filter(|name| name.starts_with(session.pins()))
+        .collect();
+    live_refs.sort();
+    expected.sort();
+    expect_that!(live_refs, eq(&expected));
     expect_that!(review.history()?.revisions().len(), eq(1));
     Ok(())
 }
@@ -102,23 +145,63 @@ fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Resul
 #[gtest]
 fn live_pins_go_unless_kept() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
+    let session = review.start_session()?;
     repo.write("a.rs", "fn a() { one(); }\n")?;
-    let first = review.live_history(&[])?.revisions()[1].head.clone();
+    let first = capture(&review, &session, &[])?.revisions()[1].clone();
     repo.write("a.rs", "fn a() { two(); }\n")?;
-    let second = review
-        .live_history(std::slice::from_ref(&first))?
-        .revisions()[1]
-        .head
-        .clone();
-    let pinned = |head: &ObjectId| -> eyre::Result<bool> {
-        Ok(refs(&repo)?.contains(&review.live_pin(head)))
+    let second = capture(&review, &session, std::slice::from_ref(&first))?.revisions()[1].clone();
+    let pinned = |record: &RevisionRecord| -> eyre::Result<bool> {
+        Ok(refs(&repo)?.contains(&head_pin(&session, record)))
     };
     expect_true!(pinned(&first)?);
     expect_true!(pinned(&second)?);
     repo.write("a.rs", "fn a() { three(); }\n")?;
-    review.live_history(std::slice::from_ref(&second))?;
+    capture(&review, &session, std::slice::from_ref(&second))?;
     expect_false!(pinned(&first)?);
     expect_true!(pinned(&second)?);
+
+    // A session that ends takes its pins with it.
+    drop(session);
+    expect_false!(refs(&repo)?.iter().any(|name| name.contains("/live/")));
+    Ok(())
+}
+
+/// Two captures with the same head against different bases each keep pins of their own, so the
+/// capture still on screen keeps its base and target pinned while the newer one is taken.
+#[gtest]
+fn captures_of_one_head_on_two_bases_are_pinned_apart() -> eyre::Result<()> {
+    let (repo, review) = worktree_review()?;
+    repo.git(&["checkout", "--quiet", "-b", "feature"])?;
+    repo.write("b.rs", "fn b() {}\n")?;
+    repo.commit("feature")?;
+    repo.write("a.rs", "fn a() { one(); }\n")?;
+    let session = review.start_session()?;
+    let first = last_revision(&capture(&review, &session, &[])?)?;
+
+    // `main` moves to the feature's tip: the capture's head is the same, its base is not.
+    repo.git(&["branch", "--force", "main", "feature"])?;
+    let second = last_revision(&capture(&review, &session, std::slice::from_ref(&first))?)?;
+    expect_that!(second.head, eq(&first.head));
+    expect_that!(second.base, not(eq(&first.base)));
+
+    // The first capture's pins still name its own base and target.
+    let pinned = |name: String| repo.git(&["rev-parse", "--verify", "--quiet", &name]);
+    expect_that!(
+        pinned(format!("{}/base", session.pins_of(&first)))?,
+        eq(first.base.as_str())
+    );
+    let first_target = first
+        .target
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("no target"))?;
+    expect_that!(
+        pinned(format!("{}/target", session.pins_of(&first)))?,
+        eq(first_target.as_str())
+    );
+    expect_that!(
+        pinned(format!("{}/base", session.pins_of(&second)))?,
+        eq(second.base.as_str())
+    );
     Ok(())
 }
 
@@ -127,8 +210,9 @@ fn live_pins_go_unless_kept() -> eyre::Result<()> {
 #[gtest]
 fn marking_a_provisional_revision_records_it_first() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
+    let session = review.start_session()?;
     repo.write("a.rs", &two_functions("first();", "second();"))?;
-    let live = review.live_history(&[])?;
+    let live = capture(&review, &session, &[])?;
     let view = live.current_view()?;
     let units = summaries(&live, view.number())?;
     let first = find(&units, "first")?.id;
@@ -160,8 +244,9 @@ fn marking_a_provisional_revision_records_it_first() -> eyre::Result<()> {
 #[gtest]
 fn a_provisional_revision_is_not_marked_once_the_log_moved_on() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
+    let session = review.start_session()?;
     repo.write("a.rs", &two_functions("first();", "second();"))?;
-    let live = review.live_history(&[])?;
+    let live = capture(&review, &session, &[])?;
     let view = live.current_view()?;
     let units = view.unit_ids();
     repo.write("a.rs", "fn a() { other(); }\n")?;
@@ -186,8 +271,9 @@ fn a_provisional_revision_is_not_marked_once_the_log_moved_on() -> eyre::Result<
 #[gtest]
 fn a_note_records_a_provisional_revision() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
+    let session = review.start_session()?;
     repo.write("a.rs", &two_functions("first();", "second();"))?;
-    let live = review.live_history(&[])?;
+    let live = capture(&review, &session, &[])?;
     let view = live.current_view()?;
     let unit = find(&summaries(&live, view.number())?, "second")?.id;
     review.note(&view, unit, "why?")?;
@@ -203,12 +289,13 @@ fn a_note_records_a_provisional_revision() -> eyre::Result<()> {
 #[gtest]
 fn marks_carry_to_the_capture_from_the_last_recorded_revision() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
+    let session = review.start_session()?;
     let recorded = review.history()?;
     let view = recorded.current_view()?;
     review.mark(&view, &view.unit_ids(), MarkVerdict::Accepted)?;
 
     repo.write("a.rs", &two_functions("changed();", ""))?;
-    let changed = review.live_history(&[])?;
+    let changed = capture(&review, &session, &[])?;
     let units = summaries(&changed, changed.current().unwrap())?;
     expect_that!(
         find(&units, "changed")?.state,
@@ -216,7 +303,7 @@ fn marks_carry_to_the_capture_from_the_last_recorded_revision() -> eyre::Result<
     );
 
     repo.write("a.rs", &two_functions("first();", ""))?;
-    let back = review.live_history(&[])?;
+    let back = capture(&review, &session, &[])?;
     expect_false!(back.is_provisional(back.current().unwrap()));
     let units = summaries(&back, back.current().unwrap())?;
     expect_that!(
@@ -237,8 +324,9 @@ fn only_a_working_tree_review_is_live() -> eyre::Result<()> {
     repo.commit("more")?;
     let review = repo.review()?;
     review.refresh()?;
+    let session = review.start_session()?;
     expect_that!(
-        review.live_history(&[]).err(),
+        review.live_history(&session, &[], &[]).err(),
         some(matches_pattern!(Error::InvalidTarget(_)))
     );
     Ok(())

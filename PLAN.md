@@ -80,6 +80,8 @@ in full rather than guessing.
 - **Unit and move IDs**: `u<revision>-<index>` and `m<revision>-<index>`, such as `u3-0007` and
   `m3-0002`, local to one revision. Indices are zero-based and written with at least four digits,
   so the first unit and the first move of revision 1 are `u1-0000` and `m1-0000`.
+  `cr` qualifies them with the review's tag, the first eight hex digits of the SHA-256 of its key
+  (`ReviewKey::tag`), as `u3-0007@3fa2b1c0`, and revisions as `3@3fa2b1c0`.
 - **Hunk**: the display unit. Units within a few lines of each other are shown together, like a
   unified-diff hunk. A hunk is reviewed when all its units are.
 - **Correspondence**: a mapping between the units of two revisions, computed from positions in
@@ -112,7 +114,15 @@ produces verified immutable inputs; everything after it is pure analysis over ob
 - Fetches go into operation-specific refs (`refs/code-review/tmp/<id>`), never `FETCH_HEAD`, and
   snapshot identity is taken from the fetched objects, not from an earlier observation. Every fetch
   passes `--no-write-fetch-head --refmap=` so a remote's configured refspecs never update
-  remote-tracking refs; nothing outside `refs/code-review/*` changes.
+  remote-tracking refs; nothing outside `refs/code-review/*` changes. Fetches never recurse into
+  submodules.
+- Every git command runs with `core.hooksPath=/dev/null`, `core.fsmonitor=false` and
+  `GIT_NO_REPLACE_OBJECTS=1`: no hook or monitor the configuration names runs, and object IDs
+  mean their own content. A working-tree capture and a checkout of a snapshot for browsing also
+  turn off every configured filter driver (`clean`, `smudge` and `process` emptied, `required`
+  false). A path whose `filter` attribute is set in the working tree's, the index's or `HEAD`'s
+  attributes is not captured from disk: it keeps its staged entry, and the capture lists the
+  ones that differ so a front end can say they are captured once staged.
 - Every snapshot is pinned under `refs/code-review/<review>/snap/<object-id>`, named by its own
   object ID, so pinning is idempotent: a ref that already exists holds the same object by
   construction. A force-push or GC cannot lose a pinned snapshot, and a crash after pinning leaves
@@ -123,6 +133,9 @@ produces verified immutable inputs; everything after it is pure analysis over ob
   commits but never the head, which may be a synthetic working-tree capture or an unpublished
   commit; wants the remote does not know are dropped one by one. Deepening has the same isolation
   as every other fetch; when it cannot find a merge base, the review fails with an explicit error.
+  The review of a checkout never deepens: a fetch has no deadline, and the capture is what the
+  window waits on. Without a merge base in a shallow clone, it compares with the empty tree and
+  says the history is shallow (`BaseRef::Shallow`), never that the histories are unrelated.
 - A front end can add variables to the environment of every `git` command a review runs
   (`Review::set_command_env`); review-tui uses it to keep fetches from prompting on the terminal
   it draws on.
@@ -141,7 +154,9 @@ identity and date produce a synthetic snapshot commit, pinned like any other; a 
 nothing beyond `HEAD` is captured as `HEAD` itself. Staged and unstaged changes are captured together. Two captures of
 different contents are two revisions; a capture identical to the current revision deduplicates.
 A review that follows the working tree shows captures without recording them until one is
-marked (see "Live updates").
+marked (see "Live updates"). A working tree with an unborn `HEAD`, or one with no default branch
+to compare with, is compared with a fixed commit of the empty tree, made the same way every
+time.
 Whether a working tree has uncommitted changes is decided by the same capture: its tree against
 `HEAD`'s, so the two can never disagree.
 
@@ -577,11 +592,28 @@ computes a correspondence between their units:
 3. **Candidates**: a unit of the newer revision corresponds to a unit of the older one when the
    older unit's position maps onto it, on the head side for added lines and on the base side for
    removed lines. A deletion-only chunk maps through its insertion point.
-4. **Confirm**: the correspondence is **unchanged** when both sides of the change are equal
-   (exactly in the MVP; formatting normalization waits for the per-chunk proof), both footprints
-   map exactly on the head and the base side, and the unit is distinguishable; **changed** when the
-   change differs. An equal change whose position is not trusted is reviewed again.
-5. **Ambiguity reopens**: a unit with several candidate predecessors (merges), a predecessor with
+4. **Identical files**: a file whose base entry and head entry (path, mode and object ID) are the
+   same on both revisions has the same diff on both, so each of its units corresponds, unchanged,
+   to the unit with equal evidence. This keeps even indistinguishable repeated edits reviewed when
+   the captured tree is committed, or when a rebase touches only other files.
+5. **Confirm**: otherwise the correspondence is **unchanged** only when all of these hold:
+   - the file's base entry is the same on both revisions (path, mode and object ID; absent on
+     both counts as the same), so any change of the base around a unit (a rebase, a moved target,
+     a base-side rename) reopens it, and the interdiff says the code around it changed in the base;
+   - the file's head mode is the same on both revisions, so a chunk carries through a head-side
+     rename of a file with a base; for a file absent from both bases the whole head entry must be
+     the same, path included, so an added file never carries through a head-side rename;
+   - both sides of the change are equal (exactly in the MVP; formatting normalization waits for
+     the per-chunk proof), and so are its context lines;
+   - both footprints map exactly on the head and the base side, and the unit is distinguishable.
+
+   It is **changed** when the change differs. An equal change whose position or surroundings are
+   not trusted is reviewed again. A file unit is unchanged only when its file's base entry is the
+   same on both revisions and so are its head path and mode. A rename, a mode change or an empty
+   file does not assert the head content, which the chunks review; a unit that does (binary,
+   symlink, submodule and the like), or one of a file absent from both bases, needs the whole
+   head entry the same.
+6. **Ambiguity reopens**: a unit with several candidate predecessors (merges), a predecessor with
    several candidate successors (splits), or no positional candidate at all has no unchanged
    correspondence. Content equality without positional correspondence, such as an identical edit
    appearing elsewhere in the file, never carries a mark.
@@ -650,12 +682,27 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   concurrent refreshes wins, either being a true sync time. Writing it is best-effort: a
   refresh that recorded its revision succeeds even when the record cannot be stored, and
   `Recorded::sync_error` says why.
+- `worktrees/<tree>`: a read-only copy of a snapshot's files, by its tree (see "Code browsing at
+  a revision").
 - `view/<front-end>.json`: each front end's own view state, through `Review::view_state` and
   `Review::save_view_state`, such as the folded folders. review-gui and review-tui share theirs
   under the name `review-lite`, review-gui's name when it first stored them, so folds made in
   one app show in the other and folds saved before the rename keep loading. It is how the review
   was last shown, not review state: written atomically without the lock, never in the event log,
   and a front end that cannot read it starts afresh.
+
+The review of a checkout is keyed by its working tree and its clone,
+`<working tree>:WORKTREE@<clone>`. The clone's identity is a blob of random bytes that
+`refs/code-review/clone-id` names in the common git directory, so every worktree of a clone
+shares it and a new clone made at the same path has another; the ref is created once, with a
+create-only update, so of two first opens the second adopts the first's. The review stores the
+whole identity as its target, and a running app checks it on every capture, so a review never
+captures a clone its history is not in.
+
+A revision event of a capture of a working tree also records the branch checked out, the commit
+`HEAD` was at and the number of the branch's pull request, when there were ones. They describe the
+revision and are never its identity: the snapshot pair is, so the same pair seen on two branches
+is one revision, which keeps the branch it was first recorded on.
 
 Rules:
 
@@ -664,6 +711,10 @@ Rules:
   publishes the analysis, appends the event with the next number, and only then releases the lock.
   The appended event is the commit point: a revision number exists only once its event is in the log, so a crash before
   that leaves nothing to clean up but idempotent pins and a content-addressed analysis file.
+  Recording what a target resolves to now (`Review::refresh`) pins it under a session of its own
+  before analyzing it, and records it only while the log still ends at the revision it ended at
+  before the target was read; otherwise it reads the target again, so an older observation is
+  never recorded after a newer one.
   Background work carries the snapshot IDs it was started for, so a stale result can never replace
   a newer one.
 - **Appends are complete or absent.** A writer holds the lock across `write_all` of one
@@ -683,23 +734,117 @@ which would conflict with an embedder's own `libsqlite3-sys`.
 
 ### Live updates
 
-A review of the working tree follows it as it changes, the way lazygit does
-([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)), and so
-does a pull request or range review opened in a checkout of its branch, through the checkout's
-continuation of it ([ADR 5](adr/0005-a-checkout-continues-the-review-of-its-branch.md)):
+A review of a working tree follows it as it changes, the way lazygit does
+([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)).
+`cr` and the apps without a target open the review of the checkout (`Review::open_checkout`),
+which follows whatever is checked out: one review per working tree and clone, on any branch.
 `review_ui::watch` watches what git does not ignore (on Linux each such directory on its own,
 found by asking `git check-ignore` about each level of the tree; on macOS and Windows the
 whole tree, filtering events by git's rules), and every change a capture records, never a read,
-starts a capture once the burst of changes goes quiet. `Review::live_history` shows the capture
+starts a capture once the burst of changes goes quiet; the burst's first such change is reported
+at once, so a capture it may have caught half-made never takes marks. Without a watch, while it
+starts or where the tree cannot be watched, once the watch could not watch a directory, and for
+the opening capture, each capture looks twice and counts only when both looks saw the same
+(`Review::confirmed_live_history`). `Review::live_history` shows the capture
 as a provisional revision after the last recorded one, which `Review::mark` and
 `Review::note` record first, under the lock, only while the log still ends where the capture
-was compared. The window shows each capture in place of the snapshot on screen, keeping the
+was compared. A capture during which the review recorded another revision is discarded, since
+its history would end in a revision it never saw. The window shows each capture in place of the snapshot on screen, keeping the
 file, the hunk, the top row and the folds through the correspondence between the two; a
 capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
 way, and one compared with a snapshot no longer on screen is taken again. A hunk that changed
 refuses review keys for a second, and while a key pressed before the change repeats. A capture
 every 30 seconds catches what a watch cannot see, walking the tree again every 5 minutes;
 `[review] live = false` turns it off.
+
+Each capture also observes its subject (`Review::subject`): the branch checked out, or none when
+`HEAD` is detached; the commit `HEAD` is at, or none when its branch is unborn; the branch's
+pull request, which the caller looks up on its own with `github::for_checkout`, one bounded
+`gh pr view` that names no branch, so `gh` resolves the one checked out as it does for the
+reviewer (where it pushes and pulls, a fork, the ref `gh pr checkout` tracks), and whose answer
+counts only when the branch (`BranchIdentity`: its name, `branch.<name>.remote` and `.merge`,
+where it pushes, `.pushRemote` or else `remote.pushDefault`, and its upstream's commit) was the
+same before and after `gh` ran, and when the pull request is the one the branch pulls (the head
+its merge ref names, the pull request of a `refs/pull/<n>/head` merge ref, or without one the
+head of the branch's own name); and the base, the first of:
+
+1. while that pull request is open, its base branch on the remote whose URL is its base
+   repository; when that is not available locally, the subject says so and the next rule applies;
+2. the default remote's default branch (`<remote>/HEAD`, `<remote>/main`, `<remote>/master`,
+   where the default remote is `origin`, or else the first remote);
+3. the local default branch (`main`, `master`), where committing lands the work;
+4. the empty tree, when `HEAD` is unborn, there is no default branch, or `HEAD` shares no
+   history with it, or none the shallow clone holds.
+
+The caller passes what it found for every local branch, and a capture takes what was found for
+the branch it sees checked out, only while that branch still pulls from and pushes to where it
+did then (`BranchIdentity::tracks_the_same`, which ignores the local name of a branch that
+pulls a ref, so a rename keeps the pull request; a push or a fetch moving its upstream's commit
+keeps it too until it is looked up again), so a capture taken as the branch switches
+or is pointed elsewhere never resolves the base from another; no branch name is matched against
+the pull request's head. The header and the title show the pull request that capture used.
+
+The capture is compared with the merge base of that base and itself. A checkout with nothing to
+review opens all the same, as an empty view.
+
+A capture is taken only while git is idle in the worktree: none while `index.lock`,
+`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge`, `rebase-apply` or `BISECT_LOG`
+exist in its git directory or the index has unmerged paths (`Capture::Busy`), checked before and
+after the capture. The subject, the base's commit and the real index's modification time and
+size are read before and after too, and a capture during which any of them changed is discarded
+(`Capture::Moved`) so the caller takes it again. A checkout that is another clone now captures
+nothing (`Capture::Replaced`).
+
+The window shows the subject of the capture on screen, not of the revision recorded: the files
+header names the branch and its base (`feat/x → origin/main`, `#12 feat/x → origin/main`,
+`#12 merged · feat/x → origin/main`), the title the directory, branch and pull request
+(`code-review · feat/x #12`), and the overview the branch, the pull request with its address, the
+base and why it is that one, filtered files and the trust. A change of branch or base, and of
+the pull request, says so once on the status line (`Now on feat/y.`, `Pull request #12 opened.`,
+`#12 merged.`, `The base is now origin/develop.`); the file list moves only when the code did. A
+view without files says why, in the words `cr show` uses (`Subject::nothing_to_review`). The watch
+also sees the refs that decide the subject: branches and remote-tracking branches in the common
+git directory, loose or in `packed-refs` (whose rewrites count only when those refs changed),
+and git starting or finishing an operation; never `refs/code-review/`. Each change it reports,
+and each change of the pull request, counts one more observation; a capture carries the count it
+was taken at, and one older than the newest never shows: the view on screen stays, marked
+`updating…`, and refuses marks until a capture of the newest lands. The view refuses marks too
+while git is busy (`git busy: rebase in progress`) and once the checkout is another clone, which
+ends the following with "reopen cr". `r` captures again and looks the pull request up again,
+recording nothing.
+
+The window looks the branch's pull request up in the background (`review_ui::model::pulls`): one
+lookup at a time with a 10-second timeout, when the review opens, when the branch or the commit
+its upstream is at changes (a switch, a rename, a push such as `gh pr create`'s), on `r`, and
+every 2 minutes while on a branch, doubling the wait after each failure up to 15 minutes; a
+push that finds none looks again 15 seconds later, as `gh pr create` pushes first. A lookup
+during which the branch moved is taken again, and an answer for another branch than the window
+follows, as when the checkout switched before its capture shows, is kept for that branch. A failure keeps the pull request
+last found for the branch, shown as stale in the overview; a repository without a remote, without
+`gh`, without a GitHub remote or without a `gh` login is asked about again only after 15
+minutes, when the branch or its upstream moves, or on `r`, and the overview says why meanwhile. A changed pull request captures again, since the base may follow it.
+
+The checkout's code is never trusted by default. The first tool that needs trust, go to
+definition, asks once: trust this snapshot, which ends when the code changes, or always trust this
+checkout until `Ctrl+T` revokes it. The bottom bar says which grant applies (`untrusted`,
+`trusted: this snapshot`, `trusted: checkout`), each capture reads it again for its own tree,
+and the worker checks it on the tree it is about to run on (`Review::tool_worktree`), again
+under the language servers' lock right before it spawns a server or sends one a request, and
+once more when the answer comes. The `initialize` handshake runs after that lock is released,
+with the server already listed. A revocation records itself and stops every listed server under
+that same lock, one in its handshake or answering included, whose wait then fails, so it waits
+at most for a process to spawn, and either stops the server or is seen before any spawn.
+
+A capture is a synthetic commit no branch reaches, so whoever shows it pins it. Each running app
+is a session (`Review::start_session`) that holds an exclusive lock on
+`code-review/sessions/<review>/<id>.lock` in the clone's common git directory, next to the pins
+it guards whatever data directory the review is kept in, for its lifetime, and pins the base, the
+head and the target of each capture it shows, before analyzing it, under
+`refs/code-review/<review>/live/<session>/<head>-<base>[-<target>]/`, so two captures of one head
+against different bases keep their own pins. A session removes only its
+own pins, those of captures it no longer shows and all of them when it ends, and another
+session's only once that session's lock file can be locked, which means it is over; it then
+removes the file too.
 
 For PR reviews, poll every 30 seconds (configurable): `git ls-remote` for the PR head and the target
 branch, and `gh pr view` for the target branch name, since a PR can be retargeted. A change of
@@ -709,11 +854,22 @@ units" and applies it on request, keeping the cursor on the current unit.
 
 ### Code browsing at a revision
 
-Each revision being browsed gets its own detached worktree at its head snapshot, created lazily
-under the review's data directory and shared by every client viewing that revision. A client
-switching revisions switches its project to the other worktree; worktrees no client uses are
-reclaimed. Worktrees are snapshots: the front ends open them read-only, so an editor save cannot
-change what is being reviewed.
+A revision being browsed gets a read-only copy of its head's files, by tree, written lazily under
+the review's data directory with every filter driver and hook off, and shared by every client
+viewing that tree (`Review::worktree`). It is written in full into a fresh directory, made
+read-only and only then renamed into place, and one found writable again is written afresh
+rather than reused, so an editor save cannot change what is being reviewed.
+
+Tools that execute code from the reviewed tree, such as language servers, run only in such a
+copy and only with a trust grant for that tree (`Review::tool_worktree`, `Review::trust_for`).
+No review is trusted by default, whatever it is of: a working tree, a local branch or a pull
+request may hold code from anywhere. For the review of a checkout, a grant covers either exactly
+one captured snapshot, by its tree, or the whole checkout while it is the same clone, and a
+revocation revokes the latest grant of its own scope. A review of a range or of the working tree
+against a fixed ref is keyed by the repository's path, which another clone made there later
+shares, so a grant covers exactly the snapshot on screen (`TrustScope::Snapshot`), never the
+whole review (`Review::trusted_per_snapshot`). A trust decision without a scope, as in logs
+written before scopes, is the whole review's, which only a pull request review heeds.
 
 ## Workspace layout
 
@@ -735,61 +891,43 @@ thiserror, a hash crate, and tree-sitter with its grammars).
 
 | Command | Purpose |
 |---|---|
-| `cr [pr-number \| pr-url \| base..head \| --worktree [ref] \| --demo]` | The terminal app (see [review-tui](#review-tui)) on that review, or without one on the review chosen as below. |
-| `cr open [pr-number \| pr-url \| base..head \| --worktree [ref]]` | Start or refresh a review; records a revision if anything changed and prints a summary. Without a target, see below. |
+| `cr [pr-number \| pr-url \| base..head \| --worktree [ref] \| --demo]` | The terminal app (see [review-tui](#review-tui)) on that review, or without one on the review of the checkout, as below. |
+| `cr open [pr-number \| pr-url \| base..head \| --worktree [ref]]` | Start or refresh a review; records a revision if anything changed and prints a summary. Without a target, the review of the checkout, as below. |
 | `cr status` | Counts per file and in total: new, changed since reviewed, reviewed, accepted, flagged, approved automatically, noise. |
-| `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts, saying how many of them were approved automatically. |
-| `cr mark <unit>... seen \| accepted \| flagged \| unseen` | Set review state. |
-| `cr note <unit> <text>` | Add a note. |
+| `cr show [--unreviewed] [--step N] [--file PATH]` | Colored text rendering with moves collapsed and formatting-only units hidden behind counts, saying how many of them were approved automatically; unit IDs qualified with the review's tag, `u1-0000@3fa2b1c0`. On the review of the checkout, it first says what the capture is of (`#12 feat/x → origin/main`), how many filtered files it could not capture, and why nothing is to review when nothing is. |
+| `cr mark <unit@tag>... seen \| accepted \| flagged \| unseen` | Set review state; `--file PATH` and `--category` take the revision shown, `--revision N@tag`. |
+| `cr note <unit@tag> <text>` | Add a note. |
 | `cr export [--format md \| json]` | Numbered list of flagged and annotated units with `file:line`, unit ID and excerpt, for an agent. |
 | `cr walkthrough prompt \| import <file> \| show` | Agent-generated walkthroughs. |
 | `cr watch` | Poll for new revisions and print what changed. |
 
-Every command accepts `--review <key>`, defaulting to the review for the current repository and
-branch, `--json`, and `--no-auto-approve`, which counts proven formatting-only units as needing
-review, whatever the shared configuration's `[review] auto_approve_formatting` says.
+Every command accepts `--review <key>`, defaulting to this checkout's review, `--json`, and
+`--no-auto-approve`, which counts proven formatting-only units as needing review, whatever the
+shared configuration's `[review] auto_approve_formatting` says.
 
-`cr` and `cr open`, review-gui and review-tui without a target and without `--worktree` choose one
-([ADR 2](adr/0002-uncommitted-work-is-reviewed-against-the-default-branch.md)) in
-`review-core` (`Review::open_for_current_branch`), and say on standard error which rule fired
-(the apps also in their status line when the review opens, after any configuration problem):
+Every mutation names its review, because IDs are local to one: a unit or move ID qualified with
+the review's tag, `u1-0000@3fa2b1c0`, or `--revision N@tag` for marks of files and categories,
+which are refused unless that revision is still the current one. A tag of another review is
+refused, and a bare ID or revision is taken only when `--review` names the review, so an ID
+copied from one review never marks a unit of another, such as the checkout's after `cr open 128`.
 
-1. The review last opened for this repository and branch. When that is a pull request or range
-   review, this checkout continues it in a review of its working tree
-   ([ADR 5](adr/0005-a-checkout-continues-the-review-of-its-branch.md)): its continuation opens
-   when it has one, whatever it holds now; otherwise, when the checkout is on the reviewed branch,
-   a local branch, and its `HEAD` contains the head of the review's current revision, the
-   continuation is created, seeded once with a copy of that revision and each unit's state there,
-   and opens, and is remembered from then on. The pull request or range review keeps only what
-   its target resolves to, and naming it opens it.
-2. Otherwise the branch's open pull request, as `gh pr view` resolves it, keyed exactly as when it
-   is opened by number or URL so marks are shared.
-   A merged or closed pull request is skipped, because its review would no longer follow the
-   branch; reviewing one stays possible by number or URL.
-3. Otherwise, on a branch whose working tree has uncommitted changes, the working tree against
-   the default branch (`--worktree <default branch>`), whether or not the branch has commits yet,
-   so uncommitted work is never left out.
-   Uncommitted means what a capture records: staged and unstaged changes and untracked files that
-   are not ignored, but not changes inside a submodule's checkout, which a capture cannot see.
-   The key names the checkout and the default branch, not the branch, so work begun on the
-   default branch and moved with `git checkout -b` stays one review; rule 1 then ties the new
-   branch to it once it is opened there, and it keeps following the branch after commits.
-   A detached `HEAD` never gets this rule, because a working-tree review is trusted and a
-   detached commit may be someone else's code.
-4. Otherwise `<default branch>..<branch>` (`..HEAD` when detached), where the default branch is
-   what `origin/HEAD` names, or else the first of `origin/main`, `origin/master`, `main` and
-   `master` that exists.
-   Any `gh` failure (not installed, not authenticated, no GitHub remote, no pull request) only
-   skips rule 2 and is reported as the reason.
-   With no default branch, or neither uncommitted changes nor a commit on `HEAD` beyond it,
-   opening fails and asks for a target or `--worktree`.
+Commands that show the review of the checkout at its current revision (`cr show`, `status`,
+`export`, `worktree` and `walkthrough prompt` and `show`) record what the checkout holds first,
+since what they print is what a later mark refers to (ADR 4). Without a watcher to say the
+working tree changed while it was read, a capture is recorded only once a second capture
+observed the same clone, subject (branch, `HEAD`, pull request and the commit the base resolved
+to) and snapshot pair; it is taken again up to five times, and the command fails while git is
+busy. `cr` looks up the branch's pull request with `gh` for up to 10 seconds, so the revision
+gets the pull request's base; without `gh`, a remote or an answer, the base is the default
+branch.
 
-A remembered review always wins, so a pull request opened after a range or working-tree review of
-the same branch is picked up only by naming it once.
-Work committed in full on a new branch before any review is opened there gets a range review of
-its own, whose units start unreviewed; the marks stay with the working-tree review.
-A review key is never reopened for a different target (a range ending at a branch named
-`WORKTREE` would otherwise share the working-tree key); opening one fails instead.
+`cr` and `cr open`, review-gui and review-tui without a target and without `--worktree` open the
+review of the checkout (`Review::open_checkout`, see "Live updates"): whatever the working tree
+holds, on whatever branch, against the base its subject resolves to on every capture. A review
+opened by a target, such as `cr open 128`, is acted on by naming it with `--review`. Reviews
+opened before the review of the checkout existed stay on disk under their keys, and open with
+`--review`. A review key is never reopened for a different target (a range ending at a branch
+named `WORKTREE` would otherwise share the working-tree key); opening one fails instead.
 
 ## Front ends
 
@@ -1147,13 +1285,12 @@ it, muted, so it never reads as code.
   rust-analyzer the memory; `g d` then says it is off.
 - **Trust.** No tool that can execute reviewed code starts unless the review is trusted.
   `Review::trust` and `Review::set_trusted` in `review-core` store the decision as a `trust` event
-  in the review's log, so every front end shares it. Without a decision, the working tree and a
-  range whose head is a local branch are trusted, and pull requests and other ranges, such as a
-  remote-tracking ref or a bare commit, are not. A local branch can still hold someone else's
-  code, for example one made by `gh pr checkout`; revoke trust for it. In both apps, `gd` on an
-  untrusted review shows a one-line hint, and `Ctrl+T` explains what will run and trusts on a
-  second press, or revokes trust and stops the language servers. The demo's head is a local
-  branch, so it is trusted.
+  in the review's log, so every front end shares it. Without a decision, no review is trusted:
+  a working tree or a local branch can hold someone else's code as well as a pull request, for
+  example one made by `gh pr checkout`. In both apps, `gd` on an untrusted review shows a one-line
+  hint, and `Ctrl+T` explains what will run and trusts on a second press, or revokes trust and
+  stops the language servers. A review of a range or of the working tree trusts only the
+  snapshot on screen.
 - **Window chrome.** gpui asks for server-side decorations; GNOME has no `xdg-decoration`, so
   the window falls back to client decorations and review-gui draws its own square title bar
   (`app/chrome.rs`): the title, a drag area, minimize, maximize and close. As in Zed's

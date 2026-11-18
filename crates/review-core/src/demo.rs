@@ -20,7 +20,7 @@ use indoc::formatdoc;
 use serde::Deserialize;
 
 use crate::error::Error;
-use crate::git::Repo;
+use crate::git::{COMMAND_CONFIG, COMMAND_ENV, Repo};
 use crate::ids::{RevisionNumber, UnitId};
 use crate::review::{Review, ReviewTarget};
 use crate::store::events::MarkVerdict;
@@ -289,7 +289,9 @@ fn git(repo: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<(), Error> {
     let mut child = Command::new("git")
         .arg("--git-dir")
         .arg(repo)
+        .args(COMMAND_CONFIG)
         .args(args)
+        .envs(COMMAND_ENV)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(if stdin.is_some() {

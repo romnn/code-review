@@ -4,10 +4,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use review_core::UnitId;
 
 use super::effects::{Outcome, Subject};
-use super::{DEFINITION_DEADLINE, Mode, Model, Servers};
+use super::{DEFINITION_DEADLINE, Mode, Model, Running, ServerKey, Servers};
 use crate::frame::Request;
 use crate::lsp::{self, LanguageServer};
 use crate::paint::display::DisplayLine;
@@ -394,12 +395,16 @@ impl Model {
     /// `g d`: asks a language server, in the background, where the identifier under the cursor
     /// is defined, and moves there, opening another file as a buffer when it is elsewhere.
     pub(super) fn go_to_definition(&mut self) {
-        self.trust_pending = false;
+        self.trust_pending = None;
         if !self.settings.language_servers {
             self.set_status(
                 "Go to definition is off: language servers never start while [lsp] enabled = \
                  false in config.toml.",
             );
+            return;
+        }
+        if !self.trusted && self.is_checkout() {
+            self.ask_trust(true);
             return;
         }
         if !self.trusted {
@@ -449,11 +454,19 @@ impl Model {
         self.looking_up = true;
         self.set_status("Looking up the definition; the language server may need to index first…");
         self.spawn(Subject::Lookup(lookup), move || {
+            let found = review.repo().tree_of(&record.head).and_then(|tree| {
+                let root = review.tool_worktree(&tree)?;
+                Ok((tree, root))
+            });
             Outcome::Definition(
-                review
-                    .worktree(&record)
+                found
                     .map_err(|err| err.to_string())
-                    .and_then(|root| find_definition(&servers, &root, &path, row, col)),
+                    .and_then(|(tree, root)| {
+                        // Trust may be revoked while the worktree is written, or while the server
+                        // starts, so it is asked again at each.
+                        let trusted = || review.trust_for(&tree).is_ok_and(|trust| trust.trusted);
+                        find_definition(&servers, &root, &path, row, col, &trusted)
+                    }),
             )
         });
     }
@@ -537,14 +550,91 @@ pub(super) struct Definition {
     pub(super) syntax: SideSyntax,
 }
 
+/// Why a definition lookup stopped: trust was revoked while it ran.
+const REVOKED_TRUST: &str = "trust was revoked, so no language server runs";
+
+/// Returns the running server `key` names, launching it with `launch` when none runs, while
+/// `trusted` says tools may run, once `initialize` completed its handshake.
+///
+/// Trust is checked, and a server launched, under the servers' lock, which a revocation holds
+/// while it records itself and stops the servers (see [`revoke_servers`]): a revocation either
+/// comes first and is seen here, or waits for the launch, which only spawns the process, and
+/// stops the server it launched.
+/// The handshake runs after the lock is released, with the server in the map already, so a
+/// revocation meanwhile stops it there and the handshake fails.
+/// A server already running gets no request either once trust is revoked.
+fn server_for(
+    servers: &Servers,
+    key: &ServerKey,
+    trusted: &dyn Fn() -> bool,
+    launch: impl FnOnce() -> Result<LanguageServer, String>,
+    initialize: impl FnOnce(&mut LanguageServer) -> Result<(), String>,
+) -> Result<Arc<Mutex<LanguageServer>>, String> {
+    let server = {
+        let mut running = servers.lock();
+        if !trusted() {
+            return Err(REVOKED_TRUST.to_owned());
+        }
+        if let Some(found) = running.get(key) {
+            Arc::clone(&found.server)
+        } else {
+            let launched = Running::new(launch()?);
+            let server = Arc::clone(&launched.server);
+            running.insert(key.clone(), launched);
+            server
+        }
+    };
+    let initialized = initialize(&mut server.lock());
+    if let Err(err) = initialized {
+        forget(servers, key, &server);
+        return Err(err);
+    }
+    Ok(server)
+}
+
+/// Removes `server` from `servers` under `key`, unless another took its place; it stops once
+/// nothing holds it.
+fn forget(servers: &Servers, key: &ServerKey, server: &Arc<Mutex<LanguageServer>>) {
+    let mut running = servers.lock();
+    if running
+        .get(key)
+        .is_some_and(|running| Arc::ptr_eq(&running.server, server))
+    {
+        running.remove(key);
+    }
+}
+
+/// Records a revocation of trust with `record` and stops the language servers, under the
+/// servers' lock, so a lookup that checks trust and launches a server under it either sees the
+/// revocation or has its server stopped here; `record` returns whether the servers stop, as
+/// when no other grant still applies.
+///
+/// Every server stops at once, one a lookup is using or still shaking hands with included:
+/// what waits on it fails.
+pub(super) fn revoke_servers<E>(
+    servers: &Servers,
+    record: impl FnOnce() -> Result<bool, E>,
+) -> Result<(), E> {
+    let mut running = servers.lock();
+    if record()? {
+        // Each server stops as it leaves the map.
+        running.clear();
+    }
+    Ok(())
+}
+
 /// Finds where the identifier at byte `column` of line `line` of `path` (relative to `root`) is
 /// defined, starting a language server for `root` on first use, and reads that file.
+///
+/// `trusted` says whether tools may still run on `root`: a server starts only while they may,
+/// and one that answers once they may not is stopped instead of kept.
 fn find_definition(
     servers: &Servers,
     root: &Path,
     path: &str,
     line: usize,
     column: usize,
+    trusted: &dyn Fn() -> bool,
 ) -> Result<Definition, String> {
     // Language servers answer with canonical paths, so the root must be canonical to strip it.
     let root = &root
@@ -563,17 +653,30 @@ fn find_definition(
         line,
         character: lsp::utf16_column(source, column.min(source.len())),
     };
-    let mut servers = servers.lock();
     let key = (command.program, root.clone());
-    if !servers.contains_key(&key) {
-        let server = LanguageServer::start(&command, root).map_err(|err| err.to_string())?;
-        servers.insert(key.clone(), server);
-    }
-    let server = servers.get_mut(&key).ok_or("the language server is gone")?;
+    let server = server_for(
+        servers,
+        &key,
+        trusted,
+        || LanguageServer::launch(&command, root).map_err(|err| err.to_string()),
+        |server| {
+            server
+                .initialize(&command, root)
+                .map_err(|err| err.to_string())
+        },
+    )?;
     let definition = server
+        .lock()
         .definition(&file, &text, position, DEFINITION_DEADLINE)
-        .map_err(|err| err.to_string())?;
-    drop(servers);
+        .map_err(|err| err.to_string());
+    if !trusted() {
+        // A revocation stopped the servers it found; this one stops once the lookup lets go
+        // of it, which dropping does.
+        forget(servers, &key, &server);
+        return Err(REVOKED_TRUST.to_owned());
+    }
+    let definition = definition?;
+    drop(server);
     let target = std::fs::read_to_string(&definition.path)
         .map_err(|err| format!("cannot read {}: {err}", definition.path.display()))?;
     // In the root's canonical spelling, which the server's answer need not share: Windows
@@ -606,6 +709,9 @@ fn find_definition(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
+
     use super::*;
 
     /// Follows a method call in the demo to its definition; skipped where rust-analyzer is not
@@ -634,9 +740,147 @@ mod tests {
             .find(|(_, line)| line.contains("self.balance(account)"))
             .unwrap();
         let column = source.find("balance(").unwrap();
-        let found =
-            find_definition(&Servers::default(), &root, "src/engine.rs", line, column).unwrap();
+        let found = find_definition(
+            &Servers::default(),
+            &root,
+            "src/engine.rs",
+            line,
+            column,
+            &|| true,
+        )
+        .unwrap();
         assert_eq!(found.path, "src/engine.rs");
         assert!(found.lines.lines[found.line].contains("fn balance("));
+    }
+
+    /// A revocation while a lookup checks trust and launches a server, under the servers' lock,
+    /// waits for the launch and stops the server it launched; the lookup refuses from then on,
+    /// a running server included.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_revocation_waits_for_a_server_starting_and_stops_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let servers = Servers::default();
+        let key: ServerKey = ("rust", dir.path().to_owned());
+        let revoked = Arc::new(AtomicBool::new(false));
+        let launched = Arc::new(AtomicBool::new(false));
+        let (launching, launch_begun) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn({
+            let servers = Arc::clone(&servers);
+            let key = key.clone();
+            let revoked = Arc::clone(&revoked);
+            let launched = Arc::clone(&launched);
+            let root = dir.path().to_owned();
+            move || {
+                let trusted = || !revoked.load(Ordering::SeqCst);
+                let launch = || {
+                    launching.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                    let server = LanguageServer::stand_in("cat", &[], &root);
+                    launched.store(true, Ordering::SeqCst);
+                    server.map_err(|err| err.to_string())
+                };
+                server_for(&servers, &key, &trusted, launch, |_| Ok(())).map(drop)
+            }
+        });
+
+        launch_begun.recv().unwrap();
+        revoke_servers(&servers, || {
+            // The launch under the lock finished before the revocation recorded itself.
+            assert!(launched.load(Ordering::SeqCst));
+            revoked.store(true, Ordering::SeqCst);
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+        assert!(worker.join().unwrap().is_ok());
+        assert!(servers.lock().is_empty(), "the server launched is stopped");
+
+        // A server running still, as one started for another window, gets no request.
+        let running = LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
+        servers.lock().insert(key.clone(), Running::new(running));
+        let trusted = || !revoked.load(Ordering::SeqCst);
+        let refused = server_for(
+            &servers,
+            &key,
+            &trusted,
+            || panic!("no server starts"),
+            |_| panic!("no handshake runs"),
+        );
+        assert!(refused.is_err_and(|err| err.contains("trust was revoked")));
+    }
+
+    /// A revocation while a server is in its handshake, which runs outside the servers' lock,
+    /// returns at once and stops it, and the handshake fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_revocation_during_a_slow_handshake_returns_promptly() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let servers = Servers::default();
+        let key: ServerKey = ("rust", dir.path().to_owned());
+        let revoked = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn({
+            let servers = Arc::clone(&servers);
+            let key = key.clone();
+            let revoked = Arc::clone(&revoked);
+            let root = dir.path().to_owned();
+            move || {
+                let trusted = || !revoked.load(Ordering::SeqCst);
+                // A server that never answers the handshake.
+                let launch = || {
+                    LanguageServer::stand_in("sleep", &["30"], &root).map_err(|err| err.to_string())
+                };
+                let command = lsp::server_for(Path::new("lib.rs")).unwrap();
+                let initialize = |server: &mut LanguageServer| {
+                    server
+                        .initialize(&command, &root)
+                        .map_err(|err| err.to_string())
+                };
+                server_for(&servers, &key, &trusted, launch, initialize).map(drop)
+            }
+        });
+        // The server is in the map, shaking hands.
+        let waited = std::time::Instant::now();
+        while servers.lock().is_empty() {
+            assert!(
+                waited.elapsed() < Duration::from_secs(10),
+                "no server launched"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+
+        let revoking = std::time::Instant::now();
+        revoke_servers(&servers, || {
+            revoked.store(true, Ordering::SeqCst);
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+        assert!(
+            revoking.elapsed() < Duration::from_secs(1),
+            "the revocation waited"
+        );
+        let shaken = worker.join().unwrap();
+        assert!(
+            shaken.is_err_and(|err| err.contains("stopped")),
+            "the handshake fails"
+        );
+        assert!(waited.elapsed() < Duration::from_secs(10));
+        assert!(servers.lock().is_empty());
+    }
+
+    /// No language server starts once trust is revoked, as while the worktree was written: the
+    /// lookup fails before starting one.
+    #[test]
+    fn no_server_starts_once_trust_is_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn a() {}\n").unwrap();
+        let servers = Servers::default();
+        let found = find_definition(&servers, dir.path(), "lib.rs", 0, 3, &|| false);
+        assert!(found.is_err_and(|err| err.contains("trust was revoked")));
+        assert!(servers.lock().is_empty());
     }
 }

@@ -27,6 +27,7 @@ pub mod overview;
 pub mod palette;
 pub mod picker;
 pub mod settings;
+pub mod trust;
 
 pub use flatten::{Flat, Ink, composite, flatten};
 pub use palette::{HunkTone, Palette};

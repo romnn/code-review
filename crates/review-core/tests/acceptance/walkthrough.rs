@@ -108,7 +108,8 @@ fn walkthrough_survives_new_revision() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Import rejects a walkthrough for another review or revision, and unknown or duplicate IDs.
+/// Import rejects a walkthrough for another review or revision, unknown or duplicate IDs, and
+/// IDs qualified with another review's tag; IDs qualified with the review's own tag import.
 #[test]
 fn invalid_walkthroughs_are_rejected() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
@@ -137,6 +138,8 @@ fn invalid_walkthroughs_are_rejected() -> eyre::Result<()> {
         ),
         walkthrough_json(&key, 1, &[("A", vec!["u2-0000".to_owned()])]),
         walkthrough_json(&key, 1, &[("A", vec!["0000".to_owned()])]),
+        walkthrough_json(&key, 1, &[("A", vec![format!("{unit}@00000000")])]),
+        walkthrough_json(&key, 1, &[("A", vec![format!("{unit}@tag")])]),
         "{not json".to_owned(),
     ];
     for attempt in attempts {
@@ -146,7 +149,12 @@ fn invalid_walkthroughs_are_rejected() -> eyre::Result<()> {
             "{attempt}: {result:?}"
         );
     }
-    review.import_walkthrough(&history, &walkthrough_json(&key, 1, &[("A", vec![unit])]))?;
+    review.import_walkthrough(
+        &history,
+        &walkthrough_json(&key, 1, &[("A", vec![unit.clone()])]),
+    )?;
+    let tagged = format!("{unit}@{}", review.key().tag());
+    review.import_walkthrough(&history, &walkthrough_json(&key, 1, &[("A", vec![tagged])]))?;
     Ok(())
 }
 
@@ -262,9 +270,9 @@ fn navigation_and_progress_follow_the_partition() -> eyre::Result<()> {
 }
 
 /// Targets come from command-line style arguments in one place for every front end, and the
-/// review opened last for a branch is remembered.
+/// data directory from the environment.
 #[test]
-fn targets_parse_from_arguments_and_reviews_are_remembered() -> eyre::Result<()> {
+fn targets_parse_from_arguments() -> eyre::Result<()> {
     use review_core::{Repo, ReviewTarget};
 
     let repo = TestRepo::new()?;
@@ -289,16 +297,6 @@ fn targets_parse_from_arguments_and_reviews_are_remembered() -> eyre::Result<()>
         ReviewTarget::from_arguments(Some("https://example.com/not-a-pull"), None, &git).is_err()
     );
 
-    assert_that!(
-        review_core::store::remembered_review(repo.data_dir(), &git)?,
-        none()
-    );
-    let review = repo.review()?;
-    review_core::store::remember_review(repo.data_dir(), &git, review.key())?;
-    assert_that!(
-        review_core::store::remembered_review(repo.data_dir(), &git)?,
-        some(eq(review.key()))
-    );
     assert_that!(
         review_core::store::default_data_dir(
             Some(std::path::Path::new("")),

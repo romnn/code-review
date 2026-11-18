@@ -40,6 +40,9 @@ pub(super) enum Tick {
     /// The time for the periodic capture of a live review's working tree; it keeps itself
     /// going.
     Reconcile,
+    /// The time for the periodic lookup of the checked-out branch's pull request; each lookup
+    /// sets the next.
+    PullRequest,
 }
 
 /// The review's freshness.
@@ -131,6 +134,7 @@ impl Model {
             }
             Tick::Minute => self.start_clock(),
             Tick::Reconcile => self.reconcile(),
+            Tick::PullRequest => self.pull_request_due(),
             Tick::Spin | Tick::Recovered => {}
         }
     }

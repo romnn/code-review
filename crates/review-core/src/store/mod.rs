@@ -6,7 +6,8 @@
 //! - `synced.json`: when the review last read its target's state, written atomically.
 //! - `analysis/<base>-<head>.json`: content-addressed analyses, written atomically.
 //! - `analysis/<base>-<head>--<base>-<head>.json`: content-addressed correspondences.
-//! - `worktrees/<head>`: detached worktrees for browsing a revision.
+//! - `worktrees/<tree>`: read-only copies of a snapshot's files, for browsing it and for the
+//!   tools that read it.
 //! - `view/<front-end>.json`: each front end's own view state, such as folded folders, written
 //!   atomically and never part of the review's state.
 
@@ -108,10 +109,10 @@ impl ReviewDir {
         Ok(self.root.join("view").join(format!("{front_end}.json")))
     }
 
-    /// Returns the browsing worktree path of a head snapshot.
+    /// Returns the path of the read-only copy of the files of `tree`.
     #[must_use]
-    pub fn worktree(&self, head: &ObjectId) -> PathBuf {
-        self.root.join("worktrees").join(head.as_str())
+    pub fn worktree(&self, tree: &ObjectId) -> PathBuf {
+        self.root.join("worktrees").join(tree.as_str())
     }
 }
 
@@ -139,52 +140,6 @@ pub fn default_data_dir(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Op
         (Some(xdg), _) if !xdg.as_os_str().is_empty() => Some(xdg.join("code-review")),
         (_, Some(home)) => Some(home.join(".local/share/code-review")),
         _ => None,
-    }
-}
-
-/// The file remembering the review last opened for `repo`'s location and current branch.
-fn remembered_file(data_dir: &Path, repo: &crate::git::Repo) -> Result<PathBuf, Error> {
-    let location = repo
-        .work_tree()
-        .unwrap_or(repo.git_dir())
-        .display()
-        .to_string();
-    let branch = repo.current_branch()?.unwrap_or_else(|| "HEAD".to_owned());
-    let name = encode_component(&format!("{location}@{branch}"));
-    Ok(data_dir.join("defaults").join(name))
-}
-
-/// Remembers `key` as the review of `repo`'s current branch, for commands that take no review.
-///
-/// # Errors
-///
-/// Returns an error when git fails or the file cannot be written.
-pub fn remember_review(
-    data_dir: &Path,
-    repo: &crate::git::Repo,
-    key: &ReviewKey,
-) -> Result<(), Error> {
-    let path = remembered_file(data_dir, repo)?;
-    if let Some(parent) = path.parent() {
-        create_dir(parent)?;
-    }
-    std::fs::write(&path, key.as_str()).map_err(|source| Error::io("write", &path, source))
-}
-
-/// Returns the review last remembered for `repo`'s current branch, if any.
-///
-/// # Errors
-///
-/// Returns an error when git fails, the file cannot be read, or it holds an invalid key.
-pub fn remembered_review(
-    data_dir: &Path,
-    repo: &crate::git::Repo,
-) -> Result<Option<ReviewKey>, Error> {
-    let path = remembered_file(data_dir, repo)?;
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(ReviewKey::parse(text.trim())?)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(Error::io("read", path, source)),
     }
 }
 
@@ -243,6 +198,73 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         }
     }
     result
+}
+
+/// Takes the write permission away from every file and directory at or below `path`, without
+/// following symbolic links, directories last.
+pub(crate) fn make_read_only(path: &Path) -> Result<(), Error> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|source| Error::io("read", path, source))?;
+    if metadata.is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path).map_err(|source| Error::io("read", path, source))? {
+            let entry = entry.map_err(|source| Error::io("read", path, source))?;
+            make_read_only(&entry.path())?;
+        }
+    }
+    set_writable(path, &metadata, false)
+}
+
+/// Removes the directory at `path` and everything below it, giving back the write permission
+/// [`make_read_only`] took first; a missing directory is no error.
+pub(crate) fn remove_read_only(path: &Path) -> Result<(), Error> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(Error::io("read", path, source)),
+    };
+    if metadata.is_dir() && !metadata.is_symlink() {
+        set_writable(path, &metadata, true)?;
+        for entry in std::fs::read_dir(path).map_err(|source| Error::io("read", path, source))? {
+            let entry = entry.map_err(|source| Error::io("read", path, source))?;
+            let child = entry.path();
+            let kind = entry
+                .file_type()
+                .map_err(|source| Error::io("read", &child, source))?;
+            if kind.is_dir() {
+                remove_read_only(&child)?;
+            }
+        }
+        std::fs::remove_dir_all(path).map_err(|source| Error::io("remove", path, source))
+    } else {
+        std::fs::remove_file(path).map_err(|source| Error::io("remove", path, source))
+    }
+}
+
+/// Gives the owner of `path` the write permission, or takes it away from everyone.
+#[cfg(unix)]
+fn set_writable(path: &Path, metadata: &std::fs::Metadata, writable: bool) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = metadata.permissions().mode();
+    let mode = if writable {
+        mode | 0o200
+    } else {
+        mode & !0o222
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|source| Error::io("change permissions of", path, source))
+}
+
+/// Sets or clears the read-only attribute of `path`.
+#[cfg(not(unix))]
+fn set_writable(path: &Path, metadata: &std::fs::Metadata, writable: bool) -> Result<(), Error> {
+    let mut permissions = metadata.permissions();
+    permissions.set_readonly(!writable);
+    std::fs::set_permissions(path, permissions)
+        .map_err(|source| Error::io("change permissions of", path, source))
 }
 
 /// Reads JSON from `path`, or `None` when it does not exist.

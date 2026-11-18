@@ -528,7 +528,7 @@ impl ReviewApp {
         let handle = match self.overlay {
             Some(Overlay::Help) => &self.help_scroll,
             Some(Overlay::Overview) => &self.overview_scroll,
-            Some(Overlay::Picker | Overlay::Settings) | None => return,
+            Some(Overlay::Picker | Overlay::Settings | Overlay::Trust) | None => return,
         };
         let delta = match step {
             SheetStep::Lines(lines) => scroll::narrow(f64::from(lines)) * self.sizes().row_height(),

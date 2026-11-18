@@ -4,13 +4,31 @@
 //! A unit of the newer revision corresponds to a unit of the older one only when the older unit's
 //! position maps onto it through line diffs of the two heads (for added lines) or the two bases
 //! (for removed lines and insertion points).
-//! A correspondence is **unchanged**, the only kind that carries a mark, when all of these hold:
+//!
+//! A file whose base entry and head entry (path, mode and object ID) are the same on both
+//! revisions has the same diff on both, so its units correspond one to one, each to the unit with
+//! the same evidence, and are **unchanged**.
+//! This keeps even indistinguishable repeated edits reviewed when the same tree is committed, or
+//! when a rebase touches only other files.
+//!
+//! Otherwise a correspondence is **unchanged**, the only kind that carries a mark, when all of
+//! these hold:
 //!
 //! - the file mapping is unambiguous and the link is one-to-one (no merge, no split);
-//! - both sides of the change are byte-for-byte equal;
+//! - the file's base entry is the same on both revisions, or absent on both, so any change of the
+//!   base around a unit reopens it;
+//! - the file's head mode is the same on both revisions, and so is its head path unless the newer
+//!   revision renames the file, whose rename unit then reviews the path; for a file absent from
+//!   both bases its whole head entry is the same, path included, so an added file never carries
+//!   through a head-side rename;
+//! - both sides of the change are byte-for-byte equal, and so are its context lines;
 //! - both footprints map exactly, on the head side and on the base side;
 //! - the unit is distinguishable: its change appears once in the file on both revisions, or its
-//!   context lines tell it apart from every identical change and match across the revisions.
+//!   context lines tell it apart from every identical change.
+//!
+//! A file unit is unchanged only when its file's base entry is the same on both revisions, and so
+//! are its head path and mode, or its whole head entry for a unit that asserts content (binary,
+//! symlink, submodule and the like) or for a file absent from both bases.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
@@ -18,7 +36,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{
-    ANALYSIS_FORMAT, Analysis, Chunk, FileChange, FileUnit, LineRange, Unit, UnitKind,
+    ANALYSIS_FORMAT, Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Unit, UnitKind,
 };
 use crate::error::Error;
 use crate::git::{Blob, BlobReader, ChangeStatus, Repo};
@@ -26,7 +44,7 @@ use crate::ids::{ObjectId, UnitIndex};
 use crate::text::{LineMap, split_lines};
 
 /// The version of the correspondence format and algorithm.
-pub const CORRESPONDENCE_FORMAT: u32 = 1;
+pub const CORRESPONDENCE_FORMAT: u32 = 3;
 
 /// Renames are ambiguous when more candidates than this would need comparing.
 const MAX_RENAME_CANDIDATES: usize = 64;
@@ -139,6 +157,8 @@ pub fn correspond(
 
     // Candidate edges, each with the index of the file pair whose line maps produced it.
     let mut edges: BTreeMap<Edge, usize> = BTreeMap::new();
+    // Edges between units of files that are the same on both revisions, with equal evidence.
+    let mut identical: BTreeSet<Edge> = BTreeSet::new();
     let mut pair_maps = Vec::with_capacity(pairs.len());
     for (pair_index, pair) in pairs.iter().enumerate() {
         let (Some(older_file), Some(newer_file)) =
@@ -167,8 +187,23 @@ pub fn correspond(
         for edge in found {
             edges.insert(edge, pair_index);
         }
+        if !pair.ambiguous && same_file(older_file, newer_file) {
+            for edge in identical_edges(older, older_file, newer, newer_file) {
+                edges.insert(edge, pair_index);
+                identical.insert(edge);
+            }
+        }
         pair_maps.push(maps);
     }
+
+    // A unit paired with its identical counterpart has no other candidate: any other edge
+    // touching it would only make it look like a merge or a split.
+    let identical_older: HashSet<UnitIndex> = identical.iter().map(|edge| edge.older).collect();
+    let identical_newer: HashSet<UnitIndex> = identical.iter().map(|edge| edge.newer).collect();
+    edges.retain(|edge, _| {
+        identical.contains(edge)
+            || !(identical_older.contains(&edge.older) || identical_newer.contains(&edge.newer))
+    });
 
     let mut predecessors: HashMap<UnitIndex, usize> = HashMap::new();
     let mut successors: HashMap<UnitIndex, usize> = HashMap::new();
@@ -185,6 +220,7 @@ pub fn correspond(
                 && successors.get(&edge.older) == Some(&1);
             let ambiguous_files = pairs.get(pair_index).is_none_or(|pair| pair.ambiguous);
             let kind = match pair_maps.get(pair_index) {
+                _ if identical.contains(edge) => LinkKind::Unchanged,
                 Some(maps) if one_to_one && !ambiguous_files => classify(
                     &Side {
                         analysis: older,
@@ -561,6 +597,60 @@ struct FileUnitRef {
     kind: FileUnit,
 }
 
+/// Returns whether two entries are the same: the same path, mode and object, or both absent.
+pub(crate) fn same_entry(older: Option<&EntrySide>, newer: Option<&EntrySide>) -> bool {
+    match (older, newer) {
+        (None, None) => true,
+        (Some(older), Some(newer)) => {
+            older.path == newer.path && older.mode == newer.mode && older.oid == newer.oid
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether a file's base entry and head entry are both the same on two revisions, so
+/// its diff is too.
+fn same_file(older: &FileChange, newer: &FileChange) -> bool {
+    same_entry(older.old.as_ref(), newer.old.as_ref())
+        && same_entry(older.new.as_ref(), newer.new.as_ref())
+}
+
+/// Pairs each unit of a file that is the same on both revisions with the unit of equal evidence.
+///
+/// Evidence includes the unit's line ranges, so even identical repeated edits pair with
+/// themselves rather than with each other.
+/// A digest that is not unique within its file pairs nothing and leaves the unit to the
+/// positional rules.
+fn identical_edges(
+    older: &Analysis,
+    older_file: &FileChange,
+    newer: &Analysis,
+    newer_file: &FileChange,
+) -> Vec<Edge> {
+    let digests = |analysis: &Analysis, file: &FileChange| -> HashMap<String, Option<UnitIndex>> {
+        let mut digests: HashMap<String, Option<UnitIndex>> = HashMap::new();
+        for &unit in &file.units {
+            if let Some(digest) = analysis.evidence_digest(unit) {
+                digests
+                    .entry(digest)
+                    .and_modify(|found| *found = None)
+                    .or_insert(Some(unit));
+            }
+        }
+        digests
+    };
+    let newer_digests = digests(newer, newer_file);
+    digests(older, older_file)
+        .into_iter()
+        .filter_map(|(digest, older_unit)| {
+            Some(Edge {
+                older: older_unit?,
+                newer: (*newer_digests.get(&digest)?)?,
+            })
+        })
+        .collect()
+}
+
 /// A chunk's change within its file, optionally with its context digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ChangeKey<'a> {
@@ -638,6 +728,11 @@ fn classify(older: &Side<'_>, newer: &Side<'_>, maps: &SideMaps) -> LinkKind {
             {
                 return LinkKind::Changed;
             }
+            if !stable_surroundings(older_file, newer_file, HeadSide::Mode)
+                || older_chunk.context != newer_chunk.context
+            {
+                return LinkKind::Untrusted;
+            }
             let head_exact = exact(
                 maps.head.as_ref(),
                 older_file.new.is_some(),
@@ -655,16 +750,15 @@ fn classify(older: &Side<'_>, newer: &Side<'_>, maps: &SideMaps) -> LinkKind {
             let distinguishable = (older.duplicates.unique(older_unit, older_chunk)
                 && newer.duplicates.unique(newer_unit, newer_chunk))
                 || (older.duplicates.unique_in_context(older_unit, older_chunk)
-                    && newer.duplicates.unique_in_context(newer_unit, newer_chunk)
-                    && older_chunk.context == newer_chunk.context);
+                    && newer.duplicates.unique_in_context(newer_unit, newer_chunk));
             if head_exact && base_exact && distinguishable {
                 LinkKind::Unchanged
             } else {
                 LinkKind::Untrusted
             }
         }
-        (UnitKind::File(kind), UnitKind::File(_)) => {
-            if file_unit_evidence_equal(*kind, older_file, newer_file) {
+        (UnitKind::File(older_kind), UnitKind::File(newer_kind)) => {
+            if older_kind == newer_kind && file_unit_stable(*older_kind, older_file, newer_file) {
                 LinkKind::Unchanged
             } else {
                 LinkKind::Changed
@@ -700,30 +794,55 @@ fn exact(
     }
 }
 
-/// Compares what a file unit asserts on two revisions.
-fn file_unit_evidence_equal(kind: FileUnit, older: &FileChange, newer: &FileChange) -> bool {
-    let paths = |file: &FileChange| {
-        (
-            file.old.as_ref().map(|side| side.path.clone()),
-            file.new.as_ref().map(|side| side.path.clone()),
-        )
-    };
-    let modes = |file: &FileChange| {
-        (
-            file.old.as_ref().map(|side| side.mode),
-            file.new.as_ref().map(|side| side.mode),
-        )
-    };
-    let objects = |file: &FileChange| {
-        (
-            file.old.as_ref().map(|side| side.oid.clone()),
-            file.new.as_ref().map(|side| side.oid.clone()),
-        )
-    };
-    match kind {
-        FileUnit::Rename => paths(older) == paths(newer),
-        FileUnit::Mode | FileUnit::EmptyAdded | FileUnit::EmptyDeleted => {
-            modes(older) == modes(newer)
+/// What of a file's head entry must be the same on both revisions for a unit to carry, when the
+/// file has a base entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadSide {
+    /// The mode, and the path unless the newer revision renames the file: a chunk carries
+    /// into a rename, whose own unit reviews the new path, but never out of one, which would
+    /// leave the path change unreviewed.
+    Mode,
+    /// The path and the mode, which a file unit asserts.
+    PathAndMode,
+    /// The whole entry, whose content a file unit without chunks asserts.
+    Entry,
+}
+
+/// Decides whether a unit's file stayed put around it: the same base entry on both revisions,
+/// and the same `head` side.
+///
+/// A file absent from both bases (added on both revisions) must keep its whole head entry,
+/// path included, since its one chunk is the whole file: a head-side rename of it could pair
+/// two files that were only ever added with the same content.
+fn stable_surroundings(older: &FileChange, newer: &FileChange, head: HeadSide) -> bool {
+    if !same_entry(older.old.as_ref(), newer.old.as_ref()) {
+        return false;
+    }
+    if older.old.is_none() || head == HeadSide::Entry {
+        return same_entry(older.new.as_ref(), newer.new.as_ref());
+    }
+    match (&older.new, &newer.new) {
+        (None, None) => true,
+        (Some(older_new), Some(newer_new)) => {
+            let renamed = newer
+                .old
+                .as_ref()
+                .is_some_and(|newer_old| newer_old.path != newer_new.path);
+            older_new.mode == newer_new.mode
+                && (older_new.path == newer_new.path || (head == HeadSide::Mode && renamed))
+        }
+        _ => false,
+    }
+}
+
+/// Decides whether a file unit's file stayed put, so the unit asserts the same on both revisions.
+///
+/// A rename, a mode change or an empty file does not assert the head content, which the file's
+/// chunks review; every other file unit has no chunks and asserts its whole head entry.
+fn file_unit_stable(kind: FileUnit, older: &FileChange, newer: &FileChange) -> bool {
+    let head = match kind {
+        FileUnit::Rename | FileUnit::Mode | FileUnit::EmptyAdded | FileUnit::EmptyDeleted => {
+            HeadSide::PathAndMode
         }
         FileUnit::Type
         | FileUnit::Submodule
@@ -731,6 +850,7 @@ fn file_unit_evidence_equal(kind: FileUnit, older: &FileChange, newer: &FileChan
         | FileUnit::Binary
         | FileUnit::Oversized
         | FileUnit::NotUtf8
-        | FileUnit::Other => modes(older) == modes(newer) && objects(older) == objects(newer),
-    }
+        | FileUnit::Other => HeadSide::Entry,
+    };
+    stable_surroundings(older, newer, head)
 }

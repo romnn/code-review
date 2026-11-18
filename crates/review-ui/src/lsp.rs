@@ -9,9 +9,11 @@ use std::collections::HashSet;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 /// A language server failure.
@@ -46,6 +48,32 @@ pub enum LspError {
     /// The server did not answer in time.
     #[error("the language server did not answer in time")]
     Timeout,
+    /// The server was stopped, as when trust was revoked, while it was waited on.
+    #[error("the language server was stopped")]
+    Stopped,
+}
+
+/// How often a wait for the server looks whether it was stopped meanwhile.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Stops a [`LanguageServer`] from another thread, without the lock of whoever uses it: its
+/// process is killed, and a wait for it, such as the `initialize` handshake, fails at once.
+#[derive(Clone)]
+pub struct Stopper {
+    child: Arc<Mutex<Child>>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Stopper {
+    /// Kills the server's process and fails any wait for it; the server reaps the process
+    /// when it is dropped.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Err(err) = self.child.lock().kill() {
+            // The process is gone already.
+            drop(err);
+        }
+    }
 }
 
 /// How long a server may take to answer the `initialize` handshake.
@@ -140,7 +168,11 @@ pub struct Definition {
 
 /// A running language server for one workspace root.
 pub struct LanguageServer {
-    child: Child,
+    child: Arc<Mutex<Child>>,
+    /// Set once the server was stopped through a [`Stopper`].
+    stopped: Arc<AtomicBool>,
+    /// Whether the `initialize` handshake is done.
+    initialized: bool,
     /// Messages to the server, written on a thread of their own, so a server that stops
     /// reading never blocks a request past its deadline, nor dropping the server.
     outgoing: mpsc::Sender<Vec<u8>>,
@@ -152,15 +184,37 @@ pub struct LanguageServer {
 }
 
 impl LanguageServer {
-    /// Starts `command` in `root` and completes the `initialize` handshake.
+    /// Starts `command` in `root`, without the `initialize` handshake, which
+    /// [`Self::initialize`] completes; starting takes only as long as spawning the process.
     ///
     /// # Errors
     ///
-    /// Returns an error when the server cannot start or the handshake fails.
-    pub fn start(command: &ServerCommand, root: &Path) -> Result<Self, LspError> {
-        let mut server = Self::spawn(command.program, command.args, root, command.language_id)?;
+    /// Returns an error when the server cannot start.
+    pub fn launch(command: &ServerCommand, root: &Path) -> Result<Self, LspError> {
+        Self::spawn(command.program, command.args, root, command.language_id)
+    }
+
+    /// Returns what stops this server from another thread.
+    #[must_use]
+    pub fn stopper(&self) -> Stopper {
+        Stopper {
+            child: Arc::clone(&self.child),
+            stopped: Arc::clone(&self.stopped),
+        }
+    }
+
+    /// Completes the `initialize` handshake for `command` in `root`, unless it is done.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LspError::Stopped`] when the server is stopped meanwhile, and an error when
+    /// the handshake fails.
+    pub fn initialize(&mut self, command: &ServerCommand, root: &Path) -> Result<(), LspError> {
+        if self.initialized {
+            return Ok(());
+        }
         let root_uri = file_uri(root);
-        server.request(
+        self.request(
             Instant::now() + HANDSHAKE_DEADLINE,
             "initialize",
             &json!({
@@ -178,8 +232,9 @@ impl LanguageServer {
                 },
             }),
         )?;
-        server.notify("initialized", &json!({}))?;
-        Ok(server)
+        self.notify("initialized", &json!({}))?;
+        self.initialized = true;
+        Ok(())
     }
 
     /// Starts `program` in `root` with its reading and writing threads, before any handshake.
@@ -208,7 +263,9 @@ impl LanguageServer {
         let (outgoing, to_write) = mpsc::channel();
         std::thread::spawn(move || write_messages(stdin, &to_write));
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            initialized: false,
             outgoing,
             messages,
             next_id: 1,
@@ -326,12 +383,25 @@ impl LanguageServer {
 
     /// The next message from the server, waiting at most until `deadline`.
     fn read_message(&mut self, deadline: Instant) -> Result<Value, LspError> {
-        let wait = deadline.saturating_duration_since(Instant::now());
-        match self.messages.recv_timeout(wait) {
-            Ok(message) => message,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(LspError::Timeout),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(LspError::Protocol("server closed its output".to_owned()))
+        loop {
+            if self.stopped.load(Ordering::SeqCst) {
+                return Err(LspError::Stopped);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(LspError::Timeout);
+            }
+            let received = self.messages.recv_timeout(left.min(STOP_POLL));
+            // A stopped server's output ends however it ends, which says nothing more.
+            if self.stopped.load(Ordering::SeqCst) {
+                return Err(LspError::Stopped);
+            }
+            match received {
+                Ok(message) => return message,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(LspError::Protocol("server closed its output".to_owned()));
+                }
             }
         }
     }
@@ -390,15 +460,15 @@ fn read_one(stdout: &mut BufReader<ChildStdout>) -> Result<Value, LspError> {
 
 #[cfg(all(test, target_os = "linux"))]
 impl LanguageServer {
-    /// `program` started in `root` as a server without a handshake, standing in for a real
+    /// `program` started with `args` in `root` as a server without a handshake, standing in for a real
     /// one where a test needs only a process that runs until the server is dropped.
-    pub(crate) fn stand_in(program: &str, root: &Path) -> Result<Self, LspError> {
-        Self::spawn(program, &[], root, "rust")
+    pub(crate) fn stand_in(program: &str, args: &[&str], root: &Path) -> Result<Self, LspError> {
+        Self::spawn(program, args, root, "rust")
     }
 
     /// The process's identifier.
     pub(crate) fn process_id(&self) -> u32 {
-        self.child.id()
+        self.child.lock().id()
     }
 }
 
@@ -415,7 +485,12 @@ impl Drop for LanguageServer {
         {
             // The server is already gone; killing it below is enough.
         }
-        if let Err(err) = self.child.kill().and_then(|()| self.child.wait().map(drop)) {
+        let mut child = self.child.lock();
+        // A server a `Stopper` killed already is reaped all the same.
+        if let Err(err) = child.kill() {
+            drop(err);
+        }
+        if let Err(err) = child.wait() {
             drop(err);
         }
     }
@@ -635,7 +710,8 @@ mod tests {
         std::fs::write(&main_path, main).unwrap();
 
         let command = server_for(&main_path).unwrap();
-        let mut server = LanguageServer::start(&command, root).unwrap();
+        let mut server = LanguageServer::launch(&command, root).unwrap();
+        server.initialize(&command, root).unwrap();
         let line = "    let _ = util::helper();";
         let column = utf16_column(line, line.find("helper").unwrap());
         let found = server

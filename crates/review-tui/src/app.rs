@@ -437,6 +437,8 @@ impl App {
             }
             Some(Overlay::Picker) => self.picker_mouse(&panes, event, position),
             Some(Overlay::Settings) => self.settings_mouse(&panes, event, position),
+            // The trust question takes an answer from the keyboard only.
+            Some(Overlay::Trust) => {}
             None => self.main_mouse(&panes, event, position),
         }
     }
@@ -938,6 +940,7 @@ mod tests {
                 review,
                 history,
                 found: None,
+                following: None,
             },
             Rect::new(0, 0, 160, 50),
             sender,

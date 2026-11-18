@@ -87,14 +87,14 @@ fn header(
         );
         name_end = query_at.saturating_sub(2);
     }
-    let name = ellipsize_end(&header.name.text, name_end.saturating_sub(at));
-    painter.text(
-        at,
-        y,
-        name_end.saturating_sub(at),
-        &name,
-        Brush::piece(&header.name, surface),
-    );
+    let room = name_end.saturating_sub(at);
+    // The checkout's branch alone reads better than its name and base cut short.
+    let shown = match &header.short {
+        Some(short) if width(&header.name.text) > room => short,
+        _ => &header.name,
+    };
+    let name = ellipsize_end(&shown.text, room);
+    painter.text(at, y, room, &name, Brush::piece(shown, surface));
 }
 
 /// The files and hunks progress lines, with the parts that fit.

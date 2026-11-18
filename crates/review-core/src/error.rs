@@ -29,6 +29,16 @@ pub enum Error {
         /// The trimmed standard error output.
         stderr: String,
     },
+    /// A `gh` process ran longer than it was given, and was stopped.
+    #[error("{program} {args} took longer than {} s and was stopped", after.as_secs())]
+    TimedOut {
+        /// The program, `gh`.
+        program: &'static str,
+        /// The arguments, joined by spaces.
+        args: String,
+        /// How long it was given.
+        after: std::time::Duration,
+    },
     /// A `git` or `gh` process produced output the engine does not understand.
     #[error("unexpected output from {program} {command}: {detail}")]
     UnexpectedOutput {
@@ -147,14 +157,25 @@ pub enum Error {
     /// A review target could not be parsed or resolved.
     #[error("invalid review target {0:?}")]
     InvalidTarget(String),
-    /// No target was given, and the current branch has no open pull request, no uncommitted
-    /// changes and no commits beyond the default branch.
-    #[error("nothing to review: {0}; pass a pull request, a base..head range, or --worktree")]
-    NothingToReview(String),
     /// A review key is already stored for a different target, so opening it would review
     /// something else under the same marks.
     #[error("review {0} is already stored for a different target")]
     KeyConflict(String),
+    /// Git is in the middle of an operation in the working tree, so a capture would record a
+    /// state nobody meant to show.
+    #[error("git is busy: {0}")]
+    GitBusy(crate::git::Busy),
+    /// The repository or the review changed while a revision was being read for recording, so
+    /// it was not recorded; reading it again records what is there now.
+    #[error("the {0} changed while it was read; try again")]
+    Raced(&'static str),
+    /// The checkout of a review of a checkout is now another clone, which the review's history
+    /// does not belong to.
+    #[error("this checkout was replaced by another clone; reopen the review")]
+    CloneReplaced,
+    /// Tools that can execute code were asked to run on a tree no trust grant covers.
+    #[error("tree {0} is not trusted to run tools on")]
+    Untrusted(ObjectId),
     /// A walkthrough failed validation.
     #[error(transparent)]
     Walkthrough(#[from] WalkthroughError),
