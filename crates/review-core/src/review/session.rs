@@ -12,9 +12,8 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use super::{Review, RevisionInput};
+use crate::analysis::hex_digest;
 use crate::error::Error;
 use crate::git::Repo;
 use crate::history::RevisionRecord;
@@ -120,11 +119,9 @@ fn capture_name(base: &ObjectId, head: &ObjectId, target: Option<&ObjectId>) -> 
         Some(target) => format!("{head}-{base}-{target}"),
         None => format!("{head}-{base}"),
     };
-    Sha256::digest(joined.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let mut name = hex_digest(joined.as_bytes());
+    name.truncate(16);
+    name
 }
 
 impl Drop for Session {
