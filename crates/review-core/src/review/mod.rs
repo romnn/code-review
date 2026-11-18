@@ -5,15 +5,21 @@
 //! Analyses and correspondences are content-addressed caches that can be recomputed from git at any
 //! time.
 
-mod github;
+mod checkout;
+pub mod github;
 mod info;
 mod live;
 mod memo;
+mod session;
+mod trust;
 
+pub use checkout::{BaseRef, Subject, filtered_note};
 pub use info::{Commit, PullRequest, ReviewInfo};
 pub(crate) use info::{LOG_FORMAT, parse_log};
+pub use live::{Capture, LiveCapture};
+pub use session::Session;
+pub use trust::Trust;
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,9 +30,9 @@ use crate::analysis::{ANALYSIS_FORMAT, Analysis, analyze};
 use crate::correspond::{CORRESPONDENCE_FORMAT, Correspondence, correspond};
 use crate::error::Error;
 use crate::git::Repo;
-use crate::history::{History, HistoryInput, RevisionRecord};
+use crate::history::{History, HistoryInput};
 use crate::ids::{MoveId, ObjectId, ReviewKey, RevisionNumber, UnitId};
-use crate::store::events::{Event, MarkEvent, MarkVerdict, NoteEvent, RevisionEvent, TrustEvent};
+use crate::store::events::{Event, MarkEvent, MarkVerdict, NoteEvent, RevisionEvent};
 use crate::store::log::{LockGuard, LogTail, LogWriter};
 use crate::store::{self, ReviewDir};
 use crate::view::RevisionView;
@@ -54,10 +60,17 @@ pub enum ReviewTarget {
         /// The head ref.
         head: String,
     },
-    /// The working tree, captured as a snapshot, against a ref.
+    /// The working tree, captured as a snapshot, against a fixed ref.
     Worktree {
         /// The target ref.
         base: String,
+    },
+    /// The checkout: whatever its working tree holds, on whatever branch, against the base its
+    /// subject resolves to on every capture (see [`Subject`]).
+    Checkout {
+        /// The clone's identity (see [`Repo::ensure_clone_id`]), so that another clone at the same
+        /// path never reads this one's history.
+        clone: ObjectId,
     },
 }
 
@@ -116,99 +129,13 @@ impl ReviewTarget {
         }
     }
 
-    /// Chooses the target for the current branch of `repo` when none is given.
-    ///
-    /// The current branch's open pull request comes first, as `gh pr view` resolves it, keyed
-    /// exactly as when it is opened by number or URL.
-    /// A merged or closed pull request is not used: its review would no longer follow the branch.
-    ///
-    /// Otherwise, on a branch whose working tree has uncommitted changes (see
-    /// [`Repo::has_uncommitted_changes`]), the target is the working tree against the default
-    /// branch (see [`Repo::default_branch`]), whether or not the branch has commits yet.
-    /// Its key names the checkout and the default branch but not the current branch, so work
-    /// begun on one branch and moved to a new one with `git checkout -b` stays one review.
-    /// A detached `HEAD` never gets one, because a working-tree review is trusted (see
-    /// [`Review::trust`]) and a detached commit may be someone else's code.
-    ///
-    /// Otherwise the target is the range from the default branch to the current branch, or to
-    /// `HEAD` when it is detached.
-    /// A `gh` failure of any kind only skips the pull request; [`Detected::Range`] and
-    /// [`Detected::Worktree`] say why.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::NothingToReview`] when there is no open pull request and either no
-    /// default branch, or neither uncommitted changes on a branch nor a commit on `HEAD` beyond
-    /// the default branch, and an error when git fails.
-    pub fn for_current_branch(repo: &Repo) -> Result<(Self, Detected), Error> {
-        let no_pull_request = match github::for_current_branch(repo) {
-            Ok(found) if found.state == "OPEN" => match github::parse_url(&found.url) {
-                Some(parsed) => {
-                    let detected = Detected::PullRequest {
-                        number: parsed.number,
-                        url: found.url,
-                        head_ref: found.head_ref_name,
-                    };
-                    let target = Self::PullRequest {
-                        host: parsed.host,
-                        owner: parsed.owner,
-                        repo: parsed.repo,
-                        number: parsed.number,
-                    };
-                    return Ok((target, detected));
-                }
-                None => format!(
-                    "gh reported pull request #{} at an unrecognized URL {}",
-                    found.number, found.url
-                ),
-            },
-            Ok(found) => format!(
-                "its pull request #{} is {}",
-                found.number,
-                found.state.to_lowercase()
-            ),
-            Err(Error::Spawn { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-                "gh is not installed".to_owned()
-            }
-            Err(Error::CommandFailed { stderr, .. }) => format!(
-                "gh found no pull request ({})",
-                stderr.lines().next().unwrap_or("no reason given").trim()
-            ),
-            Err(err) => format!("gh failed: {err}"),
-        };
-        let base = repo.default_branch()?.ok_or_else(|| {
-            Error::NothingToReview(format!(
-                "{no_pull_request}, and there is no default branch to compare with"
-            ))
-        })?;
-        let branch = repo.current_branch()?;
-        if branch.is_some() && repo.work_tree().is_some() && repo.has_uncommitted_changes()? {
-            let detected = Detected::Worktree {
-                base: base.clone(),
-                no_pull_request,
-            };
-            return Ok((Self::Worktree { base }, detected));
-        }
-        let head = branch.unwrap_or_else(|| "HEAD".to_owned());
-        if repo.count_commits(&base, &head)? == 0 {
-            return Err(Error::NothingToReview(format!(
-                "{no_pull_request}, and {head} has no commits beyond {base}"
-            )));
-        }
-        let detected = Detected::Range {
-            base: base.clone(),
-            head: head.clone(),
-            no_pull_request,
-        };
-        Ok((Self::Range { base, head }, detected))
-    }
-
     /// Returns the review key for this target in `repo_dir`.
     ///
     /// A pull request review is keyed per clone, `<host>/<owner>/<repo>#<number>@<common-dir>`,
     /// because its pinned snapshots live in that clone's object store; a second clone starts its
     /// own review rather than reading history it cannot reach.
-    /// A local review is keyed by the working tree and its refs.
+    /// A local review is keyed by the working tree and its refs, and the review of a checkout by
+    /// the working tree and the clone, `<working tree>:WORKTREE@<first 16 digits of the clone>`.
     ///
     /// # Errors
     ///
@@ -231,70 +158,14 @@ impl ReviewTarget {
             ),
             Self::Range { base, head } => format!("{location}:{base}..{head}"),
             Self::Worktree { base } => format!("{location}:{base}..WORKTREE"),
+            Self::Checkout { clone } => {
+                // Sixteen digits tell clones apart; the stored target keeps all of them, so a
+                // clash is refused as a key conflict.
+                let short = clone.as_str().get(..16).unwrap_or(clone.as_str());
+                format!("{location}:WORKTREE@{short}")
+            }
         };
         Ok(ReviewKey::parse(&key)?)
-    }
-}
-
-/// Which rule chose the review when no target was given; its [`Display`](fmt::Display) is a
-/// line for the reviewer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Detected {
-    /// The review last opened for this repository and branch.
-    Remembered,
-    /// The current branch's open pull request.
-    PullRequest {
-        /// The pull request number.
-        number: u64,
-        /// The pull request's URL.
-        url: String,
-        /// The pull request's head branch.
-        head_ref: String,
-    },
-    /// The default branch against the current branch, because no open pull request was found.
-    Range {
-        /// The default branch.
-        base: String,
-        /// The current branch, or `HEAD` when it is detached.
-        head: String,
-        /// Why the pull request rule did not apply, such as `gh is not installed`.
-        no_pull_request: String,
-    },
-    /// The working tree against the default branch, because the current branch has
-    /// uncommitted changes and no open pull request was found.
-    Worktree {
-        /// The default branch.
-        base: String,
-        /// Why the pull request rule did not apply, such as `gh is not installed`.
-        no_pull_request: String,
-    },
-}
-
-impl fmt::Display for Detected {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Remembered => write!(f, "reopened the review last opened on this branch"),
-            Self::PullRequest {
-                number,
-                url,
-                head_ref,
-            } => write!(
-                f,
-                "reviewing pull request #{number} from {head_ref} ({url})"
-            ),
-            Self::Range {
-                base,
-                head,
-                no_pull_request,
-            } => write!(f, "reviewing {base}..{head}: {no_pull_request}"),
-            Self::Worktree {
-                base,
-                no_pull_request,
-            } => write!(
-                f,
-                "reviewing the working tree against {base}: {no_pull_request}"
-            ),
-        }
     }
 }
 
@@ -341,6 +212,14 @@ pub struct Recorded {
     /// Why when the review synced could not be stored for [`Review::synced`], if it could not;
     /// the revision is recorded regardless.
     pub sync_error: Option<String>,
+    /// What a review of a working tree observed when it captured it: the branch, `HEAD` and
+    /// the base it compared with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Box<Subject>>,
+    /// The paths a capture of a working tree kept at their staged entry because a filter
+    /// driver would have to run on them; see [`crate::WorktreeCapture::filtered`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub filtered: Vec<String>,
 }
 
 /// When a review last read its target's state and recorded it, which [`Review::refresh`]
@@ -374,6 +253,45 @@ enum Publish {
     UnderLock,
     /// Write it right away.
     Now,
+}
+
+/// How many times [`Review::refresh`] reads its target when recording keeps racing.
+const RECORD_ATTEMPTS: u32 = 3;
+
+/// How many times [`Review::refresh`] captures a working tree, twice each, when the captures
+/// keep disagreeing or recording keeps racing.
+const CAPTURE_ATTEMPTS: u32 = 5;
+
+/// Which last revision recording a revision requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum After {
+    /// Any: the caller gave the revision, rather than reading it from the target.
+    Anything,
+    /// The one the log ended at before the target was read, or none; a revision read before
+    /// another one was recorded would otherwise be recorded after it, as if it were newer.
+    Revision(Option<RevisionNumber>),
+}
+
+/// What describes a revision besides its snapshots; see [`RevisionEvent::branch`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RevisionMeta {
+    branch: Option<String>,
+    head_commit: Option<ObjectId>,
+    pull_request: Option<u64>,
+}
+
+impl RevisionMeta {
+    /// What `subject` says about a capture of the working tree.
+    fn of(subject: &Subject) -> Self {
+        Self {
+            branch: subject.branch.clone(),
+            head_commit: subject.head.clone(),
+            pull_request: subject
+                .pull_request
+                .as_ref()
+                .map(|pull_request| pull_request.number),
+        }
+    }
 }
 
 /// A review: its storage, its repository and its target.
@@ -420,21 +338,6 @@ impl Review {
             meta,
             memo: memo::Memo::default(),
         })
-    }
-
-    /// Opens the review a front end opens when given no target: the one last opened for `repo`'s
-    /// current branch, or else the target [`ReviewTarget::for_current_branch`] chooses.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`ReviewTarget::for_current_branch`], [`Self::load`] and
-    /// [`Self::open`].
-    pub fn open_for_current_branch(data_dir: &Path, repo: Repo) -> Result<(Self, Detected), Error> {
-        if let Some(key) = store::remembered_review(data_dir, &repo)? {
-            return Ok((Self::load(data_dir, &key)?, Detected::Remembered));
-        }
-        let (target, detected) = ReviewTarget::for_current_branch(&repo)?;
-        Ok((Self::open(data_dir, repo, target)?, detected))
     }
 
     /// Loads the stored review `key`.
@@ -498,9 +401,24 @@ impl Review {
 
     /// Resolves the target's current snapshots and records a revision if either changed.
     ///
+    /// A review of a working tree captures it, against the base its subject resolves to (see
+    /// [`Self::subject`]), twice, and records the capture only when both observed the same:
+    /// the clone, the subject (branch, `HEAD`, pull request and the commit the base resolved
+    /// to) and the snapshot pair.
+    /// Nothing else tells a capture caught in the middle of a change, such as an editor saving
+    /// several files, from a settled one when no watcher follows the working tree.
+    /// The capture is pinned under a session of its own (see [`Self::start_session`]) before
+    /// it is analyzed, and recorded only while the log still ends at the revision it ended at
+    /// before the capture, so a capture never lands after a newer one.
+    /// A capture that something moved under, that its confirming capture disagreed with, or
+    /// that raced another recording, is taken again, a few times at most.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the target cannot be resolved or fetched, or recording fails.
+    /// Returns [`Error::GitBusy`] while git is in the middle of an operation in the working
+    /// tree, [`Error::CloneReplaced`] when the checkout of a review of a checkout is another
+    /// clone now, [`Error::Raced`] when the repository or the review kept changing, and an
+    /// error when the target cannot be resolved or fetched, or recording fails.
     pub fn refresh(&self) -> Result<Recorded, Error> {
         self.refresh_reporting(&mut |_| {})
     }
@@ -522,8 +440,38 @@ impl Review {
         &self,
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Recorded, Error> {
+        self.refresh_with(None, progress)
+    }
+
+    /// Does what [`Self::refresh_reporting`] does, with `pull_request` as what the caller found
+    /// for the branch checked out (see [`github::for_checkout`]), for a review of a checkout to
+    /// resolve its base from and record with the revision while the branch is still as it was
+    /// then; other reviews ignore it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::refresh`].
+    pub fn refresh_with(
+        &self,
+        pull_request: Option<&github::CheckoutPullRequest>,
+        progress: &mut dyn FnMut(RefreshStep),
+    ) -> Result<Recorded, Error> {
         progress(RefreshStep::Fetching);
-        let mut recorded = self.record_target(progress)?;
+        let pull_requests: Vec<github::CheckoutPullRequest> =
+            pull_request.into_iter().cloned().collect();
+        let limit = if self.follows_working_tree() {
+            CAPTURE_ATTEMPTS
+        } else {
+            RECORD_ATTEMPTS
+        };
+        let mut attempts = 0;
+        let mut recorded = loop {
+            attempts += 1;
+            match self.record_target(&pull_requests, progress) {
+                Err(Error::Raced(_)) if attempts < limit => {}
+                result => break result?,
+            }
+        };
         recorded.sync_error = store::write_json_atomic(
             &self.dir.synced(),
             &Synced {
@@ -535,8 +483,19 @@ impl Review {
         .err()
         .map(|err| with_causes(&err));
         progress(RefreshStep::Describing);
-        recorded.info_error = self.refresh_info().err().map(|err| err.to_string());
+        recorded.info_error = self
+            .describe(recorded.subject.as_deref())
+            .err()
+            .map(|err| err.to_string());
         Ok(recorded)
+    }
+
+    /// Whether the review captures a working tree rather than reading commits.
+    fn follows_working_tree(&self) -> bool {
+        matches!(
+            self.meta.target,
+            ReviewTarget::Worktree { .. } | ReviewTarget::Checkout { .. }
+        )
     }
 
     /// Returns when the review last synced with its target, or `None` before its first
@@ -565,6 +524,13 @@ impl Review {
     ///
     /// Returns an error when `gh` or `git` fails or the record cannot be written.
     pub fn refresh_info(&self) -> Result<ReviewInfo, Error> {
+        self.describe(None)
+    }
+
+    /// Does what [`Self::refresh_info`] does, describing a review of a checkout by `subject`
+    /// when the caller just observed it, rather than observing it again without its pull
+    /// request.
+    fn describe(&self, subject: Option<&Subject>) -> Result<ReviewInfo, Error> {
         let info = match &self.meta.target {
             ReviewTarget::PullRequest {
                 host,
@@ -581,9 +547,39 @@ impl Review {
             ReviewTarget::Worktree { base } => ReviewInfo::Commits {
                 commits: self.repo.commits(base, "HEAD")?,
             },
+            ReviewTarget::Checkout { .. } => {
+                let observed;
+                let subject = if let Some(subject) = subject {
+                    subject
+                } else {
+                    observed = self.subject(&[])?;
+                    &observed
+                };
+                ReviewInfo::Commits {
+                    commits: self.subject_commits(subject)?,
+                }
+            }
         };
         self.store_info(&info)?;
         Ok(info)
+    }
+
+    /// Returns the commits a capture of `subject` holds beyond its base, newest first: those
+    /// from its base to its `HEAD`, every commit of `HEAD` against the empty tree, or none
+    /// before the first commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git fails.
+    pub fn subject_commits(&self, subject: &Subject) -> Result<Vec<Commit>, Error> {
+        let Some(head) = &subject.head else {
+            return Ok(Vec::new());
+        };
+        let base = match subject.base.commit() {
+            Some(base) => base.clone(),
+            None => self.repo.empty_tree_commit()?,
+        };
+        self.repo.commits(base.as_str(), head.as_str())
     }
 
     /// Returns the view state `front_end` last saved with
@@ -618,18 +614,47 @@ impl Review {
         store::write_json_atomic(&self.dir.info(), info, "review info")
     }
 
-    /// Records the current state of the target as a revision.
-    fn record_target(&self, progress: &mut dyn FnMut(RefreshStep)) -> Result<Recorded, Error> {
+    /// Records the current state of the target as a revision, pinned under a session of its
+    /// own until it is, and only while the log still ends at the revision it ended at before.
+    fn record_target(
+        &self,
+        pull_requests: &[github::CheckoutPullRequest],
+        progress: &mut dyn FnMut(RefreshStep),
+    ) -> Result<Recorded, Error> {
+        let observed = self.last_revision()?;
+        let session = self.start_session()?;
+        let remote = self.repo.default_remote()?;
+        let deepen_from = remote.as_deref();
         match &self.meta.target {
             ReviewTarget::Range { base, head } => {
                 let target = self.repo.resolve_commit(base)?;
                 let head = self.repo.resolve_commit(head)?;
-                let remote = self.repo.default_remote()?;
-                self.record_snapshots(target, head, remote.as_deref(), progress)
+                let input = self.snapshot_input(target, head, deepen_from)?;
+                session.pin(&input)?;
+                self.record_revision_reporting(
+                    input,
+                    RevisionMeta::default(),
+                    After::Revision(observed),
+                    progress,
+                )
             }
-            ReviewTarget::Worktree { base } => {
-                let input = self.worktree_input(base)?;
-                self.record_revision_reporting(input, progress)
+            ReviewTarget::Worktree { .. } | ReviewTarget::Checkout { .. } => {
+                let checkout::Captured {
+                    input,
+                    subject,
+                    filtered,
+                } = self.confirmed_capture(pull_requests)?;
+                session.pin(&input)?;
+                let meta = RevisionMeta::of(&subject);
+                let mut recorded = self.record_revision_reporting(
+                    input,
+                    meta,
+                    After::Revision(observed),
+                    progress,
+                )?;
+                recorded.subject = Some(Box::new(subject));
+                recorded.filtered = filtered;
+                Ok(recorded)
             }
             ReviewTarget::PullRequest {
                 host,
@@ -642,37 +667,29 @@ impl Review {
                 let parsed = github::parse_url(&info.url)
                     .ok_or_else(|| Error::InvalidTarget(info.url.clone()))?;
                 let fetched = github::fetch(&self.repo, &parsed, &info.base_ref_name)?;
-                let recorded = self.record_snapshots(
+                let input = self.snapshot_input(
                     fetched.target.clone(),
                     fetched.head.clone(),
                     Some(&fetched.remote),
-                    progress,
-                );
+                )?;
+                session.pin(&input)?;
                 drop(fetched);
-                recorded
+                self.record_revision_reporting(
+                    input,
+                    RevisionMeta::default(),
+                    After::Revision(observed),
+                    progress,
+                )
             }
         }
     }
 
-    /// Computes the merge base of `target` and `head` and records the revision.
-    fn record_snapshots(
-        &self,
-        target: ObjectId,
-        head: ObjectId,
-        deepen_from: Option<&str>,
-        progress: &mut dyn FnMut(RefreshStep),
-    ) -> Result<Recorded, Error> {
-        let input = self.snapshot_input(target, head, deepen_from)?;
-        self.record_revision_reporting(input, progress)
-    }
-
-    /// The revision a working-tree review records now: the working tree, captured, against
-    /// its merge base with `base`.
-    fn worktree_input(&self, base: &str) -> Result<RevisionInput, Error> {
-        let target = self.repo.resolve_commit(base)?;
-        let head = self.repo.capture_worktree()?;
-        let remote = self.repo.default_remote()?;
-        self.snapshot_input(target, head, remote.as_deref())
+    /// The number of the last recorded revision, or `None` before the first.
+    fn last_revision(&self) -> Result<Option<RevisionNumber>, Error> {
+        let events = LogTail::new(&self.dir).poll()?;
+        Ok(revision_events(&self.dir.events(), &events)?
+            .last()
+            .map(|revision| revision.number))
     }
 
     /// The revision of `head` against its merge base with `target`.
@@ -716,14 +733,17 @@ impl Review {
     ///
     /// Returns an error when analysis, pinning or the log append fails.
     pub fn record_revision(&self, input: RevisionInput) -> Result<Recorded, Error> {
-        self.record_revision_reporting(input, &mut |_| {})
+        self.record_revision_reporting(input, RevisionMeta::default(), After::Anything, &mut |_| {})
     }
 
-    /// Does what [`Self::record_revision`] does, reporting [`RefreshStep::Analyzing`] to
+    /// Records `input`, described by `meta`, while the log's last revision is the one `after`
+    /// asks for, unless the log already ends at `input`; reports [`RefreshStep::Analyzing`] to
     /// `progress` when the snapshot pair has to be analyzed.
     fn record_revision_reporting(
         &self,
         input: RevisionInput,
+        meta: RevisionMeta,
+        after: After,
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Recorded, Error> {
         let analysis = self.analysis(&input.base, &input.head, Publish::UnderLock, progress)?;
@@ -742,7 +762,14 @@ impl Review {
                 merge_bases: existing.merge_bases.clone(),
                 info_error: None,
                 sync_error: None,
+                subject: None,
+                filtered: Vec::new(),
             });
+        }
+        if let After::Revision(observed) = after
+            && observed != revisions.last().map(|last| last.number)
+        {
+            return Err(Error::Raced("review"));
         }
         let number = self.next_number(revisions.last())?;
         self.append_revision(
@@ -754,6 +781,9 @@ impl Review {
                 target: input.target,
                 merge_bases: input.merge_bases.clone(),
                 recorded_at: store::now_seconds(),
+                branch: meta.branch,
+                head_commit: meta.head_commit,
+                pull_request: meta.pull_request,
             },
             &analysis,
         )?;
@@ -765,6 +795,8 @@ impl Review {
             merge_bases: input.merge_bases,
             info_error: None,
             sync_error: None,
+            subject: None,
+            filtered: Vec::new(),
         })
     }
 
@@ -788,10 +820,15 @@ impl Review {
         revision: RevisionEvent,
         analysis: &Analysis,
     ) -> Result<(), Error> {
-        self.repo
-            .update_ref(&self.pin_ref(&revision.base), &revision.base)?;
-        self.repo
-            .update_ref(&self.pin_ref(&revision.head), &revision.head)?;
+        // The target may lie beyond the merge base, reachable from neither snapshot.
+        let mut pins = vec![
+            (self.pin_ref(&revision.base), revision.base.clone()),
+            (self.pin_ref(&revision.head), revision.head.clone()),
+        ];
+        if let Some(target) = &revision.target {
+            pins.push((self.pin_ref(target), target.clone()));
+        }
+        self.repo.update_refs(&pins)?;
         let analysis_path = self.dir.analysis(&revision.base, &revision.head);
         if !analysis_path.exists() {
             store::write_json_atomic(&analysis_path, analysis, "analysis")?;
@@ -1042,104 +1079,6 @@ impl Review {
         self.append(vec![Event::Walkthrough(event)])?;
         Ok(revision)
     }
-
-    /// Returns whether tools that can execute code from the reviewed revisions may run.
-    ///
-    /// Language servers and build tools read the reviewed tree's build configuration, such as a
-    /// `.cargo/config.toml` naming a `rustc` wrapper, so running them on untrusted code executes
-    /// it.
-    /// The reviewer's latest [`set_trusted`](Self::set_trusted) decision applies.
-    /// Without one, the working tree and a range whose head is a local branch are trusted, and a
-    /// pull request or any other range is not.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the log cannot be read or git fails.
-    pub fn trust(&self) -> Result<Trust, Error> {
-        let events = LogTail::new(&self.dir).poll()?;
-        let decided = events.iter().rev().find_map(|event| match event {
-            Event::Trust(trust) => Some(trust.trusted),
-            _ => None,
-        });
-        Ok(match decided {
-            Some(trusted) => Trust {
-                trusted,
-                decided: true,
-            },
-            None => Trust {
-                trusted: self.trusted_by_default()?,
-                decided: false,
-            },
-        })
-    }
-
-    /// Records the reviewer's decision whether tools may execute code from the reviewed
-    /// revisions.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the append fails.
-    pub fn set_trusted(&self, trusted: bool) -> Result<(), Error> {
-        self.append(vec![Event::Trust(TrustEvent {
-            trusted,
-            at: store::now_seconds(),
-        })])
-    }
-
-    fn trusted_by_default(&self) -> Result<bool, Error> {
-        match &self.meta.target {
-            ReviewTarget::PullRequest { .. } => Ok(false),
-            ReviewTarget::Worktree { .. } => Ok(true),
-            // A remote-tracking ref or a bare commit may hold someone else's code.
-            ReviewTarget::Range { head, .. } => {
-                let branch = head.strip_prefix("refs/heads/").unwrap_or(head);
-                Ok(self
-                    .repo
-                    .ref_target(&format!("refs/heads/{branch}"))?
-                    .is_some())
-            }
-        }
-    }
-
-    /// Returns a detached worktree at the revision's head, creating it on first use.
-    ///
-    /// Front ends open it read-only; it is a snapshot of what is reviewed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git cannot create the worktree.
-    pub fn worktree(&self, revision: &RevisionRecord) -> Result<PathBuf, Error> {
-        let path = self.dir.worktree(&revision.head);
-        if !path.exists() {
-            if let Some(parent) = path.parent() {
-                store::create_dir(parent)?;
-            }
-            self.repo.add_worktree(&path, &revision.head)?;
-        }
-        Ok(path)
-    }
-
-    /// Removes the browsing worktree of a revision, if it exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git cannot remove the worktree.
-    pub fn remove_worktree(&self, revision: &RevisionRecord) -> Result<(), Error> {
-        let path = self.dir.worktree(&revision.head);
-        if path.exists() {
-            self.repo.remove_worktree(&path)?;
-        }
-        Ok(())
-    }
-}
-
-/// Whether tools that can execute code from the reviewed revisions may run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct Trust {
-    /// Whether such tools may run.
-    pub trusted: bool,
-    /// Whether the reviewer decided it, rather than the default for the review's target.
-    pub decided: bool,
 }
 
 /// Extracts the revision events and checks that they are numbered 1, 2, 3, … in log order.

@@ -1161,6 +1161,44 @@ impl ReviewApp {
     }
 
     /// The `?` cheat sheet: every bound action by section, from the keymap in effect.
+    /// The question whether to trust the checkout's code, in a card over a dimmed window.
+    fn render_trust(&self) -> Option<impl IntoElement + use<>> {
+        let colors = self.palette();
+        let prompt = review_ui::paint::trust::trust_prompt(self, &colors)?;
+        let keys_width = (self.sizes().ui_cell() * 5.0).round();
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(to_gpui(colors.background.alpha(0.6)))
+                .child(
+                    v_flex()
+                        .w(px(GRID * 140.0))
+                        .max_w(relative(0.94))
+                        .p(px(GRID * 6.0))
+                        .gap(px(GRID * 3.0))
+                        .bg(to_gpui(colors.surface))
+                        .border_1()
+                        .border_color(to_gpui(colors.hairline))
+                        .text_size(px(self.sizes().ui_size()))
+                        .child(ink::piece(prompt.title))
+                        .children(prompt.body.into_iter().map(ink::piece))
+                        .child(v_flex().pt(px(GRID * 2.0)).gap(px(GRID)).children(
+                            prompt.choices.into_iter().map(|choice| {
+                                h_flex()
+                                    .items_start()
+                                    .gap(px(GRID * 2.0))
+                                    .child(ink::piece(choice.key).w(px(keys_width)).flex_none())
+                                    .child(ink::piece(choice.label).flex_1().min_w_0())
+                            }),
+                        )),
+                ),
+        )
+    }
+
     fn render_help(&self, window: &Window) -> impl IntoElement + use<> {
         let colors = self.palette();
         let small = self.sizes().ui_size();
@@ -1475,6 +1513,7 @@ impl Render for ReviewApp {
                     .child(self.render_overview(cx))
                     .into_any_element(),
             ),
+            Some(Overlay::Trust) => self.render_trust().map(IntoElement::into_any_element),
             // The picker and the settings list draw apart, in their own key contexts.
             Some(Overlay::Picker | Overlay::Settings) | None => None,
         };

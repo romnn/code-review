@@ -8,6 +8,7 @@ use std::num::NonZeroU32;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 /// An identifier that failed to parse.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +28,9 @@ pub enum ParseIdError {
     /// The review key is empty or contains a line break.
     #[error("invalid review key {0:?}")]
     ReviewKey(String),
+    /// The text is not a review tag of eight lowercase hexadecimal digits.
+    #[error("invalid review tag {0:?}, expected eight hexadecimal digits such as 3fa2b1c0")]
+    ReviewTag(String),
 }
 
 /// A full hexadecimal git object ID (SHA-1 or SHA-256), always lowercase.
@@ -123,6 +127,17 @@ impl ReviewKey {
     pub fn encoded(&self) -> String {
         encode_component(&self.0)
     }
+
+    /// Returns the review's tag, which names it in references to its units and revisions.
+    #[must_use]
+    pub fn tag(&self) -> ReviewTag {
+        let digest = Sha256::digest(self.0.as_bytes());
+        let mut prefix = [0; 4];
+        for (byte, digested) in prefix.iter_mut().zip(digest) {
+            *byte = digested;
+        }
+        ReviewTag(u32::from_be_bytes(prefix))
+    }
 }
 
 impl TryFrom<String> for ReviewKey {
@@ -142,6 +157,67 @@ impl From<ReviewKey> for String {
 impl fmt::Display for ReviewKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+/// A short name of a review, eight hexadecimal digits such as `3fa2b1c0`: the first four bytes
+/// of the SHA-256 of its key.
+///
+/// IDs are local to a review, so the same `u1-0000` names a unit in every review; a reference
+/// qualified with a tag, `u1-0000@3fa2b1c0` (see [`Tagged`]), names the unit of one.
+/// Two keys share a tag with a chance of one in four billion, which is enough to catch a
+/// reference handed to the wrong review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReviewTag(u32);
+
+impl FromStr for ReviewTag {
+    type Err = ParseIdError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let hex = text.len() == 8
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !hex {
+            return Err(ParseIdError::ReviewTag(text.to_owned()));
+        }
+        u32::from_str_radix(text, 16)
+            .map(Self)
+            .map_err(|_| ParseIdError::ReviewTag(text.to_owned()))
+    }
+}
+
+impl fmt::Display for ReviewTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:08x}", self.0)
+    }
+}
+
+impl Serialize for ReviewTag {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// An ID qualified with the tag of the review it belongs to, written `<id>@<tag>`, such as
+/// `u1-0000@3fa2b1c0` or `3@3fa2b1c0` for a revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Tagged<T> {
+    /// The ID within its review.
+    pub id: T,
+    /// The review's tag.
+    pub tag: ReviewTag,
+}
+
+impl<T: fmt::Display> fmt::Display for Tagged<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}@{}", self.id, self.tag)
+    }
+}
+
+impl<T: fmt::Display> Serialize for Tagged<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -396,6 +472,34 @@ mod tests {
         );
         assert_eq!(MoveId::new(RevisionNumber::FIRST, 0).to_string(), "m1-0000");
         assert_eq!("m1-0000".parse::<MoveId>().unwrap().index(), 0);
+    }
+
+    /// A tag is eight digits of the key's digest, stable across runs, and parses back.
+    #[test]
+    fn review_tags_digest_the_key_and_round_trip() {
+        let key = ReviewKey::parse("github.com/owner/repo#123").unwrap();
+        let tag = key.tag();
+        assert_eq!(tag.to_string().len(), 8);
+        assert_eq!(tag.to_string().parse::<ReviewTag>().unwrap(), tag);
+        assert_eq!(
+            ReviewKey::parse("github.com/owner/repo#123").unwrap().tag(),
+            tag
+        );
+        assert_ne!(
+            ReviewKey::parse("github.com/owner/repo#124").unwrap().tag(),
+            tag
+        );
+        assert_eq!(
+            Tagged {
+                id: "u1-0000".parse::<UnitId>().unwrap(),
+                tag
+            }
+            .to_string(),
+            format!("u1-0000@{tag}")
+        );
+        for invalid in ["3fa2b1c", "3fa2b1c00", "3FA2B1C0", "+fa2b1c0", "3fa2b1cg"] {
+            assert!(invalid.parse::<ReviewTag>().is_err(), "{invalid}");
+        }
     }
 
     #[test]

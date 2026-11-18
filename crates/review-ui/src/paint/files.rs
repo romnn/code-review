@@ -1,5 +1,6 @@
 //! The files pane: its header, the review's progress under it, and the tree's rows.
 
+use review_core::github::PullRequestState;
 use review_core::tree::{NodeKind, TreeNode};
 use review_core::{ChangeKind, ReviewInfo, ReviewTarget};
 
@@ -20,6 +21,8 @@ pub struct FilesHeader {
     /// The pull request's head branch, such as `feature/reconcile`, or the range under review,
     /// such as `main..feature`; it is cut first when room runs out.
     pub name: Piece,
+    /// A shorter name, for when `name` does not fit: the checkout's branch without its base.
+    pub short: Option<Piece>,
     /// The filter while one narrows the tree.
     pub filter: Option<FilterLine>,
 }
@@ -45,11 +48,15 @@ pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
     // The pull request's metadata names its branch; before it is fetched, the target its
     // number.
     let target = model.review.as_ref().map(|review| review.target());
+    let checkout = checkout_heading(model);
+    let short = checkout.as_ref().and_then(|(_, _, short)| short.clone());
     let (number, name) = match (&model.info, target) {
+        _ if let Some((number, name, _)) = checkout => (number, name),
         (Some(ReviewInfo::PullRequest(pr)), _) => (Some(pr.number), pr.head_ref.clone()),
         (_, Some(ReviewTarget::PullRequest { number, .. })) => (Some(*number), String::new()),
         (_, Some(ReviewTarget::Range { base, head })) => (None, format!("{base}..{head}")),
         (_, Some(ReviewTarget::Worktree { base })) => (None, format!("{base}..working tree")),
+        (_, Some(ReviewTarget::Checkout { .. })) => (None, "working tree".to_owned()),
         (_, None) => (None, String::new()),
     };
     FilesHeader {
@@ -63,8 +70,41 @@ pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
                 focused
             },
         ),
+        short: short.map(|short| Piece::new(short, focused)),
         filter: filter_line(model, palette),
     }
+}
+
+/// The header of a review of the checkout, once a capture shows: the branch's pull request's
+/// number, the branch with its base, such as `feat/x → origin/main`, led by the pull request's
+/// state once it is merged or closed, and the branch alone for when that does not fit.
+fn checkout_heading(model: &Model) -> Option<(Option<u64>, String, Option<String>)> {
+    if !model.is_checkout() {
+        return None;
+    }
+    let live = model.live_state()?;
+    let Some(subject) = live.subject else {
+        return Some((None, "working tree".to_owned(), None));
+    };
+    let label = crate::model::branch_and_base(subject);
+    let short = subject.branch.clone();
+    // The pull request the capture resolved its base with, never one looked up since that it
+    // has not seen.
+    Some(match &subject.pull_request {
+        None => (None, label, short),
+        Some(pull_request) => {
+            let (name, short) = match pull_request.state {
+                PullRequestState::Open => (label, short),
+                PullRequestState::Merged => {
+                    (format!("merged · {label}"), Some("merged".to_owned()))
+                }
+                PullRequestState::Closed => {
+                    (format!("closed · {label}"), Some("closed".to_owned()))
+                }
+            };
+            (Some(pull_request.number), name, short)
+        }
+    })
 }
 
 /// The tree's filter while one narrows the tree: its query and how many files it leaves of

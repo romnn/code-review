@@ -54,12 +54,55 @@ fn cr(repo: &Path, data: &Path, args: &[&str]) -> eyre::Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
+/// Runs `cr` with `args` in `repo`, as [`cr`] does, expecting it to fail, and returns standard
+/// error.
+fn cr_fails(repo: &Path, data: &Path, args: &[&str]) -> eyre::Result<String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_cr"))
+        .args(args)
+        .arg("-C")
+        .arg(repo)
+        .env("CR_DATA_DIR", data)
+        .env("XDG_CONFIG_HOME", config_home(data))
+        .env_remove("CODE_REVIEW_CONFIG")
+        .envs(GIT_ENV)
+        .output()
+        .wrap_err("failed to run cr")?;
+    eyre::ensure!(
+        !output.status.success(),
+        "cr {} succeeded: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(String::from_utf8(output.stderr)?)
+}
+
 fn cr_json(repo: &Path, data: &Path, args: &[&str]) -> eyre::Result<Value> {
     let mut args = args.to_vec();
     args.push("--json");
     let output = cr(repo, data, &args)?;
     serde_json::from_str(&output)
         .wrap_err_with(|| format!("cr {} printed invalid JSON: {output}", args.join(" ")))
+}
+
+/// Runs `cr` with `args` on the review `key`, as [`cr`] does.
+fn cr_in(repo: &Path, data: &Path, key: &str, args: &[&str]) -> eyre::Result<String> {
+    cr(repo, data, &[args, &["--review", key]].concat())
+}
+
+/// Runs `cr --json` with `args` on the review `key`, as [`cr_json`] does.
+fn cr_json_in(repo: &Path, data: &Path, key: &str, args: &[&str]) -> eyre::Result<Value> {
+    cr_json(repo, data, &[args, &["--review", key]].concat())
+}
+
+/// Opens the review of `main..feature` and returns its key, which commands without
+/// `--review` would not act on: they act on the checkout's review.
+fn open_range(repo: &Path, data: &Path) -> eyre::Result<String> {
+    let opened = cr_json(repo, data, &["open", "main..feature"])?;
+    opened
+        .get("review")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| eyre::eyre!("no review key in {opened}"))
 }
 
 const BASE_LIB: &str = indoc! {"
@@ -100,14 +143,15 @@ fn every_command_works_with_json() -> eyre::Result<()> {
 
     // Open records revision 1 and remembers the review for this branch.
     let opened = cr_json(repo, data, &["open", "main..feature"])?;
+    let key = opened["review"].as_str().unwrap_or_default().to_owned();
     assert_eq!(opened["recorded"]["number"], 1);
     assert_eq!(opened["status"]["total"]["units"], 3);
-    let status = cr_json(repo, data, &["status"])?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["total"]["new"], 3);
     assert_eq!(status["total"]["noise"], 1);
 
     // Show lists every unit once; the lockfile lands in the noise step.
-    let shown = cr_json(repo, data, &["show"])?;
+    let shown = cr_json_in(repo, data, &key, &["show"])?;
     let steps = shown["steps"].as_array().cloned().unwrap_or_default();
     let ids: Vec<String> = steps
         .iter()
@@ -121,60 +165,77 @@ fn every_command_works_with_json() -> eyre::Result<()> {
     );
 
     // Marking, a category mark and a note.
+    let tag = shown["tag"].as_str().unwrap_or_default();
     let code_units: Vec<&str> = ids
         .iter()
         .map(String::as_str)
-        .filter(|id| *id != "u1-0000")
+        .filter(|id| *id != format!("u1-0000@{tag}"))
         .collect();
-    let marked = cr_json(
+    let marked = cr_json_in(
         repo,
         data,
+        &key,
         &[&["mark"], code_units.as_slice(), &["flagged"]].concat(),
     )?;
     assert_eq!(marked["marked"].as_array().map(Vec::len), Some(2));
-    cr_json(repo, data, &["mark", "--category", "noise", "seen"])?;
-    cr_json(repo, data, &["note", code_units[0], "is", "ten", "right?"])?;
-    let status = cr_json(repo, data, &["status"])?;
+    cr_json_in(
+        repo,
+        data,
+        &key,
+        &["mark", "--category", "noise", "--revision", "1", "seen"],
+    )?;
+    cr_json_in(
+        repo,
+        data,
+        &key,
+        &["note", code_units[0], "is", "ten", "right?"],
+    )?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["total"]["flagged"], 2);
     assert_eq!(status["total"]["reviewed"], 1);
-    let unreviewed = cr_json(repo, data, &["show", "--unreviewed"])?;
+    let unreviewed = cr_json_in(repo, data, &key, &["show", "--unreviewed"])?;
     assert_eq!(unreviewed["steps"].as_array().map(Vec::len), Some(0));
 
     // Export, as Markdown and JSON.
-    let markdown = cr(repo, data, &["export"])?;
+    let markdown = cr_in(repo, data, &key, &["export"])?;
     assert!(
         markdown.contains("1. **flagged** `lib.rs:2-2`"),
         "{markdown}"
     );
     assert!(markdown.contains("is ten right?"), "{markdown}");
-    let exported = cr_json(repo, data, &["export", "--format", "json"])?;
+    let exported = cr_json_in(repo, data, &key, &["export", "--format", "json"])?;
     assert_eq!(exported["items"].as_array().map(Vec::len), Some(2));
 
     // Walkthrough round trip.
-    let prompt = cr_json(repo, data, &["walkthrough", "prompt"])?;
+    let prompt = cr_json_in(repo, data, &key, &["walkthrough", "prompt"])?;
     assert!(
         prompt["prompt"]
             .as_str()
             .is_some_and(|text| text.contains("u1-0001"))
     );
-    let key = opened["review"].as_str().unwrap_or_default();
     let walkthrough = serde_json::json!({
         "version": 1, "review": key, "revision": 1, "title": "Tour",
         "steps": [{"title": "Values", "why": "the point", "units": code_units}],
     });
     let file = repo.join("walkthrough.json");
     std::fs::write(&file, walkthrough.to_string())?;
-    cr_json(
+    cr_json_in(
         repo,
         data,
+        &key,
         &["walkthrough", "import", &file.display().to_string()],
     )?;
-    let partition = cr_json(repo, data, &["walkthrough", "show"])?;
+    let partition = cr_json_in(repo, data, &key, &["walkthrough", "show"])?;
     assert_eq!(partition["steps"][0]["title"], "Values");
 
     // Watch records nothing new, and the browsing worktree exists at the head.
-    cr(repo, data, &["watch", "--count", "1", "--interval", "0"])?;
-    let worktree = cr_json(repo, data, &["worktree"])?;
+    cr_in(
+        repo,
+        data,
+        &key,
+        &["watch", "--count", "1", "--interval", "0"],
+    )?;
+    let worktree = cr_json_in(repo, data, &key, &["worktree"])?;
     let path = worktree["path"].as_str().unwrap_or_default();
     assert!(Path::new(path).join("lib.rs").exists());
     Ok(())
@@ -237,10 +298,10 @@ fn status_follows_the_shared_configuration() -> eyre::Result<()> {
     )?;
     let data_dir = tempfile::tempdir()?;
     let (repo, data) = (repo_dir.path(), data_dir.path());
-    cr_json(repo, data, &["open", "main..feature"])?;
+    let key = open_range(repo, data)?;
 
     // Without a configuration file, the re-wrap is approved automatically and the edit is open.
-    let status = cr_json(repo, data, &["status"])?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["total"]["units"], 2);
     assert_eq!(status["total"]["auto_approved"], 1);
     assert_eq!(status["total"]["new"], 1);
@@ -258,7 +319,7 @@ fn status_follows_the_shared_configuration() -> eyre::Result<()> {
             auto_approve_formatting = false
         "},
     )?;
-    let status = cr_json(repo, data, &["status"])?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["total"]["auto_approved"], 0);
     assert_eq!(status["total"]["new"], 2);
 
@@ -270,9 +331,9 @@ fn status_follows_the_shared_configuration() -> eyre::Result<()> {
             auto_approve_formatting = true
         "},
     )?;
-    let status = cr_json(repo, data, &["status"])?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["total"]["auto_approved"], 1);
-    let status = cr_json(repo, data, &["status", "--no-auto-approve"])?;
+    let status = cr_json_in(repo, data, &key, &["status", "--no-auto-approve"])?;
     assert_eq!(status["total"]["auto_approved"], 0);
     assert_eq!(status["total"]["new"], 2);
     Ok(())
@@ -324,8 +385,8 @@ fn show_renders_inner_diff_of_move_with_edits() -> eyre::Result<()> {
     )?;
     let data_dir = tempfile::tempdir()?;
     let (repo, data) = (repo_dir.path(), data_dir.path());
-    cr(repo, data, &["open", "main..feature"])?;
-    let shown = cr(repo, data, &["show", "--color", "never"])?;
+    let key = open_range(repo, data)?;
+    let shown = cr_in(repo, data, &key, &["show", "--color", "never"])?;
     assert!(shown.contains("moved with edits from a.rs:2-8"), "{shown}");
     assert!(
         shown.contains("     -     let masked = shifted & 0xff;"),
@@ -378,8 +439,8 @@ fn symlink_retarget_unit(old: &[u8], new: &[u8]) -> eyre::Result<Value> {
 
     let data_dir = tempfile::tempdir()?;
     let data = data_dir.path();
-    cr(repo, data, &["open", "main..feature"])?;
-    let shown = cr_json(repo, data, &["show"])?;
+    let key = open_range(repo, data)?;
+    let shown = cr_json_in(repo, data, &key, &["show"])?;
     shown
         .pointer("/steps/0/units/0")
         .cloned()
@@ -420,7 +481,7 @@ fn commands_follow_a_force_push_back() -> eyre::Result<()> {
     let repo = repo_dir.path();
     let data_dir = tempfile::tempdir()?;
     let data = data_dir.path();
-    cr(repo, data, &["open", "main..feature"])?;
+    let key = open_range(repo, data)?;
     let first_head = String::from_utf8(
         Command::new("git")
             .arg("-C")
@@ -432,11 +493,16 @@ fn commands_follow_a_force_push_back() -> eyre::Result<()> {
     std::fs::write(repo.join("a.txt"), "c\n")?;
     git(repo, &["commit", "--quiet", "--all", "-m", "second"])?;
     cr(repo, data, &["open", "main..feature"])?;
-    cr(repo, data, &["mark", "u2-0000", "seen"])?;
+    cr_in(repo, data, &key, &["mark", "u2-0000", "seen"])?;
     git(repo, &["reset", "--quiet", "--hard", first_head.trim()])?;
-    let watched = cr(repo, data, &["watch", "--count", "1", "--interval", "0"])?;
+    let watched = cr_in(
+        repo,
+        data,
+        &key,
+        &["watch", "--count", "1", "--interval", "0"],
+    )?;
     assert!(watched.contains("New revision 3"), "{watched}");
-    let status = cr_json(repo, data, &["status"])?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["revision"], 3);
     // The line reviewed on revision 2 changed back, so it is changed since reviewed.
     assert_eq!(status["total"]["changed"], 1);
@@ -462,192 +528,59 @@ fn mark_file_covers_a_file_or_directory() -> eyre::Result<()> {
         std::fs::write(repo.join(path), "fn two() {}\n")?;
     }
     git(repo, &["commit", "--quiet", "--all", "-m", "feature"])?;
-    cr(repo, data, &["open", "main..feature"])?;
+    let key = open_range(repo, data)?;
 
     // A directory covers both files below it; the top-level file stays new.
-    let marked = cr_json(repo, data, &["mark", "--file", "src", "accepted"])?;
+    let marked = cr_json_in(
+        repo,
+        data,
+        &key,
+        &["mark", "--file", "src", "--revision", "1", "accepted"],
+    )?;
     assert_eq!(marked["marked"].as_array().map(Vec::len), Some(2));
-    let status = cr_json(repo, data, &["status"])?;
+    let status = cr_json_in(repo, data, &key, &["status"])?;
     assert_eq!(status["total"]["accepted"], 2);
     assert_eq!(status["total"]["new"], 1);
 
     // A path without changes fails instead of marking nothing.
-    assert!(cr(repo, data, &["mark", "--file", "docs", "seen"]).is_err());
+    assert!(
+        cr_in(
+            repo,
+            data,
+            &key,
+            &["mark", "--file", "docs", "--revision", "1", "seen"]
+        )
+        .is_err()
+    );
     Ok(())
 }
 
-/// `cr open` without a target, with `PATH` pointing at no `gh` or at a fake one; the fake is a
-/// shell script, so these run on Unix only.
-#[cfg(unix)]
-mod open_without_target {
-    use std::ffi::{OsStr, OsString};
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::path::Path;
-    use std::process::Command;
+/// `cr open` without a target opens this checkout's review, which records the working tree
+/// against the default branch, and commands without `--review` act on it; a review opened by
+/// name needs `--review`.
+#[test]
+fn commands_without_a_review_act_on_the_checkout() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    std::fs::write(repo.join("a.txt"), "c\n")?;
 
-    use color_eyre::eyre::{self, WrapErr as _};
-    use indoc::formatdoc;
-    use serde_json::Value;
+    let opened = cr_json(repo, data, &["open"])?;
+    let key = opened["review"].as_str().unwrap_or_default().to_owned();
+    assert!(key.contains(":WORKTREE@"), "{key}");
+    assert_eq!(opened["recorded"]["number"], 1);
+    assert_eq!(opened["status"]["total"]["units"], 1);
+    let again = cr_json(repo, data, &["open"])?;
+    assert_eq!(again["review"], opened["review"]);
+    assert_eq!(again["recorded"]["number"], 1);
 
-    use super::{GIT_ENV, git, repo_with_change};
-
-    /// Runs `cr --json` with `args` in `repo` with `PATH` set to `path`, and returns its JSON output
-    /// and standard error.
-    fn cr_json_with_path(
-        repo: &Path,
-        data: &Path,
-        path: &OsStr,
-        args: &[&str],
-    ) -> eyre::Result<(Value, String)> {
-        let output = Command::new(env!("CARGO_BIN_EXE_cr"))
-            .args(args)
-            .arg("--json")
-            .arg("-C")
-            .arg(repo)
-            .env("CR_DATA_DIR", data)
-            .env("XDG_CONFIG_HOME", super::config_home(data))
-            .env_remove("CODE_REVIEW_CONFIG")
-            .env("PATH", path)
-            .envs(GIT_ENV)
-            .output()
-            .wrap_err("failed to run cr")?;
-        let stderr = String::from_utf8(output.stderr)?;
-        eyre::ensure!(
-            output.status.success(),
-            "cr {} failed: {stderr}",
-            args.join(" ")
-        );
-        Ok((serde_json::from_slice(&output.stdout)?, stderr))
-    }
-
-    /// Returns a `PATH` that finds `git` but no `gh`: a directory holding only a link to `git`.
-    fn path_without_gh(directory: &Path) -> eyre::Result<OsString> {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let git = std::env::split_paths(&path)
-            .map(|dir| dir.join("git"))
-            .find(|candidate| candidate.is_file())
-            .ok_or_else(|| eyre::eyre!("git is not on PATH"))?;
-        std::os::unix::fs::symlink(git, directory.join("git"))?;
-        Ok(directory.as_os_str().to_owned())
-    }
-
-    /// Returns a `PATH` whose `gh` prints `json` for any command, ahead of the inherited `PATH`.
-    fn path_with_fake_gh(directory: &Path, json: &str) -> eyre::Result<OsString> {
-        let gh = directory.join("gh");
-        std::fs::write(
-            &gh,
-            formatdoc!(
-                "
-                    #!/bin/sh
-                    cat <<'JSON'
-                    {json}
-                    JSON
-                "
-            ),
-        )?;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let dirs =
-            std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited));
-        Ok(std::env::join_paths(dirs)?)
-    }
-
-    /// What a fake `gh pr view` reports for pull request 7 of `example.invalid/owner/repo`.
-    fn pull_request_json(state: &str) -> String {
-        format!(
-            r#"{{"number":7,"url":"https://example.invalid/owner/repo/pull/7","state":"{state}","headRefName":"feature","baseRefName":"main","title":"Feature","body":"","author":{{"login":"someone"}},"labels":[],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}}"#
-        )
-    }
-
-    /// `cr open` without a target and without `gh` reviews the default branch against the current
-    /// branch, says why on standard error, and uses the key an explicit range gets.
-    #[test]
-    fn falls_back_to_the_default_branch_range() -> eyre::Result<()> {
-        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
-        let (data_dir, bin_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
-        let (repo, data) = (repo_dir.path(), data_dir.path());
-        let path = path_without_gh(bin_dir.path())?;
-
-        let (opened, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
-        assert_eq!(
-            stderr.trim(),
-            "cr: reviewing main..feature: gh is not installed"
-        );
-        let (explicit, _) = cr_json_with_path(repo, data, &path, &["open", "main..feature"])?;
-        assert_eq!(opened["review"], explicit["review"]);
-
-        // A second open without a target returns to the remembered review.
-        let (again, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
-        assert_eq!(
-            stderr.trim(),
-            "cr: reopened the review last opened on this branch"
-        );
-        assert_eq!(again["review"], opened["review"]);
-        Ok(())
-    }
-
-    /// `cr open` without a target reviews the branch's open pull request under the same key as
-    /// opening it by number.
-    #[test]
-    fn reviews_the_branch_pull_request() -> eyre::Result<()> {
-        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
-        let (data_dir, bin_dir, forge_dir) = (
-            tempfile::tempdir()?,
-            tempfile::tempdir()?,
-            tempfile::tempdir()?,
-        );
-        let (repo, data) = (repo_dir.path(), data_dir.path());
-
-        // The remote's path ends in the pull request's host, owner and repository, so the engine
-        // fetches the pull request's refs from it instead of the network.
-        let remote = forge_dir.path().join("example.invalid/owner/repo");
-        std::fs::create_dir_all(&remote)?;
-        git(&remote, &["init", "--quiet", "--bare"])?;
-        let remote_url = remote.display().to_string();
-        git(repo, &["remote", "add", "origin", &remote_url])?;
-        git(
-            repo,
-            &[
-                "push",
-                "--quiet",
-                "origin",
-                "main",
-                "feature:refs/pull/7/head",
-            ],
-        )?;
-        let path = path_with_fake_gh(bin_dir.path(), &pull_request_json("OPEN"))?;
-
-        let (opened, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
-        assert_eq!(
-            stderr.trim(),
-            "cr: reviewing pull request #7 from feature (https://example.invalid/owner/repo/pull/7)"
-        );
-        assert_eq!(opened["recorded"]["number"], 1);
-        let review = opened["review"].as_str().unwrap_or_default();
-        assert!(
-            review.starts_with("example.invalid/owner/repo#7@"),
-            "{review}"
-        );
-        let (by_number, _) = cr_json_with_path(repo, data, &path, &["open", "7"])?;
-        assert_eq!(by_number["review"], opened["review"]);
-        Ok(())
-    }
-
-    /// A merged pull request is not reviewed; the default branch range is, and stderr says why.
-    #[test]
-    fn skips_a_merged_pull_request() -> eyre::Result<()> {
-        let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
-        let (data_dir, bin_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
-        let (repo, data) = (repo_dir.path(), data_dir.path());
-        let path = path_with_fake_gh(bin_dir.path(), &pull_request_json("MERGED"))?;
-
-        let (_, stderr) = cr_json_with_path(repo, data, &path, &["open"])?;
-        assert_eq!(
-            stderr.trim(),
-            "cr: reviewing main..feature: its pull request #7 is merged"
-        );
-        Ok(())
-    }
+    let range = open_range(repo, data)?;
+    assert_ne!(range, key);
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["revision"], 1);
+    let shown = cr_json(repo, data, &["show"])?;
+    assert!(shown.to_string().contains("\"c\\n\""), "{shown}");
+    Ok(())
 }
 
 /// `--demo-dir` puts the demo a command acts on there, as it does the app's, so a QA run's demo
@@ -672,5 +605,215 @@ fn commands_use_the_demo_directory() -> eyre::Result<()> {
     );
     assert!(demo.path().join("repo").is_dir());
     assert!(demo.path().join("data").is_dir());
+    Ok(())
+}
+
+/// Returns the IDs of the units `cr show --json` printed.
+fn shown_ids(shown: &Value) -> Vec<String> {
+    shown
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|step| step.get("units").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|unit| unit.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+/// `cr show` records what the checkout holds and prints its unit IDs qualified with the review's
+/// tag, which `cr mark` and `cr note` take back without `--review`.
+#[test]
+fn qualified_ids_round_trip_from_show_to_mark() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+
+    // Showing the checkout's review records its first revision.
+    let shown = cr_json(repo, data, &["show"])?;
+    let tag = shown["tag"].as_str().unwrap_or_default().to_owned();
+    assert_eq!(tag.len(), 8, "{shown}");
+    assert_eq!(shown["revision"], 1);
+    assert_eq!(shown["subject"]["branch"], "feature");
+    assert_eq!(shown["subject"]["base"]["name"], "main");
+    let ids = shown_ids(&shown);
+    assert_eq!(ids, [format!("u1-0000@{tag}")]);
+
+    // The qualified ID marks and notes the unit of this review.
+    let marked = cr_json(repo, data, &["mark", &ids[0], "accepted"])?;
+    assert_eq!(marked["marked"], serde_json::json!(ids));
+    cr(repo, data, &["note", &ids[0], "fine"])?;
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["tag"], tag.as_str());
+    assert_eq!(status["total"]["accepted"], 1);
+
+    // The text rendering prints the same qualified IDs and the subject.
+    let text = cr(repo, data, &["show", "--color", "never"])?;
+    assert!(text.contains(&format!("revision 1@{tag} ")), "{text}");
+    assert!(
+        text.contains(&format!("  u1-0000@{tag} [accepted]")),
+        "{text}"
+    );
+    assert!(text.starts_with("feature → main\n"), "{text}");
+    Ok(())
+}
+
+/// A unit ID qualified with another review's tag is refused, whichever review the command acts
+/// on, and a bare ID only with `--review`.
+#[test]
+fn mark_refuses_foreign_tags_and_bare_ids() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    let range = open_range(repo, data)?;
+    let range_tag = cr_json_in(repo, data, &range, &["show"])?["tag"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let checkout_tag = cr_json(repo, data, &["show"])?["tag"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert_ne!(range_tag, checkout_tag);
+
+    // The range's ID on the checkout's review, and the checkout's on the range's
+    let error = cr_fails(
+        repo,
+        data,
+        &["mark", &format!("u1-0000@{range_tag}"), "seen"],
+    )?;
+    assert!(error.contains("belongs to another review"), "{error}");
+    let error = cr_fails(
+        repo,
+        data,
+        &[
+            "mark",
+            &format!("u1-0000@{checkout_tag}"),
+            "seen",
+            "--review",
+            &range,
+        ],
+    )?;
+    assert!(error.contains("belongs to another review"), "{error}");
+    let error = cr_fails(
+        repo,
+        data,
+        &["note", &format!("u1-0000@{range_tag}"), "why?"],
+    )?;
+    assert!(error.contains("belongs to another review"), "{error}");
+
+    // A bare ID names no review: refused with the qualified form, taken with --review.
+    let error = cr_fails(repo, data, &["mark", "u1-0000", "seen"])?;
+    assert!(error.contains("u1-0000@<tag>"), "{error}");
+    assert!(cr_fails(repo, data, &["note", "u1-0000", "why?"])?.contains("u1-0000@<tag>"));
+    cr_in(repo, data, &range, &["mark", "u1-0000", "seen"])?;
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["total"]["reviewed"], 0);
+    let status = cr_json_in(repo, data, &range, &["status"])?;
+    assert_eq!(status["total"]["reviewed"], 1);
+    Ok(())
+}
+
+/// Marks of files go on the revision the caller saw, `--revision N@<tag>`, and are refused once
+/// the checkout recorded a newer one, or without the revision.
+#[test]
+fn file_marks_refuse_a_stale_revision() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    let tag = cr_json(repo, data, &["show"])?["tag"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let first = format!("1@{tag}");
+
+    // Without the revision, and with a bare one without --review
+    let error = cr_fails(repo, data, &["mark", "--file", "a.txt", "seen"])?;
+    assert!(error.contains("--revision"), "{error}");
+    let error = cr_fails(
+        repo,
+        data,
+        &["mark", "--file", "a.txt", "--revision", "1", "seen"],
+    )?;
+    assert!(error.contains("1@<tag>"), "{error}");
+
+    // An edit shown since records revision 2, so revision 1 is stale.
+    std::fs::write(repo.join("a.txt"), "c\n")?;
+    let shown = cr_json(repo, data, &["show"])?;
+    assert_eq!(shown["revision"], 2);
+    let error = cr_fails(
+        repo,
+        data,
+        &["mark", "--file", "a.txt", "--revision", &first, "seen"],
+    )?;
+    assert!(error.contains("revision 1 is not current"), "{error}");
+    let error = cr_fails(
+        repo,
+        data,
+        &["mark", "--category", "noise", "--revision", &first, "seen"],
+    )?;
+    assert!(error.contains("revision 1 is not current"), "{error}");
+    let marked = cr_json(
+        repo,
+        data,
+        &[
+            "mark",
+            "--file",
+            "a.txt",
+            "--revision",
+            &format!("2@{tag}"),
+            "seen",
+        ],
+    )?;
+    assert_eq!(
+        marked["marked"],
+        serde_json::json!([format!("u2-0000@{tag}")])
+    );
+    Ok(())
+}
+
+/// `cr show` on a checkout in the middle of a merge records nothing and says why.
+#[test]
+fn show_refuses_a_busy_checkout() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(&[("a.txt", "a\n")], &[("a.txt", "b\n")])?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    std::fs::write(repo.join(".git/MERGE_HEAD"), "")?;
+    let error = cr_fails(repo, data, &["show"])?;
+    assert!(
+        error.contains("git is busy: merge in progress; try again when it finishes"),
+        "{error}"
+    );
+    std::fs::remove_file(repo.join(".git/MERGE_HEAD"))?;
+    let status = cr_json(repo, data, &["status"])?;
+    assert_eq!(status["revision"], 1);
+    Ok(())
+}
+
+/// A clean `main` level with `origin/main` shows an empty revision that says so.
+#[test]
+fn show_on_a_clean_main_says_nothing_is_to_review() -> eyre::Result<()> {
+    let repo_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    git(repo, &["init", "--quiet", "--initial-branch=main"])?;
+    std::fs::write(repo.join("a.txt"), "a\n")?;
+    git(repo, &["add", "--all"])?;
+    git(repo, &["commit", "--quiet", "-m", "base"])?;
+    // A remote-tracking branch without a configured remote, so no pull request is looked up.
+    git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+
+    let shown = cr(repo, data, &["show", "--color", "never"])?;
+    assert!(shown.starts_with("main → origin/main\n"), "{shown}");
+    assert!(
+        shown.contains(
+            "main is level with origin/main. Nothing to review; changes appear here as you make \
+             them."
+        ),
+        "{shown}"
+    );
+    let json = cr_json(repo, data, &["show"])?;
+    assert_eq!(json["steps"], serde_json::json!([]));
+    assert_eq!(json["subject"]["base"]["kind"], "remote_default");
     Ok(())
 }

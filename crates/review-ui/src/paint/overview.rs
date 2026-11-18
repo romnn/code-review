@@ -1,7 +1,8 @@
 //! The overview's content: what the review is about (the pull request with its description, or
 //! the commits), its progress and its revisions.
 
-use review_core::ReviewInfo;
+use review_core::github::PullRequestState;
+use review_core::{BaseRef, ReviewInfo};
 
 use super::header::{Meter, meter};
 use super::{Palette, Piece, Run, Style, Styled, Weight};
@@ -37,8 +38,11 @@ pub enum About {
     PullRequest(Box<PullRequestHead>),
     /// A local range or the working tree, by its commits.
     Commits {
-        /// The review's key, semibold and large.
+        /// The review's key, or for the checkout its branch and base, semibold and large.
         title: Piece,
+        /// For the checkout, a line each about its branch, its pull request, its base and
+        /// what keeps it from updating.
+        details: Vec<Piece>,
         /// The `Commits` section's title.
         section: Piece,
         /// The commits, newest first.
@@ -194,34 +198,9 @@ pub fn overview(model: &Model, palette: &Palette) -> Overview {
                 description: markdown_blocks(&pr.body, palette),
             }))
         }
-        Some(ReviewInfo::Commits { commits }) => About::Commits {
-            title: Piece::new(
-                model
-                    .review
-                    .as_ref()
-                    .map_or_else(String::new, |review| review.key().to_string()),
-                palette.text,
-            )
-            .weighted(Weight::Semibold),
-            section: section("Commits"),
-            commits: commits
-                .iter()
-                .map(|commit| CommitRow {
-                    id: Piece::new(
-                        commit.id.chars().take(COMMIT_ID_CHARS).collect::<String>(),
-                        palette.faint,
-                    ),
-                    subject: Piece::new(commit.subject.clone(), palette.text)
-                        .weighted(Weight::Semibold),
-                    byline: Piece::new(
-                        format!("{} · {}", commit.author, short_time(&commit.date)),
-                        palette.faint,
-                    ),
-                    body: (!commit.body.is_empty())
-                        .then(|| Piece::new(commit.body.clone(), palette.dim)),
-                })
-                .collect(),
-        },
+        Some(ReviewInfo::Commits { commits }) => commits_about(model, palette, commits),
+        // The checkout's commits are listed with its first capture; until then it has none.
+        None if model.is_checkout() => commits_about(model, palette, &[]),
         None => About::Missing(Piece::new(
             "No pull request or commit information was fetched for this review.",
             palette.dim,
@@ -240,6 +219,185 @@ pub fn overview(model: &Model, palette: &Palette) -> Overview {
             .map(|revision| revision_row(revision, palette))
             .collect(),
         footer: Piece::new("i returns to the changes", palette.faint),
+    }
+}
+
+/// What a local range or the working tree is about: its key, or for the checkout its branch and
+/// base with a line each about them, and its commits.
+fn commits_about(model: &Model, palette: &Palette, commits: &[review_core::Commit]) -> About {
+    let section = |title: &str| Piece::new(title, palette.dim).weighted(Weight::Semibold);
+    About::Commits {
+        title: Piece::new(
+            match model.live_state().and_then(|live| live.subject) {
+                Some(subject) if model.is_checkout() => crate::model::branch_and_base(subject),
+                _ => model
+                    .review
+                    .as_ref()
+                    .map_or_else(String::new, |review| review.key().to_string()),
+            },
+            palette.text,
+        )
+        .weighted(Weight::Semibold),
+        details: checkout_details(model, palette, commits.is_empty()),
+        section: section("Commits"),
+        commits: commits
+            .iter()
+            .map(|commit| CommitRow {
+                id: Piece::new(
+                    commit.id.chars().take(COMMIT_ID_CHARS).collect::<String>(),
+                    palette.faint,
+                ),
+                subject: Piece::new(commit.subject.clone(), palette.text)
+                    .weighted(Weight::Semibold),
+                byline: Piece::new(
+                    format!("{} · {}", commit.author, short_time(&commit.date)),
+                    palette.faint,
+                ),
+                body: (!commit.body.is_empty())
+                    .then(|| Piece::new(commit.body.clone(), palette.dim)),
+            })
+            .collect(),
+    }
+}
+
+/// A line each about the checkout under review: its branch, its pull request, what it is
+/// compared with and why, that it has no commits of its own when `no_commits`, files a filter
+/// keeps out, what keeps it from updating, and the trust; nothing for any other review.
+fn checkout_details(model: &Model, palette: &Palette, no_commits: bool) -> Vec<Piece> {
+    let Some(live) = model.live_state().filter(|_| model.is_checkout()) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    let plain = |text: String| Piece::new(text, palette.dim);
+    if live.replaced {
+        lines.push(Piece::new(
+            "This checkout was replaced by another clone; reopen cr to review it.",
+            palette.error,
+        ));
+    }
+    if let Some(busy) = live.busy {
+        lines.push(Piece::new(
+            format!("Git is busy: {busy}. What shows stays until it finishes."),
+            palette.flagged,
+        ));
+    } else if live.updating {
+        lines.push(Piece::new(
+            "Updating: the working tree changed while it was captured.",
+            palette.accent,
+        ));
+    }
+    let Some(subject) = live.subject else {
+        return lines;
+    };
+    lines.push(plain(match (&subject.branch, &subject.head) {
+        (Some(branch), Some(_)) => format!("Branch {branch}"),
+        (Some(branch), None) => format!("Branch {branch}, with no commits yet"),
+        (None, Some(head)) => format!("HEAD detached at {}", crate::model::abbreviated(head)),
+        (None, None) => "HEAD detached".to_owned(),
+    }));
+    if subject.branch.is_some() {
+        lines.push(plain(pull_request_line(&live)));
+    }
+    lines.push(plain(base_line(subject)));
+    if no_commits && subject.head.is_some() {
+        lines.push(plain(match subject.base.name() {
+            Some(base) => format!("No commits beyond {base}: what shows is uncommitted"),
+            None => "No commits: what shows is uncommitted".to_owned(),
+        }));
+    }
+    if let Some(note) = review_core::filtered_note(live.filtered.len()) {
+        lines.push(Piece::new(note, palette.flagged));
+    }
+    lines.push(plain(
+        match model.grant {
+            Some(crate::model::Grant::Snapshot) => {
+                "Trusted: this snapshot, until the code changes; Ctrl+T revokes it"
+            }
+            Some(crate::model::Grant::Checkout) => {
+                "Trusted: this whole checkout, until Ctrl+T revokes it"
+            }
+            None => "Untrusted: tools that run the code ask first",
+        }
+        .to_owned(),
+    ));
+    lines
+}
+
+/// What is known of the branch's pull request, for the overview.
+fn pull_request_line(live: &crate::model::LiveState<'_>) -> String {
+    if let Some(why) = live.lookup {
+        return format!("Pull request not looked up: {why}");
+    }
+    let Some(found) = live.pull_request else {
+        return match (live.looking_up, live.lookup_failed) {
+            (true, _) => "Looking up the pull request…".to_owned(),
+            (false, Some(why)) => {
+                format!(
+                    "Could not look up the pull request; it is tried again later, or now with r: {why}"
+                )
+            }
+            (false, None) => "Pull request not looked up yet".to_owned(),
+        };
+    };
+    let text = match &found.pull_request {
+        None => "No pull request".to_owned(),
+        Some(pull_request) => {
+            let state = match pull_request.state {
+                PullRequestState::Open => "open",
+                PullRequestState::Merged => "merged",
+                PullRequestState::Closed => "closed",
+            };
+            format!(
+                "Pull request #{} ({state}) into {}: {}",
+                pull_request.number, pull_request.base_branch, pull_request.url
+            )
+        }
+    };
+    match &found.stale {
+        Some(why) => {
+            let minutes = found
+                .at
+                .elapsed()
+                .map_or(0, |elapsed| elapsed.as_secs() / 60);
+            format!("{text} (as of {minutes} min ago; the last lookup failed: {why})")
+        }
+        None => text,
+    }
+}
+
+/// What the checkout is compared with, and why.
+fn base_line(subject: &review_core::Subject) -> String {
+    let compared = match &subject.base {
+        BaseRef::PullRequest { name, .. } => {
+            format!("Compared with {name}, the pull request's base")
+        }
+        BaseRef::RemoteDefault { name, .. } => {
+            format!("Compared with {name}, the remote's default branch")
+        }
+        BaseRef::LocalDefault { name, .. } => format!(
+            "Compared with {name}, the local default branch: with no remote, a commit to it \
+             lands the work"
+        ),
+        BaseRef::Given { name, .. } => format!("Compared with {name}"),
+        BaseRef::Empty {
+            unrelated: Some(name),
+        } => format!("Compared with the empty tree: HEAD shares no history with {name}"),
+        BaseRef::Empty { unrelated: None } if subject.head.is_none() => {
+            "Compared with the empty tree: there are no commits yet".to_owned()
+        }
+        BaseRef::Empty { unrelated: None } => {
+            "Compared with the empty tree: there is no default branch".to_owned()
+        }
+        BaseRef::Shallow { name } => format!(
+            "Compared with the empty tree: the clone's history is shallow; fetch more to \
+             compare with {name}"
+        ),
+    };
+    match &subject.missing_base {
+        Some(missing) => {
+            format!("{compared}, since the pull request's base {missing} is not available locally")
+        }
+        None => compared,
     }
 }
 

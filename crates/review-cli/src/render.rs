@@ -8,7 +8,8 @@ use review_core::analysis::{EntrySide, NoiseCategory, UnitKind};
 use review_core::walkthrough::{Partition, StepKind};
 use review_core::{
     Collapse, DiffLineKind, Interdiff, LineEnding, Location, NoteAttachment, Recorded, ReviewKey,
-    RevisionView, SideDiff, SplitLine, Standing, Status, UnitId, UnitState, split_line_ending,
+    ReviewTag, RevisionNumber, RevisionView, SideDiff, SplitLine, Standing, Status, Subject,
+    Tagged, UnitId, UnitState, filtered_note, split_line_ending,
 };
 use serde::Serialize;
 
@@ -59,11 +60,12 @@ pub fn open_summary(key: &ReviewKey, recorded: &Recorded, status: &Status) -> St
     writeln!(
         out,
         "{key}: {verb} revision {} (base {}, head {})",
-        recorded.number,
+        tagged(key, recorded.number),
         recorded.base.short(),
         recorded.head.short()
     )
     .ok();
+    out.push_str(&capture(Some(recorded)));
     if recorded.merge_bases.len() > 1 {
         writeln!(
             out,
@@ -94,8 +96,42 @@ fn totals(status: &Status) -> String {
     )
 }
 
-pub fn status(status: &Status) -> String {
-    let mut out = format!("revision {}: {}", status.revision, totals(status));
+/// Returns `id` qualified with the tag of the review `key`.
+pub fn tagged<T>(key: &ReviewKey, id: T) -> Tagged<T> {
+    Tagged { id, tag: key.tag() }
+}
+
+/// Says what a recorded capture of a working tree was of, and which files it could not
+/// capture; nothing for a revision recorded otherwise.
+pub fn capture(recorded: Option<&Recorded>) -> String {
+    let mut out = String::new();
+    let Some(recorded) = recorded else {
+        return out;
+    };
+    // Writing to a `String` cannot fail.
+    if let Some(subject) = &recorded.subject {
+        writeln!(out, "{}", subject.summary()).ok();
+    }
+    if let Some(note) = filtered_note(recorded.filtered.len()) {
+        writeln!(out, "{note}").ok();
+    }
+    out
+}
+
+/// Says why a revision has nothing to review, from what its capture was of when it is one.
+fn nothing_to_review(recorded: Option<&Recorded>) -> String {
+    match recorded.and_then(|recorded| Some((recorded, recorded.subject.as_deref()?))) {
+        Some((recorded, subject)) => subject.nothing_to_review(&recorded.base, &recorded.head),
+        None => "Nothing to review.".to_owned(),
+    }
+}
+
+pub fn status(key: &ReviewKey, status: &Status) -> String {
+    let mut out = format!(
+        "revision {}: {}",
+        tagged(key, status.revision),
+        totals(status)
+    );
     let width = status
         .files
         .iter()
@@ -191,24 +227,40 @@ fn location_text(location: &Location) -> String {
     format!("{}:{}-{}", location.path, location.line, location.end_line)
 }
 
+/// What `cr show` shows.
+pub struct Shown<'a> {
+    /// The review's key.
+    pub key: &'a ReviewKey,
+    /// The revision shown.
+    pub view: &'a RevisionView<'a>,
+    /// Its units in steps, as far as the options keep them.
+    pub parts: &'a Partition,
+    /// What the command recorded of the checkout before showing it, if it did.
+    pub recorded: Option<&'a Recorded>,
+}
+
 /// Renders the steps of a partition with each unit's change.
-pub fn show(
-    view: &RevisionView<'_>,
-    parts: &Partition,
-    expand: bool,
-    painter: Painter,
-) -> eyre::Result<String> {
-    let mut out = String::new();
+pub fn show(shown: &Shown<'_>, expand: bool, painter: Painter) -> eyre::Result<String> {
+    let Shown {
+        key,
+        view,
+        parts,
+        recorded,
+    } = *shown;
+    let mut out = capture(recorded);
     let record = view.record();
     // Writing to a `String` cannot fail.
     writeln!(
         out,
         "revision {} (base {}, head {})",
-        view.number(),
+        tagged(key, view.number()),
         record.map_or("?", |record| record.base.short()),
         record.map_or("?", |record| record.head.short())
     )
     .ok();
+    if view.unit_ids().is_empty() {
+        writeln!(out, "{}", nothing_to_review(recorded)).ok();
+    }
     for (index, step) in parts.steps.iter().enumerate() {
         writeln!(
             out,
@@ -230,9 +282,9 @@ pub fn show(
                     hidden_approved += usize::from(view.standing(unit)? == Standing::AutoApproved);
                 }
                 Some(Collapse::Moved(_)) if !expand => {
-                    render_move_line(&mut out, view, unit, painter)?;
+                    render_move_line(&mut out, view, tagged(key, unit), painter)?;
                 }
-                _ => render_unit(&mut out, view, unit, painter)?,
+                _ => render_unit(&mut out, view, tagged(key, unit), painter)?,
             }
         }
         if hidden_formatting > 0 {
@@ -275,9 +327,10 @@ pub fn show(
 fn render_move_line(
     out: &mut String,
     view: &RevisionView<'_>,
-    unit: UnitId,
+    tagged: Tagged<UnitId>,
     painter: Painter,
 ) -> eyre::Result<()> {
+    let unit = tagged.id;
     let state = standing_label(view, unit)?;
     let description = match view.collapse(unit)? {
         Some(Collapse::Moved(found)) => found.describe_for(unit),
@@ -287,7 +340,7 @@ fn render_move_line(
     // Writing to a `String` cannot fail.
     writeln!(
         out,
-        "  {unit} [{state}] {} {}",
+        "  {tagged} [{state}] {} {}",
         location_text(&view.location(unit)?),
         painter.dim(&description)
     )
@@ -298,9 +351,10 @@ fn render_move_line(
 fn render_unit(
     out: &mut String,
     view: &RevisionView<'_>,
-    unit: UnitId,
+    tagged: Tagged<UnitId>,
     painter: Painter,
 ) -> eyre::Result<()> {
+    let unit = tagged.id;
     let record = view.unit(unit)?;
     let label = standing_label(view, unit)?;
     let label = if view.standing(unit)?.is_reviewed() {
@@ -312,7 +366,7 @@ fn render_unit(
     writeln!(
         out,
         "  {} [{label}] {}",
-        painter.bold(&unit.to_string()),
+        painter.bold(&tagged.to_string()),
         location_text(&view.location(unit)?)
     )
     .ok();
@@ -389,12 +443,12 @@ fn render_interdiff(out: &mut String, interdiff: &Interdiff, painter: Painter) {
     // Writing to a `String` cannot fail.
     writeln!(out, "    interdiff against {}:", interdiff.reviewed).ok();
     if !interdiff.base.changed && !interdiff.head.changed {
-        writeln!(
-            out,
-            "    {}",
-            painter.dim("identical to the reviewed version, but it changed in between")
-        )
-        .ok();
+        let why = if interdiff.base_file_changed {
+            "identical to the reviewed version, but the code around it changed in the base"
+        } else {
+            "identical to the reviewed version, but it changed in between"
+        };
+        writeln!(out, "    {}", painter.dim(why)).ok();
     }
     side(
         out,
@@ -489,7 +543,8 @@ fn highlighted_lines(
 /// One unit in `cr show --json`.
 #[derive(Serialize)]
 pub struct UnitJson {
-    id: UnitId,
+    /// The unit, qualified with the review's tag.
+    id: Tagged<UnitId>,
     state: UnitState,
     /// Where the unit stands under the policy: its state, or approved automatically.
     standing: Standing,
@@ -522,14 +577,31 @@ pub struct StepJson {
 
 /// The document `cr show --json` prints.
 #[derive(Serialize)]
-pub struct ShowJson {
+pub struct ShowJson<'a> {
+    /// The review's key.
+    review: &'a str,
+    /// The review's tag, which qualifies the unit IDs.
+    tag: ReviewTag,
     revision: u32,
+    /// What the capture of the checkout this command recorded was of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<&'a Subject>,
+    /// The paths that capture kept at their staged version, because a filter would have to run
+    /// on them.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    filtered: &'a [String],
     title: Option<String>,
     steps: Vec<StepJson>,
     warnings: Vec<String>,
 }
 
-pub fn show_json(view: &RevisionView<'_>, parts: &Partition) -> eyre::Result<ShowJson> {
+pub fn show_json<'a>(shown: &Shown<'a>) -> eyre::Result<ShowJson<'a>> {
+    let Shown {
+        key,
+        view,
+        parts,
+        recorded,
+    } = *shown;
     let notes = view.notes();
     let steps = parts
         .steps
@@ -550,7 +622,7 @@ pub fn show_json(view: &RevisionView<'_>, parts: &Partition) -> eyre::Result<Sho
                             .to_owned(),
                     };
                     Ok(UnitJson {
-                        id: unit,
+                        id: tagged(key, unit),
                         state: view.state(unit)?,
                         standing: view.standing(unit)?,
                         location: view.location(unit)?,
@@ -581,11 +653,58 @@ pub fn show_json(view: &RevisionView<'_>, parts: &Partition) -> eyre::Result<Sho
         })
         .collect::<eyre::Result<Vec<_>>>()?;
     Ok(ShowJson {
+        review: key.as_str(),
+        tag: key.tag(),
         revision: view.number().get(),
+        subject: recorded.and_then(|recorded| recorded.subject.as_deref()),
+        filtered: recorded.map_or(&[], |recorded| recorded.filtered.as_slice()),
         title: parts.title.clone(),
         steps,
         warnings: parts.warnings.clone(),
     })
+}
+
+/// The document `cr walkthrough show --json` prints: the partition, with unit IDs qualified
+/// with the review's tag.
+#[derive(Serialize)]
+pub struct PartitionJson<'a> {
+    review: &'a str,
+    tag: ReviewTag,
+    revision: RevisionNumber,
+    title: Option<&'a str>,
+    written_for: Option<RevisionNumber>,
+    steps: Vec<PartitionStepJson<'a>>,
+    warnings: &'a [String],
+}
+
+/// One step in `cr walkthrough show --json`.
+#[derive(Serialize)]
+pub struct PartitionStepJson<'a> {
+    title: &'a str,
+    why: &'a str,
+    kind: StepKind,
+    units: Vec<Tagged<UnitId>>,
+}
+
+pub fn partition_json<'a>(key: &'a ReviewKey, parts: &'a Partition) -> PartitionJson<'a> {
+    PartitionJson {
+        review: key.as_str(),
+        tag: key.tag(),
+        revision: parts.revision,
+        title: parts.title.as_deref(),
+        written_for: parts.written_for,
+        steps: parts
+            .steps
+            .iter()
+            .map(|step| PartitionStepJson {
+                title: &step.title,
+                why: &step.why,
+                kind: step.kind,
+                units: step.units.iter().map(|&unit| tagged(key, unit)).collect(),
+            })
+            .collect(),
+        warnings: &parts.warnings,
+    }
 }
 
 #[cfg(test)]

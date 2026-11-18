@@ -2,8 +2,8 @@
 
 mod auto_approval;
 mod carry;
+mod checkout;
 mod common;
-mod current_branch;
 mod demo;
 mod fetch;
 mod file_marks;
@@ -14,6 +14,7 @@ mod info;
 mod live;
 mod moves;
 mod perf;
+mod repository;
 mod scope;
 mod search;
 mod storage;

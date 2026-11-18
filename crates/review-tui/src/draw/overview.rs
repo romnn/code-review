@@ -246,10 +246,17 @@ fn document(model: &Model, palette: &Palette, width: u16) -> Document {
         }
         About::Commits {
             title,
+            details,
             section: commits_title,
             commits,
         } => {
             document.wrapped(0, &plain(&title.text), title.color, true);
+            if !details.is_empty() {
+                document.blank();
+            }
+            for detail in details {
+                document.wrapped(0, &plain(&detail.text), detail.color, false);
+            }
             section(&mut document, &commits_title);
             for commit in commits {
                 let id_width = width_of(&commit.id);

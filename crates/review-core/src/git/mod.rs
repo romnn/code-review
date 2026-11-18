@@ -5,8 +5,11 @@
 
 mod blobs;
 mod diff_tree;
+mod filters;
 mod ignore;
+mod refs;
 mod snapshot;
+mod state;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -15,9 +18,34 @@ use std::process::{Command, Stdio};
 
 pub use blobs::{Blob, BlobReader, MAX_TEXT_BLOB_BYTES};
 pub use diff_tree::{ChangeStatus, EntryType, FileMode, RawChange, RawSide};
+pub use snapshot::WorktreeCapture;
+pub(crate) use state::IndexStamp;
+pub use state::{BranchIdentity, Busy, Head};
 
 use crate::error::Error;
 use crate::ids::ObjectId;
+
+/// Configuration every git command the engine runs gets, as `-c` options.
+///
+/// Hooks and a filesystem monitor are programs the repository's configuration names, and the
+/// engine never runs them: it only reads the repository and writes its own objects and refs.
+pub(crate) const COMMAND_CONFIG: [&str; 4] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+];
+
+/// Environment every git command the engine runs gets.
+///
+/// Replace refs would make an object ID stand for other content than its own, so the engine
+/// reads objects as they are.
+/// Git never prompts for credentials, and messages stay parseable.
+pub(crate) const COMMAND_ENV: [(&str, &str); 3] = [
+    ("GIT_NO_REPLACE_OBJECTS", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("LC_ALL", "C"),
+];
 
 /// A file of a commit's tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,15 +175,15 @@ impl Repo {
         command.envs(self.env.iter().map(|(key, value)| (key, value)));
     }
 
-    /// Returns a `git` command bound to this repository.
+    /// Returns a `git` command bound to this repository, with [`COMMAND_CONFIG`] and
+    /// [`COMMAND_ENV`] applied.
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new("git");
         match &self.work_tree {
             Some(work_tree) => command.arg("-C").arg(work_tree),
             None => command.arg("--git-dir").arg(&self.git_dir),
         };
-        // Never prompt for credentials and keep messages parseable.
-        command.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
+        command.args(COMMAND_CONFIG).envs(COMMAND_ENV);
         self.apply_env(&mut command);
         command
     }
@@ -265,10 +293,12 @@ impl Repo {
                     return Ok(bases);
                 }
             }
-            let shallow = self.run_text(["rev-parse", "--is-shallow-repository"])? == "true";
-            let Some(remote) = deepen_from.filter(|_| shallow) else {
+            let Some(remote) = deepen_from else {
                 break;
             };
+            if !self.is_shallow()? {
+                break;
+            }
             if !self.deepen(remote, target)? {
                 break;
             }
@@ -277,6 +307,16 @@ impl Repo {
             target: target.clone(),
             head: head.clone(),
         })
+    }
+
+    /// Returns whether the clone is shallow: its history stops at commits whose parents it does
+    /// not have.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run.
+    pub fn is_shallow(&self) -> Result<bool, Error> {
+        Ok(self.run_text(["rev-parse", "--is-shallow-repository"])? == "true")
     }
 
     /// Deepens the shallow history by 200 commits from the shallow boundary and from `target`.
@@ -382,6 +422,20 @@ impl Repo {
         match self.run(["rev-parse", "--verify", "--quiet", name]) {
             Ok(output) => Ok(parse_oid_lines(&output.stdout)?.into_iter().next()),
             Err(Error::CommandFailed { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Returns whether `ancestor` is `descendant` or one of its ancestors; an object that does
+    /// not resolve counts as not.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot be run.
+    pub fn is_ancestor(&self, ancestor: &ObjectId, descendant: &str) -> Result<bool, Error> {
+        match self.run(["merge-base", "--is-ancestor", ancestor.as_str(), descendant]) {
+            Ok(_) => Ok(true),
+            Err(Error::CommandFailed { .. }) => Ok(false),
             Err(err) => Err(err),
         }
     }
@@ -607,11 +661,41 @@ impl Repo {
         paths: impl IntoIterator<Item = &'a str>,
         success: &[i32],
     ) -> Result<Output, Error> {
+        Self::run_command_with_paths(
+            self.command(),
+            args,
+            paths.into_iter().map(str::as_bytes),
+            success,
+        )
+    }
+
+    /// Runs `command` with `args` like [`Self::run_with_paths`], with paths given as bytes.
+    fn run_command_with_paths<'a>(
+        command: Command,
+        args: &[&str],
+        paths: impl IntoIterator<Item = &'a [u8]>,
+        success: &[i32],
+    ) -> Result<Output, Error> {
+        let mut input = Vec::new();
+        for path in paths {
+            input.extend_from_slice(path);
+            input.push(0);
+        }
+        Self::run_command_with_input(command, args, input, success)
+    }
+
+    /// Runs `command` with `args`, writing `input` to its standard input, and returns its
+    /// standard output when it exits with one of the `success` codes.
+    fn run_command_with_input(
+        mut command: Command,
+        args: &[&str],
+        input: Vec<u8>,
+        success: &[i32],
+    ) -> Result<Output, Error> {
         use std::io::Write as _;
 
         let shown = args.join(" ");
-        let mut child = self
-            .command()
+        let mut child = command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -622,12 +706,7 @@ impl Repo {
                 args: shown.clone(),
                 source,
             })?;
-        let mut input = Vec::new();
-        for path in paths {
-            input.extend_from_slice(path.as_bytes());
-            input.push(0);
-        }
-        // Feed stdin from a thread so a large path list cannot deadlock against stdout.
+        // Feed stdin from a thread so a large input cannot deadlock against stdout.
         let stdin = child.stdin.take();
         let writer = std::thread::spawn(move || -> std::io::Result<()> {
             if let Some(mut stdin) = stdin {
@@ -678,14 +757,15 @@ impl Repo {
         self.fetch_with(remote, refspecs, &[])
     }
 
-    /// Fetches exactly `refspecs`: no tags, no `FETCH_HEAD`, and an empty `--refmap` so the
-    /// remote's configured fetch refspecs never update remote-tracking refs.
+    /// Fetches exactly `refspecs`: no tags, no `FETCH_HEAD`, no submodules, and an empty
+    /// `--refmap` so the remote's configured fetch refspecs never update remote-tracking refs.
     fn fetch_with(&self, remote: &str, refspecs: &[String], options: &[&str]) -> Result<(), Error> {
         let mut args: Vec<String> = [
             "fetch",
             "--quiet",
             "--no-tags",
             "--no-write-fetch-head",
+            "--no-recurse-submodules",
             "--refmap=",
         ]
         .into_iter()
@@ -698,7 +778,8 @@ impl Repo {
         Ok(())
     }
 
-    /// Returns the remote to deepen a shallow clone from: `origin`, or else the first remote.
+    /// Returns the repository's default remote, which a shallow clone deepens from and whose
+    /// default branch is the repository's: `origin`, or else the first remote.
     ///
     /// # Errors
     ///
@@ -730,6 +811,37 @@ impl Repo {
             .collect())
     }
 
+    /// Lists the configured remotes with their URLs as configured, before any `insteadOf`
+    /// rewrite, which [`Self::remotes`] applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git fails.
+    pub(crate) fn configured_remote_urls(&self) -> Result<Vec<Remote>, Error> {
+        // `git config --get-regexp` exits with 1 when nothing matches.
+        let output = Self::run_command_with_paths(
+            self.command(),
+            &["config", "-z", "--get-regexp", r"^remote\..*\.url$"],
+            [],
+            &[0, 1],
+        )?;
+        // Records of `key NL value NUL`, with the remote's name, which may hold dots, between
+        // `remote.` and `.url`.
+        Ok(output
+            .stdout
+            .split(|&byte| byte == 0)
+            .filter_map(|record| {
+                let text = std::str::from_utf8(record).ok()?;
+                let (key, url) = text.split_once('\n')?;
+                let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
+                Some(Remote {
+                    name: name.to_owned(),
+                    url: url.to_owned(),
+                })
+            })
+            .collect())
+    }
+
     /// Returns the value of the git configuration `key` for the repository, such as
     /// `core.sshCommand`, or `None` when it is not set.
     ///
@@ -756,85 +868,60 @@ impl Repo {
     }
 
     /// Returns the short name of the repository's default branch, such as `origin/main`, or
-    /// `None` when there is none to find.
-    ///
-    /// It is the branch `refs/remotes/origin/HEAD` points to, or else the first of `origin/main`,
-    /// `origin/master`, `main` and `master` that exists.
+    /// `None` when there is none to find; see [`Self::default_branch_ref`].
     ///
     /// # Errors
     ///
     /// Returns an error when git cannot run or prints output the engine cannot parse.
     pub fn default_branch(&self) -> Result<Option<String>, Error> {
-        let origin_head =
-            match self.run_text(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]) {
-                Ok(target) => Some(target),
-                // Not set, or not a symbolic ref.
-                Err(Error::CommandFailed { .. }) => None,
-                Err(err) => return Err(err),
-            };
-        let candidates = origin_head.into_iter().chain(
+        Ok(self.default_branch_ref()?.map(|name| {
+            name.strip_prefix("refs/remotes/")
+                .or_else(|| name.strip_prefix("refs/heads/"))
+                .unwrap_or(&name)
+                .to_owned()
+        }))
+    }
+
+    /// Returns the full ref of the repository's default branch, such as
+    /// `refs/remotes/origin/main`, or `None` when there is none to find.
+    ///
+    /// It is the branch `<remote>/HEAD` points to, or else the first of `<remote>/main`,
+    /// `<remote>/master`, `main` and `master` that exists, where `<remote>` is the
+    /// [default remote](Self::default_remote), or `origin` without one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run or prints output the engine cannot parse.
+    pub fn default_branch_ref(&self) -> Result<Option<String>, Error> {
+        // Remote-tracking refs left without their remote are `origin`'s, if anyone's.
+        let remote = self
+            .default_remote()?
+            .unwrap_or_else(|| "origin".to_owned());
+        let remote_head = match self.run_text([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ]) {
+            Ok(target) => Some(target),
+            // Not set, or not a symbolic ref.
+            Err(Error::CommandFailed { .. }) => None,
+            Err(err) => return Err(err),
+        };
+        let candidates = remote_head.into_iter().chain(
             [
-                "refs/remotes/origin/main",
-                "refs/remotes/origin/master",
-                "refs/heads/main",
-                "refs/heads/master",
+                format!("refs/remotes/{remote}/main"),
+                format!("refs/remotes/{remote}/master"),
             ]
-            .map(str::to_owned),
+            .into_iter()
+            .chain(["refs/heads/main", "refs/heads/master"].map(str::to_owned)),
         );
         for name in candidates {
-            // A dangling `origin/HEAD` falls through to the fixed names.
+            // A dangling `<remote>/HEAD` falls through to the fixed names.
             if self.ref_target(&format!("{name}^{{commit}}"))?.is_some() {
-                let short = name
-                    .strip_prefix("refs/remotes/")
-                    .or_else(|| name.strip_prefix("refs/heads/"))
-                    .unwrap_or(&name);
-                return Ok(Some(short.to_owned()));
+                return Ok(Some(name));
             }
         }
         Ok(None)
-    }
-
-    /// Counts the commits reachable from `head` but not from `base`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when either does not name a commit or git fails.
-    pub fn count_commits(&self, base: &str, head: &str) -> Result<usize, Error> {
-        let count = self.run_text(["rev-list", "--count", &format!("{base}..{head}"), "--"])?;
-        count.parse().map_err(|_| Error::UnexpectedOutput {
-            program: "git",
-            command: "rev-list --count".to_owned(),
-            detail: count,
-        })
-    }
-
-    /// Creates a detached worktree at `path` checked out at `commit`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git cannot create the worktree.
-    pub fn add_worktree(&self, path: &Path, commit: &ObjectId) -> Result<(), Error> {
-        let mut args: Vec<&OsStr> = vec![OsStr::new("worktree"), OsStr::new("add")];
-        args.extend([OsStr::new("--detach"), OsStr::new("--quiet")]);
-        args.extend([path.as_os_str(), OsStr::new(commit.as_str())]);
-        self.run(args)?;
-        Ok(())
-    }
-
-    /// Removes the worktree at `path`, discarding it even if files were changed there.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git cannot remove the worktree.
-    pub fn remove_worktree(&self, path: &Path) -> Result<(), Error> {
-        let args = [
-            OsStr::new("worktree"),
-            OsStr::new("remove"),
-            OsStr::new("--force"),
-            path.as_os_str(),
-        ];
-        self.run(args)?;
-        Ok(())
     }
 }
 

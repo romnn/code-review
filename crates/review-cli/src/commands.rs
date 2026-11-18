@@ -7,15 +7,23 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use color_eyre::eyre::{self, OptionExt as _, WrapErr as _};
+use review_core::github::{self, CheckoutPullRequest};
 use review_core::walkthrough::{partition, prompt};
 use review_core::{
-    History, MarkVerdict, MoveId, Repo, Review, ReviewKey, ReviewPolicy, ReviewTarget,
-    RevisionNumber, RevisionView, Standing, UnitId,
+    History, MarkVerdict, MoveId, Recorded, Repo, Review, ReviewKey, ReviewPolicy, ReviewTag,
+    ReviewTarget, RevisionNumber, RevisionView, Standing, Tagged, UnitId,
 };
 use serde::Serialize;
 
+use crate::reference::Reference;
 use crate::render::{self, Painter};
 use crate::{ColorChoice, ExportFormat, GlobalOptions};
+
+/// How long looking up the checked-out branch's pull request with `gh` may take.
+const PULL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A revision as `--revision` gives it, `3` or `3@3fa2b1c0`.
+pub type RevisionReference = Reference<RevisionNumber>;
 
 /// A category of units that `cr mark --category` marks at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -35,6 +43,9 @@ pub struct Context {
     data_dir: PathBuf,
     repo_dir: PathBuf,
     review: Option<String>,
+    /// Whether the command line named the review, with `--review` or the demo, so that bare
+    /// IDs are known to be its own.
+    named: bool,
     json: bool,
     painter: Painter,
     /// Which units still need review in every view the commands read.
@@ -54,6 +65,7 @@ impl Context {
                 data_dir: paths.data,
                 repo_dir: paths.repo,
                 review: Some(review.key().as_str().to_owned()),
+                named: true,
                 json: options.json,
                 painter: Painter {
                     color: color_enabled(options),
@@ -74,30 +86,93 @@ impl Context {
             data_dir,
             repo_dir: options.repo.clone(),
             review: options.review.clone(),
+            named: options.review.is_some(),
             json: options.json,
             painter: Painter { color },
             policy: policy(options),
         })
     }
 
-    fn remember(&self, review: &Review) -> eyre::Result<()> {
-        Ok(review_core::store::remember_review(
-            &self.data_dir,
-            review.repo(),
-            review.key(),
-        )?)
+    /// Loads the review `--review` names, or else opens the checkout's.
+    fn load(&self) -> eyre::Result<Review> {
+        match &self.review {
+            Some(key) => Ok(Review::load(
+                &self.data_dir,
+                &ReviewKey::parse(key.trim())?,
+            )?),
+            None => Ok(Review::open_checkout(
+                &self.data_dir,
+                Repo::discover(&self.repo_dir)?,
+            )?),
+        }
     }
 
-    fn load(&self) -> eyre::Result<Review> {
-        let key = if let Some(key) = &self.review {
-            ReviewKey::parse(key.trim())?
-        } else {
-            let repo = Repo::discover(&self.repo_dir)?;
-            review_core::store::remembered_review(&self.data_dir, &repo)?.ok_or_eyre(
-                "no review opened for this repository and branch; run `cr open` or pass --review",
-            )?
+    /// Loads the review to show, as [`Self::load`] does, and when it is the review of a
+    /// checkout shown at its current revision (no `revision`), records what the checkout holds
+    /// now first: what a command prints, others refer to, so it has to be a revision (ADR 4).
+    fn load_shown(&self, revision: Option<&RevisionReference>) -> eyre::Result<Shown> {
+        let review = self.load()?;
+        let recorded = match review.target() {
+            ReviewTarget::Checkout { .. } if revision.is_none() => {
+                Some(record(&review, &mut PullRequestLookup::default())?)
+            }
+            _ => None,
         };
-        Ok(Review::load(&self.data_dir, &key)?)
+        Ok(Shown { review, recorded })
+    }
+}
+
+/// A review a command shows, and what showing it recorded.
+struct Shown {
+    review: Review,
+    /// The capture of the checkout that was recorded, or found recorded already, for the
+    /// review of a checkout at its current revision.
+    recorded: Option<Recorded>,
+}
+
+/// Records what the review's target holds now, as [`Review::refresh`] does, with the
+/// checked-out branch's pull request for the review of a checkout.
+fn record(review: &Review, lookup: &mut PullRequestLookup) -> eyre::Result<Recorded> {
+    let pull_request = match review.target() {
+        ReviewTarget::Checkout { .. } => lookup.find(review),
+        _ => None,
+    };
+    match review.refresh_with(pull_request.as_ref(), &mut |_| {}) {
+        Ok(recorded) => Ok(recorded),
+        Err(review_core::Error::GitBusy(busy)) => {
+            eyre::bail!("git is busy: {busy}; try again when it finishes")
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Looks up the checked-out branch's pull request, and says once why it could not.
+#[derive(Default)]
+struct PullRequestLookup {
+    reported: bool,
+}
+
+impl PullRequestLookup {
+    /// Returns what `gh` finds for the branch checked out in `review`'s repository, or `None`
+    /// when `HEAD` is detached, the repository has no remote, or `gh` fails, which is no reason
+    /// to fail the command: the base is then the default branch.
+    fn find(&mut self, review: &Review) -> Option<CheckoutPullRequest> {
+        let repo = review.repo();
+        let found = match repo.remotes() {
+            Ok(remotes) if remotes.is_empty() => return None,
+            Ok(_) => github::for_checkout(repo, PULL_REQUEST_TIMEOUT),
+            Err(err) => Err(err),
+        };
+        found.unwrap_or_else(|err| {
+            if !self.reported {
+                self.reported = true;
+                eprintln!(
+                    "cr: no pull request looked up, so the base is the default branch: {:#}",
+                    eyre::Report::new(err)
+                );
+            }
+            None
+        })
     }
 }
 
@@ -152,17 +227,22 @@ fn print_json<T: Serialize>(value: &T) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Returns the view of the revision `revision` names in `review`; without one, of the
+/// revision the command `recorded`, or else of the current one.
+///
+/// What the command recorded is what it shows, with what that capture was of, even when
+/// another process recorded a newer revision since.
 fn pick_view<'h>(
     context: &Context,
+    review: &Review,
     history: &'h History,
-    revision: Option<u32>,
+    revision: Option<&RevisionReference>,
+    recorded: Option<&Recorded>,
 ) -> eyre::Result<RevisionView<'h>> {
-    let view = match revision {
-        Some(number) => {
-            let number = RevisionNumber::new(number).ok_or_eyre("revisions are numbered from 1")?;
-            history.view_under(number, context.policy)?
-        }
-        None => history.current_view_under(context.policy)?,
+    let view = match (revision, recorded) {
+        (Some(revision), _) => history.view_under(revision.check(review.key())?, context.policy)?,
+        (None, Some(recorded)) => history.view_under(recorded.number, context.policy)?,
+        (None, None) => history.current_view_under(context.policy)?,
     };
     Ok(view)
 }
@@ -176,22 +256,20 @@ fn print_warnings(history: &History) {
 #[derive(Serialize)]
 struct OpenOutput<'a> {
     review: &'a str,
-    recorded: &'a review_core::Recorded,
+    tag: ReviewTag,
+    recorded: &'a Recorded,
     status: review_core::Status,
 }
 
 pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> eyre::Result<()> {
     let repo = Repo::discover(&context.repo_dir)?;
     let review = if target.is_none() && worktree.is_none() {
-        let (review, detected) = Review::open_for_current_branch(&context.data_dir, repo)?;
-        eprintln!("cr: {detected}");
-        review
+        Review::open_checkout(&context.data_dir, repo)?
     } else {
         let target = ReviewTarget::from_arguments(target, worktree, &repo)?;
         Review::open(&context.data_dir, repo, target)?
     };
-    let recorded = review.refresh()?;
-    context.remember(&review)?;
+    let recorded = record(&review, &mut PullRequestLookup::default())?;
     let history = review.history()?;
     print_warnings(&history);
     let status = history
@@ -200,6 +278,7 @@ pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> 
     if context.json {
         return print_json(&OpenOutput {
             review: review.key().as_str(),
+            tag: review.key().tag(),
             recorded: &recorded,
             status,
         });
@@ -208,15 +287,40 @@ pub fn open(context: &Context, target: Option<&str>, worktree: Option<&str>) -> 
     Ok(())
 }
 
-pub fn status(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
-    let review = context.load()?;
+/// The document `cr status --json` prints.
+#[derive(Serialize)]
+struct StatusOutput<'a> {
+    review: &'a str,
+    tag: ReviewTag,
+    /// What the capture of the checkout this command recorded was of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<&'a review_core::Subject>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    filtered: &'a [String],
+    #[serde(flatten)]
+    status: review_core::Status,
+}
+
+pub fn status(context: &Context, revision: Option<&RevisionReference>) -> eyre::Result<()> {
+    let Shown { review, recorded } = context.load_shown(revision)?;
     let history = review.history()?;
     print_warnings(&history);
-    let status = pick_view(context, &history, revision)?.status();
+    let status = pick_view(context, &review, &history, revision, recorded.as_ref())?.status();
     if context.json {
-        return print_json(&status);
+        return print_json(&StatusOutput {
+            review: review.key().as_str(),
+            tag: review.key().tag(),
+            subject: recorded
+                .as_ref()
+                .and_then(|recorded| recorded.subject.as_deref()),
+            filtered: recorded
+                .as_ref()
+                .map_or(&[], |recorded| recorded.filtered.as_slice()),
+            status,
+        });
     }
-    print!("{}", render::status(&status));
+    print!("{}", render::capture(recorded.as_ref()));
+    print!("{}", render::status(review.key(), &status));
     Ok(())
 }
 
@@ -226,14 +330,20 @@ pub struct ShowOptions {
     pub step: Option<usize>,
     pub file: Option<String>,
     pub expand: bool,
-    pub revision: Option<u32>,
+    pub revision: Option<RevisionReference>,
 }
 
 pub fn show(context: &Context, options: &ShowOptions) -> eyre::Result<()> {
-    let review = context.load()?;
+    let Shown { review, recorded } = context.load_shown(options.revision.as_ref())?;
     let history = review.history()?;
     print_warnings(&history);
-    let view = pick_view(context, &history, options.revision)?;
+    let view = pick_view(
+        context,
+        &review,
+        &history,
+        options.revision.as_ref(),
+        recorded.as_ref(),
+    )?;
     let mut parts = partition(&view);
     if let Some(step) = options.step {
         let index = step
@@ -254,71 +364,89 @@ pub fn show(context: &Context, options: &ShowOptions) -> eyre::Result<()> {
         });
     }
     parts.steps.retain(|step| !step.units.is_empty());
+    let shown = render::Shown {
+        key: review.key(),
+        view: &view,
+        parts: &parts,
+        recorded: recorded.as_ref(),
+    };
     if context.json {
-        return print_json(&render::show_json(&view, &parts)?);
+        return print_json(&render::show_json(&shown)?);
     }
-    print!(
-        "{}",
-        render::show(&view, &parts, options.expand, context.painter)?
-    );
+    print!("{}", render::show(&shown, options.expand, context.painter)?);
     Ok(())
 }
 
 #[derive(Serialize)]
 struct MarkOutput {
     verdict: &'static str,
-    marked: Vec<UnitId>,
+    marked: Vec<Tagged<UnitId>>,
 }
 
-pub fn mark(
-    context: &Context,
-    args: &[String],
-    category: Option<Category>,
-    files: &[String],
-) -> eyre::Result<()> {
+/// What `cr mark` marks.
+pub struct MarkOptions<'a> {
+    /// Unit and move IDs, followed by the verdict.
+    pub args: &'a [String],
+    pub category: Option<Category>,
+    pub files: &'a [String],
+    /// The revision the caller saw, which marks of files and categories go on.
+    pub revision: Option<&'a RevisionReference>,
+}
+
+pub fn mark(context: &Context, options: &MarkOptions<'_>) -> eyre::Result<()> {
+    let MarkOptions {
+        args,
+        category,
+        files,
+        revision,
+    } = *options;
     let (verdict, ids) = args
         .split_last()
         .ok_or_eyre("pass the units and a verdict")?;
     let verdict: MarkVerdict = verdict.parse().map_err(|err: String| eyre::eyre!(err))?;
     let review = context.load()?;
     let history = review.history()?;
-    if !files.is_empty() {
+    if !files.is_empty() || category.is_some() {
         eyre::ensure!(
-            ids.is_empty() && category.is_none(),
+            ids.is_empty() && (files.is_empty() || category.is_none()),
             "pass either unit IDs, --category or --file"
         );
-        let marked =
-            review.mark_files(&history.current_view_under(context.policy)?, files, verdict)?;
-        return print_marked(context, verdict, marked);
-    }
-    let mut by_revision: BTreeMap<RevisionNumber, Vec<UnitId>> = BTreeMap::new();
-    if let Some(category) = category {
-        eyre::ensure!(
-            ids.is_empty(),
-            "pass either unit IDs or --category, not both"
-        );
+        let revision = revision.ok_or_eyre(
+            "pass the revision `cr show` printed with --revision, such as --revision 3@<tag>, \
+             so the marks go on what you saw",
+        )?;
+        let seen = revision.resolve(review.key(), context.named)?;
         let view = history.current_view_under(context.policy)?;
-        for unit in view.unit_ids() {
-            let record = view.unit(unit)?;
-            let noise = view.noise(unit)?.is_some();
-            let wanted = match category {
-                Category::Noise => noise,
-                Category::Formatting => record.formatting_only,
-                Category::Moved => record.moved,
-                Category::Collapsed => noise || record.formatting_only || record.moved,
-            };
-            if wanted {
-                by_revision.entry(view.number()).or_default().push(unit);
+        eyre::ensure!(
+            view.number() == seen,
+            "revision {seen} is not current; the review is at revision {} now, so run `cr show` \
+             again before marking",
+            view.number()
+        );
+        let marked = match category {
+            Some(category) => {
+                let units = category_units(&view, category)?;
+                review.mark(&view, &units, verdict)?;
+                units
             }
-        }
+            None => review.mark_files(&view, files, verdict)?,
+        };
+        return print_marked(context, &review, verdict, marked);
     }
+    eyre::ensure!(
+        revision.is_none(),
+        "--revision goes with --file and --category; unit and move IDs carry their revision"
+    );
+    let mut by_revision: BTreeMap<RevisionNumber, Vec<UnitId>> = BTreeMap::new();
     for id in ids {
-        if let Ok(unit) = id.parse::<UnitId>() {
+        if let Ok(unit) = id.parse::<Reference<UnitId>>() {
+            let unit = unit.resolve(review.key(), context.named)?;
             by_revision.entry(unit.revision()).or_default().push(unit);
         } else {
-            let found: MoveId = id
-                .parse()
-                .wrap_err_with(|| format!("{id:?} is neither a unit nor a move ID"))?;
+            let found = id
+                .parse::<Reference<MoveId>>()
+                .wrap_err_with(|| format!("{id:?} is neither a unit nor a move ID"))?
+                .resolve(review.key(), context.named)?;
             let view = history.view_under(found.revision(), context.policy)?;
             by_revision
                 .entry(found.revision())
@@ -332,14 +460,41 @@ pub fn mark(
         review.mark(&view, &units, verdict)?;
         marked.extend(units);
     }
-    print_marked(context, verdict, marked)
+    print_marked(context, &review, verdict, marked)
 }
 
-fn print_marked(context: &Context, verdict: MarkVerdict, marked: Vec<UnitId>) -> eyre::Result<()> {
+/// Returns the units of `category` in `view`.
+fn category_units(view: &RevisionView<'_>, category: Category) -> eyre::Result<Vec<UnitId>> {
+    let mut units = Vec::new();
+    for unit in view.unit_ids() {
+        let record = view.unit(unit)?;
+        let noise = view.noise(unit)?.is_some();
+        let wanted = match category {
+            Category::Noise => noise,
+            Category::Formatting => record.formatting_only,
+            Category::Moved => record.moved,
+            Category::Collapsed => noise || record.formatting_only || record.moved,
+        };
+        if wanted {
+            units.push(unit);
+        }
+    }
+    Ok(units)
+}
+
+fn print_marked(
+    context: &Context,
+    review: &Review,
+    verdict: MarkVerdict,
+    marked: Vec<UnitId>,
+) -> eyre::Result<()> {
     if context.json {
         return print_json(&MarkOutput {
             verdict: verdict.name(),
-            marked,
+            marked: marked
+                .into_iter()
+                .map(|unit| render::tagged(review.key(), unit))
+                .collect(),
         });
     }
     println!("marked {} units {}", marked.len(), verdict.name());
@@ -347,14 +502,16 @@ fn print_marked(context: &Context, verdict: MarkVerdict, marked: Vec<UnitId>) ->
 }
 
 pub fn note(context: &Context, unit: &str, text: &str) -> eyre::Result<()> {
-    let unit: UnitId = unit.parse()?;
+    let unit: Reference<UnitId> = unit.parse()?;
     let review = context.load()?;
+    let unit = unit.resolve(review.key(), context.named)?;
     let history = review.history()?;
     review.note(
         &history.view_under(unit.revision(), context.policy)?,
         unit,
         text,
     )?;
+    let unit = render::tagged(review.key(), unit);
     if context.json {
         return print_json(&serde_json::json!({ "unit": unit, "note": text }));
     }
@@ -362,12 +519,16 @@ pub fn note(context: &Context, unit: &str, text: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-pub fn export(context: &Context, format: ExportFormat, revision: Option<u32>) -> eyre::Result<()> {
-    let review = context.load()?;
+pub fn export(
+    context: &Context,
+    format: ExportFormat,
+    revision: Option<&RevisionReference>,
+) -> eyre::Result<()> {
+    let Shown { review, recorded } = context.load_shown(revision)?;
     let history = review.history()?;
     print_warnings(&history);
-    let view = pick_view(context, &history, revision)?;
-    let exported = review_core::export::export(&view, review.key().as_str());
+    let view = pick_view(context, &review, &history, revision, recorded.as_ref())?;
+    let exported = review_core::export::export(&view, review.key());
     if context.json || format == ExportFormat::Json {
         return print_json(&exported);
     }
@@ -376,9 +537,12 @@ pub fn export(context: &Context, format: ExportFormat, revision: Option<u32>) ->
 }
 
 pub fn walkthrough_prompt(context: &Context) -> eyre::Result<()> {
-    let review = context.load()?;
+    let Shown { review, recorded } = context.load_shown(None)?;
     let history = review.history()?;
-    let text = prompt(&history.current_view_under(context.policy)?, review.key());
+    let text = prompt(
+        &pick_view(context, &review, &history, None, recorded.as_ref())?,
+        review.key(),
+    );
     if context.json {
         return print_json(&serde_json::json!({ "prompt": text }));
     }
@@ -405,13 +569,16 @@ pub fn walkthrough_import(context: &Context, file: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
-pub fn walkthrough_show(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
-    let review = context.load()?;
+pub fn walkthrough_show(
+    context: &Context,
+    revision: Option<&RevisionReference>,
+) -> eyre::Result<()> {
+    let Shown { review, recorded } = context.load_shown(revision)?;
     let history = review.history()?;
-    let view = pick_view(context, &history, revision)?;
+    let view = pick_view(context, &review, &history, revision, recorded.as_ref())?;
     let parts = partition(&view);
     if context.json {
-        return print_json(&parts);
+        return print_json(&render::partition_json(review.key(), &parts));
     }
     print!("{}", render::partition(&view, &parts));
     Ok(())
@@ -419,30 +586,34 @@ pub fn walkthrough_show(context: &Context, revision: Option<u32>) -> eyre::Resul
 
 pub fn watch(context: &Context, interval: u64, count: Option<u64>) -> eyre::Result<()> {
     let review = context.load()?;
+    let mut lookup = PullRequestLookup::default();
     let mut polls = 0;
     loop {
-        match review.refresh() {
+        match record(&review, &mut lookup) {
             Ok(recorded) if recorded.created => {
                 let history = review.history()?;
                 let status = history
                     .view_under(recorded.number, context.policy)?
                     .status();
+                let number = render::tagged(review.key(), recorded.number);
                 if context.json {
                     println!(
                         "{}",
-                        serde_json::to_string(
-                            &serde_json::json!({ "recorded": recorded, "status": status })
-                        )?
+                        serde_json::to_string(&serde_json::json!({
+                            "revision": number,
+                            "recorded": recorded,
+                            "status": status,
+                        }))?
                     );
                 } else {
                     println!(
-                        "New revision {}: {} new and {} changed units",
-                        recorded.number, status.total.new, status.total.changed
+                        "New revision {number}: {} new and {} changed units",
+                        status.total.new, status.total.changed
                     );
                 }
             }
             Ok(_) => {}
-            Err(err) => eprintln!("warning: refresh failed: {err}"),
+            Err(err) => eprintln!("warning: refresh failed: {err:#}"),
         }
         polls += 1;
         if count.is_some_and(|count| polls >= count) {
@@ -452,15 +623,80 @@ pub fn watch(context: &Context, interval: u64, count: Option<u64>) -> eyre::Resu
     }
 }
 
-pub fn worktree(context: &Context, revision: Option<u32>) -> eyre::Result<()> {
-    let review = context.load()?;
+pub fn worktree(context: &Context, revision: Option<&RevisionReference>) -> eyre::Result<()> {
+    let Shown { review, recorded } = context.load_shown(revision)?;
     let history = review.history()?;
-    let view = pick_view(context, &history, revision)?;
+    let view = pick_view(context, &review, &history, revision, recorded.as_ref())?;
     let record = view.record().ok_or_eyre("revision has no record")?;
     let path = review.worktree(record)?;
     if context.json {
-        return print_json(&serde_json::json!({ "revision": view.number(), "path": path }));
+        return print_json(&serde_json::json!({
+            "revision": render::tagged(review.key(), view.number()),
+            "path": path,
+        }));
     }
     println!("{}", path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+
+    /// Runs git in `dir`, isolated from the user's configuration.
+    fn git(dir: &Path, args: &[&str]) -> eyre::Result<()> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()?;
+        eyre::ensure!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    /// A command shows the revision it recorded, which its capture's subject describes, even
+    /// when another process recorded a newer one before the command read the history.
+    #[test]
+    fn a_command_shows_the_revision_it_recorded() -> eyre::Result<()> {
+        let repo = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        git(repo.path(), &["init", "--quiet", "--initial-branch=main"])?;
+        std::fs::write(repo.path().join("a.rs"), "fn a() {}\n")?;
+        git(repo.path(), &["add", "--all"])?;
+        git(repo.path(), &["commit", "--quiet", "-m", "base"])?;
+        std::fs::write(repo.path().join("a.rs"), "fn a() { first(); }\n")?;
+        let review = Review::open_checkout(data.path(), Repo::discover(repo.path())?)?;
+        let recorded = review.refresh()?;
+
+        // Another process records the next edit.
+        std::fs::write(repo.path().join("a.rs"), "fn a() { second(); }\n")?;
+        let newer = review.refresh()?;
+        assert_ne!(newer.number, recorded.number);
+
+        let context = Context {
+            data_dir: data.path().to_path_buf(),
+            repo_dir: repo.path().to_path_buf(),
+            review: None,
+            named: false,
+            json: false,
+            painter: Painter { color: false },
+            policy: ReviewPolicy::MARKS_ONLY,
+        };
+        let history = review.history()?;
+        let view = pick_view(&context, &review, &history, None, Some(&recorded))?;
+        assert_eq!(view.number(), recorded.number);
+        Ok(())
+    }
 }

@@ -3,6 +3,7 @@
 mod app;
 mod commands;
 mod config;
+mod reference;
 mod render;
 
 use std::path::PathBuf;
@@ -30,10 +31,8 @@ struct Cli {
 pub struct AppOptions {
     /// A pull request number or URL, or a `base..head` range.
     ///
-    /// Without one (and without --worktree), reopens the review last opened on this branch, or
-    /// else reviews the branch's open pull request, or else, when the branch has uncommitted
-    /// changes, the working tree against the default branch, or else
-    /// `<default branch>..<branch>`.
+    /// Without one (and without --worktree), reviews this checkout: whatever its working tree
+    /// holds, on whatever branch, against the default branch.
     #[arg(conflicts_with_all = ["demo", "demo_revision"])]
     target: Option<String>,
     /// Review the working tree, including uncommitted and untracked files, against a ref.
@@ -46,7 +45,7 @@ pub struct AppOptions {
 /// Options shared by every command.
 #[derive(Debug, Clone, clap::Args)]
 pub struct GlobalOptions {
-    /// The review to act on; defaults to the review last opened for this repository and branch.
+    /// The review to act on; defaults to this checkout's review.
     #[arg(long, global = true)]
     review: Option<String>,
     /// Print machine-readable JSON instead of text.
@@ -107,22 +106,28 @@ enum Command {
     Open {
         /// A pull request number or URL, or a `base..head` range.
         ///
-        /// Without one (and without --worktree), reopens the review last opened on this branch,
-        /// or else reviews the branch's open pull request, or else, when the branch has
-        /// uncommitted changes, the working tree against the default branch, or else
-        /// `<default branch>..<branch>`.
+        /// Without one (and without --worktree), reviews this checkout: whatever its working
+        /// tree holds, on whatever branch, against the default branch.
         target: Option<String>,
         /// Review the working tree, including uncommitted and untracked files, against a ref.
         #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "HEAD", conflicts_with = "target")]
         worktree: Option<String>,
     },
     /// Show counts per file and in total.
+    ///
+    /// On this checkout's review, records what the checkout holds first, as `cr show` does.
     Status {
-        /// The revision; defaults to the current (last) one.
-        #[arg(long)]
-        revision: Option<u32>,
+        /// The revision, `3` or `3@<tag>` as `cr show` prints it; defaults to the current (last)
+        /// one.
+        #[arg(long, value_name = "N[@TAG]")]
+        revision: Option<commands::RevisionReference>,
     },
     /// Render the changes, step by step.
+    ///
+    /// On this checkout's review, records what the checkout holds first, so that the units
+    /// shown can be marked.
+    /// Unit IDs print qualified with the review's tag, `u1-0000@3fa2b1c0`, and the revision as
+    /// `1@3fa2b1c0`.
     Show {
         /// Only units that still need review.
         #[arg(long)]
@@ -136,14 +141,21 @@ enum Command {
         /// Expand formatting-only, moved and noise units instead of collapsing them.
         #[arg(long)]
         expand: bool,
-        /// The revision; defaults to the current (last) one.
-        #[arg(long)]
-        revision: Option<u32>,
+        /// The revision, `3` or `3@<tag>` as `cr show` prints it; defaults to the current (last)
+        /// one.
+        #[arg(long, value_name = "N[@TAG]")]
+        revision: Option<commands::RevisionReference>,
     },
     /// Set the review state of units, or of the units a plain move covers.
+    ///
+    /// Every mark names its review: unit and move IDs as `cr show` prints them, with the
+    /// review's tag (`u3-0007@3fa2b1c0`), and marks of files and categories with the revision
+    /// shown (`--revision 3@3fa2b1c0`).
+    /// Bare IDs and revisions are taken only when --review names the review; an ID or revision
+    /// of another review is refused.
     Mark {
-        /// Unit IDs (`u3-0007`) or move IDs (`m3-0001`), followed by the verdict: seen, accepted,
-        /// flagged or unseen.
+        /// Unit IDs (`u3-0007@<tag>`) or move IDs (`m3-0001@<tag>`), followed by the verdict:
+        /// seen, accepted, flagged or unseen.
         #[arg(required = true, num_args = 1..)]
         args: Vec<String>,
         /// Mark every unit of this category in the current revision instead.
@@ -153,10 +165,14 @@ enum Command {
         /// revision instead; repeatable.
         #[arg(long = "file", value_name = "PATH")]
         files: Vec<String>,
+        /// The revision the marks of --category or --file are for, `3@<tag>` as `cr show`
+        /// prints it; refused when it is not the current one.
+        #[arg(long, value_name = "N[@TAG]")]
+        revision: Option<commands::RevisionReference>,
     },
     /// Attach a note to a unit.
     Note {
-        /// The unit ID.
+        /// The unit ID, `u3-0007@<tag>` as `cr show` prints it.
         unit: String,
         /// The note text.
         #[arg(required = true, num_args = 1..)]
@@ -167,9 +183,10 @@ enum Command {
         /// The output format.
         #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
         format: ExportFormat,
-        /// The revision; defaults to the current (last) one.
-        #[arg(long)]
-        revision: Option<u32>,
+        /// The revision, `3` or `3@<tag>` as `cr show` prints it; defaults to the current (last)
+        /// one.
+        #[arg(long, value_name = "N[@TAG]")]
+        revision: Option<commands::RevisionReference>,
     },
     /// Agent-written walkthroughs.
     Walkthrough {
@@ -187,9 +204,10 @@ enum Command {
     },
     /// Print the path of a detached worktree at a revision's head, for browsing.
     Worktree {
-        /// The revision; defaults to the current (last) one.
-        #[arg(long)]
-        revision: Option<u32>,
+        /// The revision, `3` or `3@<tag>` as `cr show` prints it; defaults to the current (last)
+        /// one.
+        #[arg(long, value_name = "N[@TAG]")]
+        revision: Option<commands::RevisionReference>,
     },
 }
 
@@ -213,9 +231,10 @@ enum WalkthroughCommand {
     },
     /// Show the walkthrough's steps for the current revision.
     Show {
-        /// The revision; defaults to the current (last) one.
-        #[arg(long)]
-        revision: Option<u32>,
+        /// The revision, `3` or `3@<tag>` as `cr show` prints it; defaults to the current (last)
+        /// one.
+        #[arg(long, value_name = "N[@TAG]")]
+        revision: Option<commands::RevisionReference>,
     },
 }
 
@@ -231,7 +250,7 @@ fn main() -> eyre::Result<()> {
         Command::Open { target, worktree } => {
             commands::open(&context, target.as_deref(), worktree.as_deref())
         }
-        Command::Status { revision } => commands::status(&context, revision),
+        Command::Status { revision } => commands::status(&context, revision.as_ref()),
         Command::Show {
             unreviewed,
             step,
@@ -252,16 +271,29 @@ fn main() -> eyre::Result<()> {
             args,
             category,
             files,
-        } => commands::mark(&context, &args, category, &files),
+            revision,
+        } => commands::mark(
+            &context,
+            &commands::MarkOptions {
+                args: &args,
+                category,
+                files: &files,
+                revision: revision.as_ref(),
+            },
+        ),
         Command::Note { unit, text } => commands::note(&context, &unit, &text.join(" ")),
-        Command::Export { format, revision } => commands::export(&context, format, revision),
+        Command::Export { format, revision } => {
+            commands::export(&context, format, revision.as_ref())
+        }
         Command::Walkthrough { command } => match command {
             WalkthroughCommand::Prompt => commands::walkthrough_prompt(&context),
             WalkthroughCommand::Import { file } => commands::walkthrough_import(&context, &file),
-            WalkthroughCommand::Show { revision } => commands::walkthrough_show(&context, revision),
+            WalkthroughCommand::Show { revision } => {
+                commands::walkthrough_show(&context, revision.as_ref())
+            }
         },
         Command::Watch { interval, count } => commands::watch(&context, interval, count),
-        Command::Worktree { revision } => commands::worktree(&context, revision),
+        Command::Worktree { revision } => commands::worktree(&context, revision.as_ref()),
     }
 }
 

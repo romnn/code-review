@@ -1345,9 +1345,14 @@ fn interdiff_rows(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId
     };
     let since = interdiff.reviewed.revision();
     if !interdiff.base.changed && !interdiff.head.changed {
+        let why = if interdiff.base_file_changed {
+            "the code around it changed in the base"
+        } else {
+            "it changed in between"
+        };
         pusher.push(
             RowKind::Interdiff,
-            format!("same as reviewed in revision {since}, but it changed in between"),
+            format!("same as reviewed in revision {since}, but {why}"),
         );
     }
     for (title, side) in [

@@ -56,8 +56,7 @@ pub fn sync_label(
             0,
         ));
         if let Some(record) = snapshot.view().and_then(|view| view.record()) {
-            // Seven digits, as git abbreviates a commit.
-            let head = record.head.as_str().get(..7).unwrap_or_default();
+            let head = crate::model::abbreviated(&record.head);
             parts.push(part(Piece::new(head, palette.faint), 3));
         }
         if let Some(newer) = snapshot.newer() {
@@ -77,12 +76,33 @@ pub fn sync_label(
         parts.push(part(Piece::new(activity, palette.dim), 0));
     } else if model.sync.failing(now) {
         parts.push(part(Piece::new("sync failed", palette.error), 0));
-    } else if model.following() {
-        // A review that follows the working tree is as fresh as the disk.
-        parts.push(part(Piece::new("live", palette.faint), 2));
+    } else if let Some(live) = model.live_state() {
+        // A review that follows the working tree is as fresh as the disk, unless something
+        // keeps it from updating.
+        parts.push(match (live.replaced, live.busy, live.updating) {
+            (true, ..) => part(Piece::new("checkout replaced", palette.error), 0),
+            (false, Some(busy), _) => part(Piece::new(busy_label(busy), palette.flagged), 0),
+            (false, None, true) => part(Piece::new("updating…", palette.accent), 0),
+            (false, None, false) => part(Piece::new("live", palette.faint), 2),
+        });
     } else if let Some(synced) = &model.sync.synced {
         parts.push(part(
             Piece::new(format!("synced {}", ago(synced, now)), palette.faint),
+            2,
+        ));
+    }
+    // Which grant lets tools run on the checkout's code, which is never trusted by default.
+    if model.is_checkout() {
+        parts.push(part(
+            match model.grant {
+                Some(crate::model::Grant::Snapshot) => {
+                    Piece::new("trusted: this snapshot", palette.flagged)
+                }
+                Some(crate::model::Grant::Checkout) => {
+                    Piece::new("trusted: checkout", palette.flagged)
+                }
+                None => Piece::new("untrusted", palette.faint),
+            },
             2,
         ));
     }
@@ -114,6 +134,19 @@ pub fn sync_label(
         pieces.push(piece);
     }
     pieces
+}
+
+/// What git is busy with, short enough for the bar: `git: rebasing`.
+fn busy_label(busy: review_core::Busy) -> &'static str {
+    match busy {
+        review_core::Busy::IndexLocked => "git: index locked",
+        review_core::Busy::Merge => "git: merging",
+        review_core::Busy::CherryPick => "git: cherry-picking",
+        review_core::Busy::Revert => "git: reverting",
+        review_core::Busy::Rebase => "git: rebasing",
+        review_core::Busy::Bisect => "git: bisecting",
+        review_core::Busy::Unmerged => "git: unmerged paths",
+    }
 }
 
 /// The spinner's frame at `now`, which turns every tenth of a second.
@@ -150,7 +183,8 @@ fn step_label(model: &Model, step: SyncStep) -> String {
 pub fn hint_available(model: &Model, action: &str) -> bool {
     match action {
         "NextFile" => model.adjacent_file(true).is_some() || model.adjacent_file(false).is_some(),
-        "GoToDefinition" => model.trusted,
+        // The checkout's review asks for trust when the key is pressed.
+        "GoToDefinition" => model.trusted || model.is_checkout(),
         "ToggleApprove" | "ToggleFlag" => match model.mode {
             Mode::Buffer => model.buffer_hunk().is_some(),
             Mode::Diff => !model.rows.hunks.is_empty(),
@@ -205,6 +239,12 @@ pub fn bar_hints(
             hint.available = true;
         }
     }
+    // The trust question's answers belong to it alone, and it has nothing to scroll.
+    let asking = model.overlay == Some(crate::model::Overlay::Trust);
+    hints.retain(|hint| {
+        let answer = matches!(hint.action, "TrustSnapshot" | "TrustCheckout");
+        answer == asking || hint.action == "CloseOverlay"
+    });
     // In scroll mode, `j` and `k` scroll a line.
     if area == Area::Diff && model.scroll_mode {
         for hint in hints.iter_mut().filter(|hint| hint.action == "NextHunk") {

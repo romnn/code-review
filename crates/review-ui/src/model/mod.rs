@@ -55,6 +55,7 @@ mod marks;
 pub mod overview;
 pub mod picker;
 pub mod present;
+mod pulls;
 mod quit;
 mod search;
 mod select;
@@ -68,6 +69,8 @@ pub use actions::Action;
 use effects::{Because, Highlighted, Outcome, Subject, TextsRead};
 pub use effects::{Completion, Driver, Effect, Job, SheetStep, Updated};
 pub use fields::{Field, FieldState};
+pub use live::{Following, abbreviated, branch_and_base};
+pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
 pub use select::{TextPress, list_of};
 pub use sync::{Sync, SyncStep};
@@ -144,9 +147,22 @@ pub struct Loaded {
     pub review: Review,
     /// Its revisions.
     pub history: History,
-    /// How the review was found, such as the pull request of the current branch, which the
+    /// How the review was found, such as following the checkout's working tree, which the
     /// status line says when the review opens.
     pub found: Option<String>,
+    /// For a review of the checkout, the session it opened under and what its opening capture
+    /// saw; `None` for any other review, which starts a session of its own when it follows the
+    /// working tree.
+    pub following: Option<Following>,
+}
+
+/// The grant of trust that lets tools run on the checkout's snapshot on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grant {
+    /// A grant for exactly this snapshot, which ends when the code changes.
+    Snapshot,
+    /// A grant for the whole checkout, until it is revoked.
+    Checkout,
 }
 
 /// Opens the review and loads its history, off the UI thread.
@@ -179,6 +195,8 @@ pub enum Overlay {
     Help,
     /// The pull request overview.
     Overview,
+    /// The question whether to trust the checkout's code, before a tool runs it.
+    Trust,
     /// The file finder or the content search; see [`Model::picker`].
     Picker,
     /// The settings list; see the `settings` module.
@@ -244,8 +262,38 @@ pub struct Filter {
     pub editing: bool,
 }
 
-/// Running language servers by program and worktree.
-type Servers = Arc<Mutex<HashMap<(&'static str, PathBuf), LanguageServer>>>;
+/// Which language server: its program and the worktree it runs in.
+type ServerKey = (&'static str, PathBuf);
+
+/// Running language servers by program and worktree; the map's own lock is held only to find,
+/// launch or stop them, never across a handshake or a request.
+type Servers = Arc<Mutex<HashMap<ServerKey, Running>>>;
+
+/// A running language server, locked while a lookup uses it, with what stops it without that
+/// lock.
+///
+/// It stops as it leaves the map, however it leaves: a lookup still holding the server sees
+/// its wait fail rather than keeping it running unlisted, where no revocation finds it.
+struct Running {
+    server: Arc<Mutex<LanguageServer>>,
+    stopper: crate::lsp::Stopper,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stopper.stop();
+    }
+}
+
+impl Running {
+    /// `server`, with its stopper.
+    fn new(server: LanguageServer) -> Self {
+        Self {
+            stopper: server.stopper(),
+            server: Arc::new(Mutex::new(server)),
+        }
+    }
+}
 
 /// File text and highlights by blob, filled in the background; content never changes under an
 /// object ID, so these never go stale.
@@ -453,8 +501,17 @@ pub struct Model {
     highlights: highlights::Highlights,
     /// Whether language servers may run on the reviewed code; see [`Review::trust`].
     pub trusted: bool,
-    /// Whether trusting awaits a confirming second press.
-    trust_pending: bool,
+    /// For a review of the checkout, the grant that lets tools run on the snapshot on screen,
+    /// if one does.
+    pub grant: Option<Grant>,
+    /// The head of the snapshot a confirming second press would trust, while trusting awaits
+    /// one; another snapshot showing meanwhile drops it.
+    trust_pending: Option<ObjectId>,
+    /// Whether go to definition waits for the trust it asked for.
+    trust_resumes: bool,
+    /// The decisions on trust made in the window, counted, so a grant read in the background
+    /// before the latest decision is read again rather than shown.
+    trust_decisions: u64,
     /// The text selection in the diff or the buffer.
     pub selection: Option<Selection>,
     /// The pane a selection is being dragged in.
@@ -541,7 +598,10 @@ impl Model {
             highlighting: 0,
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
             trusted: false,
-            trust_pending: false,
+            grant: None,
+            trust_pending: None,
+            trust_resumes: false,
+            trust_decisions: 0,
             selection: None,
             dragging: None,
             settings,
@@ -571,6 +631,9 @@ impl Model {
                 self.info = opened.info;
                 self.sync.synced = opened.synced;
                 self.trusted = opened.trusted;
+                if let Some(granted) = opened.granted {
+                    self.set_grant(granted.grant);
+                }
                 self.review = Some(Arc::new(opened.review));
                 self.blobs.texts.extend(opened.texts);
                 self.revisions = overview::summarize(&opened.history, self.settings.policy);
@@ -587,11 +650,12 @@ impl Model {
                 self.phase = Phase::Ready;
                 self.refresh_tree();
                 self.restore_view_state(opened.view_state);
-                let (status, failed) = opening_status(
-                    &self.summary(),
-                    opened.found.as_deref(),
-                    &self.settings.problems,
-                );
+                let found = match &opened.following {
+                    Some(following) => following.describe(),
+                    None => opened.found,
+                };
+                let (status, failed) =
+                    opening_status(&self.summary(), found.as_deref(), &self.settings.problems);
                 if failed {
                     self.fail(status);
                 } else {
@@ -599,7 +663,7 @@ impl Model {
                 }
                 self.request_syntax();
                 self.start_clock();
-                self.start_live();
+                self.start_live(opened.following);
             }
             Err(err) => {
                 self.effect(Effect::Log(err.clone()));
@@ -636,9 +700,13 @@ impl Model {
             || matches!(self.phase, Phase::Loading(_))
     }
 
-    /// The window title: the pull request or range under review.
+    /// The window title: the pull request or range under review, or for the checkout, its
+    /// directory with the branch and its pull request, such as `code-review · feat/x #12`.
     #[must_use]
     pub fn title(&self) -> String {
+        if let Some(title) = self.checkout_title() {
+            return title;
+        }
         match &self.info {
             Some(review_core::ReviewInfo::PullRequest(pr)) => {
                 format!("#{} {}", pr.number, pr.title)
@@ -648,6 +716,94 @@ impl Model {
                 |review| format!("Review of {}", review.key()),
             ),
         }
+    }
+
+    /// The title of a review of the checkout, from its directory and what the capture on
+    /// screen was of.
+    fn checkout_title(&self) -> Option<String> {
+        let review = self.review.as_ref()?;
+        if !matches!(review.target(), review_core::ReviewTarget::Checkout { .. }) {
+            return None;
+        }
+        let directory = review
+            .repo()
+            .work_tree()
+            .and_then(|tree| tree.file_name())
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let Some(subject) = self.live.as_ref().and_then(|live| live.subject()) else {
+            return Some(directory);
+        };
+        let head = match (&subject.branch, &subject.head) {
+            (Some(branch), _) => branch.clone(),
+            (None, Some(head)) => format!("detached {}", live::abbreviated(head)),
+            (None, None) => "detached".to_owned(),
+        };
+        // The pull request the capture on screen resolved its base with.
+        let number = subject
+            .pull_request
+            .as_ref()
+            .map_or_else(String::new, |pull_request| {
+                format!(" #{}", pull_request.number)
+            });
+        Some(format!("{directory} · {head}{number}"))
+    }
+
+    /// Takes in the grant that applies to the checkout's snapshot on screen: tools may run on
+    /// it exactly while one does.
+    fn set_grant(&mut self, grant: Option<Grant>) {
+        self.grant = grant;
+        self.set_trusted(grant.is_some());
+    }
+
+    /// Takes in whether tools may run on the snapshot on screen: once they may not, as when
+    /// another window revoked trust, the language servers stop, as a revocation here stops
+    /// them.
+    fn set_trusted(&mut self, trusted: bool) {
+        if self.trusted && !trusted {
+            // Each server stops as it leaves the map.
+            self.servers.lock().clear();
+        }
+        self.trusted = trusted;
+    }
+
+    /// For a review trusted one snapshot at a time, reads again whether the snapshot on screen
+    /// is trusted, as when another one shows.
+    fn read_snapshot_trust(&mut self) {
+        // A confirmation asked for on another snapshot does not carry over.
+        self.trust_pending = None;
+        let (Some(review), Some(snapshot)) = (&self.review, &self.snapshot) else {
+            return;
+        };
+        if review.trusted_per_snapshot() {
+            let trusted = snapshot_trusted(review, &snapshot.history, snapshot.revision);
+            self.set_trusted(trusted);
+        }
+    }
+
+    /// Whether the review is of the checkout, whatever it holds.
+    #[must_use]
+    pub fn is_checkout(&self) -> bool {
+        self.review.as_ref().is_some_and(|review| {
+            matches!(review.target(), review_core::ReviewTarget::Checkout { .. })
+        })
+    }
+
+    /// For a review that follows the working tree, what the capture on screen was of, whether
+    /// it may miss a change, and what keeps it from updating; see [`LiveState`].
+    #[must_use]
+    pub fn live_state(&self) -> Option<LiveState<'_>> {
+        let live = self.live.as_ref()?;
+        Some(LiveState {
+            subject: live.subject(),
+            pull_request: live.pulls.current(),
+            lookup: live.pulls.unavailable(),
+            looking_up: live.pulls.running(),
+            lookup_failed: live.pulls.failed(),
+            filtered: live.filtered(),
+            updating: live.updating(),
+            busy: live.busy(),
+            replaced: live.replaced(),
+        })
     }
 
     /// One line on where the review stands, with how many of the reviewed hunks were approved
@@ -1227,6 +1383,30 @@ fn highlight_sides(
     }
 }
 
+/// What a review that follows the working tree shows besides its diff.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveState<'a> {
+    /// What the capture on screen was of: the branch, `HEAD`, the base, and the pull request
+    /// it resolved the base from; `None` for a review that does not observe one.
+    pub subject: Option<&'a review_core::Subject>,
+    /// The branch's pull request as last looked up, if it was.
+    pub pull_request: Option<&'a Found>,
+    /// Why the pull request is not looked up, if it is not.
+    pub lookup: Option<&'a str>,
+    /// Whether a lookup of the pull request runs.
+    pub looking_up: bool,
+    /// Why the last lookup of the pull request failed, if it did.
+    pub lookup_failed: Option<&'a str>,
+    /// The paths the capture kept at their staged version, under a filter driver.
+    pub filtered: &'a [String],
+    /// Whether the view may miss a change and takes no marks until it is captured again.
+    pub updating: bool,
+    /// What git is busy with in the checkout, which keeps the view on screen.
+    pub busy: Option<review_core::Busy>,
+    /// Whether the checkout is another clone now, so nothing is captured any more.
+    pub replaced: bool,
+}
+
 /// What opening a review produced.
 pub(super) struct Opened {
     review: Review,
@@ -1236,6 +1416,10 @@ pub(super) struct Opened {
     ignored: Option<String>,
     found: Option<String>,
     trusted: bool,
+    /// For a review of the checkout, the grant that applies to its opening capture.
+    granted: Option<live::Granted>,
+    /// For a review of the checkout, what its opening capture saw.
+    following: Option<live::Opening>,
     info: Option<review_core::ReviewInfo>,
     /// When the review last synced with its target.
     synced: Option<review_core::Synced>,
@@ -1245,6 +1429,21 @@ pub(super) struct Opened {
     texts: HashMap<ObjectId, Arc<rows::FullText>>,
 }
 
+/// Whether the reviewer trusts the snapshot of `history`'s revision `revision`, the head it
+/// reviews, for a review trusted one snapshot at a time; see [`Review::trust_for`].
+pub(super) fn snapshot_trusted(
+    review: &Review,
+    history: &History,
+    revision: RevisionNumber,
+) -> bool {
+    let tree = history
+        .view(revision)
+        .ok()
+        .and_then(|view| view.record().map(|record| record.head.clone()))
+        .and_then(|head| review.repo().tree_of(&head).ok());
+    tree.is_some_and(|tree| review.trust_for(&tree).is_ok_and(|trust| trust.trusted))
+}
+
 /// Opens the review with `opener` and reads what the window shows first; runs in the
 /// background.
 fn open(opener: Opener) -> Result<Opened, String> {
@@ -1252,11 +1451,23 @@ fn open(opener: Opener) -> Result<Opened, String> {
         review,
         history,
         found,
+        following,
     } = opener()?;
-    let trust = review.trust().map_err(|err| err.to_string())?;
+    let revision = history.current().ok_or("the review has no revision yet")?;
+    let trusted = if review.trusted_per_snapshot() {
+        snapshot_trusted(&review, &history, revision)
+    } else {
+        review.trust().map_err(|err| err.to_string())?.trusted
+    };
+    let (following, granted) = match following {
+        Some(following) => {
+            let (opening, granted) = live::Opening::read(&review, &history, following);
+            (Some(opening), granted)
+        }
+        None => (None, None),
+    };
     let info = review.info().ok().flatten();
     let synced = review.synced().ok().flatten();
-    let revision = history.current().ok_or("the review has no revision yet")?;
     let history = Arc::new(history);
     let texts = read_texts(&review, &history, revision);
     let (view_state, ignored) = match crate::folders::load(&review) {
@@ -1268,7 +1479,9 @@ fn open(opener: Opener) -> Result<Opened, String> {
         view_state,
         ignored,
         found,
-        trusted: trust.trusted,
+        trusted,
+        granted,
+        following,
         info,
         synced,
         history,

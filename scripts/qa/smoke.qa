@@ -606,7 +606,7 @@ expect "collapsed":\["src/generated"\]
 launch --demo-revision 2
 expect "revision":"2"
 expect "collapsed":\["src/generated"\]
-expect "trusted":true
+expect "trusted":false
 file src/engine.rs
 find changed since
 state

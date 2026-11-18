@@ -34,7 +34,8 @@
 //!
 //! [review]
 //! auto_approve_formatting = true  # proven formatting-only hunks count as approved, unmarked
-//! live = true       # a review of the working tree follows it as it changes
+//! live = true       # a review of the working tree follows it as it changes; without it, r
+//!                   # captures it again
 //!
 //! [lsp]
 //! enabled = true    # false never starts a language server; `g d` then says it is off

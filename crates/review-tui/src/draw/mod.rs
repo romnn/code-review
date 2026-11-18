@@ -30,6 +30,7 @@ pub mod painter;
 mod picker;
 mod settings;
 mod sheet;
+mod trust;
 
 pub(crate) use files::fit_cells;
 
@@ -136,6 +137,7 @@ pub fn frame(buffer: &mut Buffer, colors: Colors, model: &Model, scene: Scene<'_
         }
         Some(Overlay::Picker) => picker::draw(&mut painter, model, &palette, panes, editor),
         Some(Overlay::Settings) => settings::draw(&mut painter, model, &palette, panes, editor),
+        Some(Overlay::Trust) => trust::draw(&mut painter, model, &palette, panes.area),
         None => {}
     }
     painter.finish();

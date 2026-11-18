@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 use crate::history::History;
-use crate::ids::{ReviewKey, RevisionNumber, UnitId, UnitIndex};
+use crate::ids::{ReviewKey, ReviewTag, RevisionNumber, Tagged, UnitId, UnitIndex};
 use crate::standing::Standing;
 use crate::store::events::{StoredStep, StoredUnit, WalkthroughEvent};
 use crate::view::RevisionView;
@@ -41,6 +41,9 @@ pub enum WalkthroughError {
     /// A unit ID is malformed.
     #[error("invalid unit id {0:?}")]
     InvalidUnit(String),
+    /// A unit ID is qualified with the tag of another review (see [`crate::ReviewTag`]).
+    #[error("unit {0} belongs to another review")]
+    OtherReview(String),
     /// A unit ID names another revision than the walkthrough's.
     #[error("unit {unit} is not from revision {revision}")]
     OtherRevision {
@@ -111,9 +114,22 @@ pub(crate) fn validate(
     for step in file.steps {
         let mut units = Vec::with_capacity(step.units.len());
         for text in step.units {
-            let id: UnitId = text
+            // An ID may name its review as `cr show` prints it, `u1-0000@<tag>`.
+            let (bare, tag) = match text.split_once('@') {
+                Some((bare, tag)) => (bare, Some(tag)),
+                None => (text.as_str(), None),
+            };
+            let id: UnitId = bare
                 .parse()
                 .map_err(|_| WalkthroughError::InvalidUnit(text.clone()))?;
+            if let Some(tag) = tag {
+                let tag: ReviewTag = tag
+                    .parse()
+                    .map_err(|_| WalkthroughError::InvalidUnit(text.clone()))?;
+                if tag != key.tag() {
+                    return Err(WalkthroughError::OtherReview(text).into());
+                }
+            }
             if id.revision() != revision {
                 return Err(WalkthroughError::OtherRevision {
                     unit: text,
@@ -581,6 +597,7 @@ pub fn prompt(view: &RevisionView<'_>, key: &ReviewKey) -> String {
 
     let mut prompt = String::new();
     let revision = view.number();
+    let tag = key.tag();
     // Writing to a `String` cannot fail.
     writeln!(
         prompt,
@@ -599,7 +616,7 @@ pub fn prompt(view: &RevisionView<'_>, key: &ReviewKey) -> String {
         "review": key.as_str(),
         "revision": revision.get(),
         "title": "<one-line title>",
-        "steps": [{"title": "<step title>", "why": "<why it matters>", "units": [format!("u{revision}-0000")]}],
+        "steps": [{"title": "<step title>", "why": "<why it matters>", "units": [format!("u{revision}-0000@{tag}")]}],
     });
     writedoc!(
         prompt,
@@ -631,6 +648,7 @@ pub fn prompt(view: &RevisionView<'_>, key: &ReviewKey) -> String {
         } else {
             format!(" [{}]", tags.join(", "))
         };
+        let id = Tagged { id, tag };
         writeln!(
             prompt,
             "{id}  {}:{}-{}{tags}  {excerpt}",

@@ -119,6 +119,45 @@ fn renamed_file_keeps_reviewed_chunks() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A chunk reviewed in a renamed file does not carry to a revision that makes the same edit
+/// without the rename: that revision has no rename unit to review the path change with, so
+/// the edit at its other path is new.
+#[test]
+fn a_chunk_reviewed_in_a_rename_reopens_without_it() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    let base = rust_functions(20);
+    repo.write("internal/policy.rs", &base)?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    let edited = base.replace("let value = 3;", "let value = 30;");
+    std::fs::remove_file(repo.path().join("internal/policy.rs"))?;
+    repo.write("public/policy.rs", &edited)?;
+    repo.commit("rename and edit")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Seen)?;
+
+    // The same edit, at the path the file had.
+    std::fs::remove_file(repo.path().join("public/policy.rs"))?;
+    repo.write("internal/policy.rs", &edited)?;
+    repo.commit("no rename")?;
+    let second = refresh(&review)?;
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    let chunks: Vec<_> = units
+        .iter()
+        .filter(|unit| unit.unit.chunk().is_some())
+        .collect();
+    assert_that!(chunks.len(), eq(1));
+    assert!(
+        chunks
+            .iter()
+            .all(|unit| !unit.state.is_reviewed() && unit.path == "internal/policy.rs"),
+        "{chunks:?}"
+    );
+    Ok(())
+}
+
 /// Lockfiles and `@generated` files are noise, but still need a mark.
 #[test]
 fn lockfiles_and_generated_files_are_noise() -> eyre::Result<()> {
@@ -262,6 +301,32 @@ fn capture_sees_racily_clean_edits() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A directory of tracked files replaced by a symbolic link is captured as the link, its files
+/// removed, though git reaches them only through the link now.
+#[cfg(unix)]
+#[test]
+fn a_directory_replaced_by_a_link_is_captured() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write("dir/file", "one\n")?;
+    repo.write("other/file", "two\n")?;
+    repo.commit("base")?;
+    std::fs::remove_dir_all(repo.path().join("dir"))?;
+    std::os::unix::fs::symlink("other", repo.path().join("dir"))?;
+
+    let capture = Repo::discover(repo.path())?.capture_worktree()?;
+    let entries = repo.git(&["ls-tree", "-r", capture.commit.as_str()])?;
+    let entries: Vec<&str> = entries.lines().collect();
+    assert_that!(
+        entries,
+        elements_are![
+            starts_with("120000 blob"),
+            all!(starts_with("100644 blob"), ends_with("\tother/file"))
+        ]
+    );
+    assert_that!(entries[0], ends_with("\tdir"));
+    Ok(())
+}
+
 /// A read-only index, which git can still read and replace, does not stop a capture.
 #[cfg(unix)]
 #[test]
@@ -278,6 +343,102 @@ fn capture_reads_a_read_only_index() -> eyre::Result<()> {
     let git = Repo::discover(repo.path())?;
     assert_that!(git.has_uncommitted_changes()?, eq(true));
     git.capture_worktree()?;
+    Ok(())
+}
+
+/// A configured filter driver never runs while a capture reads the working tree or a revision
+/// is checked out for browsing, nor does a hook, and a file the driver would filter keeps its
+/// staged entry.
+///
+/// While the working tree is captured, the `.gitattributes` that selects the driver is deleted
+/// on disk, so only the index's and `HEAD`'s attributes still name it; the revision checked out
+/// has it again, so the checkout would select the driver.
+#[cfg(unix)]
+#[test]
+fn filters_never_run_and_filtered_files_keep_their_staged_entry() -> eyre::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = TestRepo::new()?;
+    repo.write(".gitattributes", "*.dat filter=marker\n")?;
+    repo.write("data.dat", "staged\n")?;
+    repo.write("plain.txt", "one\n")?;
+    repo.commit("base")?;
+
+    // Configured only now, so committing the base ran nothing; any run leaves the marker.
+    let marker = repo.data_dir().join("filter-ran");
+    let command = format!("touch '{}'; cat", marker.display());
+    repo.git(&["config", "filter.marker.clean", &command])?;
+    repo.git(&["config", "filter.marker.smudge", &command])?;
+    repo.git(&["config", "filter.marker.required", "true"])?;
+
+    std::fs::remove_file(repo.path().join(".gitattributes"))?;
+    repo.write("data.dat", "edited\n")?;
+    repo.write("new.dat", "untracked\n")?;
+    repo.write("plain.txt", "two\n")?;
+
+    let git = Repo::discover(repo.path())?;
+    assert_that!(git.has_uncommitted_changes()?, eq(true));
+    let capture = git.capture_worktree()?;
+    assert_that!(
+        capture.filtered,
+        elements_are![eq("data.dat"), eq("new.dat")]
+    );
+    let commit = capture.commit.as_str();
+    // The filtered file keeps its staged bytes and the untracked one stays out, while the
+    // other changes are captured.
+    assert_that!(
+        repo.git(&["cat-file", "-p", &format!("{commit}:data.dat")])?,
+        eq("staged")
+    );
+    let captured = repo.git(&["ls-tree", "--name-only", commit])?;
+    assert_that!(
+        captured.lines().collect::<Vec<_>>(),
+        elements_are![eq(&"data.dat"), eq(&"plain.txt")]
+    );
+    assert_that!(
+        repo.git(&["cat-file", "-p", &format!("{commit}:plain.txt")])?,
+        eq("two")
+    );
+    assert!(!marker.exists(), "a capture ran the filter");
+
+    // Checking out a revision whose attributes select the driver, for browsing, runs no smudge
+    // filter either, nor the hook git runs whenever it writes an index, which checking out
+    // does.
+    repo.write(".gitattributes", "*.dat filter=marker\n")?;
+    let hook_marker = repo.data_dir().join("hook-ran");
+    let hook = repo.path().join(".git/hooks/post-index-change");
+    std::fs::create_dir_all(repo.path().join(".git/hooks"))?;
+    std::fs::write(
+        &hook,
+        indoc::formatdoc! {"
+            #!/bin/sh
+            touch '{}'
+        ", hook_marker.display()},
+    )?;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+    let review = Review::open(
+        repo.data_dir(),
+        git,
+        ReviewTarget::Worktree {
+            base: "HEAD".to_owned(),
+        },
+    )?;
+    review.refresh()?;
+    let history = review.history()?;
+    let revisions = history.revisions();
+    let record = revisions.last().ok_or_else(|| eyre::eyre!("no revision"))?;
+    let browsing = review.worktree(record)?;
+    assert_that!(
+        std::fs::read_to_string(browsing.join(".gitattributes"))?,
+        eq("*.dat filter=marker\n")
+    );
+    assert_that!(
+        std::fs::read_to_string(browsing.join("data.dat"))?,
+        eq("staged\n")
+    );
+    review.remove_worktree(record)?;
+    assert!(!marker.exists(), "a checkout ran the filter");
+    assert!(!hook_marker.exists(), "a capture or a checkout ran a hook");
     Ok(())
 }
 

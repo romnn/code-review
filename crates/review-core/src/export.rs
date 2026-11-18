@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::history::{UnitState, Verdict};
-use crate::ids::{RevisionNumber, UnitId};
+use crate::ids::{ReviewKey, RevisionNumber, Tagged, UnitId};
 use crate::view::{Location, NoteAttachment, RevisionView};
 
 /// Excerpts in exports are cut to this many characters.
@@ -16,8 +16,8 @@ const EXCERPT_CHARS: usize = 120;
 pub struct ExportItem {
     /// The item's one-based number.
     pub number: usize,
-    /// The unit.
-    pub unit: UnitId,
+    /// The unit, qualified with the review's tag so that it names its review on its own.
+    pub unit: Tagged<UnitId>,
     /// Where it is.
     pub location: Location,
     /// The verdict of a direct or inherited mark that still holds.
@@ -33,8 +33,8 @@ pub struct ExportItem {
 pub struct OutdatedNote {
     /// The file the note fell back to.
     pub path: String,
-    /// The unit the note was written on.
-    pub written_on: UnitId,
+    /// The unit the note was written on, qualified with the review's tag.
+    pub written_on: Tagged<UnitId>,
     /// The note text.
     pub text: String,
 }
@@ -54,7 +54,8 @@ pub struct Export {
 
 /// Collects the flagged, accepted and annotated units of `view`.
 #[must_use]
-pub fn export(view: &RevisionView<'_>, review: &str) -> Export {
+pub fn export(view: &RevisionView<'_>, review: &ReviewKey) -> Export {
+    let tag = review.tag();
     let mut notes: BTreeMap<UnitId, Vec<String>> = BTreeMap::new();
     let mut outdated_notes = Vec::new();
     for note in view.notes() {
@@ -62,7 +63,10 @@ pub fn export(view: &RevisionView<'_>, review: &str) -> Export {
             NoteAttachment::Unit { unit } => notes.entry(unit).or_default().push(note.text),
             NoteAttachment::File { path } => outdated_notes.push(OutdatedNote {
                 path,
-                written_on: note.written_on,
+                written_on: Tagged {
+                    id: note.written_on,
+                    tag,
+                },
                 text: note.text,
             }),
         }
@@ -81,7 +85,7 @@ pub fn export(view: &RevisionView<'_>, review: &str) -> Export {
             wanted.then(|| -> Option<ExportItem> {
                 Some(ExportItem {
                     number: 0,
-                    unit: id,
+                    unit: Tagged { id, tag },
                     location: view.location(id).ok()?,
                     verdict,
                     notes: unit_notes,
@@ -90,12 +94,12 @@ pub fn export(view: &RevisionView<'_>, review: &str) -> Export {
             })?
         })
         .collect();
-    items.sort_by_key(|item| (item.verdict != Some(Verdict::Flagged), item.unit));
+    items.sort_by_key(|item| (item.verdict != Some(Verdict::Flagged), item.unit.id));
     for (index, item) in items.iter_mut().enumerate() {
         item.number = index + 1;
     }
     Export {
-        review: review.to_owned(),
+        review: review.as_str().to_owned(),
         revision: view.number(),
         items,
         outdated_notes,

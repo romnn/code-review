@@ -107,8 +107,13 @@ actions! {
     ResetReview,
     /// Switches to a newer revision, or fetches one.
     Refresh,
-    /// Trusts the review after a confirming second press, or revokes trust.
+    /// Trusts the review after a confirming second press, or revokes trust; for the checkout,
+    /// asks which grant to make, or revokes the one that applies.
     ToggleTrust,
+    /// In the trust question, trusts exactly the snapshot on screen.
+    TrustSnapshot,
+    /// In the trust question, trusts the whole checkout until revoked.
+    TrustCheckout,
     /// Copies the selected hunk's first unit ID.
     YankUnitId,
     /// Moves the buffer cursor down a line.
@@ -275,6 +280,8 @@ impl Model {
             Action::ResetReview => self.review(MarkVerdict::Unseen),
             Action::Refresh => self.refresh(),
             Action::ToggleTrust => self.toggle_trust(),
+            Action::TrustSnapshot => self.grant_trust(super::Grant::Snapshot),
+            Action::TrustCheckout => self.grant_trust(super::Grant::Checkout),
             Action::YankUnitId => self.yank_unit_id(),
             Action::CursorDown => self.move_buffer_cursor_by(1),
             Action::CursorUp => self.move_buffer_cursor_by(-1),

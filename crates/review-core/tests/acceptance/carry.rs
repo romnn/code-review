@@ -3,7 +3,10 @@
 use color_eyre::eyre;
 use googletest::prelude::*;
 use indoc::{formatdoc, indoc};
-use review_core::{DiffLineKind, LineEnding, MarkVerdict, NoteAttachment, UnitState, Verdict};
+use review_core::{
+    DiffLineKind, LineEnding, MarkVerdict, NoteAttachment, Repo, Review, ReviewTarget, UnitState,
+    Verdict,
+};
 
 use crate::common::{TestRepo, find, mark_all, refresh, rust_functions, summaries};
 
@@ -11,8 +14,8 @@ fn is_reviewed(state: UnitState) -> bool {
     state.is_reviewed()
 }
 
-/// Marks everything, amends one chunk, rebases onto a newer base and force-updates the head:
-/// only the amended chunk is unreviewed, and it is changed since reviewed.
+/// Marks everything, amends one chunk, rebases onto a newer base that changed another file and
+/// force-updates the head: only the amended chunk is unreviewed, and it is changed since reviewed.
 #[test]
 fn force_push_carry_over() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
@@ -31,19 +34,13 @@ fn force_push_carry_over() -> eyre::Result<()> {
     let first = refresh(&review)?;
     mark_all(&review, first, MarkVerdict::Seen)?;
 
-    // The target branch moves on, and the head is rebased onto it with one chunk amended.
+    // The target branch moves on in another file, and the head is rebased onto it with one
+    // chunk amended.
     repo.switch("main")?;
-    let newer_base = formatdoc!(
-        "
-            fn top() {{}}
-
-            {base}"
-    );
-    repo.write("src/lib.rs", &newer_base)?;
     repo.write("README.md", "unrelated\n")?;
     repo.commit("newer base")?;
     repo.branch_at("feature", "main")?;
-    repo.write("src/lib.rs", &edit(&newer_base, "let value = 555;"))?;
+    repo.write("src/lib.rs", &edit(&base, "let value = 555;"))?;
     repo.commit("rebased and amended")?;
     let second = refresh(&review)?;
     assert_that!(second.get(), eq(2));
@@ -378,10 +375,10 @@ fn ambiguous_renames_reopen() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The control for [`ambiguous_renames_reopen`]: one file renamed by the target branch keeps its
-/// reviewed chunks.
+/// One file renamed by the target branch reopens its reviewed chunks even when the rename is
+/// unambiguous, and the interdiff says the code around them changed in the base.
 #[test]
-fn unambiguous_base_rename_keeps_review() -> eyre::Result<()> {
+fn base_rename_reopens() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
     let base = rust_functions(3);
     repo.write("x.rs", &base)?;
@@ -405,7 +402,18 @@ fn unambiguous_base_rename_keeps_review() -> eyre::Result<()> {
     let history = review.history()?;
     let units = summaries(&history, second)?;
     assert_that!(units.len(), eq(1));
-    assert!(is_reviewed(units[0].state), "{units:#?}");
+    assert!(
+        matches!(units[0].state, UnitState::ChangedSinceReviewed { .. }),
+        "{units:#?}"
+    );
+    // Both sides of the change are as reviewed; only the base file around it moved.
+    let interdiff = history
+        .view(second)?
+        .interdiff(units[0].id)?
+        .ok_or_else(|| eyre::eyre!("no interdiff"))?;
+    assert!(!interdiff.base.changed);
+    assert!(!interdiff.head.changed);
+    assert!(interdiff.base_file_changed);
     Ok(())
 }
 
@@ -413,21 +421,10 @@ fn unambiguous_base_rename_keeps_review() -> eyre::Result<()> {
 #[test]
 fn indistinguishable_repeated_edit_reopens() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
-    let block = indoc! {"
-        fn same() {
-            a();
-            b();
-            c();
-            d();
-            e();
-        }
-    "};
-    let base = format!("{}fn tail() {{}}\n", block.repeat(4));
+    let (base, edited) = repeated_edits();
     repo.write("src/lib.rs", &base)?;
     repo.commit("base")?;
     repo.branch_at("feature", "main")?;
-    let edited_block = block.replace("c();", "c(1);");
-    let edited = format!("{edited_block}{block}{edited_block}{block}fn tail() {{}}\n");
     repo.write("src/lib.rs", &edited)?;
     repo.commit("repeat an edit")?;
     let review = repo.review()?;
@@ -451,6 +448,269 @@ fn indistinguishable_repeated_edit_reopens() -> eyre::Result<()> {
         repeated.iter().all(|unit| !is_reviewed(unit.state)),
         "{repeated:#?}"
     );
+    Ok(())
+}
+
+/// Four copies of one block with the same edit in the first and the third, which no context
+/// tells apart, and the unedited text.
+fn repeated_edits() -> (String, String) {
+    let block = indoc! {"
+        fn same() {
+            a();
+            b();
+            c();
+            d();
+            e();
+        }
+    "};
+    let base = format!("{}fn tail() {{}}\n", block.repeat(4));
+    let edited_block = block.replace("c();", "c(1);");
+    let edited = format!("{edited_block}{block}{edited_block}{block}fn tail() {{}}\n");
+    (base, edited)
+}
+
+/// The target branch changes a line of the file far above a reviewed edit, out of reach of its
+/// context lines, and the head is rebased with the same edit: the edit reopens, and the interdiff
+/// says the code around it changed in the base.
+#[test]
+fn changed_base_line_far_above_reopens() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    let base = rust_functions(10);
+    repo.write("src/lib.rs", &base)?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    let edit = |text: &str| text.replace("let value = 7;", "let value = 70;");
+    repo.write("src/lib.rs", &edit(&base))?;
+    repo.commit("edit f7")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Seen)?;
+
+    // The changed base line is in f1, some 25 lines above the edit in f7.
+    repo.switch("main")?;
+    let newer_base = base.replace("let value = 1;", "let value = 10;");
+    repo.write("src/lib.rs", &newer_base)?;
+    repo.commit("target changes f1")?;
+    repo.branch_at("feature", "main")?;
+    repo.write("src/lib.rs", &edit(&newer_base))?;
+    repo.commit("rebased")?;
+    let second = refresh(&review)?;
+
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    assert_that!(units.len(), eq(1));
+    let unit = find(&units, "let value = 70;")?;
+    assert!(
+        matches!(
+            unit.state,
+            UnitState::ChangedSinceReviewed {
+                verdict: Verdict::Seen,
+                ..
+            }
+        ),
+        "{:?}",
+        unit.state
+    );
+    // Neither side of the edit changed, only the base file around it.
+    let interdiff = history
+        .view(second)?
+        .interdiff(unit.id)?
+        .ok_or_else(|| eyre::eyre!("no interdiff"))?;
+    assert!(!interdiff.base.changed);
+    assert!(!interdiff.head.changed);
+    assert!(interdiff.base_file_changed);
+    Ok(())
+}
+
+/// A rebase onto a target that changed only another file keeps every mark, even on identical
+/// edits that no context tells apart, since the edited file is the same on both revisions.
+#[test]
+fn base_change_in_another_file_keeps_repeated_edits() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    let (base, edited) = repeated_edits();
+    repo.write("src/lib.rs", &base)?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    repo.write("src/lib.rs", &edited)?;
+    repo.commit("repeat an edit")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Seen)?;
+
+    repo.switch("main")?;
+    repo.write("README.md", "unrelated\n")?;
+    repo.commit("target changes another file")?;
+    repo.branch_at("feature", "main")?;
+    repo.write("src/lib.rs", &edited)?;
+    repo.commit("rebased")?;
+    let second = refresh(&review)?;
+    assert_that!(second.get(), eq(2));
+
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    assert_that!(units.len(), eq(2));
+    assert!(
+        units
+            .iter()
+            .all(|unit| unit.added.contains("c(1);") && is_reviewed(unit.state)),
+        "{units:#?}"
+    );
+    Ok(())
+}
+
+/// A working-tree review of uncommitted edits, all marked, keeps every mark once exactly that
+/// tree is committed, identical repeated edits included.
+#[test]
+fn committing_the_captured_tree_keeps_everything() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    let (base, edited) = repeated_edits();
+    repo.write("src/lib.rs", &base)?;
+    repo.write("notes.txt", "one\n")?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    repo.write("src/lib.rs", &edited)?;
+    repo.write("notes.txt", "two\n")?;
+    let review = Review::open(
+        repo.data_dir(),
+        Repo::discover(repo.path())?,
+        ReviewTarget::Worktree {
+            base: "main".to_owned(),
+        },
+    )?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Accepted)?;
+
+    // The commit has the captured tree, but another commit ID than the synthetic capture.
+    repo.commit("commit the reviewed edits")?;
+    let second = refresh(&review)?;
+    assert_that!(second.get(), eq(2));
+    let history = review.history()?;
+    let records = history.revisions();
+    assert_that!(records[1].head, not(eq(&records[0].head)));
+
+    let units = summaries(&history, second)?;
+    assert_that!(units.len(), eq(3));
+    assert!(
+        units.iter().all(|unit| is_reviewed(unit.state)),
+        "{units:#?}"
+    );
+    Ok(())
+}
+
+/// Two identical files added independently, one of them renamed on the head side: the renamed
+/// one's edit does not carry, while the untouched one keeps its mark.
+#[test]
+fn head_rename_of_identical_added_files_does_not_carry() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write("README.md", "readme\n")?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    let content = rust_functions(3);
+    repo.write("a.rs", &content)?;
+    repo.write("b.rs", &content)?;
+    repo.commit("add two identical files")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Seen)?;
+
+    repo.git(&["mv", "a.rs", "c.rs"])?;
+    repo.commit("rename one")?;
+    let second = refresh(&review)?;
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    let state_of = |path: &str| -> eyre::Result<UnitState> {
+        let mut found = units.iter().filter(|unit| unit.path == path);
+        let unit = found
+            .next()
+            .ok_or_else(|| eyre::eyre!("no unit in {path}"))?;
+        eyre::ensure!(found.next().is_none(), "several units in {path}");
+        Ok(unit.state)
+    };
+    assert!(!is_reviewed(state_of("c.rs")?), "{units:#?}");
+    assert!(is_reviewed(state_of("b.rs")?), "{units:#?}");
+    Ok(())
+}
+
+/// A mode-only change carries only while the file's content is the same: once the target branch
+/// changes the file's content, the same mode change is reviewed again.
+#[test]
+fn mode_only_unit_with_another_blob_does_not_carry() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    // Modes live only in the index, so switching branches never finds the file's mode changed.
+    repo.git(&["config", "core.fileMode", "false"])?;
+    repo.write("run.sh", "echo one\n")?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    repo.git(&["add", "--chmod=+x", "run.sh"])?;
+    repo.commit_staged("make it executable")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Seen)?;
+
+    repo.switch("main")?;
+    repo.write("run.sh", "echo two\n")?;
+    repo.commit("target changes the script")?;
+    repo.branch_at("feature", "main")?;
+    repo.git(&["add", "--chmod=+x", "run.sh"])?;
+    repo.commit_staged("make it executable again")?;
+    let second = refresh(&review)?;
+
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    assert_that!(units.len(), eq(1));
+    assert_that!(
+        units[0].unit.kind,
+        eq(&review_core::analysis::UnitKind::File(
+            review_core::analysis::FileUnit::Mode
+        ))
+    );
+    assert!(
+        matches!(units[0].state, UnitState::ChangedSinceReviewed { .. }),
+        "{units:#?}"
+    );
+    Ok(())
+}
+
+/// A reviewed mode change stays reviewed when the head edits the file's content, which its
+/// chunks review, as long as the base is the same.
+#[test]
+fn mode_change_carries_across_a_content_edit() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    // Modes live only in the index, so committing never finds the file's mode changed on disk.
+    repo.git(&["config", "core.fileMode", "false"])?;
+    let base = rust_functions(10);
+    repo.write("run.rs", &base)?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    repo.write("run.rs", &base.replace("let value = 1;", "let value = 10;"))?;
+    repo.git(&["add", "--chmod=+x", "run.rs"])?;
+    repo.commit_staged("make it executable and edit f1")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Seen)?;
+
+    repo.write(
+        "run.rs",
+        &base
+            .replace("let value = 1;", "let value = 10;")
+            .replace("let value = 8;", "let value = 80;"),
+    )?;
+    repo.git(&["add", "run.rs"])?;
+    repo.commit_staged("edit f8")?;
+    let second = refresh(&review)?;
+
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    let mode = units
+        .iter()
+        .find(|unit| {
+            unit.unit.kind
+                == review_core::analysis::UnitKind::File(review_core::analysis::FileUnit::Mode)
+        })
+        .ok_or_else(|| eyre::eyre!("no mode unit"))?;
+    assert!(is_reviewed(mode.state), "{units:#?}");
+    assert!(is_reviewed(find(&units, "let value = 10;")?.state));
+    assert_that!(find(&units, "let value = 80;")?.state, eq(UnitState::New));
     Ok(())
 }
 

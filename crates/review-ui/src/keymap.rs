@@ -433,7 +433,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "Refresh",
-        &["shift-r"],
+        &["r", "shift-r"],
         MODES,
         "Review",
         "fetch · switch to a new revision",
@@ -693,6 +693,24 @@ const DEFAULTS: &[Default] = &[
         "View",
         "",
         Some((1, "close")),
+        None,
+    ),
+    (
+        "TrustSnapshot",
+        &["s"],
+        &[Area::Overlay],
+        "Review",
+        "",
+        Some((1, "trust this snapshot")),
+        None,
+    ),
+    (
+        "TrustCheckout",
+        &["c"],
+        &[Area::Overlay],
+        "Review",
+        "",
+        Some((1, "always trust this checkout")),
         None,
     ),
     (

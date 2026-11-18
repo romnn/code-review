@@ -425,6 +425,8 @@ fn stale_analysis_cache_format_is_replaced() -> eyre::Result<()> {
         rewritten["format"],
         eq(&serde_json::json!(review_core::analysis::ANALYSIS_FORMAT))
     );
+    // Format 11 left behind the analyses that earlier builds read through git replace refs.
+    assert_that!(review_core::analysis::ANALYSIS_FORMAT, eq(11));
     assert_that!(rewritten["units"].as_array().map(Vec::len), some(eq(1)));
     Ok(())
 }

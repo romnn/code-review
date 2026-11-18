@@ -6,9 +6,11 @@
 # smoke.qa and smoke-tui.qa include it right after launching the demo.
 
 # The diff opens on whole files; this walk reads each hunk apart under its header, as `v`
-# shows it, which later launches remember. smoke-file.qa walks the whole file.
+# shows it, which later launches remember. smoke-file.qa walks the whole file. A pull request
+# review shows its pushed heads and never follows a working tree.
 state
 expect "view":"file","effective_view":"file"
+expect "live":null
 key v
 state
 expect "view":"hunks","effective_view":"hunks"

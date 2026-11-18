@@ -107,6 +107,15 @@ pub struct RevisionRecord {
     pub merge_bases: Vec<ObjectId>,
     /// Seconds since the Unix epoch.
     pub recorded_at: u64,
+    /// The branch checked out when the working tree was captured, if one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit `HEAD` was at when the working tree was captured, if it had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<ObjectId>,
+    /// The number of the branch's pull request when the working tree was captured, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<u64>,
 }
 
 impl From<&RevisionEvent> for RevisionRecord {
@@ -118,6 +127,9 @@ impl From<&RevisionEvent> for RevisionRecord {
             target: event.target.clone(),
             merge_bases: event.merge_bases.clone(),
             recorded_at: event.recorded_at,
+            branch: event.branch.clone(),
+            head_commit: event.head_commit.clone(),
+            pull_request: event.pull_request,
         }
     }
 }

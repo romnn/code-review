@@ -9,6 +9,9 @@
 //!
 //! - [`Review`] opens a review, records revisions, and performs every state transition (marks,
 //!   notes, walkthrough imports) under the review's lock.
+//! - [`Review::open_checkout`] opens the review of a checkout, which follows whatever its working
+//!   tree holds; [`Review::live_history`] shows a capture of it as a provisional revision, with
+//!   the [`Subject`] it was taken of, under a [`Session`] that pins it while it shows.
 //! - [`Review::history`] loads a [`History`]: every revision with its [`analysis`], the
 //!   [`correspond`]ences between consecutive revisions, and derived unit states.
 //! - [`History::view`] gives a [`RevisionView`] with unit states, interdiffs, notes, moves and
@@ -52,26 +55,32 @@ pub mod export;
 pub mod git;
 mod history;
 mod ids;
+mod random;
 mod review;
 pub mod scope;
 mod standing;
 pub mod store;
 pub mod syntax;
+#[cfg(test)]
+mod testing;
 mod text;
 pub mod tree;
 mod view;
 pub mod walkthrough;
 
 pub use error::Error;
-pub use git::Repo;
+pub use git::{BranchIdentity, Busy, Head, Repo, WorktreeCapture};
 pub use history::{History, RevisionRecord, UnitState, Verdict};
-pub use ids::{MoveId, ObjectId, ParseIdError, ReviewKey, RevisionNumber, UnitId, UnitIndex};
+pub use ids::{
+    MoveId, ObjectId, ParseIdError, ReviewKey, ReviewTag, RevisionNumber, Tagged, UnitId, UnitIndex,
+};
 pub use review::{
-    Commit, Detected, PullRequest, Recorded, RefreshStep, Review, ReviewInfo, ReviewMeta,
-    ReviewTarget, RevisionInput, Synced, Trust,
+    BaseRef, Capture, Commit, LiveCapture, PullRequest, Recorded, RefreshStep, Review, ReviewInfo,
+    ReviewMeta, ReviewTarget, RevisionInput, Session, Subject, Synced, Trust, filtered_note,
+    github,
 };
 pub use standing::{ReviewPolicy, Standing};
-pub use store::events::MarkVerdict;
+pub use store::events::{MarkVerdict, TrustScope};
 pub use view::{
     ChangeKind, Collapse, Counts, DiffLine, DiffLineKind, FileChangeSummary, FileStatus, FileTone,
     Interdiff, LineEnding, Location, MoveEnd, MoveView, NoteAttachment, ResolvedNote, RevisionView,
