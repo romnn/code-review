@@ -260,8 +260,10 @@ impl Review {
         let parent = self.dir.root().join("worktrees");
         store::create_dir(&parent)?;
         let id = crate::random::hex(16);
-        let staging = parent.join(format!(".{tree}-{id}.tmp"));
-        let index = parent.join(format!(".{tree}-{id}.index"));
+        // The random id alone names the staging copy: the tree id as well would lengthen
+        // every path written under it past Windows' limit sooner.
+        let staging = parent.join(format!(".{id}.tmp"));
+        let index = parent.join(format!(".{id}.index"));
         store::create_dir(&staging)?;
         let written = self
             .repo
