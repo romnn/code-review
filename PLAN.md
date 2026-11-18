@@ -840,8 +840,9 @@ is a session (`Review::start_session`) that holds an exclusive lock on
 `code-review/sessions/<review>/<id>.lock` in the clone's common git directory, next to the pins
 it guards whatever data directory the review is kept in, for its lifetime, and pins the base, the
 head and the target of each capture it shows, before analyzing it, under
-`refs/code-review/<review>/live/<session>/<head>-<base>[-<target>]/`, so two captures of one head
-against different bases keep their own pins. A session removes only its
+`refs/code-review/<review>/live/<session>/<capture>/`, where `<capture>` is 16 hex digits of a
+digest of the head, base and target, so two captures of one head against different bases keep
+their own pins and the ref paths stay within Windows' path length limit. A session removes only its
 own pins, those of captures it no longer shows and all of them when it ends, and another
 session's only once that session's lock file can be locked, which means it is over; it then
 removes the file too.

@@ -12,6 +12,8 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use super::{Review, RevisionInput};
 use crate::error::Error;
 use crate::git::Repo;
@@ -51,8 +53,8 @@ impl Session {
     }
 
     /// Returns the prefix of the refs that pin the capture `record` is of, under
-    /// [`Self::pins`]: they are named for its head, base and target, so two captures that
-    /// share a head but not a base, as when the base moved, each keep their own.
+    /// [`Self::pins`]: they are named for a digest of its head, base and target, so two
+    /// captures that share a head but not a base, as when the base moved, each keep their own.
     #[must_use]
     pub fn pins_of(&self, record: &RevisionRecord) -> String {
         format!(
@@ -109,12 +111,20 @@ impl Session {
     }
 }
 
-/// The name of a capture's pins: its head, base and target, joined by `-`.
+/// The name of a capture's pins: 16 hex digits of a digest of its head, base and target.
+///
+/// A digest rather than the ids themselves keeps ref paths, which already hold the review
+/// key, within Windows' path length limit.
 fn capture_name(base: &ObjectId, head: &ObjectId, target: Option<&ObjectId>) -> String {
-    match target {
+    let joined = match target {
         Some(target) => format!("{head}-{base}-{target}"),
         None => format!("{head}-{base}"),
-    }
+    };
+    Sha256::digest(joined.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl Drop for Session {
