@@ -61,14 +61,14 @@ expect "overlay":null
 # za folds the selected hunk to its header and unfolds it again, keeping the place; a hunk
 # unfolded by hand stays open once approved.
 state
-expect "row_count":38,
+expect "row_count":41,
 key z a
 state
-expect "row_count":26,
+expect "row_count":29,
 expect "hunk":1,"hunks"
 key z a
 state
-expect "row_count":38,
+expect "row_count":41,
 
 # The mouse in the diff: a drag selects text across rows and copies nothing by itself, since
 # copy-on-select is off by default, and `y`, as Ctrl+C, copies it to the clipboard and the
@@ -95,10 +95,10 @@ state
 expect "hunk":2,"hunks"
 click 49 3
 state
-expect "row_count":52,
+expect "row_count":55,
 click 49 3
 state
-expect "row_count":52,
+expect "row_count":55,
 
 # Shift with a press extends the selection from where it started.
 click 44 20
@@ -159,9 +159,9 @@ key n
 key n
 state
 expect "mode":"Diff"
-expect "target":"Diff","query":"balance","matches":7,"current":3
+expect "target":"Diff","query":"balance","matches":8,"current":4
 expect "hunk":2,"hunks"
-expect "status":"Match 4 of 7"
+expect "status":"Match 5 of 8"
 shot 11-diff-find
 key escape
 
@@ -213,18 +213,18 @@ file src/engine.rs
 key 0
 state
 expect "density":"normal"
-expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 key shift-s
 state
 expect "diff_style":"soft"
 expect "background":"muted","change_bar":false
-expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-soft
 key shift-s
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
-expect "row_count":26,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
 shot 06-plain
 key shift-s
 state
@@ -237,7 +237,7 @@ expect "diff_style":"bold"
 key |
 state
 expect "layout":"side-by-side","effective_layout":"side-by-side"
-expect "row_count":19,
+expect "row_count":22,
 expect "kind":"Pair"
 shot 11-side-by-side
 drag 109 12 139 14
@@ -434,7 +434,7 @@ key z shift-a
 state
 expect "approved":"shown"
 expect "status":"Approved hunks shown\."
-expect "row_count":50,
+expect "row_count":56,
 shot 07b-approved-shown
 key z shift-a
 state
@@ -552,12 +552,12 @@ expect "selected":"src/engine.rs"
 expect "hunk":2,"hunks"
 
 # The density comes from the configuration: compact rows leave out the blank row before each
-# hunk, which the normal density's 38 rows of this file have.
+# hunk, which the normal density's 41 rows of this file have.
 launch --demo --config scripts/qa/compact.toml
 expect "density":"compact","effective_density":"compact"
 file src/engine.rs
 state
-expect "row_count":25,
+expect "row_count":28,
 expect "kind":"Gap".*"kind":"Header"
 shot 15-compact
 

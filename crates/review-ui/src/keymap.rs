@@ -638,7 +638,7 @@ const DEFAULTS: &[Default] = &[
         &[Area::Tree, Area::Diff],
         "View",
         "whole file or hunks apart",
-        None,
+        Some((7, "view")),
         None,
     ),
     (

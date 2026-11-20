@@ -311,10 +311,18 @@ impl ReviewApp {
             .text_size(px(small))
             .flex()
             .items_center();
-        let shown = paint::annotation::annotation(self, colors, row, note, frame);
+        let shown = paint::annotation::annotation(self, colors, row, note);
         let pan = paint::annotation::note_pan(self, self.reach(&shown));
         match shown {
             Annotation::Spacer => base,
+            // A file's path, flush with the file header's path above the diff.
+            Annotation::File { path, background } => base.bg(to_gpui(background)).child(
+                div()
+                    .px(px(GRID * 3.0))
+                    .text_color(to_gpui(path.color))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(ink::shown(&path.text)),
+            ),
             Annotation::Gap { label, rule } => base
                 .cursor_pointer()
                 .child(frame_bar(frame, colors))
@@ -382,7 +390,7 @@ impl ReviewApp {
         // Each part after the first, with the padding before it.
         let padded = |piece: Option<&Piece>| piece.map_or(0.0, |piece| GRID * 3.0 + cells(piece));
         match shown {
-            Annotation::Spacer | Annotation::Gap { .. } => 0.0,
+            Annotation::Spacer | Annotation::Gap { .. } | Annotation::File { .. } => 0.0,
             Annotation::Header(header) => {
                 let HunkHeader {
                     scope,

@@ -144,36 +144,51 @@ impl RowKey {
         }
     }
 
-    /// The unified row of `layout` that shows the same line, of the same unit when it can,
-    /// else of the unit's file; or else the header of the same unit.
+    /// The unified row of `layout` that shows the same line of code, of the same unit when it
+    /// can, else of the unit's file; `None` when the layout shows no such line.
     #[must_use]
-    pub(crate) fn find(self, layout: &Layout) -> Option<usize> {
+    pub(crate) fn find_line(self, layout: &Layout) -> Option<usize> {
         let rows = &layout.rows;
         // A folder's diff has several files, whose line numbers mean other lines: without the
         // unit, a line names no file among them.
-        let file = layout
-            .unit_rows
-            .get(&self.unit)
-            .and_then(|&row| rows.get(row))
-            .map(|row| row.file);
+        let file = self.file_in(layout);
         let anywhere = !several_files(layout);
-        // A file's header in a single file's diff is the unit's place, as below.
-        if self.file_header && several_files(layout) {
-            return rows
-                .iter()
-                .find(|row| row.kind() == RowKind::FileHeader && Some(row.file) == file)
-                .map(|row| row.source);
-        }
-        let row = rows
-            .iter()
+        rows.iter()
             .find(|row| row.unit == self.unit && self.same_line(row))
             .or_else(|| {
                 rows.iter().find(|row| {
                     (file == Some(row.file) || (file.is_none() && anywhere)) && self.same_line(row)
                 })
             })
-            .or_else(|| rows.get(*layout.unit_rows.get(&self.unit)?))?;
-        Some(row.source)
+            .map(|row| row.source)
+    }
+
+    /// The unified row of `layout` that shows the same line, as [`Self::find_line`] finds it;
+    /// or else the header of the same unit.
+    #[must_use]
+    pub(crate) fn find(self, layout: &Layout) -> Option<usize> {
+        let rows = &layout.rows;
+        // A file's header in a single file's diff is the unit's place, as below.
+        if self.file_header && several_files(layout) {
+            let file = self.file_in(layout);
+            return rows
+                .iter()
+                .find(|row| row.kind() == RowKind::FileHeader && Some(row.file) == file)
+                .map(|row| row.source);
+        }
+        self.find_line(layout).or_else(|| {
+            rows.get(*layout.unit_rows.get(&self.unit)?)
+                .map(|row| row.source)
+        })
+    }
+
+    /// The file section of `layout` that has the key's unit.
+    fn file_in(self, layout: &Layout) -> Option<usize> {
+        layout
+            .unit_rows
+            .get(&self.unit)
+            .and_then(|&row| layout.rows.get(row))
+            .map(|row| row.file)
     }
 }
 

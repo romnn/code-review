@@ -99,7 +99,7 @@ fn draw_row(
         Body::Code(cell) => code_row(painter, model, palette, row, cell, frame, at, background),
         Body::Pair(pair) => pair_row(painter, model, palette, row, pair, frame, at, background),
         Body::Note(note) => {
-            let shown = annotation::annotation(model, palette, row, note, frame);
+            let shown = annotation::annotation(model, palette, row, note);
             let pan = annotation::note_pan(model, f32::from(reach(&shown)));
             annotation_row(painter, palette, &shown, frame, at, pan, background);
         }
@@ -352,6 +352,15 @@ fn annotation_row(
     match shown {
         // Air between hunks: nothing, not even the frame bar.
         Annotation::Spacer => {}
+        // A file's path, flush with the file header's path above the diff.
+        Annotation::File {
+            path,
+            background: band,
+        } => {
+            let bg = over(background, *band);
+            painter.fill(row, bg);
+            painter.piece(area.x + 1, y, right.saturating_sub(area.x + 1), path, bg);
+        }
         Annotation::Gap { label, rule } => {
             frame_bar(painter, palette, frame, area.x, y, background);
             let brush = Brush::new(*rule, background);
@@ -423,7 +432,7 @@ fn annotation_row(
 /// nothing, and the cell it keeps free at the right edge counts too.
 fn reach(shown: &Annotation) -> u16 {
     match shown {
-        Annotation::Spacer | Annotation::Gap { .. } => 0,
+        Annotation::Spacer | Annotation::Gap { .. } | Annotation::File { .. } => 0,
         Annotation::Header(header) => header_reach(header),
         Annotation::Note { text, tag, .. } => width(&text.text).saturating_add(
             tag.as_ref()

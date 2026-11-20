@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use super::display::display_width;
 use super::{Bar, Palette, Piece, Room, Weight, split_path};
-use crate::config::{DiffLayout, DiffView};
+use crate::config::DiffLayout;
 use crate::model::buffer::Origin;
 use crate::model::{Model, Phase};
 use crate::rows::FileSection;
@@ -273,12 +273,9 @@ fn folder_header(
     }
 }
 
-/// The selected hunk's scopes, outermost first, and label for the file header, in the file
-/// view only: the hunks view says them in each hunk's header.
+/// The selected hunk's scopes, outermost first, and label for the file header, in either view:
+/// a hunk has a header row of its own only while folded or tagged.
 fn hunk_scope(model: &Model) -> (Vec<String>, Option<String>) {
-    if model.rows.presentation.view != DiffView::File {
-        return (Vec::new(), None);
-    }
     let Some(note) = model.rows.hunk_notes.get(model.hunk) else {
         return (Vec::new(), None);
     };

@@ -1102,7 +1102,12 @@ it, muted, so it never reads as code.
   A hunk the reviewer folds keeps its header alone, so it can still be selected and unfolded,
   and so does a change without lines, such as a mode change. `hunks` is the view described
   under the visual grammar below: each hunk under its header with a few unchanged lines around
-  it, the rest folded into gaps, and approved hunks folded as `[diff] approved` says.
+  it, the rest folded into gaps, and approved hunks folded as `[diff] approved` says. Fewer
+  than ten unchanged lines between two changes, or between a change and the file's start or
+  end, show whole rather than as a gap, which would hide hardly more than it takes. Switching
+  the view keeps the code exactly where it is: a line of code both views show keeps its row
+  (in the diff the selected hunk's line nearest the reading line, which stays selected), never
+  a hunk header only the hunks view has. The bar offers `f` as `file/hunks`.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
@@ -1115,8 +1120,9 @@ it, muted, so it never reads as code.
   unchanged lines`, Enter shows more); a note is a block of italic yellow text with a yellow
   bar; every hunk has a gray bar along its left edge, and its header is a gray band that turns
   green once all of it is approved and red once some of it is flagged. The selected hunk's bar
-  and header take the solid color of its state, blue while it still needs the reviewer, green
-  once approved, red once flagged, so each hunk's start, extent and state show at a glance.
+  takes the solid color of its state, blue while it still needs the reviewer, green once
+  approved, red once flagged, and its header is plain, on the editor's own background, as the
+  file view's code is, so each hunk's start, extent and state show at a glance.
   Enter or `p` (as `za`) shows a folded hunk's code and folds it again. Approved hunks fold to
   their header, and unchanged lines between folded hunks or between one and the file's edge
   show nothing, not even a gap rule or a blank row, so a run of folded hunks reads as a list of

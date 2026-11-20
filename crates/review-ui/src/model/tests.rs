@@ -4005,8 +4005,8 @@ fn hunks_can_land_in_the_middle() {
     assert!(centered(host.model()));
 }
 
-/// The unit of `install.sh` that the hunks view joins with the changes above it, where the file
-/// view gives it a hunk of its own: its last change, the checksum download.
+/// The unit of `install.sh` a few lines below the changes above it: its last change, the
+/// checksum download.
 fn joined_unit(model: &Model) -> UnitId {
     let view = model.view().unwrap();
     view.units_of_file("scripts/install.sh")
@@ -4024,8 +4024,8 @@ fn joined_unit(model: &Model) -> UnitId {
         .unwrap()
 }
 
-/// A buffer's change markers name units, so after the view changes how hunks group, the hunk
-/// under the buffer's cursor is still the one holding the line's change.
+/// A buffer's change markers name units, so after the view changes, the hunk under the buffer's
+/// cursor is still the one holding the line's change.
 #[test]
 fn the_buffer_marks_the_unit_under_its_cursor_whatever_the_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -4039,18 +4039,12 @@ fn the_buffer_marks_the_unit_under_its_cursor_whatever_the_view() {
     host.dispatch(Action::ToggleBuffer);
     assert_eq!(host.model().buffer_hunk(), Some(hunk));
     host.update(|model| model.apply_view(crate::config::DiffView::Hunks));
-    let joined = host.model().buffer_hunk().unwrap();
-    assert!(host.model().rows.hunks[joined].contains(&unit));
-    assert_ne!(joined, hunk, "the hunk's index changed with the view");
-    let hunk = joined;
-    assert!(
-        host.model().rows.hunks[hunk].len() > 1,
-        "the hunks view joins it"
-    );
+    let shown = host.model().buffer_hunk().unwrap();
+    assert_eq!(host.model().rows.hunks[shown], [unit]);
 }
 
 /// A file left with a hunk selected comes back to the hunk holding the same change in the other
-/// view, whose hunks number differently.
+/// view.
 #[test]
 fn a_file_comes_back_at_its_change_in_the_other_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -4065,14 +4059,12 @@ fn a_file_comes_back_at_its_change_in_the_other_view() {
     host.update(|model| model.show_file("scripts/release.sh"));
     host.dispatch(Action::ToggleView);
     host.update(|model| model.show_file(install));
-    let group = host.model().hunk_units();
-    assert!(group.contains(&unit) && group.len() > 1);
-    // And back: the hunks view selected the whole group, so the file view lands on its first
-    // change.
+    assert_eq!(host.model().hunk_units(), [unit]);
+    // And back.
     host.update(|model| model.show_file("scripts/release.sh"));
     host.dispatch(Action::ToggleView);
     host.update(|model| model.show_file(install));
-    assert_eq!(host.model().hunk_units(), group[..1]);
+    assert_eq!(host.model().hunk_units(), [unit]);
 }
 
 /// A file left with a later hunk selected comes back to it after a capture of an edit to another
@@ -4981,78 +4973,7 @@ fn f_switches_the_view() {
     }
 }
 
-/// `f` keeps the change the reviewer looks at where it is: in a hunk of several changes, the
-/// one on screen becomes the selected hunk of the whole file at the same place, rather than
-/// the hunk's first change scrolled into view.
-#[test]
-fn switching_the_view_keeps_the_change_looked_at() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
-    // A diff ten rows tall, which the demo's short files more than fill.
-    let short = Geometry {
-        heights: Heights {
-            diff: Some(10.0),
-            ..fixed_window().heights
-        },
-        ..fixed_window()
-    };
-    let lay_out = |host: &mut Host| host.update(|model| model.layout(short, Instant::now()));
-    // A file whose hunks view joins changes under one header.
-    let paths: Vec<String> = file_paths(&host.model().tree)
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    let hunk = paths
-        .iter()
-        .find_map(|path| {
-            host.update(|model| model.show_file(path));
-            host.model()
-                .rows
-                .hunks
-                .iter()
-                .position(|units| units.len() > 1)
-        })
-        .expect("the demo has a hunk of several changes");
-    host.dispatch(Action::FocusDiff);
-    lay_out(&mut host);
-    host.update(|model| model.hunk = hunk);
-    // The hunk's second change at the top, its first above the screen.
-    let (second, row) = {
-        let model = host.model();
-        let second = model.rows.hunks[hunk][1];
-        let row = model.hunk_rows[hunk]
-            .clone()
-            .find(|&row| model.rows.rows[row].unit == second && model.rows.rows[row].is_code())
-            .unwrap();
-        (second, row)
-    };
-    host.update(|model| model.diff_scroll.jump(scroll::rows(row)));
-    let line = host.model().rows.rows[row]
-        .cells()
-        .next()
-        .map(|cell| (cell.head.as_ref().map(|head| head.line), cell.base));
-    host.dispatch(Action::ToggleView);
-    lay_out(&mut host);
-    let model = host.model();
-    assert_eq!(model.presented.view, crate::config::DiffView::File);
-    assert!(
-        model.hunk_units().contains(&second),
-        "the change looked at is selected"
-    );
-    assert!(
-        !model.diff_scroll.animating(),
-        "nothing scrolls away from it"
-    );
-    let top = scroll::whole_rows(model.diff_scroll.offset());
-    let shown = model.rows.rows[top]
-        .cells()
-        .next()
-        .map(|cell| (cell.head.as_ref().map(|head| head.line), cell.base));
-    assert_eq!(shown, line, "at the same place");
-}
-
-/// A click on a change that a folder's diff joins under one hunk with an earlier change opens
-/// the file with the change clicked selected, not the first change of that hunk.
+/// A click on a change in a folder's diff opens its file with the change clicked selected.
 #[test]
 fn a_click_in_a_folders_diff_selects_the_change_clicked() {
     let dir = tempfile::tempdir().unwrap();
@@ -5063,22 +4984,22 @@ fn a_click_in_a_folders_diff_selects_the_change_clicked() {
             model.tree[model.visible_tree()[position]].kind == NodeKind::Directory
         })
         .collect();
-    // A folder whose diff has a changed line of a hunk's later change.
+    // A folder whose diff has a changed line of a file after its first.
     let (row, unit) = folders
         .into_iter()
         .find_map(|position| {
             host.update(|model| model.tree_move_to(position));
             let model = host.model();
             model.rows.rows.iter().enumerate().find_map(|(index, row)| {
-                let hunk = model.rows.hunks.get(row.hunk?)?;
-                let later = hunk.first() != Some(&row.unit);
+                row.hunk?;
+                let later = row.file > 0;
                 let changed = row.cells().next().is_some_and(|cell| {
                     matches!(cell.kind, rows::RowKind::Added | rows::RowKind::Removed)
                 });
                 (later && changed).then_some((index, row.unit))
             })
         })
-        .expect("a folder's diff joins changes under one hunk");
+        .expect("a folder's diff has a changed line of a later file");
     lay_out(&mut host);
     host.update(|model| model.press_text(text_press(row, 0)));
     let model = host.model();
@@ -5088,4 +5009,146 @@ fn a_click_in_a_folders_diff_selects_the_change_clicked() {
         model.hunk_units().contains(&unit),
         "the change clicked is selected"
     );
+}
+
+/// The defaults with each hunk apart.
+fn hunks_apart() -> Settings {
+    let mut settings = settings();
+    settings.appearance.applied.view = crate::config::DiffView::Hunks;
+    settings
+}
+
+/// In the hunks view, fewer than ten unchanged lines between two changes show whole, while a
+/// longer stretch folds into a gap row.
+#[test]
+fn a_few_unchanged_lines_between_changes_show_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = |changed: &[usize]| -> String {
+        let lines: Vec<String> = (0..40)
+            .map(|line| {
+                if changed.contains(&line) {
+                    format!("changed {line}")
+                } else {
+                    format!("line {line}")
+                }
+            })
+            .collect();
+        lines.join("\n") + "\n"
+    };
+    let base = text(&[]);
+    // Changes at lines 2, 11 and 30: eight unchanged lines between the first two, eighteen
+    // between the last two.
+    let head = text(&[2, 11, 30]);
+    let (review, _repo) = worktree_review_of(dir.path(), &[("a.txt", &base)], &[("a.txt", &head)]);
+    let mut host = Host::open_with(review, hunks_apart());
+    host.update(|model| model.show_file("a.txt"));
+    let model = host.model();
+    let lines: Vec<usize> = model
+        .rows
+        .rows
+        .iter()
+        .filter(|row| row.kind() == rows::RowKind::Context)
+        .filter_map(|row| row.cells().next()?.head.as_ref().map(|head| head.line))
+        .collect();
+    assert!(
+        (3..11).all(|line| lines.contains(&line)),
+        "the eight lines between the first changes show: {lines:?}"
+    );
+    let gaps: Vec<&str> = model
+        .rows
+        .rows
+        .iter()
+        .filter_map(|row| match &row.body {
+            rows::Body::Note(note) if note.kind == rows::RowKind::Gap => Some(note.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(gaps, ["12 unchanged lines"], "only the long stretch folds");
+}
+
+/// Switching the view keeps the code exactly where it is on screen, also when a row only the
+/// hunks view has, a gap of unchanged lines, is at the top.
+#[test]
+fn switching_the_view_keeps_the_code_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), hunks_apart());
+    // A diff ten rows tall, which the demo's files more than fill.
+    let short = Geometry {
+        heights: Heights {
+            diff: Some(10.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let lay_out = |host: &mut Host| host.update(|model| model.layout(short, Instant::now()));
+    host.update(|model| model.show_file("scheduler.rs"));
+    lay_out(&mut host);
+    // A gap at the top, past the file's start.
+    let gap = host
+        .model()
+        .rows
+        .rows
+        .iter()
+        .enumerate()
+        .skip(5)
+        .find(|(_, row)| row.kind() == rows::RowKind::Gap)
+        .map(|(index, _)| index)
+        .expect("scheduler.rs has gaps");
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(gap)));
+    lay_out(&mut host);
+    let screen = |model: &Model| -> Vec<Option<usize>> {
+        let top = scroll::whole_rows(model.diff_scroll.offset());
+        (top..top + 10)
+            .map(|row| {
+                model
+                    .rows
+                    .rows
+                    .get(row)?
+                    .cells()
+                    .next()?
+                    .head
+                    .as_ref()
+                    .map(|head| head.line)
+            })
+            .collect()
+    };
+    let before = screen(host.model());
+    assert_eq!(before[0], None, "the gap is at the top");
+    host.dispatch(Action::ToggleView);
+    lay_out(&mut host);
+    let after = screen(host.model());
+    // Every line the hunks view showed below the gap, up to the next row it alone has, is at
+    // the same row in the file view.
+    for (row, line) in before.iter().enumerate().skip(1) {
+        if line.is_none() {
+            break;
+        }
+        assert_eq!(after[row], *line, "row {row}: {before:?} then {after:?}");
+    }
+}
+
+/// Moving from a folder onto its first file keeps the file's code on the same rows: the empty
+/// row a single file's diff starts with stands where the folder's diff names the file.
+#[test]
+fn a_folder_and_its_first_file_show_the_code_on_the_same_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), hunks_apart());
+    let folder = folder_at(host.model(), "src/generated");
+    host.update(|model| model.tree_move_to(folder));
+    let lines = |model: &Model| -> Vec<Option<usize>> {
+        model
+            .rows
+            .rows
+            .iter()
+            .take(8)
+            .map(|row| row.cells().next()?.head.as_ref().map(|head| head.line))
+            .collect()
+    };
+    let in_folder = lines(host.model());
+    assert_eq!(host.model().rows.files.len(), 1, "the folder has one file");
+    host.dispatch(Action::TreeDown);
+    assert_eq!(host.model().shown_file(), Some("src/generated/schema.rs"));
+    lay_out(&mut host);
+    assert!((host.model().diff_scroll.offset()).abs() < f64::EPSILON);
+    assert_eq!(lines(host.model()), in_folder);
 }

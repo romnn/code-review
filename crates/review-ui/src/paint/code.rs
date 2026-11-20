@@ -7,30 +7,25 @@ use std::sync::Arc;
 use super::palette::HunkTone;
 use super::{Layer, Palette, Piece, Run, Style};
 use crate::color::Hsla;
-use crate::config::{Background, DiffView};
+use crate::config::Background;
 use crate::find::Match;
 use crate::model::buffer::Marker;
 use crate::model::{Mode, Model};
-use crate::rows::{Body, Cell, FullText, Row, RowKind};
+use crate::rows::{Cell, FullText, RowKind};
 use crate::syntax::{SideSyntax, Span, Tone};
 use crate::text::{Column, Pane, Selection, TextPos};
 use crate::theme::{self, Theme};
 
-/// Where a diff row is relative to the hunks, for its band and the bar along its left edge.
+/// Where a diff row is relative to the hunks, for its band and the bar along its left edge,
+/// alike in either view, so the code reads as one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame {
-    /// Between hunks: no band and no bar.
+    /// Outside every hunk's rows: no band and no bar.
     Outside,
-    /// In a hunk that is not selected: a gray bar on the hunk's gray band, so every hunk's
-    /// extent shows.
-    Hunk,
-    /// In the selected hunk, of its tone: a bar in the tone's solid color.
-    Selected(HunkTone),
-    /// In a hunk of the file view, which draws a band only behind approved hunks, so the code
-    /// reads as one file: the selected hunk has a bar in its tone's solid color, and of the
-    /// others only those the reviewer decided on have one, quieter, so approved and flagged code
-    /// shows as such.
-    Whole {
+    /// In a hunk's rows: the selected hunk has a bar in its tone's solid color, and of the
+    /// others only those the reviewer decided on have one, quieter, so approved and flagged
+    /// code shows as such.
+    Hunk {
         /// What the hunk asks of the reviewer.
         tone: HunkTone,
         /// Whether it is the selected hunk.
@@ -39,22 +34,21 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// The bar along the row's left edge: gray, or the selected hunk's solid color.
+    /// The bar along the row's left edge: the selected hunk's solid color, a decided hunk's
+    /// quieter one, or none.
     #[must_use]
     pub fn bar(self, palette: &Palette) -> Option<Hsla> {
         match self {
             Self::Outside
-            | Self::Whole {
+            | Self::Hunk {
                 tone: HunkTone::Open,
                 selected: false,
             } => None,
-            Self::Hunk => Some(palette.faint),
-            Self::Selected(tone)
-            | Self::Whole {
+            Self::Hunk {
                 tone,
                 selected: true,
             } => Some(palette.hunk_solid(tone)),
-            Self::Whole {
+            Self::Hunk {
                 tone,
                 selected: false,
             } => Some(palette.hunk_solid(tone).alpha(DECIDED_BAR_ALPHA)),
@@ -63,18 +57,17 @@ impl Frame {
 
     /// The band behind a hunk's rows; a changed line's own background covers it.
     ///
-    /// The file view draws it only behind approved hunks, whose code has lost its diff colors,
-    /// so what the reviewer approved still stands apart from the file around it.
+    /// Only approved hunks have one, since their code has lost its diff colors: what the
+    /// reviewer approved stands apart from the code around it, and everything else is as plain
+    /// as the file's code, the bars marking the hunks.
     #[must_use]
     pub fn band(self, palette: &Palette) -> Option<Hsla> {
         matches!(
             self,
-            Self::Hunk
-                | Self::Selected(_)
-                | Self::Whole {
-                    tone: HunkTone::Approved,
-                    ..
-                }
+            Self::Hunk {
+                tone: HunkTone::Approved,
+                ..
+            }
         )
         .then_some(palette.band)
     }
@@ -82,7 +75,7 @@ impl Frame {
     /// Whether the row is in the selected hunk.
     #[must_use]
     pub fn selected(self) -> bool {
-        matches!(self, Self::Selected(_) | Self::Whole { selected: true, .. })
+        matches!(self, Self::Hunk { selected: true, .. })
     }
 
     /// How much of the frame's width the bar takes: all of it in the selected hunk, and a
@@ -96,7 +89,7 @@ impl Frame {
 /// The share of the frame's width the bar of a hunk that is not selected takes.
 const THIN_BAR_SHARE: f32 = 0.4;
 
-/// How strongly the bar of a decided hunk that is not selected shows in the file view.
+/// How strongly the bar of a decided hunk that is not selected shows.
 const DECIDED_BAR_ALPHA: f32 = 0.6;
 
 /// Where diff row `index` is relative to the hunks: in the selected one only while the diff
@@ -104,14 +97,11 @@ const DECIDED_BAR_ALPHA: f32 = 0.6;
 #[must_use]
 pub fn frame(model: &Model, index: usize) -> Frame {
     let selected = (model.mode == Mode::Diff).then_some(model.hunk);
-    let whole = model.rows.presentation.view == DiffView::File;
-    match hunk_at(model, index, !whole) {
-        Some(hunk) if whole => Frame::Whole {
+    match hunk_at(model, index) {
+        Some(hunk) => Frame::Hunk {
             tone: hunk_tone(model, hunk),
             selected: Some(hunk) == selected,
         },
-        Some(hunk) if Some(hunk) == selected => Frame::Selected(hunk_tone(model, hunk)),
-        Some(_) => Frame::Hunk,
         None => Frame::Outside,
     }
 }
@@ -127,27 +117,16 @@ pub fn hunk_tone(model: &Model, hunk: usize) -> HunkTone {
     HunkTone::of(&badges)
 }
 
-/// The hunk that diff row `index` belongs to for its band and bar: from the hunk's header
-/// through its last row and, with `trailing`, the unchanged lines right after it, up to the next
-/// gap or header.
-fn hunk_at(model: &Model, index: usize, with_trailing: bool) -> Option<usize> {
+/// The hunk that diff row `index` belongs to for its band and bar: from the hunk's first row
+/// through its last, its changed lines and, while it is folded, its header.
+fn hunk_at(model: &Model, index: usize) -> Option<usize> {
     // Hunks are in row order, so the one that may hold the row is the last starting at or
     // before it.
     let hunk = model
         .hunk_rows
         .partition_point(|rows| rows.start <= index)
         .checked_sub(1)?;
-    let rows = model.hunk_rows.get(hunk)?;
-    let trailing = |row: &Row| row.hunk.is_none() && !matches!(row.body, Body::Note(_));
-    let within = rows.contains(&index)
-        || (with_trailing
-            && index >= rows.end
-            && model
-                .rows
-                .rows
-                .get(rows.end..=index)
-                .is_some_and(|after| after.iter().all(trailing)));
-    within.then_some(hunk)
+    model.hunk_rows.get(hunk)?.contains(&index).then_some(hunk)
 }
 
 /// Where a line of code is drawn: its diff row, its file section and its column.
@@ -210,8 +189,8 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
     // Approved code loses its diff colors in every style, its signs aside, so the code still to
     // review is what stands out: added lines read as the file's code, and removed lines fade,
     // as code that is gone.
-    let approved = hunk_at(model, at.row, false)
-        .is_some_and(|hunk| hunk_tone(model, hunk) == HunkTone::Approved);
+    let approved =
+        hunk_at(model, at.row).is_some_and(|hunk| hunk_tone(model, hunk) == HunkTone::Approved);
     let faded = approved && matches!(cell.kind, RowKind::Removed | RowKind::NestedOld);
     if approved {
         ink.background = None;
