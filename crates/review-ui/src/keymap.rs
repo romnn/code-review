@@ -634,7 +634,7 @@ const DEFAULTS: &[Default] = &[
     ),
     (
         "ToggleView",
-        &["v"],
+        &["f", "v"],
         &[Area::Tree, Area::Diff],
         "View",
         "whole file or hunks apart",

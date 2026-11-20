@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use indoc::{formatdoc, indoc};
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
@@ -16,7 +16,7 @@ use super::buffer::{Definition, Lookup};
 use super::effects::{Completion, Job, Outcome, Subject};
 use super::picker::{Found, PreviewText, Unchanged};
 use super::*;
-use crate::frame::{Chrome, Geometry, Heights, List, Scale, Sizes};
+use crate::frame::{Chrome, Geometry, Heights, List, Scale, Sizes, Wheel};
 use crate::look::{Appearance, Look};
 use crate::rows::Presentation;
 use crate::scroll;
@@ -1306,8 +1306,9 @@ fn the_review_opens_where_the_reviewer_quit() {
 }
 
 /// Approved code loses its diff colors, its signs aside, its removed lines fading as code that
-/// is gone; and in the bold style only the selected hunk keeps bold line backgrounds, the
-/// others soft ones, with a bar across the frame against a sliver.
+/// is gone, and sits on the hunks' gray band; and in the bold style only the selected hunk
+/// keeps bold line backgrounds, the others soft ones, with a bar across the frame against a
+/// sliver.
 #[test]
 fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
     use crate::paint::Palette;
@@ -1345,10 +1346,15 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
     let palette = Palette::of(model);
     let approved = changed(model, 0);
     assert_ne!(approved.len(), 0, "the first hunk has changed lines");
-    for (kind, cell, _) in &approved {
+    for (kind, cell, frame) in &approved {
         assert_eq!(
             cell.background, None,
             "approved code has no line background"
+        );
+        assert_eq!(
+            frame.band(&palette),
+            Some(palette.band),
+            "approved code is banded"
         );
         assert_ne!(cell.sign.text, " ", "its sign stays");
         let faded = (*kind == rows::RowKind::Removed).then_some(palette.faint);
@@ -1367,6 +1373,7 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
             Some(soft(line(kind))),
             "a hunk not selected is soft"
         );
+        assert_eq!(frame.band(&palette), None, "open code has no band");
         assert!(frame.bar_share() < 1.0);
     }
     host.dispatch(Action::LastHunk);
@@ -1666,7 +1673,7 @@ fn without_scroll_the_wheel_moves_nothing() {
     let top = |host: &Host| host.model().diff_scroll.offset();
     let before = top(&host);
     assert!(before > 0.0, "the file opens scrolled to its first change");
-    host.update(|model| model.wheel_list(List::Diff, -5.0));
+    host.update(|model| model.wheel_list(List::Diff, Wheel::Precise(-5.0)));
     host.update(|model| model.pan_text(4.0));
     assert_eq!(top(&host), before);
     assert_eq!(host.model().diff_text().offset(), 0.0);
@@ -4716,5 +4723,369 @@ fn a_waiting_capture_older_than_a_change_never_shows() {
         model.totals(),
         (0, 2),
         "the newest capture shows, with both hunks"
+    );
+}
+
+/// The position in the visible tree of the folder at `path`.
+fn folder_at(model: &Model, path: &str) -> usize {
+    model
+        .visible_tree()
+        .iter()
+        .position(|&index| {
+            let node = &model.tree[index];
+            node.kind == NodeKind::Directory && node.path == path
+        })
+        .expect("the demo has the folder")
+}
+
+/// The files of the folder at `path`, in tree order.
+fn files_under(model: &Model, path: &str) -> Vec<String> {
+    model
+        .tree
+        .iter()
+        .filter(|node| node.kind == NodeKind::File && review_core::tree::is_under(&node.path, path))
+        .map(|node| node.path.clone())
+        .collect()
+}
+
+/// On a folder, the diff shows every change of the folder's files, each under its path and in
+/// the hunks view, as lazygit shows a folder's diff; on a file again, that file's diff shows
+/// where the reviewer left it.
+#[test]
+fn a_folder_under_the_cursor_shows_its_files_diffs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    let engine = "src/engine.rs";
+    host.update(|model| model.show_file(engine));
+    lay_out(&mut host);
+    let top = host.model().diff_scroll.offset();
+    let src = folder_at(host.model(), "src");
+    host.update(|model| model.tree_move_to(src));
+
+    // The folder's diff: a section per file in tree order, under a header row each, with no
+    // file shown in place of it.
+    let expected = files_under(host.model(), "src");
+    assert!(expected.len() > 1, "src has several files");
+    let model = host.model();
+    assert_eq!(model.folder(), Some("src"));
+    assert_eq!(model.shown_file(), None);
+    let sections: Vec<&str> = model
+        .rows
+        .files
+        .iter()
+        .map(|section| section.path.as_str())
+        .collect();
+    assert_eq!(sections, expected);
+    let headers = model
+        .rows
+        .rows
+        .iter()
+        .filter(|row| row.kind() == rows::RowKind::FileHeader)
+        .count();
+    assert_eq!(headers, expected.len());
+    assert_eq!(
+        model.rows.presentation.view,
+        crate::config::DiffView::Hunks,
+        "a folder's diff shows its hunks apart, whatever the view"
+    );
+
+    // Another folder shows its own files.
+    let docs = folder_at(host.model(), "docs");
+    host.update(|model| model.tree_move_to(docs));
+    assert_eq!(host.model().folder(), Some("docs"));
+    assert_eq!(
+        host.model().rows.files[0].path,
+        files_under(host.model(), "docs")[0]
+    );
+
+    // The engine again, where it was left.
+    host.update(|model| model.show_file(engine));
+    let model = host.model();
+    assert_eq!(model.folder(), None);
+    assert_eq!(model.shown_file(), Some(engine));
+    assert_eq!(model.rows.files.len(), 1);
+    assert!((model.diff_scroll.offset() - top).abs() < f64::EPSILON);
+}
+
+/// Tab on a folder opens the file its diff shows at the reading line, with the same line at
+/// the same place on screen, and the diff and the tree then act on that file.
+#[test]
+fn opening_a_folders_diff_opens_the_file_at_its_reading_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    // A diff ten rows tall, which the demo's short files more than fill.
+    let short = Geometry {
+        heights: Heights {
+            diff: Some(10.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let lay_out = |host: &mut Host| host.update(|model| model.layout(short, Instant::now()));
+    let src = folder_at(host.model(), "src");
+    host.update(|model| model.tree_move_to(src));
+    lay_out(&mut host);
+
+    // The reading line on a changed line of a file after the first with a screenful of the
+    // file before and after it, so the file's own diff can put it at the same place.
+    let (second, row) = {
+        let model = host.model();
+        let row = (0..model.rows.rows.len())
+            .find(|&row| {
+                let row = &model.rows.rows[row];
+                let lines = model.rows.files[row.file].lines.unwrap_or(0);
+                row.file > 0
+                    && row.hunk.is_some()
+                    && row
+                        .cells()
+                        .next()
+                        .and_then(|cell| cell.head.as_ref())
+                        .is_some_and(|head| head.line >= 5 && head.line + 10 < lines)
+            })
+            .expect("a later file of src changes a line with a screenful around it");
+        let file = model.rows.rows[row].file;
+        (model.rows.files[file].path.clone(), row)
+    };
+    let unit = host.model().rows.rows[row].unit;
+    let reading = (10.0 * scroll::READING_LINE).floor();
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(row) - reading));
+    lay_out(&mut host);
+    let on_screen = scroll::rows(row) - host.model().diff_scroll.offset();
+    let line = host.model().rows.rows[row]
+        .cells()
+        .next()
+        .map(|cell| (cell.head.as_ref().map(|head| head.line), cell.base));
+
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let model = host.model();
+    assert_eq!(model.mode, Mode::Diff);
+    assert_eq!(model.folder(), None);
+    assert_eq!(model.shown_file(), Some(second.as_str()));
+    assert_eq!(model.tree_node().unwrap().path, second, "the tree follows");
+    let at = scroll::whole_rows(model.diff_scroll.offset() + on_screen);
+    let landed = model.rows.rows[at]
+        .cells()
+        .next()
+        .map(|cell| (cell.head.as_ref().map(|head| head.line), cell.base));
+    assert_eq!(landed, line, "the same line, where it was on screen");
+    assert!(
+        model.hunk_units().contains(&unit),
+        "the hunk of the change at the reading line is selected"
+    );
+}
+
+/// A folder's diff shows the files the tree's filter keeps, and widens to all of them once the
+/// filter clears, so a review key on the folder acts on exactly the files its diff shows.
+#[test]
+fn a_folders_diff_follows_the_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| {
+        model.filter = Some(super::Filter {
+            id: 0,
+            query: "src/engine".to_owned(),
+            editing: false,
+        });
+        model.apply_filter();
+    });
+    let src = folder_at(host.model(), "src");
+    host.update(|model| model.tree_move_to(src));
+    let sections = |model: &Model| -> Vec<String> {
+        model
+            .rows
+            .files
+            .iter()
+            .map(|section| section.path.clone())
+            .collect()
+    };
+    assert_eq!(sections(host.model()), ["src/engine.rs"]);
+
+    // Cleared, the filter leaves the cursor on the folder, whose diff shows all its files.
+    host.update(|model| {
+        model.filter = None;
+        model.apply_filter();
+    });
+    assert_eq!(host.model().tree_node().unwrap().path, "src");
+    let all = files_under(host.model(), "src");
+    assert_eq!(sections(host.model()), all);
+
+    // A review key acts on exactly the files the folder's diff shows.
+    let (mut target, _) = host.model().review_target().unwrap();
+    let view = host.model().view().unwrap();
+    let mut shown: Vec<_> = all
+        .iter()
+        .flat_map(|path| view.units_of_file(path))
+        .collect();
+    shown.sort_unstable();
+    target.sort_unstable();
+    assert_eq!(target, shown);
+}
+
+/// A folder's diff is the tree's alone: leaving the tree any other way opens a file, so the
+/// diff's keys never act on a folder's rows.
+#[test]
+fn leaving_the_tree_from_a_folder_opens_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    let src = folder_at(host.model(), "src");
+    host.update(|model| model.tree_move_to(src));
+    lay_out(&mut host);
+    assert_eq!(host.model().folder(), Some("src"));
+    host.dispatch(Action::ToggleSidebar);
+    let model = host.model();
+    assert_eq!(model.mode, Mode::Diff);
+    assert_eq!(model.folder(), None);
+    let shown = model.shown_file().unwrap();
+    assert!(review_core::tree::is_under(shown, "src"), "{shown}");
+    assert_eq!(model.rows.files[0].path, shown);
+}
+
+/// A notch of the wheel scrolls its rows; notches kept coming fast scroll further, and a
+/// precise scroll, such as a touchpad's, always scrolls exactly its rows.
+#[test]
+fn the_wheel_builds_momentum_in_the_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("scheduler.rs"));
+    lay_out(&mut host);
+    host.update(|model| model.drag_list_to(List::Diff, 0.0));
+    let start = Instant::now();
+    let notch = |host: &mut Host, at: Instant| {
+        let before = host.model().diff_scroll.offset();
+        host.update(|model| model.wheel_list(List::Diff, Wheel::Notches { rows: 3.0, at }));
+        host.model().diff_scroll.offset() - before
+    };
+    assert!((notch(&mut host, start) - 3.0).abs() < f64::EPSILON);
+    let mut last = 0.0;
+    for step in 1..20 {
+        last = notch(&mut host, start + Duration::from_millis(20 * step));
+    }
+    assert!(last > 6.0, "a fast wheel scrolls further: {last}");
+    let before = host.model().diff_scroll.offset();
+    host.update(|model| model.wheel_list(List::Diff, Wheel::Precise(3.0)));
+    assert!((host.model().diff_scroll.offset() - before - 3.0).abs() < f64::EPSILON);
+}
+
+/// `f` switches between the whole file and hunks apart wherever `v` does.
+#[test]
+fn f_switches_the_view() {
+    let (bindings, _) = keymap::keymap(&BTreeMap::new());
+    for area in [Area::Tree, Area::Diff] {
+        assert!(
+            bindings.iter().any(|binding| binding.action == "ToggleView"
+                && binding.area == area
+                && binding.keys.iter().any(|key| key == "f")),
+            "{area:?}"
+        );
+    }
+}
+
+/// `f` keeps the change the reviewer looks at where it is: in a hunk of several changes, the
+/// one on screen becomes the selected hunk of the whole file at the same place, rather than
+/// the hunk's first change scrolled into view.
+#[test]
+fn switching_the_view_keeps_the_change_looked_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    // A diff ten rows tall, which the demo's short files more than fill.
+    let short = Geometry {
+        heights: Heights {
+            diff: Some(10.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let lay_out = |host: &mut Host| host.update(|model| model.layout(short, Instant::now()));
+    // A file whose hunks view joins changes under one header.
+    let paths: Vec<String> = file_paths(&host.model().tree)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let hunk = paths
+        .iter()
+        .find_map(|path| {
+            host.update(|model| model.show_file(path));
+            host.model()
+                .rows
+                .hunks
+                .iter()
+                .position(|units| units.len() > 1)
+        })
+        .expect("the demo has a hunk of several changes");
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.update(|model| model.hunk = hunk);
+    // The hunk's second change at the top, its first above the screen.
+    let (second, row) = {
+        let model = host.model();
+        let second = model.rows.hunks[hunk][1];
+        let row = model.hunk_rows[hunk]
+            .clone()
+            .find(|&row| model.rows.rows[row].unit == second && model.rows.rows[row].is_code())
+            .unwrap();
+        (second, row)
+    };
+    host.update(|model| model.diff_scroll.jump(scroll::rows(row)));
+    let line = host.model().rows.rows[row]
+        .cells()
+        .next()
+        .map(|cell| (cell.head.as_ref().map(|head| head.line), cell.base));
+    host.dispatch(Action::ToggleView);
+    lay_out(&mut host);
+    let model = host.model();
+    assert_eq!(model.presented.view, crate::config::DiffView::File);
+    assert!(
+        model.hunk_units().contains(&second),
+        "the change looked at is selected"
+    );
+    assert!(
+        !model.diff_scroll.animating(),
+        "nothing scrolls away from it"
+    );
+    let top = scroll::whole_rows(model.diff_scroll.offset());
+    let shown = model.rows.rows[top]
+        .cells()
+        .next()
+        .map(|cell| (cell.head.as_ref().map(|head| head.line), cell.base));
+    assert_eq!(shown, line, "at the same place");
+}
+
+/// A click on a change that a folder's diff joins under one hunk with an earlier change opens
+/// the file with the change clicked selected, not the first change of that hunk.
+#[test]
+fn a_click_in_a_folders_diff_selects_the_change_clicked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    let folders: Vec<usize> = (0..host.model().visible_tree().len())
+        .filter(|&position| {
+            let model = host.model();
+            model.tree[model.visible_tree()[position]].kind == NodeKind::Directory
+        })
+        .collect();
+    // A folder whose diff has a changed line of a hunk's later change.
+    let (row, unit) = folders
+        .into_iter()
+        .find_map(|position| {
+            host.update(|model| model.tree_move_to(position));
+            let model = host.model();
+            model.rows.rows.iter().enumerate().find_map(|(index, row)| {
+                let hunk = model.rows.hunks.get(row.hunk?)?;
+                let later = hunk.first() != Some(&row.unit);
+                let changed = row.cells().next().is_some_and(|cell| {
+                    matches!(cell.kind, rows::RowKind::Added | rows::RowKind::Removed)
+                });
+                (later && changed).then_some((index, row.unit))
+            })
+        })
+        .expect("a folder's diff joins changes under one hunk");
+    lay_out(&mut host);
+    host.update(|model| model.press_text(text_press(row, 0)));
+    let model = host.model();
+    assert_eq!(model.mode, Mode::Diff);
+    assert_eq!(model.folder(), None);
+    assert!(
+        model.hunk_units().contains(&unit),
+        "the change clicked is selected"
     );
 }

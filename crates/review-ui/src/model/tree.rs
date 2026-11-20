@@ -93,10 +93,16 @@ impl Model {
     /// tree cursor to it. This is the one way the shown file changes, so the tree cursor always
     /// lands on the file whose diff shows: a filter that hides it is cleared and the folders
     /// that fold it open.
+    ///
+    /// A folder's diff showing in the selected file's place gives way to `path`'s.
     pub fn show_file(&mut self, path: &str) {
         self.reveal_in_tree(path);
-        if self.selected.as_deref() != Some(path) {
-            self.remember_place();
+        let previewing = self.folder.take().is_some();
+        if previewing || self.selected.as_deref() != Some(path) {
+            if !previewing {
+                self.remember_place();
+            }
+            self.wheel_momentum.stop();
             self.selected = Some(path.to_owned());
             self.selection = None;
             self.show_selected();
@@ -141,7 +147,7 @@ impl Model {
     }
 
     /// Builds the selected file's diff at the place the reviewer left it.
-    fn show_selected(&mut self) {
+    pub(super) fn show_selected(&mut self) {
         let Some(path) = self.selected.clone() else {
             return;
         };
@@ -179,8 +185,12 @@ impl Model {
         self.unified_text.reset();
     }
 
-    /// Remembers the selected hunk and the row at the top of the shown file.
+    /// Remembers the selected hunk and the row at the top of the shown file; a folder's diff
+    /// is no file's place.
     pub(super) fn remember_place(&mut self) {
+        if self.folder.is_some() {
+            return;
+        }
         if let Some(path) = self.selected.clone() {
             let offset = self.diff_scroll.offset();
             let top = super::present::diff_anchor(&self.rows, offset);
@@ -328,8 +338,16 @@ impl Model {
     }
 
     /// `0`, and opening a file from the tree: focuses the diff of the file under the tree
-    /// cursor, or of the selected file.
+    /// cursor, or of the selected file; on a folder, of the file its diff shows at the reading
+    /// line.
     pub(super) fn open_diff(&mut self) {
+        // A folder's diff opens the file under its reading line, where it shows.
+        if self.folder.is_some() {
+            if self.open_from_folder(None) {
+                self.enter_mode(Mode::Diff);
+            }
+            return;
+        }
         if let Some(path) = self
             .tree_node()
             .filter(|node| node.kind == NodeKind::File)

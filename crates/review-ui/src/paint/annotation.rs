@@ -151,6 +151,12 @@ pub fn annotation(
             accent: palette.note,
             background: palette.note_band,
         },
+        // A file's path in a folder's diff stands out from the quiet lines within its section.
+        RowKind::FileHeader => Annotation::Line {
+            text: Piece::new(note.text.clone(), palette.text).weighted(Weight::Bold),
+            hint: note.hint().map(|hint| Piece::new(hint, palette.faint)),
+            background: palette.band,
+        },
         _ => {
             let color = match note.kind {
                 RowKind::Moved => palette.moved,

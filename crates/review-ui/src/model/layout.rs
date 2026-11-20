@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use super::{Mode, Model};
 use crate::frame::{
-    Geometry, Grid, List, ListScroll, Metrics, PAN_SLACK, Sizes, TextPan, pan_extent,
+    Geometry, Grid, List, ListScroll, Metrics, PAN_SLACK, Sizes, TextPan, Wheel, pan_extent,
 };
 use crate::paint::display::display_width;
 
@@ -181,15 +181,23 @@ impl Model {
     }
 
     /// The wheel over `list`: it takes over from an eased scroll, which would otherwise pull
-    /// the list back to its target on the next frames, and scrolls by `delta` rows. In the
-    /// diff, the selected hunk follows the view.
-    pub fn wheel_list(&mut self, list: List, delta: f64) {
+    /// the list back to its target on the next frames, and scrolls by its rows, further as a
+    /// mouse wheel keeps turning fast.
+    /// In the diff, the selected hunk follows the view.
+    pub fn wheel_list(&mut self, list: List, wheel: Wheel) {
         if !self.settings.mouse.scroll {
             return;
         }
         if let Some(scroll) = self.list_scroll_mut(list) {
             scroll.stop();
         }
+        let delta = match wheel {
+            Wheel::Notches { rows, at } => self.wheel_momentum.turn(list, rows, at),
+            Wheel::Precise(rows) => {
+                self.wheel_momentum.stop();
+                rows
+            }
+        };
         if delta != 0.0 {
             self.scroll_list_by(list, delta);
         }

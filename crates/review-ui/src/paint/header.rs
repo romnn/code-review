@@ -104,6 +104,9 @@ pub fn file_header(
     room: Room,
     meter_gap: f32,
 ) -> Option<FileHeader> {
+    if let Some(folder) = model.folder() {
+        return Some(folder_header(model, palette, folder, room, meter_gap));
+    }
     let section = model.rows.files.first()?;
     let (dir, name) = split_path(&section.path);
     let change = section.change.as_ref();
@@ -202,6 +205,72 @@ pub fn file_header(
         }),
         meter: show_meter.then(|| meter(palette, approved, units.len())),
     })
+}
+
+/// The header of a folder's diff: the folder's path, how many files it shows, and the line
+/// counts and the meter over all of their units, where they fit.
+fn folder_header(
+    model: &Model,
+    palette: &Palette,
+    folder: &str,
+    room: Room,
+    meter_gap: f32,
+) -> FileHeader {
+    let (dir, name) = split_path(folder.trim_end_matches('/'));
+    let name = format!("{name}/");
+    let sections = &model.rows.files;
+    let units: Vec<_> = sections
+        .iter()
+        .flat_map(|section| section.units.iter().copied())
+        .collect();
+    let approved = model
+        .view()
+        .map(|view| {
+            state::badges(&view, &units, &model.pending)
+                .into_iter()
+                .filter(|&badge| state::is_approved(badge))
+                .count()
+        })
+        .unwrap_or(0);
+    let added = format!(
+        "+{}",
+        sections.iter().map(|section| section.added).sum::<usize>()
+    );
+    let removed = format!(
+        "−{}",
+        sections
+            .iter()
+            .map(|section| section.removed)
+            .sum::<usize>()
+    );
+    let Room { budget, cell, gap } = room;
+    let text = |text: &str| float(display_width(text)) * cell;
+    let lead = text(folder).min(cell * PATH_CELLS);
+    let meter_room = gap + meter_width(units.len(), cell, meter_gap);
+    let counts_room = gap + text(&added) + gap + text(&removed);
+    let show_meter = lead + meter_room <= budget;
+    let show_counts = show_meter && lead + meter_room + counts_room <= budget;
+    let mut dir = dir.to_owned();
+    let right =
+        if show_meter { meter_room } else { 0.0 } + if show_counts { counts_room } else { 0.0 };
+    if model.settings.shorten_chains && text(&dir) + text(&name) > budget - right {
+        dir = super::shorten_middle(&dir);
+    }
+    FileHeader {
+        kind: None,
+        dir: Piece::new(dir, palette.dim),
+        name: Piece::new(name, palette.text).weighted(Weight::Bold),
+        scope: None,
+        details: Piece::new(crate::model::plural(sections.len(), "file"), palette.faint),
+        lines: None,
+        counts: show_counts.then(|| {
+            [
+                Piece::new(added, palette.added_sign),
+                Piece::new(removed, palette.removed_sign),
+            ]
+        }),
+        meter: show_meter.then(|| meter(palette, approved, units.len())),
+    }
 }
 
 /// The selected hunk's scopes, outermost first, and label for the file header, in the file

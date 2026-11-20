@@ -181,6 +181,90 @@ pub fn centered(height: f64, top: f64, bottom: f64, share: f64) -> f64 {
     middle.min(top - above).max(0.0).floor()
 }
 
+/// How quickly the wheel's momentum fades once the wheel slows or stops: the time in which
+/// it falls to about a third.
+const MOMENTUM_FADE: Duration = Duration::from_millis(300);
+
+/// The speed, in rows a second, past which the wheel builds momentum: about ten notches a
+/// second, since a notch scrolls three rows in either front end, so turning the wheel at an
+/// easy pace scrolls exactly as far as its notches say.
+const MOMENTUM_ONSET: f64 = 30.0;
+
+/// The most the wheel's momentum multiplies a notch by.
+const MOMENTUM_MAX: f64 = 8.0;
+
+/// The momentum a mouse wheel builds as it keeps turning fast, as a simple physics model.
+///
+/// Every notch adds its rows to an energy that fades exponentially with time, so the energy
+/// tracks how fast the wheel turns, in rows a second.
+/// A notch scrolls by the momentum the notches before it built, so a burst of notches the
+/// platform delivered as one scrolls as far as they say.
+/// Below [`MOMENTUM_ONSET`] a notch scrolls as far as it says, so short and slow turns stay
+/// precise; past it, each notch scrolls further the faster the wheel keeps turning, up to
+/// [`MOMENTUM_MAX`] times as far.
+/// What momentum adds is whole rows, the fraction carried to the next notch, so a notch of
+/// whole rows keeps the list at a whole row, as a terminal draws it.
+/// Turning the other way, or another list, starts from rest.
+/// Nothing glides on after the wheel stops: the rows scroll as the notches arrive.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WheelMomentum {
+    /// The faded sum of the rows the wheel turned, in rows.
+    energy: f64,
+    /// The part of a row momentum added that the notches so far left over, which the next
+    /// notch the same way scrolls.
+    carry: f64,
+    /// The last notch: when it arrived, which list it scrolled and whether down.
+    last: Option<Notch>,
+}
+
+/// A notch of the wheel, which the next one builds on.
+#[derive(Debug, Clone, Copy)]
+struct Notch {
+    at: Instant,
+    list: crate::frame::List,
+    down: bool,
+}
+
+impl WheelMomentum {
+    /// Takes in a notch of `rows` over `list` at `now`, down when positive, and returns how
+    /// many rows it scrolls with the momentum built so far.
+    pub fn turn(&mut self, list: crate::frame::List, rows: f64, now: Instant) -> f64 {
+        if rows == 0.0 {
+            return 0.0;
+        }
+        let down = rows > 0.0;
+        match self.last {
+            Some(previous) if previous.list == list && previous.down == down => {
+                let elapsed = now.saturating_duration_since(previous.at).as_secs_f64();
+                self.energy *= (-elapsed / MOMENTUM_FADE.as_secs_f64()).exp();
+            }
+            _ => *self = Self::default(),
+        }
+        let exact = rows * (self.factor() - 1.0) + self.carry;
+        let extra = exact.trunc();
+        self.carry = exact - extra;
+        self.energy += rows.abs();
+        self.last = Some(Notch {
+            at: now,
+            list,
+            down,
+        });
+        rows + extra
+    }
+
+    /// How many times as far a notch scrolls at the speed the energy stands for: one up to
+    /// [`MOMENTUM_ONSET`], then growing with the speed, up to [`MOMENTUM_MAX`].
+    fn factor(&self) -> f64 {
+        let speed = self.energy / MOMENTUM_FADE.as_secs_f64();
+        (speed / MOMENTUM_ONSET).clamp(1.0, MOMENTUM_MAX)
+    }
+
+    /// Drops the momentum, as when something other than the wheel scrolls the list.
+    pub fn stop(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +351,90 @@ mod tests {
         // Above: a margin below the top, never past zero.
         assert_eq!(reveal(10.0, 40.0, 12.0, 14.0, 6.0), Some(6.0));
         assert_eq!(reveal(10.0, 40.0, 2.0, 4.0, 6.0), Some(0.0));
+    }
+    /// Notches `apart` apart over the diff, all down, and the rows the last one scrolls.
+    fn spin(notches: usize, apart: Duration) -> f64 {
+        let start = Instant::now();
+        let mut momentum = WheelMomentum::default();
+        let mut last = 0.0;
+        for notch in 0..notches {
+            let at = start + apart * u32::try_from(notch).unwrap();
+            last = momentum.turn(crate::frame::List::Diff, 3.0, at);
+        }
+        last
+    }
+
+    /// An easy turn of the wheel scrolls exactly as far as its notches say, and a wheel kept
+    /// spinning fast builds momentum up to a cap.
+    #[test]
+    fn a_fast_wheel_builds_momentum() {
+        // One notch, and notches at five a second, scroll three rows each.
+        assert!((spin(1, Duration::ZERO) - 3.0).abs() < f64::EPSILON);
+        assert!((spin(20, Duration::from_millis(200)) - 3.0).abs() < f64::EPSILON);
+        // Thirty notches a second scroll further, the more so the longer they keep coming.
+        let early = spin(8, Duration::from_millis(33));
+        let late = spin(15, Duration::from_millis(33));
+        assert!(early > 3.0 && late > early, "{early} then {late}");
+        // However fast the wheel spins, a notch scrolls at most eight times as far.
+        assert!((spin(200, Duration::from_millis(1)) - 24.0).abs() < f64::EPSILON);
+    }
+
+    /// Notches the platform delivers together scroll as far as they say, and what momentum
+    /// adds is whole rows, so a list scrolled by whole rows stays at a whole row.
+    #[test]
+    fn momentum_comes_from_earlier_notches_in_whole_rows() {
+        let start = Instant::now();
+        let mut momentum = WheelMomentum::default();
+        assert!((momentum.turn(crate::frame::List::Diff, 12.0, start) - 12.0).abs() < 1e-9);
+        let mut burst = WheelMomentum::default();
+        let rows: f64 = (0..4)
+            .map(|_| burst.turn(crate::frame::List::Diff, 3.0, start))
+            .sum();
+        assert!((rows - 12.0).abs() < 1e-9, "{rows}");
+        let mut terminal = WheelMomentum::default();
+        for event in 0..60 {
+            let rows = terminal.turn(
+                crate::frame::List::Diff,
+                1.0,
+                start + Duration::from_millis(5 * event),
+            );
+            assert!((rows - rows.round()).abs() < 1e-9, "{rows}");
+        }
+    }
+
+    /// Momentum fades once the wheel pauses, and turning back or over another list starts
+    /// from rest.
+    #[test]
+    fn momentum_fades_and_resets() {
+        let start = Instant::now();
+        let fast = |momentum: &mut WheelMomentum| {
+            for notch in 0..20 {
+                momentum.turn(
+                    crate::frame::List::Diff,
+                    3.0,
+                    start + Duration::from_millis(20 * notch),
+                );
+            }
+        };
+        let after = start + Duration::from_millis(400);
+        // A second's pause leaves no momentum.
+        let mut momentum = WheelMomentum::default();
+        fast(&mut momentum);
+        let rows = momentum.turn(
+            crate::frame::List::Diff,
+            3.0,
+            after + Duration::from_secs(1),
+        );
+        assert!((rows - 3.0).abs() < 1e-9, "{rows}");
+        // Turning the wheel back scrolls a notch's rows the other way.
+        let mut momentum = WheelMomentum::default();
+        fast(&mut momentum);
+        let rows = momentum.turn(crate::frame::List::Diff, -3.0, after);
+        assert!((rows + 3.0).abs() < f64::EPSILON, "{rows}");
+        // Another list starts from rest.
+        let mut momentum = WheelMomentum::default();
+        fast(&mut momentum);
+        let rows = momentum.turn(crate::frame::List::Tree, 3.0, after);
+        assert!((rows - 3.0).abs() < f64::EPSILON, "{rows}");
     }
 }

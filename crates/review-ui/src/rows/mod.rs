@@ -507,7 +507,9 @@ pub struct Layout {
 pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout {
     let mut layout = Layout::default();
     let notes = view.notes();
-    for group in file_groups(view, units) {
+    let groups = file_groups(view, units);
+    let file_units = file_units(view, &groups);
+    for group in groups {
         let file_index = layout.files.len();
         let Some(&first) = group.first() else {
             continue;
@@ -524,6 +526,7 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
                 view,
                 file_index,
                 &group,
+                file_units.get(&path).map_or(&[][..], Vec::as_slice),
                 text.as_deref(),
                 folds.context,
                 folds,
@@ -570,6 +573,7 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
             view,
             file_index,
             &group,
+            file_units.get(&path).map_or(&[][..], Vec::as_slice),
             text.as_deref(),
             context,
             folds,
@@ -580,19 +584,40 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
         .hunks
         .iter()
         .map(|units| {
+            // Every unit has a header row, which knows its file section.
             let file = units
                 .first()
-                .and_then(|unit| {
-                    layout
-                        .files
-                        .iter()
-                        .position(|section| section.units.contains(unit))
-                })
-                .unwrap_or(0);
+                .and_then(|unit| layout.unit_rows.get(unit))
+                .and_then(|&row| layout.rows.get(row))
+                .map_or(0, |row| row.file);
             hunk_note(&layout, view, file, units, folds)
         })
         .collect();
     layout
+}
+
+/// Every unit of the files `groups` lay out, by display path, from one pass over the
+/// revision's files: a section's context leaves out the file's changes in other groups, and a
+/// folder's diff has many sections.
+fn file_units(view: &RevisionView<'_>, groups: &[Vec<UnitId>]) -> HashMap<String, Vec<UnitId>> {
+    let paths: HashSet<&str> = groups
+        .iter()
+        .filter_map(|group| view.file(*group.first()?).ok())
+        .map(review_core::analysis::FileChange::display_path)
+        .collect();
+    let mut units: HashMap<String, Vec<UnitId>> = HashMap::new();
+    if let Some(analysis) = view.analysis() {
+        for file in &analysis.files {
+            let path = file.display_path();
+            if paths.contains(path) {
+                units
+                    .entry(path.to_owned())
+                    .or_default()
+                    .extend(file.units.iter().map(|&index| view.id(index)));
+            }
+        }
+    }
+    units
 }
 
 /// Splits `units` into runs of consecutive units of one file.
@@ -641,12 +666,12 @@ fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> Fil
         }
     }
     let total = group.len();
-    // A fully reviewed file folds like its approved units, unless the reviewer chose.
+    // A file whose units all fold folds with them, unless the reviewer chose: a flagged or
+    // changed unit never folds, so neither does its file.
     let collapsed = folds.files.get(&path).copied().unwrap_or(
         folds.view == DiffView::Hunks
-            && folds.approved == Approved::Folded
             && total > 0
-            && reviewed == total,
+            && group.iter().all(|&unit| folds.is_folded(view, unit)),
     );
     FileSection {
         has_head: file.is_some_and(|file| file.new.is_some()),
@@ -1373,6 +1398,9 @@ fn interdiff_rows(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId
 /// around it from `text`, and gap rows for the unchanged lines left out. Without `text`, chunks
 /// show without context. With `context` at `usize::MAX`, the whole file shows.
 ///
+/// `all_units` are every unit of the file, those of other groups too, whose lines never show
+/// as unchanged context.
+///
 /// A folded hunk is its header alone, and unchanged lines between folded hunks or between one
 /// and the file's edge show nothing at all, so consecutive folded hunks read as a list of
 /// headers.
@@ -1386,6 +1414,7 @@ fn section_rows(
     view: &RevisionView<'_>,
     file: usize,
     group: &[UnitId],
+    all_units: &[UnitId],
     text: Option<&FullText>,
     context: usize,
     folds: &Folds,
@@ -1436,9 +1465,9 @@ fn section_rows(
     chunks.sort_by_key(|&(_, start, _)| start);
     // Changes of this file in other steps are never shown as unchanged context.
     let shown: HashSet<UnitId> = group.iter().copied().collect();
-    let others: Vec<(usize, usize, UnitId)> = view
-        .units_of_file(&path)
-        .into_iter()
+    let others: Vec<(usize, usize, UnitId)> = all_units
+        .iter()
+        .copied()
         .filter(|unit| !shown.contains(unit))
         .filter_map(|unit| {
             let chunk = view.unit(unit).ok()?.chunk()?;
@@ -1455,7 +1484,7 @@ fn section_rows(
         path: path.clone(),
         text,
         others: &others,
-        bases: BaseLines::of(view, &path),
+        bases: BaseLines::of(view, all_units),
     };
     // Display hunks come from the engine's grouping of the units alone, never from whether the
     // text has arrived, so a hunk approves the same units before and after.
@@ -1643,11 +1672,11 @@ struct ChunkEnd {
 }
 
 impl BaseLines {
-    /// The chunks of the file at `path` in `view`.
-    fn of(view: &RevisionView<'_>, path: &str) -> Self {
-        let mut ends: Vec<ChunkEnd> = view
-            .units_of_file(path)
-            .into_iter()
+    /// The chunks of a file in `view`, whose units are `units`.
+    fn of(view: &RevisionView<'_>, units: &[UnitId]) -> Self {
+        let mut ends: Vec<ChunkEnd> = units
+            .iter()
+            .copied()
             .filter_map(|unit| {
                 let chunk = view.unit(unit).ok()?.chunk()?;
                 Some(ChunkEnd {

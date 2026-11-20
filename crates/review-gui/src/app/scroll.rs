@@ -9,18 +9,20 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Canvas, Context, DispatchPhase, Hitbox, HitboxBehavior, IsZero as _, Pixels,
-    Point, ScrollEvent, Size, UniformListScrollHandle, WeakEntity, Window, canvas, point, px,
+    Point, ScrollEvent, ScrollSource, Size, UniformListScrollHandle, WeakEntity, Window, canvas,
+    point, px,
 };
 use gpui_component::scroll::ScrollbarHandle;
 pub use review_ui::scroll::{float, narrow, rows, whole};
 
 use super::ReviewApp;
 use super::measure::{Handles, PanelSizes};
-use review_ui::frame::{List, ListScroll};
+use review_ui::frame::{List, ListScroll, Wheel};
 use review_ui::model::Model;
 
 /// What a scrollbar asked of the model, in its rows and cells.
@@ -330,8 +332,18 @@ impl ReviewApp {
         }
         let rows = -f64::from(f32::from(down)) / f64::from(self.row_px(list));
         let cells = -f64::from(f32::from(across)) / f64::from(self.sizes().code_cell());
+        // A touchpad's or a touchscreen's scroll has momentum of its own; a wheel's notches
+        // build it in the model.
+        let wheel = if event.delta.precise() || event.source == ScrollSource::Touch {
+            Wheel::Precise(rows)
+        } else {
+            Wheel::Notches {
+                rows,
+                at: Instant::now(),
+            }
+        };
         self.update_model(window, cx, |model| {
-            model.wheel_list(list, rows);
+            model.wheel_list(list, wheel);
             if cells != 0.0 {
                 match list {
                     List::Buffer => model.pan_buffer(cells),

@@ -26,9 +26,10 @@ pub enum Frame {
     Hunk,
     /// In the selected hunk, of its tone: a bar in the tone's solid color.
     Selected(HunkTone),
-    /// In a hunk of the file view, which draws no band, so the code reads as one file: the
-    /// selected hunk has a bar in its tone's solid color, and of the others only those the
-    /// reviewer decided on have one, quieter, so approved and flagged code shows as such.
+    /// In a hunk of the file view, which draws a band only behind approved hunks, so the code
+    /// reads as one file: the selected hunk has a bar in its tone's solid color, and of the
+    /// others only those the reviewer decided on have one, quieter, so approved and flagged code
+    /// shows as such.
     Whole {
         /// What the hunk asks of the reviewer.
         tone: HunkTone,
@@ -61,9 +62,21 @@ impl Frame {
     }
 
     /// The band behind a hunk's rows; a changed line's own background covers it.
+    ///
+    /// The file view draws it only behind approved hunks, whose code has lost its diff colors,
+    /// so what the reviewer approved still stands apart from the file around it.
     #[must_use]
     pub fn band(self, palette: &Palette) -> Option<Hsla> {
-        matches!(self, Self::Hunk | Self::Selected(_)).then_some(palette.band)
+        matches!(
+            self,
+            Self::Hunk
+                | Self::Selected(_)
+                | Self::Whole {
+                    tone: HunkTone::Approved,
+                    ..
+                }
+        )
+        .then_some(palette.band)
     }
 
     /// Whether the row is in the selected hunk.

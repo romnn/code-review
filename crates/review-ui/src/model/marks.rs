@@ -41,21 +41,37 @@ impl Model {
                                     folder."
                             .to_owned());
                     }
-                    // A folder acts on the files it shows.
-                    let units = state::folder_files(&self.tree, index)
+                    // A folder acts on the files it shows, which its diff shows too.
+                    let files = state::folder_files(&self.tree, index);
+                    let previewed = self.folder.as_ref().is_some_and(|folder| {
+                        folder.path == node.path && folder.files.iter().eq(files.iter())
+                    });
+                    if !previewed {
+                        return Err("The folder's diff is not the one shown; move the cursor \
+                                    to show it first."
+                            .to_owned());
+                    }
+                    let units = files
                         .into_iter()
                         .flat_map(|path| view.units_of_file(path))
                         .collect();
                     return Ok((units, node.path.clone()));
                 }
-                if selected != Some(node.path.as_str()) || shown != selected {
+                if self.folder.is_some()
+                    || selected != Some(node.path.as_str())
+                    || shown != selected
+                {
                     return Err("The file under the cursor is not the one shown; move the \
                                 cursor to show it first."
                         .to_owned());
                 }
                 Ok((view.units_of_file(&node.path), node.path.clone()))
             }
-            Mode::Diff | Mode::Buffer if shown.is_none() || shown != selected => Err(nothing()),
+            Mode::Diff | Mode::Buffer
+                if self.folder.is_some() || shown.is_none() || shown != selected =>
+            {
+                Err(nothing())
+            }
             Mode::Diff => {
                 let units = self.hunk_units();
                 if units.is_empty() {

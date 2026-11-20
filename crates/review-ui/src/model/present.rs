@@ -73,6 +73,8 @@ pub(crate) struct RowKey {
     base: Option<usize>,
     /// Whether the line belongs to a nested diff, whose lines may be another file's.
     nested: bool,
+    /// Whether the row is a file's header in a diff of several files.
+    file_header: bool,
 }
 
 impl RowKey {
@@ -91,6 +93,7 @@ impl RowKey {
                     RowKind::NestedOld | RowKind::NestedNew | RowKind::NestedSame
                 )
             }),
+            file_header: row.kind() == RowKind::FileHeader,
         }
     }
 
@@ -131,6 +134,8 @@ impl RowKey {
     ) -> Option<usize> {
         match unit {
             Some(unit) => Self { unit, ..self }.find(layout),
+            // Without the unit, a line number names no file among several.
+            None if several_files(layout) => None,
             None => layout
                 .rows
                 .iter()
@@ -139,18 +144,46 @@ impl RowKey {
         }
     }
 
-    /// The unified row of `layout` that shows the same line, of the same unit when it can;
-    /// or else the header of the same unit.
+    /// The unified row of `layout` that shows the same line, of the same unit when it can,
+    /// else of the unit's file; or else the header of the same unit.
     #[must_use]
     pub(crate) fn find(self, layout: &Layout) -> Option<usize> {
         let rows = &layout.rows;
+        // A folder's diff has several files, whose line numbers mean other lines: without the
+        // unit, a line names no file among them.
+        let file = layout
+            .unit_rows
+            .get(&self.unit)
+            .and_then(|&row| rows.get(row))
+            .map(|row| row.file);
+        let anywhere = !several_files(layout);
+        // A file's header in a single file's diff is the unit's place, as below.
+        if self.file_header && several_files(layout) {
+            return rows
+                .iter()
+                .find(|row| row.kind() == RowKind::FileHeader && Some(row.file) == file)
+                .map(|row| row.source);
+        }
         let row = rows
             .iter()
             .find(|row| row.unit == self.unit && self.same_line(row))
-            .or_else(|| rows.iter().find(|row| self.same_line(row)))
+            .or_else(|| {
+                rows.iter().find(|row| {
+                    (file == Some(row.file) || (file.is_none() && anywhere)) && self.same_line(row)
+                })
+            })
             .or_else(|| rows.get(*layout.unit_rows.get(&self.unit)?))?;
         Some(row.source)
     }
+}
+
+/// Whether `layout` is a diff of several files, such as a folder's, whose line numbers name no
+/// line without a file: it starts with a file's header, however few files it has now.
+fn several_files(layout: &Layout) -> bool {
+    layout
+        .rows
+        .first()
+        .is_some_and(|row| row.kind() == RowKind::FileHeader)
 }
 
 /// Where every list is, by row: the diff by its unified row, the tree and the buffer by their

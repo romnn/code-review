@@ -106,6 +106,14 @@ impl Model {
         if self.settings.mouse.navigate {
             match pane {
                 Pane::Diff => {
+                    // A press in a folder's diff opens the file pressed, at the line pressed;
+                    // the rows it pressed are gone, so nothing else of the press applies.
+                    if self.folder.is_some() {
+                        if self.open_from_folder(Some(pos.row)) {
+                            self.enter_mode(Mode::Diff);
+                        }
+                        return;
+                    }
                     if self.mode != Mode::Diff {
                         self.enter_mode(Mode::Diff);
                     }

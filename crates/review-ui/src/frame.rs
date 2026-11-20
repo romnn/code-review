@@ -22,6 +22,22 @@ use std::time::Instant;
 use crate::config::Density;
 use crate::scroll::{self, Animation};
 
+/// A turn of the wheel over a list, in rows, down when positive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Wheel {
+    /// Notches of a mouse wheel, arriving at `at`, which build momentum as they keep coming
+    /// fast; see [`scroll::WheelMomentum`].
+    Notches {
+        /// The rows the notches scroll at rest.
+        rows: f64,
+        /// When they arrived.
+        at: Instant,
+    },
+    /// A continuous scroll, such as a touchpad's, which scrolls exactly as far as it says:
+    /// the platform already gives it momentum of its own.
+    Precise(f64),
+}
+
 /// A scrolled list the model drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum List {
