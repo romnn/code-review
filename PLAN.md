@@ -991,12 +991,13 @@ it, muted, so it never reads as code.
     mode, where `j`/`k` scroll a line until `s` again, or Esc, which goes back to the hunk
     scroll mode began at, the next Esc going to the files. The wheel scrolls without a mode,
     and in review-tui a row for each wheel event, since terminals already send several events
-    for one notch. A wheel kept turning fast builds momentum: each notch adds its rows to an
-    energy that fades within a few tenths of a second, and past about thirty rows a second
-    (ten notches) a notch scrolls further the faster the wheel turns, up to eight times as far,
-    while an easy turn scrolls exactly its notches; turning back, another list or other content
-    starts from rest, and a touchpad's precise scrolling, which has momentum of its own, is
-    left as it is. Either way the
+    for one notch. A wheel kept turning fast builds momentum: each notch adds one to an energy
+    that fades within a few tenths of a second (a terminal's several events for one notch count
+    once), and past about six notches a second a notch scrolls further with the square of how
+    fast the wheel turns, about twice as far at ten a second and nine times at twenty, up to
+    twelve times, while an easy turn scrolls exactly its notches; turning back, another list or
+    other content starts from rest, and a touchpad's precise scrolling, which has momentum of
+    its own, is left as it is. Either way the
     selected hunk follows the view: when it leaves it, the hunk in view nearest the reading
     line a fifth down becomes the selected one, so the review keys act on what shows. With
     `[diff] cross_files = true` (or the settings list) `j`/`k` go on

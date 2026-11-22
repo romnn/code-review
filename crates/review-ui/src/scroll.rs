@@ -185,78 +185,99 @@ pub fn centered(height: f64, top: f64, bottom: f64, share: f64) -> f64 {
 /// it falls to about a third.
 const MOMENTUM_FADE: Duration = Duration::from_millis(300);
 
-/// The speed, in rows a second, past which the wheel builds momentum: about ten notches a
-/// second, since a notch scrolls three rows in either front end, so turning the wheel at an
-/// easy pace scrolls exactly as far as its notches say.
-const MOMENTUM_ONSET: f64 = 30.0;
+/// How close together wheel events count as one notch: a terminal sends several events for one
+/// notch at once, and a desktop wheel one.
+const NOTCH_BURST: Duration = Duration::from_millis(4);
+
+/// The notches a second past which the wheel builds momentum, so turning it at an easy pace
+/// scrolls exactly as far as its notches say.
+const MOMENTUM_ONSET: f64 = 6.0;
 
 /// The most the wheel's momentum multiplies a notch by.
-const MOMENTUM_MAX: f64 = 8.0;
+const MOMENTUM_MAX: f64 = 12.0;
 
 /// The momentum a mouse wheel builds as it keeps turning fast, as a simple physics model.
 ///
-/// Every notch adds its rows to an energy that fades exponentially with time, so the energy
-/// tracks how fast the wheel turns, in rows a second.
-/// A notch scrolls by the momentum the notches before it built, so a burst of notches the
-/// platform delivered as one scrolls as far as they say.
-/// Below [`MOMENTUM_ONSET`] a notch scrolls as far as it says, so short and slow turns stay
-/// precise; past it, each notch scrolls further the faster the wheel keeps turning, up to
-/// [`MOMENTUM_MAX`] times as far.
+/// Every notch adds one to an energy that fades exponentially with time, so the energy tracks
+/// how fast the wheel turns, in notches a second, whatever rows a notch scrolls and however
+/// many events a terminal sends for it.
+/// A notch scrolls by the momentum the notches before it built, so a burst the platform
+/// delivered as one scrolls as far as it says.
+/// Up to [`MOMENTUM_ONSET`] a notch scrolls as far as it says, so short and slow turns stay
+/// precise; past it, each notch scrolls further with the square of how fast the wheel keeps
+/// turning, so a quick spin travels far, up to [`MOMENTUM_MAX`] times as far.
 /// What momentum adds is whole rows, the fraction carried to the next notch, so a notch of
 /// whole rows keeps the list at a whole row, as a terminal draws it.
 /// Turning the other way, or another list, starts from rest.
 /// Nothing glides on after the wheel stops: the rows scroll as the notches arrive.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WheelMomentum {
-    /// The faded sum of the rows the wheel turned, in rows.
+    /// The faded count of the notches the wheel turned.
     energy: f64,
     /// The part of a row momentum added that the notches so far left over, which the next
     /// notch the same way scrolls.
     carry: f64,
-    /// The last notch: when it arrived, which list it scrolled and whether down.
+    /// The last notch, which the next one builds on.
     last: Option<Notch>,
 }
 
 /// A notch of the wheel, which the next one builds on.
 #[derive(Debug, Clone, Copy)]
 struct Notch {
+    /// When its first event arrived.
     at: Instant,
     list: crate::frame::List,
     down: bool,
+    /// How many times as far its events scroll.
+    factor: f64,
 }
 
 impl WheelMomentum {
-    /// Takes in a notch of `rows` over `list` at `now`, down when positive, and returns how
-    /// many rows it scrolls with the momentum built so far.
+    /// Takes in a wheel event of `rows` over `list` at `now`, down when positive, and returns
+    /// how many rows it scrolls with the momentum built so far.
     pub fn turn(&mut self, list: crate::frame::List, rows: f64, now: Instant) -> f64 {
         if rows == 0.0 {
             return 0.0;
         }
         let down = rows > 0.0;
-        match self.last {
-            Some(previous) if previous.list == list && previous.down == down => {
-                let elapsed = now.saturating_duration_since(previous.at).as_secs_f64();
-                self.energy *= (-elapsed / MOMENTUM_FADE.as_secs_f64()).exp();
+        let factor = match self.last {
+            Some(notch) if notch.list == list && notch.down == down => {
+                let elapsed = now.saturating_duration_since(notch.at);
+                if elapsed < NOTCH_BURST {
+                    // Another event of the same notch.
+                    notch.factor
+                } else {
+                    self.energy = self.energy
+                        * (-elapsed.as_secs_f64() / MOMENTUM_FADE.as_secs_f64()).exp()
+                        + 1.0;
+                    self.begin(list, down, now)
+                }
             }
-            _ => *self = Self::default(),
-        }
-        let exact = rows * (self.factor() - 1.0) + self.carry;
+            _ => {
+                *self = Self::default();
+                self.energy = 1.0;
+                self.begin(list, down, now)
+            }
+        };
+        let exact = rows * (factor - 1.0) + self.carry;
         let extra = exact.trunc();
         self.carry = exact - extra;
-        self.energy += rows.abs();
+        rows + extra
+    }
+
+    /// Starts a notch at `now`, scrolling by the momentum the notches before it built, and
+    /// returns that factor.
+    fn begin(&mut self, list: crate::frame::List, down: bool, now: Instant) -> f64 {
+        // The notches before this one, at the rate they came.
+        let rate = (self.energy - 1.0).max(0.0) / MOMENTUM_FADE.as_secs_f64();
+        let factor = (rate / MOMENTUM_ONSET).powi(2).clamp(1.0, MOMENTUM_MAX);
         self.last = Some(Notch {
             at: now,
             list,
             down,
+            factor,
         });
-        rows + extra
-    }
-
-    /// How many times as far a notch scrolls at the speed the energy stands for: one up to
-    /// [`MOMENTUM_ONSET`], then growing with the speed, up to [`MOMENTUM_MAX`].
-    fn factor(&self) -> f64 {
-        let speed = self.energy / MOMENTUM_FADE.as_secs_f64();
-        (speed / MOMENTUM_ONSET).clamp(1.0, MOMENTUM_MAX)
+        factor
     }
 
     /// Drops the momentum, as when something other than the wheel scrolls the list.
@@ -375,8 +396,8 @@ mod tests {
         let early = spin(8, Duration::from_millis(33));
         let late = spin(15, Duration::from_millis(33));
         assert!(early > 3.0 && late > early, "{early} then {late}");
-        // However fast the wheel spins, a notch scrolls at most eight times as far.
-        assert!((spin(200, Duration::from_millis(1)) - 24.0).abs() < f64::EPSILON);
+        // However fast the wheel spins, a notch scrolls at most twelve times as far.
+        assert!((spin(200, Duration::from_millis(5)) - 36.0).abs() < f64::EPSILON);
     }
 
     /// Notches the platform delivers together scroll as far as they say, and what momentum
@@ -436,5 +457,35 @@ mod tests {
         fast(&mut momentum);
         let rows = momentum.turn(crate::frame::List::Tree, 3.0, after);
         assert!((rows - 3.0).abs() < f64::EPSILON, "{rows}");
+    }
+
+    /// A terminal's several events for one notch count as that one notch, so a wheel builds
+    /// the same momentum in either front end: three one-row events at once scroll as far as
+    /// one three-row event.
+    #[test]
+    fn a_notchs_events_count_once() {
+        let start = Instant::now();
+        let mut desktop = WheelMomentum::default();
+        let mut terminal = WheelMomentum::default();
+        let (mut desktop_rows, mut terminal_rows) = (0.0, 0.0);
+        for notch in 0..20 {
+            let at = start + Duration::from_millis(60 * notch);
+            desktop_rows += desktop.turn(crate::frame::List::Diff, 3.0, at);
+            for event in 0..3 {
+                terminal_rows += terminal.turn(
+                    crate::frame::List::Diff,
+                    1.0,
+                    at + Duration::from_micros(200 * event),
+                );
+            }
+        }
+        assert!(
+            desktop_rows > 60.0,
+            "sixteen notches a second build momentum"
+        );
+        assert!(
+            (desktop_rows - terminal_rows).abs() <= 3.0,
+            "{desktop_rows} and {terminal_rows}"
+        );
     }
 }
