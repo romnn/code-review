@@ -1306,13 +1306,14 @@ fn the_review_opens_where_the_reviewer_quit() {
 }
 
 /// Approved code loses its diff colors, its signs aside, its removed lines fading as code that
-/// is gone, and sits on the hunks' gray band; and in the bold style only the selected hunk
-/// keeps bold line backgrounds, the others soft ones, with a bar across the frame against a
-/// sliver.
+/// is gone, and sits on the hunks' gray band, while code still to review keeps them, an edited
+/// line on its soft background, and has a bar too, and a mark on the ruler; and in the bold
+/// style only the selected hunk keeps bold line backgrounds, the others soft ones, with a bar
+/// across the frame against a sliver, and line numbers in the text color against quiet ones.
 #[test]
 fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
     use crate::paint::Palette;
-    use crate::paint::code::{At, CodeCell, Frame, code_cell, frame};
+    use crate::paint::code::{At, CodeCell, Frame, code_cell, frame, ruler};
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open_with(demo(dir.path()), whole_file());
     host.update(|model| model.show_file("src/engine.rs"));
@@ -1357,8 +1358,8 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
         );
         assert_eq!(
             frame.band(&palette),
-            Some(palette.band),
-            "approved code is banded"
+            Some(palette.selected_band),
+            "approved code is banded, brighter while selected"
         );
         assert_ne!(cell.sign.text, " ", "its sign stays");
         let faded = (*kind == rows::RowKind::Removed).then_some(palette.faint);
@@ -1367,10 +1368,10 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
     let soft = |line: crate::color::Hsla| {
         crate::theme::mix(line, palette.background, crate::look::MUTED_SHARE)
     };
-    // An edited line reads as the code it now is, without a line background.
     let line = |kind: rows::RowKind| match kind {
         rows::RowKind::Removed => Some(palette.removed_line),
         rows::RowKind::Added => Some(palette.added_line),
+        rows::RowKind::Edited => Some(palette.edited_line),
         _ => None,
     };
     for (kind, cell, frame) in changed(model, 2) {
@@ -1380,13 +1381,32 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
             "a hunk not selected is soft"
         );
         assert_eq!(frame.band(&palette), None, "open code has no band");
+        assert!(frame.bar(&palette).is_some(), "open code has a bar too");
         assert!(frame.bar_share() < 1.0);
+        if kind != rows::RowKind::Removed {
+            assert_eq!(cell.number.color, palette.faint);
+        }
     }
+    // The ruler marks where code still needs the reviewer, and not where it is approved.
+    let rows = crate::scroll::float(model.rows.rows.len());
+    let marked = |hunk: usize| {
+        let start = crate::scroll::float(model.hunk_rows[hunk].start) / rows;
+        ruler(model, &palette)
+            .iter()
+            .any(|mark| (mark.start - start).abs() < f32::EPSILON)
+    };
+    assert!(marked(2) && !marked(0));
     host.dispatch(Action::LastHunk);
     let model = host.model();
     for (kind, cell, frame) in changed(model, 2) {
         assert_eq!(cell.background, line(kind), "the selected hunk is bold");
         assert!((frame.bar_share() - 1.0).abs() < f32::EPSILON);
+        if kind != rows::RowKind::Removed {
+            assert_eq!(cell.number.color, palette.text);
+        }
+    }
+    for (_, _, frame) in changed(model, 0) {
+        assert_eq!(frame.band(&palette), Some(palette.band));
     }
 }
 

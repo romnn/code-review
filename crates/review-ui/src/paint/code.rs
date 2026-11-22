@@ -22,9 +22,9 @@ use crate::theme::{self, Theme};
 pub enum Frame {
     /// Outside every hunk's rows: no band and no bar.
     Outside,
-    /// In a hunk's rows: the selected hunk has a bar in its tone's solid color, and of the
-    /// others only those the reviewer decided on have one, quieter, so approved and flagged
-    /// code shows as such.
+    /// In a hunk's rows: every hunk has a bar in its tone's color, the selected one's solid
+    /// and the others' quieter, so whether code still needs the reviewer shows whatever its
+    /// lines look like.
     Hunk {
         /// What the hunk asks of the reviewer.
         tone: HunkTone,
@@ -34,16 +34,12 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// The bar along the row's left edge: the selected hunk's solid color, a decided hunk's
-    /// quieter one, or none.
+    /// The bar along the row's left edge: the selected hunk's solid color, another hunk's
+    /// quieter one, or none outside the hunks.
     #[must_use]
     pub fn bar(self, palette: &Palette) -> Option<Hsla> {
         match self {
-            Self::Outside
-            | Self::Hunk {
-                tone: HunkTone::Open,
-                selected: false,
-            } => None,
+            Self::Outside => None,
             Self::Hunk {
                 tone,
                 selected: true,
@@ -51,25 +47,29 @@ impl Frame {
             Self::Hunk {
                 tone,
                 selected: false,
-            } => Some(palette.hunk_solid(tone).alpha(DECIDED_BAR_ALPHA)),
+            } => Some(palette.hunk_solid(tone).alpha(UNSELECTED_BAR_ALPHA)),
         }
     }
 
     /// The band behind a hunk's rows; a changed line's own background covers it.
     ///
     /// Only approved hunks have one, since their code has lost its diff colors: what the
-    /// reviewer approved stands apart from the code around it, and everything else is as plain
-    /// as the file's code, the bars marking the hunks.
+    /// reviewer approved stands apart from the code around it, the selected one a step
+    /// brighter, and everything else is as plain as the file's code, the bars marking the
+    /// hunks.
     #[must_use]
     pub fn band(self, palette: &Palette) -> Option<Hsla> {
-        matches!(
-            self,
+        match self {
             Self::Hunk {
                 tone: HunkTone::Approved,
-                ..
-            }
-        )
-        .then_some(palette.band)
+                selected,
+            } => Some(if selected {
+                palette.selected_band
+            } else {
+                palette.band
+            }),
+            _ => None,
+        }
     }
 
     /// Whether the row is in the selected hunk.
@@ -87,10 +87,10 @@ impl Frame {
 }
 
 /// The share of the frame's width the bar of a hunk that is not selected takes.
-const THIN_BAR_SHARE: f32 = 0.4;
+const THIN_BAR_SHARE: f32 = 0.67;
 
-/// How strongly the bar of a decided hunk that is not selected shows.
-const DECIDED_BAR_ALPHA: f32 = 0.6;
+/// How strongly the bar of a hunk that is not selected shows.
+const UNSELECTED_BAR_ALPHA: f32 = 0.8;
 
 /// Where diff row `index` is relative to the hunks: in the selected one only while the diff
 /// has the keys.
@@ -127,6 +127,41 @@ fn hunk_at(model: &Model, index: usize) -> Option<usize> {
         .partition_point(|rows| rows.start <= index)
         .checked_sub(1)?;
     model.hunk_rows.get(hunk)?.contains(&index).then_some(hunk)
+}
+
+/// A hunk marked on the diff's scrollbar track, its rows as shares of the diff's from the top.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RulerMark {
+    /// Where the hunk's first row is, from 0 at the top to 1 at the bottom.
+    pub start: f32,
+    /// Where its rows end.
+    pub end: f32,
+    /// Its tone's solid color.
+    pub color: Hsla,
+}
+
+/// The hunks marked on the diff's scrollbar track: each one that still needs the reviewer, and
+/// each flagged one, in its tone's color, so what is left of a long diff shows without
+/// scrolling to it.
+#[must_use]
+pub fn ruler(model: &Model, palette: &Palette) -> Vec<RulerMark> {
+    let rows = crate::scroll::float(model.rows.rows.len());
+    if rows == 0.0 {
+        return Vec::new();
+    }
+    model
+        .hunk_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(hunk, range)| {
+            let tone = hunk_tone(model, hunk);
+            (tone != HunkTone::Approved).then(|| RulerMark {
+                start: crate::scroll::float(range.start) / rows,
+                end: crate::scroll::float(range.end) / rows,
+                color: palette.hunk_solid(tone),
+            })
+        })
+        .collect()
 }
 
 /// Where a line of code is drawn: its diff row, its file section and its column.
@@ -236,7 +271,7 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
         ))
     .then(|| Piece::new("⏎", palette.faint));
     CodeCell {
-        number: gutter(cell, at.column, palette),
+        number: gutter(cell, at.column, frame.selected(), palette),
         bar: ink.bar,
         sign: Piece::new(ink.sign, ink.sign_color),
         layers,
@@ -254,8 +289,9 @@ fn is_nested(cell: &Cell) -> bool {
     )
 }
 
-/// A line's number in its file, painted in `column`.
-fn gutter(cell: &Cell, column: Column, palette: &Palette) -> Piece {
+/// A line's number in its file, painted in `column`: in the text color in the selected hunk, so
+/// the hunk the keys act on shows in the gutter too, and quiet elsewhere.
+fn gutter(cell: &Cell, column: Column, selected: bool, palette: &Palette) -> Piece {
     let nested = is_nested(cell);
     // Each half of a pair numbers its own side: the left the base (or a nested diff's old
     // side), the right the head.
@@ -275,10 +311,15 @@ fn gutter(cell: &Cell, column: Column, palette: &Palette) -> Piece {
         None if nested => "┆".to_owned(),
         None => String::new(),
     };
-    let color = if cell.kind == RowKind::Removed {
-        palette.faint.alpha(0.6)
+    let color = if selected {
+        palette.text
     } else {
         palette.faint
+    };
+    let color = if cell.kind == RowKind::Removed {
+        color.alpha(0.6)
+    } else {
+        color
     };
     Piece::new(number, color)
 }
@@ -335,11 +376,12 @@ fn cell_ink(model: &Model, cell: &Cell, palette: &Palette) -> CellInk {
             bar: bar(palette.added_sign),
         },
         // A line changed in place reads as the code it now is, what stayed the same as any
-        // unchanged line, its marks saying what changed.
+        // unchanged line, its marks saying what changed, on a soft background of its own while
+        // it still needs the reviewer.
         RowKind::Edited => CellInk {
             sign: "~",
             sign_color: palette.added_sign,
-            background: None,
+            background: line(palette.edited_line),
             text_color: None,
             bar: bar(palette.added_sign),
         },
@@ -478,20 +520,21 @@ const MOVED_EDIT_ALPHA: f32 = 0.4;
 const MARK_ALPHA: f32 = 0.4;
 
 /// The words a line changed, behind a stronger shade of red or green, as delta marks them. An
-/// edited line always marks the tokens it inserted and strikes out in red the ones it deleted,
-/// which never read as code, approved or not; a removed or an added line marks its changed
-/// words when the look emphasizes them.
+/// edited line always marks the tokens it inserted and strikes out the ones it deleted, which
+/// never read as code, in red until approved and gray after; a removed or an added line marks
+/// its changed words when the look emphasizes them.
 fn marks_layer(model: &Model, cell: &Cell, palette: &Palette, approved: bool) -> Layer {
     if cell.kind == RowKind::Edited {
-        // Deleted text keeps its tint when approved too: it is no code, and a deleted space, or
+        // Deleted text keeps a tint when approved too: it is no code, and a deleted space, or
         // any deleted text in a terminal that draws no line through it, has no other cue.
+        let color = if approved {
+            palette.faint
+        } else {
+            palette.removed_sign
+        };
         let deleted = Style {
-            color: Some(if approved {
-                palette.faint
-            } else {
-                palette.removed_sign
-            }),
-            background: Some(palette.removed_sign.alpha(MARK_ALPHA)),
+            color: Some(color),
+            background: Some(color.alpha(MARK_ALPHA)),
             strikethrough: true,
             ..Style::default()
         };

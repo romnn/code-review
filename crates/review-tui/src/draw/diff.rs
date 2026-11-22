@@ -106,11 +106,11 @@ fn draw_row(
     }
 }
 
-/// The bar along a hunk's rows at the row's left edge: gray, or the accent in the selected
-/// hunk; nothing between hunks.
+/// The bar along a hunk's rows at the row's left edge, in its state's color: the whole cell in
+/// the selected hunk, half of it in the others; nothing between hunks.
 fn frame_bar(painter: &mut Painter<'_>, palette: &Palette, frame: Frame, x: u16, y: u16, bg: Rgba) {
     if let Some(color) = frame.bar(palette) {
-        let symbol = if frame.selected() { "▌" } else { "▎" };
+        let symbol = if frame.selected() { "█" } else { "▌" };
         painter.symbol(x, y, symbol, Brush::new(color, bg));
     }
 }
