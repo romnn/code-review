@@ -1326,7 +1326,11 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
             .filter_map(|index| {
                 let row = &model.rows.rows[index];
                 let cell = row.cells().next()?;
-                matches!(cell.kind, rows::RowKind::Added | rows::RowKind::Removed).then(|| {
+                matches!(
+                    cell.kind,
+                    rows::RowKind::Added | rows::RowKind::Removed | rows::RowKind::Edited
+                )
+                .then(|| {
                     let at = At {
                         row: index,
                         file: row.file,
@@ -1363,14 +1367,16 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
     let soft = |line: crate::color::Hsla| {
         crate::theme::mix(line, palette.background, crate::look::MUTED_SHARE)
     };
+    // An edited line reads as the code it now is, without a line background.
     let line = |kind: rows::RowKind| match kind {
-        rows::RowKind::Removed => palette.removed_line,
-        _ => palette.added_line,
+        rows::RowKind::Removed => Some(palette.removed_line),
+        rows::RowKind::Added => Some(palette.added_line),
+        _ => None,
     };
     for (kind, cell, frame) in changed(model, 2) {
         assert_eq!(
             cell.background,
-            Some(soft(line(kind))),
+            line(kind).map(soft),
             "a hunk not selected is soft"
         );
         assert_eq!(frame.band(&palette), None, "open code has no band");
@@ -1379,11 +1385,7 @@ fn approved_code_reads_as_code_and_the_selected_hunk_stands_out() {
     host.dispatch(Action::LastHunk);
     let model = host.model();
     for (kind, cell, frame) in changed(model, 2) {
-        assert_eq!(
-            cell.background,
-            Some(line(kind)),
-            "the selected hunk is bold"
-        );
+        assert_eq!(cell.background, line(kind), "the selected hunk is bold");
         assert!((frame.bar_share() - 1.0).abs() < f32::EPSILON);
     }
 }
@@ -1454,13 +1456,12 @@ fn moved_code_shows_in_the_move_color() {
     );
 }
 
-/// The demo's `line_error`, moved out of `mod config` to the file's top level, differs only in
-/// its indentation, and its `occupancy_line`, moved into `mod worker`, also in a line rustfmt
-/// wrapped anew there, which the engine proves is formatting in Rust: plain moves within one
-/// file, both ends naming lines of this file, their lines in the move's color and none as an
-/// edit.
+/// The demo's `line_error` leaves `mod config` for the file's top level, and its
+/// `occupancy_line` ends up in `mod worker`, each where it stands as a module's closing brace
+/// moves past it: re-indented in place, which is no move. Neither shows a move's note or color,
+/// and each of their lines shows once, edited in place.
 #[test]
-fn a_reindented_rust_move_is_a_plain_move() {
+fn a_rust_reindent_in_place_is_no_move() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::open_with(demo(dir.path()), whole_file());
     host.update(|model| model.show_file("scheduler.rs"));
@@ -1473,46 +1474,19 @@ fn a_reindented_rust_move_is_a_plain_move() {
         .filter(|row| row.kind() == rows::RowKind::Moved)
         .map(|row| row.text().to_owned())
         .collect();
-    assert!(
-        notes
+    assert!(notes.is_empty(), "{notes:?}");
+    // Re-indented where they stand, every line shows once, as the code it now is.
+    for text in ["reason: reason.into()", "still free"] {
+        let shown: Vec<(rows::RowKind, bool)> = model
+            .rows
+            .rows
             .iter()
-            .any(|note| note.starts_with("↗ moved to lines ") && note.ends_with(" of this file")),
-        "{notes:?}"
-    );
-    assert!(
-        notes
-            .iter()
-            .any(|note| note.starts_with("↙ moved from lines ") && note.ends_with(" of this file")),
-        "{notes:?}"
-    );
-    let moved_kinds: Vec<rows::RowKind> = model
-        .rows
-        .rows
-        .iter()
-        .filter_map(|row| row.cells().next())
-        .filter(|cell| cell.moved && cell.text.contains("reason: reason.into()"))
-        .map(|cell| cell.kind)
-        .collect();
-    assert_eq!(
-        moved_kinds,
-        [rows::RowKind::Removed, rows::RowKind::Added],
-        "both ends show the line as moved, neither as an edit"
-    );
-    // `occupancy_line`, moved into `mod worker`, where rustfmt wrapped its last line anew: a
-    // plain move too.
-    let wrapped: Vec<(rows::RowKind, bool)> = model
-        .rows
-        .rows
-        .iter()
-        .filter_map(|row| row.cells().next())
-        .filter(|cell| cell.text.contains("still free"))
-        .map(|cell| (cell.kind, cell.moved))
-        .collect();
-    assert_eq!(
-        wrapped,
-        [(rows::RowKind::Removed, true), (rows::RowKind::Added, true)],
-        "the wrapped line shows as moved at both ends"
-    );
+            .filter_map(|row| row.cells().next())
+            .filter(|cell| cell.text.contains(text))
+            .map(|cell| (cell.kind, cell.moved))
+            .collect();
+        assert_eq!(shown, [(rows::RowKind::Edited, false)], "{text}");
+    }
 }
 
 /// The demo's Python `spread`, moved into `main`, becomes a function of `main` there, so the
@@ -3908,6 +3882,56 @@ fn a_scroll_on_its_way_selects_nothing_unseen() {
     );
 }
 
+/// Switching between unified and side by side keeps the line at the top, though a line edited in
+/// place shows once in one layout and as two lines in the other.
+#[test]
+fn switching_the_layout_keeps_the_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    let short = Geometry {
+        heights: Heights {
+            diff: Some(8.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let settle = |host: &mut Host| {
+        host.update(|model| model.layout(short, Instant::now() + scroll::DURATION));
+    };
+    // The head line the top row shows, on either side of a pair.
+    let top_head = |model: &Model| {
+        let row = &model.rows.rows[scroll::whole_rows(model.diff_scroll.offset())];
+        row.cells()
+            .find_map(|cell| cell.head.as_ref().map(|head| head.line))
+    };
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    settle(&mut host);
+    // A head line past the first hunk, which shows once unified, at the top.
+    let past = host.model().hunk_rows[0].end;
+    let start = (past..host.model().rows.rows.len())
+        .find(|&row| {
+            host.model().rows.rows[row]
+                .cells()
+                .any(|cell| cell.head.is_some())
+        })
+        .unwrap();
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(start)));
+    settle(&mut host);
+    let line = top_head(host.model());
+    assert!(line.is_some(), "a head line at the top");
+    host.dispatch(Action::ToggleLayout);
+    settle(&mut host);
+    assert_eq!(
+        host.model().presented.layout,
+        crate::config::DiffLayout::SideBySide
+    );
+    assert_eq!(top_head(host.model()), line, "side by side keeps the line");
+    host.dispatch(Action::ToggleLayout);
+    settle(&mut host);
+    assert_eq!(top_head(host.model()), line, "unified keeps it too");
+}
+
 /// Switching between the whole file and hunks apart keeps the line at the top, and a file left
 /// in one view comes back at its line in the other.
 #[test]
@@ -3940,7 +3964,11 @@ fn the_view_keeps_the_place() {
     host.update(|model| model.drag_list_to(List::Diff, scroll::rows(start)));
     settle(&mut host);
     let line = top_line(host.model());
-    assert_eq!(line.1, Some(7), "the first hunk's removed line");
+    assert_eq!(
+        line,
+        (Some(7), None),
+        "the first hunk's line, edited in place"
+    );
     host.dispatch(Action::ToggleView);
     settle(&mut host);
     assert_eq!(host.model().presented.view, crate::config::DiffView::Hunks);

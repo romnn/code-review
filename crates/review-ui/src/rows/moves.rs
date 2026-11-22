@@ -204,7 +204,7 @@ const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
 
 /// The pairs of positions a longest common subsequence of `old` and `new` matches, in order, or
 /// `None` when aligning them would take more than [`MAX_ALIGNMENT_CELLS`].
-fn lcs<T: PartialEq>(old: &[T], new: &[T]) -> Option<Vec<(usize, usize)>> {
+pub(super) fn lcs<T: PartialEq>(old: &[T], new: &[T]) -> Option<Vec<(usize, usize)>> {
     let columns = new.len() + 1;
     if (old.len() + 1).saturating_mul(columns) > MAX_ALIGNMENT_CELLS {
         return None;
@@ -298,7 +298,7 @@ fn word_changes(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) 
 
 /// The words of `line` as byte ranges: runs of letters, digits and `_`, runs of whitespace,
 /// and single other characters.
-fn words(line: &str) -> Vec<Range<usize>> {
+pub(super) fn words(line: &str) -> Vec<Range<usize>> {
     #[derive(PartialEq)]
     enum Class {
         Word,

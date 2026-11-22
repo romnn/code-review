@@ -175,54 +175,6 @@ pub(crate) fn generic_tokens(text: &str) -> Vec<Range<usize>> {
     tokens
 }
 
-/// Returns the ranges of `before_tokens` and `after_tokens` that a token diff marks as changed,
-/// merging touching ranges.
-pub(crate) fn changed_token_ranges(
-    before_text: &str,
-    before_tokens: &[Range<usize>],
-    after_text: &str,
-    after_tokens: &[Range<usize>],
-) -> ChangedRanges {
-    let before: Vec<&str> = before_tokens
-        .iter()
-        .map(|range| before_text.get(range.clone()).unwrap_or(""))
-        .collect();
-    let after: Vec<&str> = after_tokens
-        .iter()
-        .map(|range| after_text.get(range.clone()).unwrap_or(""))
-        .collect();
-    let mut changed = ChangedRanges::default();
-    for hunk in diff_tokens(&before, &after) {
-        push_span(&mut changed.before, before_tokens, &hunk.before);
-        push_span(&mut changed.after, after_tokens, &hunk.after);
-    }
-    changed
-}
-
-/// Changed byte ranges on both sides of a token diff.
-#[derive(Debug, Default)]
-pub(crate) struct ChangedRanges {
-    pub before: Vec<Range<usize>>,
-    pub after: Vec<Range<usize>>,
-}
-
-fn push_span(spans: &mut Vec<Range<usize>>, tokens: &[Range<usize>], hunk: &Range<usize>) {
-    let (Some(first), Some(last)) = (
-        tokens.get(hunk.start),
-        hunk.end.checked_sub(1).and_then(|end| tokens.get(end)),
-    ) else {
-        return;
-    };
-    if hunk.is_empty() {
-        return;
-    }
-    let span = first.start..last.end;
-    match spans.last_mut() {
-        Some(previous) if previous.end >= span.start => previous.end = span.end.max(previous.end),
-        _ => spans.push(span),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;

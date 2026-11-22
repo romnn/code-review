@@ -35,13 +35,14 @@ new in the pull request show as one added hunk: the moves' targets `src/format.r
 edits. `server.go` has twenty small changes over 318 lines, one new function taller than a terminal,
 and `scheduler.rs` is the long one: 98 changes over 1248 lines, a pull request that adds
 cancellation and per-queue limits to a job scheduler, for moving and scrolling through a
-long file. Two of its changes are moves within the file that only formatting tells apart, which
-the engine proves plain moves: `line_error` leaves `mod config` for the top level, re-indented,
-and `occupancy_line` moves into `mod worker`, where rustfmt wraps one of its lines anew. In
-`tools/stats.py`, `spread` moves into `main` the same way, but in Python that makes it a
-function of `main`, so its syntax tree changes and the move keeps its edits, each line shown old
-and new. Both sort after every other file but the root's, so most tree rows the QA scripts
-click stay where they are.
+long file. Two of its changes re-indent code where it stands, which is never a move:
+`line_error` leaves `mod config` for the top level as the module's closing brace moves above it,
+and `occupancy_line` ends up in `mod worker` as that module's brace moves below it, where rustfmt
+wraps one of its lines anew. In `tools/stats.py`, `spread` moves past `def main():` into `main`,
+a move, re-indented; in Python that makes it a function of `main`, so its syntax tree changes and
+the move keeps its edits, each line shown once with the indentation it gained marked. Both sort
+after every other file but the root's, so most tree rows the QA scripts click stay where they
+are.
 
 Snapshots duplicate the files a commit does not change, but each one reads and edits as plain
 files. A file the pull request adds is therefore in every `head-*` tree. Edit its copies in

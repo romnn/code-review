@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::config::{Approved, DiffView};
+use crate::config::{Approved, DiffLayout, DiffView};
 use crate::paint::display::display_width;
 use crate::syntax::FileSyntax;
 use review_core::analysis::{Chunk, FileUnit, UnitKind};
@@ -23,6 +23,7 @@ use review_core::{
 };
 
 mod moves;
+mod once;
 mod present;
 
 pub use present::{Presentation, present};
@@ -42,6 +43,9 @@ pub enum RowKind {
     Added,
     /// An unchanged line of a file shown in full.
     Context,
+    /// A line of the head that a hunk changed in place, shown once: the tokens it inserted
+    /// marked, and the ones it deleted struck out where they stood.
+    Edited,
     /// An old line of an interdiff or of a move's inner diff.
     NestedOld,
     /// A new line of an interdiff or of a move's inner diff.
@@ -98,8 +102,12 @@ pub struct Cell {
     pub text: String,
     /// The length of the code in `text`, before any line-ending marker.
     pub content_len: usize,
-    /// Byte ranges of `text` that a token diff marks as really changed.
+    /// Byte ranges of `text` that a token diff marks as really changed; on an edited line, the
+    /// tokens it inserted.
     pub highlights: Vec<Range<usize>>,
+    /// On an edited line, the byte ranges of `text` that hold deleted text, which is no line's
+    /// code: copying leaves it out, and the line's own bytes follow it.
+    pub deleted: Vec<Range<usize>>,
     /// For a line of the head file, where it is.
     pub head: Option<HeadLine>,
     /// For a line of the base file, its zero-based line there: a removed line, or the base side
@@ -123,6 +131,35 @@ impl Cell {
     #[must_use]
     pub fn width(&self) -> usize {
         display_width(&self.text)
+    }
+
+    /// The line's own code, without the deleted text an edited line shows.
+    #[must_use]
+    pub fn own_code(&self) -> String {
+        let code = self.code();
+        let mut own = String::with_capacity(code.len());
+        let mut at = 0;
+        for range in &self.deleted {
+            own.push_str(code.get(at..range.start).unwrap_or_default());
+            at = range.end;
+        }
+        own.push_str(code.get(at..).unwrap_or_default());
+        own
+    }
+
+    /// Where byte `at` of the line's own code lies in `text`, past the deleted text spliced in
+    /// before it: at a splice, a `start` lies after the deleted text and an end before it.
+    #[must_use]
+    pub fn shown_at(&self, at: usize, start: bool) -> usize {
+        let mut moved = 0;
+        for range in &self.deleted {
+            // Where the deleted text stands in the line's own code.
+            let stands = range.start - moved;
+            if stands < at || (start && stands == at) {
+                moved += range.len();
+            }
+        }
+        at + moved
     }
 }
 
@@ -411,6 +448,9 @@ pub struct Folds {
     /// How much of a file its section shows: the whole file without hunk headers, or each hunk
     /// with a few lines around it.
     pub view: DiffView,
+    /// The layout the rows are presented in: unified shows a changed line once where it can,
+    /// side by side always both versions.
+    pub layout: DiffLayout,
     /// Whether the layout is one file's diff, without file headers: an empty row stands in for
     /// its header.
     pub single_file: bool,
@@ -460,6 +500,7 @@ impl Default for Folds {
             opened: HashSet::new(),
             approved: Approved::Folded,
             view: DiffView::Hunks,
+            layout: DiffLayout::Unified,
             single_file: false,
             pending: HashMap::new(),
             expanded: HashSet::new(),
@@ -735,6 +776,7 @@ fn plain_cell(kind: RowKind, text: String) -> Cell {
         content_len: text.len(),
         text,
         highlights: Vec::new(),
+        deleted: Vec::new(),
         head: None,
         base: None,
         quiet: false,
@@ -758,6 +800,8 @@ struct Pusher<'a> {
     quiet: bool,
     /// Whether the lines pushed now are moved code.
     moved: bool,
+    /// Whether a changed line may show once, as the unified layout shows it.
+    once: bool,
 }
 
 impl Pusher<'_> {
@@ -878,6 +922,58 @@ impl Pusher<'_> {
         }
     }
 
+    /// Pushes the lines of `chunk` as its edit script shows them: each new line once where the
+    /// layout allows it and nothing that changed would hide, and otherwise its old lines above
+    /// its new ones, the words that changed marked.
+    fn edited_chunk(&mut self, chunk: &Chunk, head_path: Option<&str>) {
+        let old: Vec<&str> = chunk.removed.split_inclusive('\n').collect();
+        let new: Vec<&str> = chunk.added.split_inclusive('\n').collect();
+        let head = |line: usize| {
+            head_path.map(|path| HeadLine {
+                path: path.to_owned(),
+                line: chunk.new.start + line,
+            })
+        };
+        for shown in once::lines(chunk, self.once) {
+            let cell = match shown {
+                once::Shown::Removed { line, words } => {
+                    let split = split_line_ending(old.get(line).copied().unwrap_or_default());
+                    Cell {
+                        content_len: split.content.len(),
+                        highlights: words,
+                        base: Some(chunk.old.start + line),
+                        ..self.cell(RowKind::Removed, with_ending(split.content, split.ending))
+                    }
+                }
+                once::Shown::Added { line, words } => {
+                    let split = split_line_ending(new.get(line).copied().unwrap_or_default());
+                    Cell {
+                        content_len: split.content.len(),
+                        highlights: words,
+                        head: head(line),
+                        ..self.cell(RowKind::Added, with_ending(split.content, split.ending))
+                    }
+                }
+                once::Shown::Once {
+                    line,
+                    text,
+                    inserted,
+                    deleted,
+                } => {
+                    let split = split_line_ending(new.get(line).copied().unwrap_or_default());
+                    Cell {
+                        content_len: text.len(),
+                        highlights: inserted,
+                        deleted,
+                        head: head(line),
+                        ..self.cell(RowKind::Edited, with_ending(&text, split.ending))
+                    }
+                }
+            };
+            self.add_cell(cell);
+        }
+    }
+
     /// Pushes a nested diff. With `head`, the head line its new side starts at, its new and
     /// unchanged lines know their head lines, for line numbers and syntax. With `old`, the
     /// zero-based line its old side starts at in the file that side comes from (a move's
@@ -958,9 +1054,14 @@ impl Pusher<'_> {
         removed: Option<&MovedSpan<'_>>,
         added: Option<&MovedSpan<'_>>,
     ) {
+        // Moved and formatting-only code shows its own way, line for line.
+        if removed.is_none() && added.is_none() && !self.moved && !self.quiet {
+            self.edited_chunk(chunk, head_path);
+            return;
+        }
         self.side(
             &chunk.removed,
-            &chunk.removed_highlights,
+            &chunk.removed_highlights(),
             RowKind::Removed,
             None,
             Some(chunk.old.start),
@@ -972,7 +1073,7 @@ impl Pusher<'_> {
         });
         self.side(
             &chunk.added,
-            &chunk.added_highlights,
+            &chunk.added_highlights(),
             RowKind::Added,
             head.as_ref(),
             None,
@@ -1117,6 +1218,7 @@ fn unit_rows(
         hunk,
         quiet,
         moved: false,
+        once: folds.layout == DiffLayout::Unified,
     };
     unit_body(&mut pusher, view, unit, folds);
     for note in notes {
@@ -2291,11 +2393,16 @@ mod tests {
                 .all(|row| !matches!(row.kind(), RowKind::Gap | RowKind::Header)),
             "no gaps and no hunk headers"
         );
-        // Unchanged and added lines are the head file, each line once and in order.
+        // Unchanged, edited and added lines are the head file, each line once and in order.
         let head: Vec<usize> = rows
             .iter()
             .flat_map(|row| row.cells())
-            .filter(|cell| matches!(cell.kind, RowKind::Context | RowKind::Added))
+            .filter(|cell| {
+                matches!(
+                    cell.kind,
+                    RowKind::Context | RowKind::Edited | RowKind::Added
+                )
+            })
             .filter_map(|cell| cell.head.as_ref().map(|head| head.line))
             .collect();
         assert_eq!(head, (0..text.lines.len()).collect::<Vec<_>>());

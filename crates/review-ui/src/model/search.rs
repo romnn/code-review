@@ -7,14 +7,14 @@ use std::sync::Arc;
 use review_core::tree::NodeKind;
 
 use super::{Filter, Find, Mode, Model};
-use crate::find::{self, Spot};
-use crate::rows::{Body, Row};
+use crate::find::{self, Match, Spot};
+use crate::rows::{Body, Cell, Row};
 use crate::scroll;
 use crate::text::Column;
 
-/// The code of each line in `row`, with the column it shows in: one across the width, both
-/// halves of a side-by-side row, or none for a note.
-fn row_code(row: &Row) -> impl Iterator<Item = (Column, &str)> {
+/// Each line in `row`, with the column it shows in: one across the width, both halves of a
+/// side-by-side row, or none for a note.
+fn row_cells(row: &Row) -> impl Iterator<Item = (Column, &Cell)> {
     let halves = match &row.body {
         Body::Code(cell) => [(Column::Whole, Some(cell)), (Column::Whole, None)],
         Body::Pair(pair) => [
@@ -25,7 +25,23 @@ fn row_code(row: &Row) -> impl Iterator<Item = (Column, &str)> {
     };
     halves
         .into_iter()
-        .filter_map(|(column, cell)| Some((column, cell?.code())))
+        .filter_map(|(column, cell)| Some((column, cell?)))
+}
+
+/// The matches of `query` in the code of `cell`, row `row` in `column`. An edited line's deleted
+/// text is no code to find: the line's own code is searched, and a match across deleted text
+/// spans it as it shows, though only its code is painted.
+fn cell_matches(row: usize, column: Column, cell: &Cell, query: &str) -> Vec<Match> {
+    if cell.deleted.is_empty() {
+        return find::matches([(row, column, cell.code())], query);
+    }
+    find::matches([(row, column, cell.own_code().as_str())], query)
+        .into_iter()
+        .map(|found| Match {
+            range: cell.shown_at(found.range.start, true)..cell.shown_at(found.range.end, false),
+            ..found
+        })
+        .collect()
 }
 
 impl Model {
@@ -144,12 +160,17 @@ impl Model {
             }),
             // Only code is searched, each half of a side-by-side row apart; headers and notes
             // are not the file's text.
-            Mode::Diff => find::matches(
-                self.rows.rows.iter().enumerate().flat_map(|(index, row)| {
-                    row_code(row).map(move |(column, code)| (index, column, code))
-                }),
-                &query,
-            ),
+            Mode::Diff => self
+                .rows
+                .rows
+                .iter()
+                .enumerate()
+                .flat_map(|(index, row)| {
+                    row_cells(row)
+                        .flat_map(|(column, cell)| cell_matches(index, column, cell, &query))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
             Mode::Tree => Vec::new(),
         };
         if let Some(find) = &mut self.find {
@@ -281,5 +302,44 @@ impl Model {
         } else {
             self.find = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+
+    use super::*;
+    use crate::rows::RowKind;
+
+    /// The bytes `start..end`, as a match or a mark covers them.
+    fn span(start: usize, end: usize) -> Range<usize> {
+        start..end
+    }
+
+    /// Find searches an edited line's own code: deleted text neither matches nor breaks a match,
+    /// which covers it as it shows.
+    #[test]
+    fn find_skips_deleted_text() {
+        let cell = Cell {
+            kind: RowKind::Edited,
+            text: "min(3220)".to_owned(),
+            content_len: 9,
+            highlights: vec![span(6, 8)],
+            deleted: vec![span(4, 6)],
+            head: None,
+            base: None,
+            quiet: false,
+            moved: false,
+        };
+        let ranges = |query: &str| -> Vec<Range<usize>> {
+            cell_matches(0, Column::Whole, &cell, query)
+                .into_iter()
+                .map(|found| found.range)
+                .collect()
+        };
+        assert_eq!(ranges("min(20)"), [span(0, 9)]);
+        assert_eq!(ranges("32"), Vec::<Range<usize>>::new());
+        assert_eq!(ranges("20"), [span(6, 8)]);
     }
 }

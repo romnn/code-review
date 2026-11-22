@@ -38,6 +38,17 @@ fn setup(
     Ok((repo, review))
 }
 
+/// `text` with each line indented by `by`.
+fn indent(text: &str, by: &str) -> String {
+    let mut indented = String::with_capacity(text.len());
+    for line in text.lines() {
+        indented.push_str(by);
+        indented.push_str(line);
+        indented.push('\n');
+    }
+    indented
+}
+
 /// A function moved to another file is one move, and both its units are covered.
 #[test]
 fn function_moved_to_another_file_is_one_move() -> eyre::Result<()> {
@@ -206,7 +217,8 @@ fn moved_block_with_edit_is_expanded() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A YAML block moved and re-nested is not collapsed as a plain move.
+/// A YAML block moved past another key and re-nested under it is a move with edits, never a
+/// plain one.
 #[test]
 fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
     let block = indoc! {"
@@ -216,6 +228,7 @@ fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
           timeout: 30
           retries: 5
           backoff: exponential
+          protocol: https
     "};
     let nested = block
         .lines()
@@ -227,9 +240,8 @@ fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
             "config.yaml",
             &formatdoc!(
                 "
-                    top:
+                    {block}top:
                       a: 1
-                    {block}other: x
                 "
             ),
         )],
@@ -239,18 +251,14 @@ fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
                 "
                     top:
                       a: 1
-                    {nested}other: x
-                "
+                    {nested}"
             ),
         )],
     )?;
     let history = review.history()?;
     let view = history.current_view()?;
-    assert!(
-        view.moves()
-            .iter()
-            .all(|found| found.kind != MoveKind::Moved)
-    );
+    let kinds: Vec<MoveKind> = view.moves().iter().map(|found| found.kind).collect();
+    assert_that!(kinds, elements_are![eq(&MoveKind::MovedWithEdits)]);
     let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
     assert!(
         analysis
@@ -339,11 +347,11 @@ fn python_moved_into_a_class_keeps_its_edits() -> eyre::Result<()> {
             "a.py",
             &formatdoc!(
                 "
+                    {function}
+
                     class Holder:
                         pass
-
-
-                    {function}"
+                "
             ),
         )],
         &[(
@@ -359,10 +367,400 @@ fn python_moved_into_a_class_keeps_its_edits() -> eyre::Result<()> {
     )?;
     let history = review.history()?;
     let view = history.current_view()?;
-    assert!(
-        view.moves()
+    let kinds: Vec<MoveKind> = view.moves().iter().map(|found| found.kind).collect();
+    assert_that!(kinds, elements_are![eq(&MoveKind::MovedWithEdits)]);
+    Ok(())
+}
+
+/// Code a new call wraps where it stands is re-indented in place, not moved: its chunk keeps it
+/// where it was, so no move claims it.
+#[test]
+fn code_reindented_in_place_is_no_move() -> eyre::Result<()> {
+    let (_repo, review) = setup(
+        &[(
+            "a.rs",
+            indoc! {"
+                fn reasoning(id: &str, summary: &[&str]) -> Item {
+                    Item::Reasoning(Box::new(ReasoningItem {
+                        content: Some(Vec::new()),
+                        id: id.to_owned(),
+                        summary: Some(summary.iter().map(|&line| line.to_owned()).collect()),
+                    }))
+                }
+            "},
+        )],
+        &[(
+            "a.rs",
+            indoc! {"
+                fn reasoning(id: &str, summary: &[&str]) -> Item {
+                    item(ItemVariant::Reasoning(Box::new(
+                        ReasoningItem {
+                            content: Some(Vec::new()),
+                            id: id.to_owned(),
+                            summary: Some(summary.iter().map(|&line| line.to_owned()).collect()),
+                        },
+                    )))
+                }
+            "},
+        )],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    assert_that!(view.moves(), is_empty());
+    Ok(())
+}
+
+/// A function that leaves a block as the block's closing line moves above it crosses only that
+/// line and a blank one, which stay: its removed and added lines fall in two chunks, but it went
+/// nowhere, so it is no move.
+#[test]
+fn code_crossing_only_a_closing_line_is_no_move() -> eyre::Result<()> {
+    let (_repo, review) = setup(
+        &[(
+            "a.js",
+            indoc! {r#"
+                describe("ledger", () => {
+                  it("applies", () => {});
+                  function helper(input) {
+                    const doubled = input * 2;
+                    const shifted = doubled + 7;
+                    return doubled + shifted;
+                  }
+                });
+
+                run();
+            "#},
+        )],
+        &[(
+            "a.js",
+            indoc! {r#"
+                describe("ledger", () => {
+                  it("applies", () => {});
+                });
+
+                function helper(input) {
+                  const doubled = input * 2;
+                  const shifted = doubled + 7;
+                  return doubled + shifted;
+                }
+
+                run();
+            "#},
+        )],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    assert_that!(
+        analysis
+            .units
             .iter()
-            .all(|found| found.kind != MoveKind::Moved)
+            .filter(|unit| unit.chunk().is_some())
+            .count(),
+        eq(2)
+    );
+    assert_that!(view.moves(), is_empty());
+    Ok(())
+}
+
+/// Code wrapped in place may also be copied elsewhere, verbatim as it was, into an existing
+/// function: the copy is longer than any run left in place, but the code stayed, so the copy is
+/// an addition, not a move that could fold it.
+#[test]
+fn a_copy_of_code_that_stayed_is_no_move() -> eyre::Result<()> {
+    let expression = indoc! {"
+        Item::Reasoning(Box::new(ReasoningItem {
+            content: Some(Vec::new()),
+            id: id.to_owned(),
+            summary: Some(summary.iter().map(|&line| line.to_owned()).collect()),
+        }))
+    "};
+    let in_function = |body: &str| {
+        formatdoc!(
+            "
+                fn reasoning(id: &str, summary: &[&str]) -> Item {{
+                {body}}}
+            ",
+            body = indent(body, "    "),
+        )
+    };
+    let (_repo, review) = setup(
+        &[
+            ("a.rs", &in_function(expression)),
+            ("b.rs", &in_function("log(id);\n")),
+        ],
+        &[
+            (
+                "a.rs",
+                &in_function(indoc! {"
+                    item(ItemVariant::Reasoning(Box::new(
+                        ReasoningItem {
+                            content: Some(Vec::new()),
+                            id: id.to_owned(),
+                            summary: Some(summary.iter().map(|&line| line.to_owned()).collect()),
+                        },
+                    )))
+                "}),
+            ),
+            ("b.rs", &in_function(&["log(id);\n", expression].concat())),
+        ],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    assert_that!(view.moves(), is_empty());
+    Ok(())
+}
+
+/// Extracts the code around an `audit` call that stays where it was into an existing function of
+/// b.rs, with `between` written between the two extracted runs there.
+fn extract_around_a_call(between: &str) -> eyre::Result<(TestRepo, review_core::Review)> {
+    let before = indoc! {"
+        let total = entries.len();
+        let valid = entries.iter().filter(|entry| entry.valid).count();
+        let ratio = valid as f64 / total.max(1) as f64;
+    "};
+    let after = indoc! {r#"
+        let skipped = total - valid;
+        let message = format!("{valid} of {total} valid, {skipped} skipped");
+        println!("{message} at {ratio}");
+    "#};
+    let audit = "audit(\"process\", entries.len());\n";
+    let function = |name: &str, body: &str| {
+        formatdoc!(
+            "
+                fn {name}(entries: &[Entry]) {{
+                {body}}}
+            ",
+            body = indent(body, "    "),
+        )
+    };
+    setup(
+        &[
+            (
+                "a.rs",
+                &function("process", &[before, audit, after].concat()),
+            ),
+            ("b.rs", &function("summary", "log(entries);\n")),
+        ],
+        &[
+            (
+                "a.rs",
+                &function(
+                    "process",
+                    &formatdoc!(
+                        "
+                            if !entries.is_empty() {{
+                            {audit}}}
+                        ",
+                        audit = indent(audit, "    "),
+                    ),
+                ),
+            ),
+            (
+                "b.rs",
+                &function(
+                    "summary",
+                    &["log(entries);\n", before, between, after].concat(),
+                ),
+            ),
+        ],
+    )
+}
+
+/// Code extracted from around a call that stays where it was moves as two runs, never merged
+/// across that call, so a copy of the call between them at the destination stays an addition.
+#[test]
+fn a_move_never_merges_across_code_that_stayed() -> eyre::Result<()> {
+    let (_repo, review) = extract_around_a_call("audit(\"process\", entries.len());\n")?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let targets: Vec<(usize, usize)> = view
+        .moves()
+        .iter()
+        .filter(|found| found.target.location.path == "b.rs")
+        .map(|found| (found.target.location.line, found.target.location.end_line))
+        .collect();
+    // b.rs holds the first run on lines 3–5, the call on line 6 and the second run on 7–9.
+    assert_that!(targets, unordered_elements_are![eq(&(3, 5)), eq(&(7, 9))]);
+    Ok(())
+}
+
+/// Two plain moves that land side by side make up one added chunk between them, but neither
+/// covers it, and acknowledging either marks nothing there: the chunk is not folded as moved.
+#[test]
+fn a_chunk_two_moves_cover_together_is_not_folded() -> eyre::Result<()> {
+    let (_repo, review) = extract_around_a_call("")?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let moves = view.moves();
+    assert_that!(moves.len(), eq(2));
+    assert!(moves.iter().all(|found| found.kind == MoveKind::Moved));
+    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let destination = view
+        .units_of_file("b.rs")
+        .into_iter()
+        .find(|unit| {
+            analysis
+                .unit(unit.index())
+                .is_some_and(|unit| unit.chunk().is_some())
+        })
+        .ok_or_else(|| eyre::eyre!("no chunk in b.rs"))?;
+    // Together the moves cover the whole chunk, lines 3–8 of b.rs.
+    let targets: Vec<(usize, usize)> = moves
+        .iter()
+        .map(|found| (found.target.location.line, found.target.location.end_line))
+        .collect();
+    assert_that!(targets, unordered_elements_are![eq(&(3, 5)), eq(&(6, 8))]);
+    let chunk = analysis
+        .unit(destination.index())
+        .and_then(|unit| unit.chunk())
+        .ok_or_else(|| eyre::eyre!("no chunk"))?;
+    assert_that!((chunk.new.start, chunk.new.len), eq((2, 6)));
+    assert!(
+        analysis
+            .unit(destination.index())
+            .is_some_and(|unit| !unit.moved)
+    );
+    assert_that!(view.collapse(destination)?, none());
+    for found in &moves {
+        assert!(!view.units_covered_by_move(found.id)?.contains(&destination));
+    }
+    Ok(())
+}
+
+/// A chunk the syntax proof shows only reformatted kept all of its code, rewrapped lines too, so
+/// none of it pairs with a copy of the old code elsewhere.
+#[test]
+fn a_copy_of_reformatted_code_is_no_move() -> eyre::Result<()> {
+    let statements = indoc! {"
+        let total = input.iter().copied().map(u64::from).sum::<u64>();
+        let largest = input.iter().copied().max().unwrap_or_default();
+        let smallest = input.iter().copied().min().unwrap_or_default();
+    "};
+    let rest = indoc! {"
+        let spread = u64::from(largest - smallest);
+        let doubled = spread * 2;
+        let halved = total / 2;
+        let sum = doubled + halved;
+        sum.max(1)
+    "};
+    let wrapped = indoc! {"
+        let total = input
+            .iter()
+            .copied()
+            .map(u64::from)
+            .sum::<u64>();
+        let largest = input
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or_default();
+        let smallest = input
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or_default();
+    "};
+    let function = |name: &str, body: &str| {
+        formatdoc!(
+            "
+                fn {name}(input: &[u32]) -> u64 {{
+                {body}}}
+            ",
+            body = indent(body, "    "),
+        )
+    };
+    let first_of_rest = indent(rest.lines().next().unwrap_or_default(), "  ");
+    let (_repo, review) = setup(
+        &[
+            (
+                "a.rs",
+                &function("compute", &[statements, &indent(rest, "  ")].concat()),
+            ),
+            ("b.rs", &function("other", "log(input);\n")),
+        ],
+        &[
+            ("a.rs", &function("compute", &[wrapped, rest].concat())),
+            (
+                "b.rs",
+                &function(
+                    "other",
+                    &["log(input);\n", statements, &first_of_rest].concat(),
+                ),
+            ),
+        ],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    assert!(
+        view.units_of_file("a.rs").iter().all(|unit| analysis
+            .unit(unit.index())
+            .is_some_and(|unit| unit.formatting_only)),
+        "a.rs is only reformatted"
+    );
+    assert_that!(view.moves(), is_empty());
+    Ok(())
+}
+
+/// A blank line inside moved code never splits the move, even where a blank line of different
+/// whitespace replaces the code where it left.
+#[test]
+fn a_blank_line_in_moved_code_never_splits_the_move() -> eyre::Result<()> {
+    let commands = formatdoc! {"
+        cp build/output.tar.gz /srv/releases/current.tar.gz
+        tar -xzf /srv/releases/current.tar.gz -C /srv/app
+        {spaces}
+        systemctl restart app.service --no-block
+        curl --fail http://localhost:8080/health
+    ", spaces = "  "};
+    let (_repo, review) = setup(
+        &[
+            (
+                "a.sh",
+                &formatdoc!(
+                    "
+                        echo start
+                        {commands}echo done
+                    "
+                ),
+            ),
+            ("b.sh", "echo other\n"),
+        ],
+        &[
+            (
+                "a.sh",
+                indoc! {"
+                    echo start
+                    make clean all
+                    make install
+
+                    make test
+                    make package
+                    echo done
+                "},
+            ),
+            (
+                "b.sh",
+                &formatdoc!(
+                    "
+                        echo other
+                        {commands}"
+                ),
+            ),
+        ],
+    )?;
+    let history = review.history()?;
+    let view = history.current_view()?;
+    let moves = view.moves();
+    assert_that!(moves.len(), eq(1));
+    assert_that!(moves[0].kind, eq(MoveKind::Moved));
+    assert_that!(
+        (
+            moves[0].target.location.line,
+            moves[0].target.location.end_line
+        ),
+        eq((2, 6))
     );
     Ok(())
 }

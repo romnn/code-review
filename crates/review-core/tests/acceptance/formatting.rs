@@ -96,12 +96,12 @@ fn real_edit_keeps_the_rewrap_proven_and_is_highlighted() -> eyre::Result<()> {
         .find(|chunk| chunk.added.contains("limit = 2"))
         .ok_or_else(|| eyre::eyre!("no edit chunk"))?;
     let highlighted: Vec<&str> = edit
-        .added_highlights
+        .added_highlights()
         .iter()
         .map(|range| &edit.added[range.clone()])
         .collect();
     let removed: Vec<&str> = edit
-        .removed_highlights
+        .removed_highlights()
         .iter()
         .map(|range| &edit.removed[range.clone()])
         .collect();
@@ -115,7 +115,7 @@ fn real_edit_keeps_the_rewrap_proven_and_is_highlighted() -> eyre::Result<()> {
         .filter_map(|unit| unit.chunk())
         .find(|chunk| chunk.added.contains("compute("))
         .ok_or_else(|| eyre::eyre!("no re-wrap chunk"))?;
-    assert!(rewrap.added_highlights.is_empty() && rewrap.whitespace_only);
+    assert!(rewrap.added_highlights().is_empty() && rewrap.whitespace_only);
     Ok(())
 }
 

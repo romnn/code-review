@@ -40,6 +40,8 @@ pub struct Flat {
     pub italic: bool,
     /// The underline's color, composited over the background, when the text is underlined.
     pub underline: Option<Rgba>,
+    /// Whether the text is struck out.
+    pub strikethrough: bool,
 }
 
 /// `above` laid over the opaque `below` by `above`'s alpha, in encoded sRGB as gpui's renderer
@@ -93,6 +95,7 @@ fn styled(range: Range<usize>, style: Style, ink: Ink) -> Flat {
         bold: style.bold,
         italic: style.italic,
         underline: style.underline.map(|color| composite(background, color)),
+        strikethrough: style.strikethrough,
     }
 }
 

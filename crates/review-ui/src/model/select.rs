@@ -29,6 +29,20 @@ fn row_text(row: &Row, column: Column) -> Option<&str> {
     }
 }
 
+/// The deleted text an edited line of `row` shows in `column`, which copying leaves out.
+fn deleted(row: &Row, column: Column) -> &[std::ops::Range<usize>] {
+    let cell = match &row.body {
+        Body::Code(cell) => Some(cell),
+        Body::Pair(pair) => match column {
+            Column::Left => pair.left.as_ref(),
+            Column::Right => pair.right.as_ref(),
+            Column::Whole => None,
+        },
+        Body::Note(_) => None,
+    };
+    cell.map_or(&[], |cell| &cell.deleted)
+}
+
 /// A press of the main button on text of the diff or the buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextPress {
@@ -74,7 +88,16 @@ impl Model {
             {
                 return None;
             }
-            self.copyable(selection.pane, selection.column, row)
+            let text = self.copyable(selection.pane, selection.column, row)?;
+            let skipped = match selection.pane {
+                Pane::Diff => self
+                    .rows
+                    .rows
+                    .get(row)
+                    .map_or(&[][..], |row| deleted(row, selection.column)),
+                Pane::Source => &[],
+            };
+            Some((text, skipped))
         }))
     }
 
@@ -224,6 +247,7 @@ mod tests {
             text: text.to_owned(),
             content_len: text.len(),
             highlights: Vec::new(),
+            deleted: Vec::new(),
             head: None,
             base: None,
             quiet: false,
@@ -239,6 +263,29 @@ mod tests {
             source: 0,
             body: Body::Pair(Pair { left, right }),
         }
+    }
+
+    /// Copying an edited line takes its code, never the deleted text struck out in it.
+    #[test]
+    fn copying_an_edited_line_leaves_out_its_deleted_text() {
+        let row = Row {
+            file: 0,
+            unit: "u1-0".parse().unwrap(),
+            hunk: Some(0),
+            source: 0,
+            body: Body::Code(Cell {
+                deleted: std::iter::once(4..6).collect(),
+                ..cell(RowKind::Edited, "min(3220)")
+            }),
+        };
+        let selection = Selection {
+            pane: Pane::Diff,
+            column: Column::Whole,
+            anchor: TextPos { row: 0, col: 2 },
+            head: TextPos { row: 0, col: 9 },
+        };
+        let line = |_| Some((row_text(&row, Column::Whole)?, deleted(&row, Column::Whole)));
+        assert_eq!(selection.text(line), "n(20)");
     }
 
     /// A selection down the left half of a replacement copies the base's lines: padding where
@@ -263,7 +310,10 @@ mod tests {
             anchor: TextPos { row: 0, col: 0 },
             head: TextPos { row: 3, col: 4 },
         };
-        let line = |index: usize| rows.get(index).and_then(|row| row_text(row, Column::Left));
+        let line = |index: usize| {
+            let row = rows.get(index)?;
+            Some((row_text(row, Column::Left)?, deleted(row, Column::Left)))
+        };
         assert_eq!(
             selection.text(line),
             indoc! {"
@@ -271,7 +321,10 @@ mod tests {
 
                 same"}
         );
-        let right = |index: usize| rows.get(index).and_then(|row| row_text(row, Column::Right));
+        let right = |index: usize| {
+            let row = rows.get(index)?;
+            Some((row_text(row, Column::Right)?, deleted(row, Column::Right)))
+        };
         assert_eq!(
             selection.text(right),
             indoc! {"

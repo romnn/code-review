@@ -331,6 +331,7 @@ mod tests {
                 text: text.to_owned(),
                 content_len: text.len(),
                 highlights: Vec::new(),
+                deleted: Vec::new(),
                 head: None,
                 base: None,
                 quiet: false,

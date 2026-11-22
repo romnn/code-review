@@ -358,6 +358,35 @@ pub(crate) struct ParsedFile {
     pub canonical: Option<Vec<u8>>,
     /// Byte ranges of leaf tokens (literals and comments count as one token), in source order.
     pub tokens: Vec<Range<usize>>,
+    /// For each token, the byte range of `canonical` that records the gap before it: what the
+    /// proof keeps of that whitespace, and of the line's indentation where it matters, as in
+    /// Python.
+    gaps: Vec<Range<usize>>,
+}
+
+/// Whether a gap with key `key` may break lines or not without changing anything: a wrap site
+/// whose indentation is not recorded, such as a gap inside brackets.
+pub(crate) fn breaks_free(key: &[u8]) -> bool {
+    // A wrap site's gap is one `w` field, the tag, a length of eight bytes and the values
+    // `[line, touch]`, whose `line` is 2 (see `Serializer::gap`); a recorded indentation, as
+    // Python's, follows it as another field.
+    key.len() == 11 && key.first() == Some(&b'w') && key.get(9) == Some(&2)
+}
+
+/// Whether a gap with key `key` may also vanish without changing anything, its tokens touching:
+/// a wrap site where whether the tokens touch is not recorded either, as next to a bracket.
+pub(crate) fn may_vanish(key: &[u8]) -> bool {
+    // The second value of the `w` field, `touch`, is 2 when touching cannot matter.
+    breaks_free(key) && key.get(10) == Some(&2)
+}
+
+impl ParsedFile {
+    /// What the proof keeps of the gap before token `token`: two gaps with equal keys are
+    /// equivalent, so changing one into the other changes nothing. `None` when the file is
+    /// refused, which proves nothing.
+    pub(crate) fn gap_key(&self, token: usize) -> Option<&[u8]> {
+        self.canonical.as_ref()?.get(self.gaps.get(token)?.clone())
+    }
 }
 
 /// Parses `source` as `language`.
@@ -383,6 +412,7 @@ struct Serializer<'a> {
     source: &'a str,
     canonical: Vec<u8>,
     tokens: Vec<Range<usize>>,
+    gaps: Vec<Range<usize>>,
     /// The last leaf, with its class.
     previous: Option<(Node<'a>, Class)>,
     /// Python only: bracket nesting depth, inside which line breaks are insignificant.
@@ -412,6 +442,7 @@ fn serialize<'a>(language: Language, tree: &'a Tree, source: &'a str) -> ParsedF
         source,
         canonical: Vec::with_capacity(source.len() * 2),
         tokens: Vec::new(),
+        gaps: Vec::new(),
         previous: None,
         bracket_depth: 0,
         refused: false,
@@ -424,6 +455,7 @@ fn serialize<'a>(language: Language, tree: &'a Tree, source: &'a str) -> ParsedF
     ParsedFile {
         canonical: (!refused).then_some(serializer.canonical),
         tokens: serializer.tokens,
+        gaps: serializer.gaps,
     }
 }
 
@@ -497,6 +529,7 @@ impl<'a> Serializer<'a> {
             // A comment is not JSON.
             self.refused = true;
         }
+        let gap_start = self.canonical.len();
         match self.previous {
             None => {
                 let prefix = self.text(0..range.start).as_bytes().to_vec();
@@ -507,6 +540,7 @@ impl<'a> Serializer<'a> {
         if self.language == Language::Python {
             self.python_indentation(&range);
         }
+        self.gaps.push(gap_start..self.canonical.len());
         let text = self.text(range.clone()).as_bytes().to_vec();
         push_field(&mut self.canonical, b't', &text);
         self.tokens.push(range);

@@ -24,7 +24,7 @@ state
 expect "rows":\[\{"row":0,"source":0,"kind":"Context","hunk":null
 expect "hunk":0,"hunks"
 expect "hunk_badges":\["Accepted"\]
-expect "kind":"Added","hunk":0,
+expect "kind":"Edited","hunk":0,
 # j/k step through every hunk, approved ones too, and by default stop at the file's ends.
 key j
 state

@@ -4,6 +4,7 @@
 //! It is content-addressed by those IDs, cached on disk, and knows nothing about revision numbers.
 
 mod build;
+mod edits;
 mod moves;
 mod noise;
 
@@ -22,9 +23,8 @@ use crate::syntax::Language;
 /// The version of the analysis format and algorithm; cached analyses of another version are
 /// recomputed.
 ///
-/// Version 11 drops analyses read through git replace refs, which earlier versions followed, so
-/// a cached analysis may describe a replacement tree rather than the snapshot's own.
-pub const ANALYSIS_FORMAT: u32 = 11;
+/// Version 13 keeps each chunk's edit script in place of its highlighted ranges.
+pub const ANALYSIS_FORMAT: u32 = 13;
 
 /// Units within this many lines of each other are shown together as one hunk.
 pub const HUNK_MERGE_DISTANCE: usize = 3;
@@ -125,7 +125,8 @@ pub struct Unit {
     /// Whether the change is proven formatting-only, by its file's whole-file proof or, for a
     /// chunk, by its own.
     pub formatting_only: bool,
-    /// Whether plain moves cover every changed line of this unit.
+    /// Whether one plain move covers every changed line of this unit, so acknowledging that move
+    /// marks it.
     pub moved: bool,
 }
 
@@ -161,16 +162,96 @@ pub struct Chunk {
     pub removed: String,
     /// The added lines, each with its line terminator.
     pub added: String,
-    /// Byte ranges of `removed` that a token diff marks as really changed.
-    pub removed_highlights: Vec<Range<usize>>,
-    /// Byte ranges of `added` that a token diff marks as really changed.
-    pub added_highlights: Vec<Range<usize>>,
+    /// The edit script from `removed` to `added`: a token diff that ignores whitespace, with
+    /// each changed gap between tokens judged by the language's formatting proof.
+    pub edits: Vec<Edit>,
     /// Whether both sides have equal tokens, so only whitespace differs.
     /// This is a display hint, never a reason to hide or skip the chunk.
     pub whitespace_only: bool,
     /// A digest of the context lines around the chunk on both sides, used to tell apart
     /// identical changes in one file.
     pub context: String,
+}
+
+impl Chunk {
+    /// The stretches of `removed` that changed, each within one line and without the whitespace
+    /// around it: the words a removed line marks. None when nothing was added in their place.
+    #[must_use]
+    pub fn removed_highlights(&self) -> Vec<Range<usize>> {
+        if self.added.is_empty() {
+            return Vec::new();
+        }
+        changed_words(
+            &self.removed,
+            self.edits.iter().map(|edit| (edit.kind, &edit.removed)),
+        )
+    }
+
+    /// The stretches of `added` that changed, each within one line and without the whitespace
+    /// around it: the words an added line marks. None when nothing was removed in their place.
+    #[must_use]
+    pub fn added_highlights(&self) -> Vec<Range<usize>> {
+        if self.removed.is_empty() {
+            return Vec::new();
+        }
+        changed_words(
+            &self.added,
+            self.edits.iter().map(|edit| (edit.kind, &edit.added)),
+        )
+    }
+}
+
+/// The parts of `text` that `stretches` changed, split at line breaks and trimmed of whitespace.
+fn changed_words<'a>(
+    text: &str,
+    stretches: impl Iterator<Item = (EditKind, &'a Range<usize>)>,
+) -> Vec<Range<usize>> {
+    let mut words = Vec::new();
+    for (_, stretch) in stretches.filter(|(kind, _)| *kind == EditKind::Changed) {
+        let Some(changed) = text.get(stretch.clone()) else {
+            continue;
+        };
+        let mut start = stretch.start;
+        for line in changed.split_inclusive('\n') {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let at = start + (line.len() - line.trim_start().len());
+                words.push(at..at + trimmed.len());
+            }
+            start += line.len();
+        }
+    }
+    words
+}
+
+/// One step of a chunk's edit script: a stretch of its removed text and the stretch of its added
+/// text that stands in its place. The steps cover both texts in order, byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edit {
+    /// How the two stretches differ.
+    pub kind: EditKind,
+    /// The stretch of [`Chunk::removed`].
+    pub removed: Range<usize>,
+    /// The stretch of [`Chunk::added`].
+    pub added: Range<usize>,
+}
+
+/// How the two stretches of an [`Edit`] differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditKind {
+    /// They are the same text.
+    Same,
+    /// They are whitespace that the language's formatting proof shows equivalent, such as a line
+    /// broken anew inside brackets, so changing one into the other changes nothing.
+    Layout,
+    /// Tokens that changed, with the whitespace between them; either side may be empty, for an
+    /// insertion or a deletion.
+    Changed,
+    /// Whitespace that changed where the proof cannot show it means nothing: indentation that
+    /// Python reads, a line broken or joined where the language minds, a changed line ending, or
+    /// any whitespace in a language the proof does not support.
+    Whitespace,
 }
 
 /// A change that is not a line change.
@@ -231,6 +312,17 @@ pub struct Move {
     pub source: MoveSide,
     /// The added lines.
     pub target: MoveSide,
+}
+
+impl Move {
+    /// Whether this move covers every changed line of `chunk`, unit `unit`, on both sides: the
+    /// one rule for collapsing a unit as moved and for marking it when the move is acknowledged.
+    pub(crate) fn covers(&self, unit: UnitIndex, chunk: &Chunk) -> bool {
+        let side_covered = |lines: usize, side: MoveSide| {
+            lines == 0 || (side.unit == unit && side.offset == 0 && side.len == lines)
+        };
+        side_covered(chunk.old.len, self.source) && side_covered(chunk.new.len, self.target)
+    }
 }
 
 /// The full evidence of a unit, as recorded with a mark: both sides of the change, paths,
