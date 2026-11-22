@@ -15,7 +15,7 @@ launch --demo
 expect "revision":"1"
 expect "mode":"Tree"
 expect "theme":"carbonfox"
-expect "token_emphasis":false,"diff_style":"bold"
+expect "token_emphasis":true,"diff_style":"bold"
 expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
 expect "layout":\{"sidebar":31,"fit":true\}
 expect "viewport":\[32,1,128,47\]
@@ -557,7 +557,7 @@ launch --demo --config scripts/qa/compact.toml
 expect "density":"compact","effective_density":"compact"
 file src/engine.rs
 state
-expect "row_count":28,
+expect "row_count":27,
 expect "kind":"Gap".*"kind":"Header"
 shot 15-compact
 

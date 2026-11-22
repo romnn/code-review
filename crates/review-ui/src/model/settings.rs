@@ -211,7 +211,7 @@ const OPTIONS: &[(&str, &str, &str, Choice)] = &[
     (
         "Token emphasis",
         "on",
-        "underline the tokens that changed",
+        "mark the words removed and added lines changed",
         Choice::Emphasis(true),
     ),
     (

@@ -45,8 +45,10 @@ in full rather than guessing.
 
 - Posting comments to GitHub (export only; posting comes after the MVP).
 - Multi-user or server features; review state is local to one reviewer.
-- Structural (AST) diff rendering. Tree-sitter proves formatting equivalence and highlights code;
-  it never shapes the diff.
+- A tree diff (difftastic's or GumTree's) and names for edits such as "wrapped in a call". Hunks
+  show their code once, token by token, where the formatting proof shows the layout means
+  nothing ([ADR 6](adr/0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md)), but
+  the token diff aligns flat tokens, not trees.
 - AI walkthrough generation inside the app (the CLI emits a prompt and imports the result).
 
 ## Concepts
@@ -546,6 +548,20 @@ Moves are a presentation over review units, not units of their own:
   stay visible. The moves' proofs share a parse budget per revision.
 - Assignments are one-to-one and non-overlapping: each removed run pairs with at most one added
   run. A block copied to two places shows one move and one plain addition.
+- Code that may have stayed where it was is never part of a move. A file's chunks fall into
+  regions, separated by unchanged lines of code (a letter or digit) whose text occurs once in
+  each version, so each marks one place; blank lines, brackets and repeated lines such as Ruby's
+  `end` mark none. Within a region, a line of code whose trimmed text is both removed and added
+  may be the same line, re-indented or rewrapped where it stands. Such lines are set aside
+  before matching: no move starts on one, runs through one or merges across one, and no copy
+  elsewhere claims one, however long. Fields re-indented by a call newly wrapped around them, or
+  a function that ends up inside or outside a module because only the module's closing brace
+  and blank lines moved past it, are edits shown where they stand. So is a chunk the syntax
+  proof shows only reformatted. Blank lines and brackets are never set aside, so setting lines
+  aside never splits a move; a blank line the line diff keeps as unchanged context still
+  separates two chunks, and a move lies within one chunk on each side.
+- A unit folds as moved only when one plain move covers all of its changed lines, the same
+  rule acknowledging a move marks it by.
 - **Moved**: both sides equal after normalization. Shown as one collapsed line, "moved from
   `old.rs:120-160`" at the destination and "moved to `new.rs:40-80`" at the source. Acknowledging
   it marks only the units the move covers completely, on both sides; a unit with changes outside
@@ -1166,8 +1182,14 @@ it, muted, so it never reads as code.
   muted look. `[styles.<name>]` tables add more (one that sets `density` is rejected with an
   error saying where it belongs, and one that sets the retired `headers` says it is gone),
   `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `S`
-  hint names the style in use. Changed-token emphasis is off by default
-  (`[diff] token_emphasis`).
+  hint names the style in use. In the unified layout a hunk shows its code once where nothing
+  that changed would hide, as [ADR 6](adr/0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md)
+  describes: a line changed in place has a `~` and no line color, so what stayed the same reads
+  as unchanged code, re-indented or rewrapped or not, and marks the tokens it inserted behind a
+  stronger green and the ones it deleted struck out in red where they stood; copying and find
+  skip the deleted text. Elsewhere a hunk shows its old lines above its new ones, and each line
+  marks the words it changed behind a stronger red or green, and a line deleted or added whole
+  in such a hunk all its code, unless `[diff] token_emphasis` is off.
 - **Density.** The rows' spacing is its own setting, `[diff] density`: `compact`, a terminal's
   line height with each hunk and note right after the code before it; `normal` (the default),
   a little more line height, a blank row before each hunk and one above and below each note;

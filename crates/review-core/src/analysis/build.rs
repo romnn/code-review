@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
+use super::edits::{self, ScriptSide};
 use super::{
     ANALYSIS_FORMAT, Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Move, Unit,
     UnitKind, hex_digest, moves, noise,
@@ -12,7 +13,7 @@ use crate::error::Error;
 use crate::git::{Blob, BlobReader, ChangeStatus, EntryType, RawChange, RawSide, Repo};
 use crate::ids::{ObjectId, UnitIndex};
 use crate::syntax::{self, Language};
-use crate::text::{self, changed_token_ranges, generic_tokens, split_lines};
+use crate::text::{self, generic_tokens, split_lines};
 
 /// Git's binary detection window: a NUL byte in the first 8000 bytes means binary.
 const BINARY_PROBE_BYTES: usize = 8000;
@@ -45,6 +46,7 @@ pub fn analyze(repo: &Repo, base: &ObjectId, head: &ObjectId) -> Result<Analysis
         blobs: repo.blob_reader()?,
         files: Vec::with_capacity(changes.len()),
         units: Vec::new(),
+        regions: HashMap::new(),
     };
     for change in changes {
         let is_generated = generated
@@ -57,13 +59,14 @@ pub fn analyze(repo: &Repo, base: &ObjectId, head: &ObjectId) -> Result<Analysis
         files,
         mut units,
         mut blobs,
+        regions,
     } = builder;
     let mut proof = MoveProof {
         blobs: &mut blobs,
         texts: HashMap::new(),
         budget: MOVE_PROOF_BUDGET,
     };
-    let moves = moves::detect(&mut units, |found, units| {
+    let moves = moves::detect(&mut units, &regions, |found, units| {
         move_is_formatting_only(found, units, &files, &mut proof)
     });
     Ok(Analysis {
@@ -97,6 +100,8 @@ struct Builder {
     blobs: BlobReader,
     files: Vec<FileChange>,
     units: Vec<Unit>,
+    /// Each chunk unit's region in its file, see [`regions`].
+    regions: HashMap<UnitIndex, usize>,
 }
 
 impl Builder {
@@ -193,8 +198,15 @@ impl Builder {
                 file_texts.new.as_deref(),
             );
             formatting_only = file_chunks.formatting_only;
-            for (chunk, proven) in file_chunks.chunks.into_iter().zip(file_chunks.proven) {
-                indices.push(self.push_unit(file_index, UnitKind::Chunk(chunk), proven));
+            for FileChunk {
+                chunk,
+                proven,
+                region,
+            } in file_chunks.chunks
+            {
+                let index = self.push_unit(file_index, UnitKind::Chunk(chunk), proven);
+                self.regions.insert(index, region);
+                indices.push(index);
             }
         }
         if indices.is_empty() {
@@ -320,12 +332,18 @@ fn content_change(
 }
 
 struct FileChunks {
-    chunks: Vec<Chunk>,
+    chunks: Vec<FileChunk>,
     /// Whether the whole file is proven formatting-only.
     formatting_only: bool,
-    /// For each chunk, whether it is proven formatting-only, by the whole-file proof or its
-    /// own.
-    proven: Vec<bool>,
+}
+
+/// A chunk, with what the analysis learns of it that the chunk does not keep.
+struct FileChunk {
+    chunk: Chunk,
+    /// Whether it is proven formatting-only, by the whole-file proof or its own.
+    proven: bool,
+    /// Its region in the file, see [`regions`].
+    region: usize,
 }
 
 /// How many bytes the proofs that moves with edits differ only in formatting may parse, across
@@ -533,20 +551,28 @@ fn chunks(
         old_parsed.canonical.is_some() && old_parsed.canonical == new_parsed.canonical
     });
 
-    let mut proven = Vec::with_capacity(hunks.len());
     let mut budget = CHUNK_PROOF_BUDGET;
     let chunks = hunks
         .iter()
-        .map(|hunk| {
+        .zip(regions(&old, &new, &hunks))
+        .map(|(hunk, region)| {
             let removed = old.join(&hunk.before);
             let added = new.join(&hunk.after);
-            let (removed_tokens, added_tokens) = match &parsed {
-                Some((old_parsed, new_parsed)) => (
-                    clip_tokens(&old_parsed.tokens, &old.byte_range(&hunk.before)),
-                    clip_tokens(&new_parsed.tokens, &new.byte_range(&hunk.after)),
-                ),
-                None => (generic_tokens(&removed), generic_tokens(&added)),
-            };
+            let ((removed_tokens, removed_keys), (added_tokens, added_keys)) =
+                if let Some((old_parsed, new_parsed)) = &parsed {
+                    (
+                        clip_tokens(old_parsed, &old.byte_range(&hunk.before)),
+                        clip_tokens(new_parsed, &new.byte_range(&hunk.after)),
+                    )
+                } else {
+                    let (removed_tokens, added_tokens) =
+                        (generic_tokens(&removed), generic_tokens(&added));
+                    let (removed_keys, added_keys) = (
+                        vec![None; removed_tokens.len()],
+                        vec![None; added_tokens.len()],
+                    );
+                    ((removed_tokens, removed_keys), (added_tokens, added_keys))
+                };
             let token_text = |text: &str, tokens: &[Range<usize>]| -> Vec<String> {
                 tokens
                     .iter()
@@ -556,27 +582,32 @@ fn chunks(
             let whitespace_only = !removed.is_empty()
                 && !added.is_empty()
                 && token_text(&removed, &removed_tokens) == token_text(&added, &added_tokens);
-            proven.push(
-                formatting_only
-                    || (whitespace_only
-                        && chunk_is_formatting_only(
-                            language,
-                            &old,
-                            &new,
-                            parsed.as_ref(),
-                            hunk,
-                            &mut budget,
-                        )),
+            let proven = formatting_only
+                || (whitespace_only
+                    && chunk_is_formatting_only(
+                        language,
+                        &old,
+                        &new,
+                        parsed.as_ref(),
+                        hunk,
+                        &mut budget,
+                    ));
+            let edits = edits::edit_script(
+                &ScriptSide {
+                    text: &removed,
+                    tokens: &removed_tokens,
+                    keys: &removed_keys,
+                },
+                &ScriptSide {
+                    text: &added,
+                    tokens: &added_tokens,
+                    keys: &added_keys,
+                },
             );
-            let highlights = if formatting_only || removed.is_empty() || added.is_empty() {
-                text::ChangedRanges::default()
-            } else {
-                changed_token_ranges(&removed, &removed_tokens, &added, &added_tokens)
-            };
             let mut context = old.context(&hunk.before);
             context.push('\0');
             context.push_str(&new.context(&hunk.after));
-            Chunk {
+            let chunk = Chunk {
                 old: LineRange {
                     start: hunk.before.start,
                     len: hunk.before.len(),
@@ -585,20 +616,59 @@ fn chunks(
                     start: hunk.after.start,
                     len: hunk.after.len(),
                 },
-                removed_highlights: highlights.before,
-                added_highlights: highlights.after,
+                edits,
                 removed,
                 added,
                 whitespace_only,
                 context: hex_digest(context.as_bytes()),
+            };
+            FileChunk {
+                chunk,
+                proven,
+                region,
             }
         })
         .collect();
     FileChunks {
         chunks,
         formatting_only,
-        proven,
     }
+}
+
+/// The region of each of a file's `hunks`: how many boundaries come before it, a boundary being an
+/// unchanged line of code whose trimmed text occurs once in each version of the file, so it marks
+/// one place. Repeated lines such as Ruby's `end` mark none, nor do blank lines and brackets.
+fn regions(old: &Side<'_>, new: &Side<'_>, hunks: &[text::Hunk]) -> Vec<usize> {
+    if hunks.len() < 2 {
+        return vec![0; hunks.len()];
+    }
+    let mut occurrences: HashMap<&str, (usize, usize)> = HashMap::new();
+    for line in &old.lines {
+        occurrences.entry(line.trim()).or_default().0 += 1;
+    }
+    for line in &new.lines {
+        occurrences.entry(line.trim()).or_default().1 += 1;
+    }
+    let boundary = |line: &str| {
+        let text = line.trim();
+        moves::anchorable(text) && occurrences.get(text) == Some(&(1, 1))
+    };
+    let mut region = 0;
+    let mut unchanged_from = 0;
+    hunks
+        .iter()
+        .map(|hunk| {
+            region += new
+                .lines
+                .get(unchanged_from..hunk.after.start)
+                .unwrap_or_default()
+                .iter()
+                .filter(|line| boundary(line))
+                .count();
+            unchanged_from = hunk.after.end;
+            region
+        })
+        .collect()
 }
 
 /// Proves one chunk formatting-only on its own, for a file whose other changes are real.
@@ -653,33 +723,385 @@ fn chunk_is_formatting_only(
         && canonical(&backward).as_ref() == Some(new_canonical)
 }
 
-/// Returns the tokens overlapping `range`, clipped to it and made relative to its start.
-fn clip_tokens(tokens: &[Range<usize>], range: &Range<usize>) -> Vec<Range<usize>> {
-    let first = tokens.partition_point(|token| token.end <= range.start);
-    tokens
+/// Returns the tokens of `parsed` overlapping `range`, clipped to it and made relative to its
+/// start, each with the key of the gap before it when it lies wholly inside `range`.
+fn clip_tokens<'a>(
+    parsed: &'a syntax::ParsedFile,
+    range: &Range<usize>,
+) -> (Vec<Range<usize>>, Vec<Option<&'a [u8]>>) {
+    let first = parsed
+        .tokens
+        .partition_point(|token| token.end <= range.start);
+    parsed
+        .tokens
         .get(first..)
         .unwrap_or_default()
         .iter()
-        .take_while(|token| token.start < range.end)
-        .map(|token| {
-            token.start.max(range.start) - range.start..token.end.min(range.end) - range.start
+        .enumerate()
+        .take_while(|(_, token)| token.start < range.end)
+        .filter_map(|(offset, token)| {
+            let clipped =
+                token.start.max(range.start) - range.start..token.end.min(range.end) - range.start;
+            let whole = token.start >= range.start && token.end <= range.end;
+            let key = whole.then(|| parsed.gap_key(first + offset)).flatten();
+            (!clipped.is_empty()).then_some((clipped, key))
         })
-        .filter(|token| !token.is_empty())
-        .collect()
+        .unzip()
 }
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
+    use indoc::{formatdoc, indoc};
 
-    use super::{Side, chunk_is_formatting_only, chunks, escape_bytes};
+    use super::{Chunk, Side, chunk_is_formatting_only, chunks, escape_bytes};
+    use crate::analysis::EditKind;
     use crate::syntax::{self, Language};
     use crate::text;
+
+    /// Only an unchanged line of code that occurs once in each version separates regions: a
+    /// repeated one, such as Ruby's `end`, marks no place.
+    #[test]
+    fn a_unique_line_of_code_separates_regions() {
+        let regions = |separator: &str| {
+            let old = formatdoc! {"
+                first
+                {separator}
+                second
+                end
+            "};
+            let new = formatdoc! {"
+                first changed
+                {separator}
+                second changed
+                end
+            "};
+            let file = chunks(None, Some(&old), Some(&new));
+            file.chunks
+                .iter()
+                .map(|chunk| chunk.region)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(regions("middle"), [0, 1]);
+        assert_eq!(regions("end"), [0, 0]);
+        assert_eq!(regions("});"), [0, 0]);
+    }
+
+    /// The edit script of the one chunk between `old` and `new`, checked to cover both texts in
+    /// order, byte for byte, with layout only between whitespace.
+    fn script(
+        language: Option<Language>,
+        old: &str,
+        new: &str,
+    ) -> (Chunk, Vec<(EditKind, String, String)>) {
+        let file = chunks(language, Some(old), Some(new));
+        assert_eq!(file.chunks.len(), 1, "one chunk");
+        let chunk = file
+            .chunks
+            .into_iter()
+            .next()
+            .map(|chunk| chunk.chunk)
+            .unwrap();
+        let (mut removed_at, mut added_at) = (0, 0);
+        let mut steps = Vec::new();
+        for edit in &chunk.edits {
+            assert_eq!(
+                (edit.removed.start, edit.added.start),
+                (removed_at, added_at)
+            );
+            let removed = &chunk.removed[edit.removed.clone()];
+            let added = &chunk.added[edit.added.clone()];
+            match edit.kind {
+                EditKind::Same => assert_eq!(removed, added),
+                EditKind::Layout | EditKind::Whitespace => {
+                    assert!(removed.trim().is_empty() && added.trim().is_empty());
+                }
+                EditKind::Changed => {}
+            }
+            steps.push((edit.kind, removed.to_owned(), added.to_owned()));
+            (removed_at, added_at) = (edit.removed.end, edit.added.end);
+        }
+        assert_eq!(
+            (removed_at, added_at),
+            (chunk.removed.len(), chunk.added.len())
+        );
+        (chunk, steps)
+    }
+
+    /// The changes of an edit script, as removed and added text.
+    fn changes(steps: &[(EditKind, String, String)]) -> Vec<(&str, &str)> {
+        steps
+            .iter()
+            .filter(|(kind, _, _)| *kind == EditKind::Changed)
+            .map(|(_, removed, added)| (removed.as_str(), added.as_str()))
+            .collect()
+    }
+
+    /// Code wrapped in a call and rewrapped by rustfmt changes only its tokens: the line broken
+    /// anew and the fields re-indented are layout.
+    #[test]
+    fn a_rewrapped_call_changes_only_its_tokens() {
+        let old = indoc! {"
+            fn reasoning(id: &str) -> ThreadItem {
+                ThreadItem::Reasoning(Box::new(ReasoningThreadItem {
+                    content: Some(Vec::new()),
+                    id: id.to_owned(),
+                }))
+            }
+        "};
+        let new = indoc! {"
+            fn reasoning(id: &str) -> ThreadItem {
+                item(ThreadItemVariant::Reasoning(Box::new(
+                    ReasoningThreadItem {
+                        content: Some(Vec::new()),
+                        id: id.to_owned(),
+                    },
+                )))
+            }
+        "};
+        let (chunk, steps) = script(Some(Language::Rust), old, new);
+        // The comma and one of the three closing parentheses are inserted as one run, broken
+        // inside the brackets, where a line break means nothing.
+        assert_eq!(
+            changes(&steps),
+            [
+                ("ThreadItem", "item(ThreadItemVariant"),
+                ("", ","),
+                ("", ")")
+            ]
+        );
+        assert!(
+            steps
+                .iter()
+                .all(|(kind, _, _)| *kind != EditKind::Whitespace),
+            "{steps:?}"
+        );
+        let words: Vec<&str> = chunk
+            .added_highlights()
+            .into_iter()
+            .map(|range| &chunk.added[range])
+            .collect();
+        assert_eq!(words, ["item(ThreadItemVariant", ",", ")"]);
+        assert!(steps.iter().any(|(kind, _, _)| *kind == EditKind::Layout));
+    }
+
+    /// Where whitespace carries meaning, or the proof cannot tell, a whitespace change is a change:
+    /// Python's indentation, touching tokens a Rust macro sees, also beside a deleted token, a
+    /// line ending, and any change in a language the proof does not support.
+    #[test]
+    fn significant_whitespace_is_a_change() {
+        let whitespace_changed = |language: Option<Language>, old: &str, new: &str| {
+            let (_, steps) = script(language, old, new);
+            assert!(
+                steps
+                    .iter()
+                    .any(|(kind, _, _)| *kind == EditKind::Whitespace),
+                "{steps:?}"
+            );
+            assert!(
+                steps.iter().all(|(kind, _, _)| *kind != EditKind::Layout),
+                "{steps:?}"
+            );
+        };
+        whitespace_changed(
+            Some(Language::Python),
+            indoc! {"
+                def f():
+                    return 1
+            "},
+            indoc! {"
+                def f():
+                        return 1
+            "},
+        );
+        whitespace_changed(
+            Some(Language::Rust),
+            indoc! {"
+                tokens!(+
+                -);
+            "},
+            "tokens!(+-);\n",
+        );
+        // A deleted `*` would show touching the `-`, which it did not.
+        whitespace_changed(
+            Some(Language::Rust),
+            indoc! {"
+                tokens!(+*
+                -);
+            "},
+            "tokens!(+-);\n",
+        );
+        whitespace_changed(Some(Language::Rust), "fn f() {}\n", "fn f() {}\r\n");
+        whitespace_changed(
+            None,
+            indoc! {"
+                call(a,
+                  b)
+            "},
+            "call(a, b)\n",
+        );
+    }
+
+    /// A line inserted or deleted whole is one change, from its indentation through its line
+    /// break, and changes no whitespace of the code around it: a comment above an edited line, a
+    /// statement deleted above an edited one, a Python statement beside its neighbors. A
+    /// Python statement that indents the next one changes its whitespace.
+    #[test]
+    fn a_line_inserted_or_deleted_whole_is_one_change() {
+        let changes = |language: Language, old: &str, new: &str| -> Vec<(String, String)> {
+            let (_, steps) = script(Some(language), old, new);
+            assert!(
+                steps
+                    .iter()
+                    .all(|(kind, _, _)| *kind != EditKind::Whitespace),
+                "{steps:?}"
+            );
+            steps
+                .into_iter()
+                .filter(|(kind, _, _)| *kind == EditKind::Changed)
+                .map(|(_, old, new)| (old, new))
+                .collect()
+        };
+        let pair = |old: &str, new: &str| (old.to_owned(), new.to_owned());
+        assert_eq!(
+            changes(
+                Language::Rust,
+                indoc! {"
+                    fn f(ceiling: u64) {
+                        if ceiling == 0 {
+                            return;
+                        }
+                    }
+                "},
+                indoc! {"
+                    fn f(ceiling: u64) {
+                        // Nothing to spread.
+                        if ceiling <= 1 {
+                            return;
+                        }
+                    }
+                "},
+            ),
+            [
+                pair("", "    // Nothing to spread.\n"),
+                pair("== 0", "<= 1")
+            ]
+        );
+        assert_eq!(
+            changes(
+                Language::Rust,
+                indoc! {"
+                    fn f() {
+                        a(1);
+                        obsolete();
+                        b(2);
+                    }
+                "},
+                indoc! {"
+                    fn f() {
+                        a(1);
+                        b(20);
+                    }
+                "},
+            ),
+            [pair("    obsolete();\n", ""), pair("2", "20")]
+        );
+        let before = indoc! {"
+            def f():
+                prepare()
+                send()
+        "};
+        assert_eq!(
+            changes(
+                Language::Python,
+                before,
+                indoc! {"
+                    def f():
+                        prepare()
+                        check()
+                        send()
+                "},
+            ),
+            [pair("", "    check()\n")]
+        );
+        let (_, steps) = script(
+            Some(Language::Python),
+            before,
+            indoc! {"
+                def f():
+                    prepare()
+                    if ready:
+                        send()
+            "},
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|(kind, _, _)| *kind == EditKind::Whitespace)
+        );
+    }
+
+    /// A Python call renamed and dedented out of its block shows both: its indentation is a
+    /// whitespace change of its own, never folded into the rename.
+    #[test]
+    fn a_dedent_beside_a_rename_stays_a_whitespace_change() {
+        let (_, steps) = script(
+            Some(Language::Python),
+            indoc! {"
+                if ready:
+                    prepare()
+                    send(payload)
+            "},
+            indoc! {"
+                if ready:
+                    prepare()
+                deliver(payload)
+            "},
+        );
+        assert_eq!(changes(&steps), [("send", "deliver")]);
+        assert!(
+            steps
+                .iter()
+                .any(|(kind, removed, added)| *kind == EditKind::Whitespace
+                    && removed.ends_with("    ")
+                    && !added.ends_with(' ')),
+            "{steps:?}"
+        );
+    }
+
+    /// A line ending that changes inside a chunk is never layout, even where the proof counts
+    /// line breaks alike.
+    #[test]
+    fn a_changed_line_ending_inside_a_chunk_shows() {
+        let crlf = |text: &str| text.replace('\n', "\r\n");
+        let old = crlf(indoc! {"
+            fn f() {
+                let a = 1;
+            }
+        "});
+        // The first line's ending turns LF, and the next line's number changes.
+        let rest = crlf(indoc! {"
+                let a = 2;
+            }
+        "});
+        let new = ["fn f() {\n", &rest].concat();
+        let (_, steps) = script(Some(Language::Rust), &old, &new);
+        assert!(
+            steps
+                .iter()
+                .any(|(kind, removed, _)| *kind == EditKind::Whitespace && removed.contains('\r')),
+            "{steps:?}"
+        );
+        assert!(
+            steps.iter().all(|(kind, _, _)| *kind != EditKind::Layout),
+            "{steps:?}"
+        );
+    }
 
     /// Each chunk's proof, and the whole file's.
     fn proofs(language: Language, old: &str, new: &str) -> (Vec<bool>, bool) {
         let file = chunks(Some(language), Some(old), Some(new));
-        (file.proven, file.formatting_only)
+        let proven = file.chunks.iter().map(|chunk| chunk.proven).collect();
+        (proven, file.formatting_only)
     }
 
     /// Each chunk's token hint: whether only whitespace differs, which makes it a candidate.
@@ -687,7 +1109,7 @@ mod tests {
         chunks(Some(language), Some(old), Some(new))
             .chunks
             .iter()
-            .map(|chunk| chunk.whitespace_only)
+            .map(|file_chunk| file_chunk.chunk.whitespace_only)
             .collect()
     }
 

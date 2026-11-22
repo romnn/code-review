@@ -67,7 +67,7 @@ impl Brush {
             bold: flat.bold,
             italic: flat.italic,
             underline: flat.underline,
-            crossed: false,
+            crossed: flat.strikethrough,
         }
     }
 }

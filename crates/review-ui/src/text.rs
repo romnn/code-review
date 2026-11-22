@@ -104,12 +104,16 @@ impl Selection {
         (from < to || (row != end.row && from == to)).then_some(from..to)
     }
 
-    /// The selected text, one line per row, where `line` gives a row's copyable text.
-    pub fn text<'a>(&self, line: impl Fn(usize) -> Option<&'a str>) -> String {
+    /// The selected text, one line per row, where `line` gives a row's text and the stretches of
+    /// it that are no code to copy, such as an edited line's deleted text.
+    pub fn text<'a>(
+        &self,
+        line: impl Fn(usize) -> Option<(&'a str, &'a [Range<usize>])>,
+    ) -> String {
         let (start, end) = self.ordered();
         let mut lines = Vec::new();
         for row in start.row..=end.row {
-            let Some(text) = line(row) else {
+            let Some((text, skipped)) = line(row) else {
                 continue;
             };
             let from = if row == start.row {
@@ -122,7 +126,17 @@ impl Selection {
             } else {
                 text.len()
             };
-            lines.push(text.get(from..to.max(from)).unwrap_or_default());
+            let mut copied = String::new();
+            let mut at = from;
+            for skip in skipped
+                .iter()
+                .filter(|skip| skip.end > from && skip.start < to)
+            {
+                copied.push_str(text.get(at..skip.start.max(at)).unwrap_or_default());
+                at = skip.end.max(at);
+            }
+            copied.push_str(text.get(at.min(to)..to.max(from)).unwrap_or_default());
+            lines.push(copied);
         }
         lines.join("\n")
     }
@@ -230,7 +244,7 @@ mod tests {
         assert_eq!(selection.range_in_row(2, 13), Some(0..5));
         assert_eq!(selection.range_in_row(3, 4), None);
         assert_eq!(
-            selection.text(|row| rows.get(row).copied()),
+            selection.text(|row| rows.get(row).map(|text| (*text, &[][..]))),
             indoc! {"
                 beta
                 gamma
@@ -238,7 +252,7 @@ mod tests {
         );
         assert_eq!(
             Selection::caret(Pane::Diff, Column::Whole, pos(1, 2))
-                .text(|row| rows.get(row).copied()),
+                .text(|row| rows.get(row).map(|text| (*text, &[][..]))),
             ""
         );
     }

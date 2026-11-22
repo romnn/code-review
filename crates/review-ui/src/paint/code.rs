@@ -206,14 +206,14 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
     if !approved {
         layers.push(moved_edit_layer(cell, palette));
     }
+    // Under the find matches and the selection, which tint behind the text and leave deleted
+    // text its red and its line.
+    layers.push(marks_layer(model, cell, palette, approved));
     if let Some(find) = model.search_of(Mode::Diff) {
         let current = find.current.and_then(|current| find.matches.get(current));
-        layers.push(match_layer(
-            &find.matches,
-            current,
-            at.row,
-            Some(at.column),
-            palette,
+        layers.push(around_deleted(
+            match_layer(&find.matches, current, at.row, Some(at.column), palette),
+            &cell.deleted,
         ));
     }
     if let Some(range) = model
@@ -221,14 +221,20 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
         .filter(|selection| selection.pane == Pane::Diff && selection.covers(at.column))
         .and_then(|selection| selection.range_in_row(at.row, cell.content_len))
     {
-        layers.push(vec![Run {
-            range,
-            style: Style::behind(palette.selection),
-        }]);
+        layers.push(around_deleted(
+            vec![Run {
+                range,
+                style: Style::behind(palette.selection),
+            }],
+            &cell.deleted,
+        ));
     }
-    layers.push(emphasis_layer(model, cell, palette));
-    let blank = (cell.text.is_empty() && matches!(cell.kind, RowKind::Removed | RowKind::Added))
-        .then(|| Piece::new("⏎", palette.faint));
+    let blank = (cell.text.is_empty()
+        && matches!(
+            cell.kind,
+            RowKind::Removed | RowKind::Added | RowKind::Edited
+        ))
+    .then(|| Piece::new("⏎", palette.faint));
     CodeCell {
         number: gutter(cell, at.column, palette),
         bar: ink.bar,
@@ -328,6 +334,15 @@ fn cell_ink(model: &Model, cell: &Cell, palette: &Palette) -> CellInk {
             text_color: text(palette.added_text),
             bar: bar(palette.added_sign),
         },
+        // A line changed in place reads as the code it now is, what stayed the same as any
+        // unchanged line, its marks saying what changed.
+        RowKind::Edited => CellInk {
+            sign: "~",
+            sign_color: palette.added_sign,
+            background: None,
+            text_color: None,
+            bar: bar(palette.added_sign),
+        },
         _ => CellInk {
             sign: " ",
             sign_color: palette.faint,
@@ -398,7 +413,20 @@ fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> L
         (None, Some(base)) if !is_nested(cell) => syntax.base.as_ref().map(|side| side.line(base)),
         (None, _) => None,
     };
-    let mut layer = syntax_runs(model.theme(), spans.unwrap_or_default(), cell.content_len);
+    // An edited line's own bytes follow the deleted text spliced into it.
+    let shifted: Vec<Span>;
+    let mut spans = spans.unwrap_or_default();
+    if !cell.deleted.is_empty() {
+        shifted = spans
+            .iter()
+            .map(|(range, tone)| {
+                let start = cell.shown_at(range.start, true);
+                (start..cell.shown_at(range.end, false), *tone)
+            })
+            .collect();
+        spans = &shifted;
+    }
+    let mut layer = syntax_runs(model.theme(), spans, cell.content_len);
     // On a tinted line, dim colors such as comments lift toward the text color until they
     // stay readable against the line's final background.
     let tint = match cell.kind {
@@ -446,22 +474,90 @@ fn moved_edit_layer(cell: &Cell, palette: &Palette) -> Layer {
 /// How strongly the words a move's edit changed show behind their text.
 const MOVED_EDIT_ALPHA: f32 = 0.4;
 
-/// The underlines of the tokens a line really changed, when the look emphasizes them.
-fn emphasis_layer(model: &Model, cell: &Cell, palette: &Palette) -> Layer {
-    if !model.look().token_emphasis || cell.quiet {
-        return Vec::new();
+/// How strongly a changed word shows behind its text.
+const MARK_ALPHA: f32 = 0.4;
+
+/// The words a line changed, behind a stronger shade of red or green, as delta marks them. An
+/// edited line always marks the tokens it inserted and strikes out in red the ones it deleted,
+/// which never read as code, approved or not; a removed or an added line marks its changed
+/// words when the look emphasizes them.
+fn marks_layer(model: &Model, cell: &Cell, palette: &Palette, approved: bool) -> Layer {
+    if cell.kind == RowKind::Edited {
+        // Deleted text keeps its tint when approved too: it is no code, and a deleted space, or
+        // any deleted text in a terminal that draws no line through it, has no other cue.
+        let deleted = Style {
+            color: Some(if approved {
+                palette.faint
+            } else {
+                palette.removed_sign
+            }),
+            background: Some(palette.removed_sign.alpha(MARK_ALPHA)),
+            strikethrough: true,
+            ..Style::default()
+        };
+        let mut layer: Layer = cell
+            .deleted
+            .iter()
+            .map(|range| Run {
+                range: range.clone(),
+                style: deleted,
+            })
+            .collect();
+        if !approved {
+            layer.extend(cell.highlights.iter().map(|range| Run {
+                range: range.clone(),
+                style: Style::behind(palette.added_sign.alpha(MARK_ALPHA)),
+            }));
+        }
+        layer.sort_by_key(|run| run.range.start);
+        return layer;
     }
-    let underline = Style {
-        underline: Some(palette.text.alpha(0.5)),
-        ..Style::default()
+    let color = match cell.kind {
+        _ if approved || cell.quiet || cell.moved || !model.look().token_emphasis => {
+            return Vec::new();
+        }
+        RowKind::Removed => palette.removed_sign,
+        RowKind::Added => palette.added_sign,
+        _ => return Vec::new(),
     };
     cell.highlights
         .iter()
         .map(|range| Run {
             range: range.clone(),
-            style: underline,
+            style: Style::behind(color.alpha(MARK_ALPHA)),
         })
         .collect()
+}
+
+/// `layer` apart from an edited line's `deleted` text, which is no code to find or select, so
+/// inside a match or a selection it keeps its own red and line.
+fn around_deleted(layer: Layer, deleted: &[std::ops::Range<usize>]) -> Layer {
+    if deleted.is_empty() {
+        return layer;
+    }
+    let mut parts = Vec::new();
+    for run in layer {
+        let mut start = run.range.start;
+        for range in deleted
+            .iter()
+            .filter(|range| range.start < run.range.end && run.range.start < range.end)
+        {
+            if start < range.start {
+                parts.push(Run {
+                    range: start..range.start,
+                    style: run.style,
+                });
+            }
+            start = start.max(range.end);
+        }
+        if start < run.range.end {
+            parts.push(Run {
+                range: start..run.range.end,
+                style: run.style,
+            });
+        }
+    }
+    parts
 }
 
 /// The find matches on row `row`, in `column` when one is given: the current one as a solid
@@ -607,5 +703,34 @@ impl BufferLines {
             layers,
             background: on_cursor.then_some(palette.raised),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A find match or a selection across an edited line's deleted text paints only the code
+    /// around it, which leaves the deleted text its own red and line.
+    #[test]
+    fn find_and_selection_skip_deleted_text() {
+        let style = Style::default();
+        let runs = |ranges: &[(usize, usize)]| -> Layer {
+            ranges
+                .iter()
+                .map(|&(start, end)| Run {
+                    range: start..end,
+                    style,
+                })
+                .collect()
+        };
+        // `min(3220)`: `32` deleted, `20` inserted.
+        let deleted: Vec<std::ops::Range<usize>> = std::iter::once(4..6).collect();
+        assert_eq!(
+            around_deleted(runs(&[(0, 9)]), &deleted),
+            runs(&[(0, 4), (6, 9)])
+        );
+        assert_eq!(around_deleted(runs(&[(4, 6)]), &deleted), runs(&[]));
+        assert_eq!(around_deleted(runs(&[(0, 9)]), &[]), runs(&[(0, 9)]));
     }
 }

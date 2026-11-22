@@ -22,7 +22,7 @@
 //! approved = "folded"   # or "shown": approved hunks show their code; `zA` toggles it
 //! removed = "#5f1519"   # overrides the theme's line backgrounds
 //! added = "#14471f"
-//! token_emphasis = false
+//! token_emphasis = true   # mark the words removed and added lines changed
 //!
 //! [styles.calm]     # a diff style beside plain, bold and soft: colors only, never spacing
 //! syntax = true         # syntax colors in the diff
@@ -575,7 +575,8 @@ pub struct Config {
     pub added: Option<u32>,
     /// The theme's name.
     pub theme: Option<String>,
-    /// Whether changed tokens within a line are emphasized.
+    /// Whether a removed or an added line marks the words it changed; a line shown once always
+    /// marks what it inserted and deleted.
     pub token_emphasis: bool,
     /// Whether proven formatting-only units count as approved without a mark; see
     /// [`review_core::Standing`].
@@ -615,7 +616,7 @@ impl Default for Config {
             removed: None,
             added: None,
             theme: None,
-            token_emphasis: false,
+            token_emphasis: true,
             auto_approve_formatting: true,
             language_servers: true,
             live: true,

@@ -215,6 +215,8 @@ pub(crate) struct Places {
     pub(crate) policy: review_core::ReviewPolicy,
     /// How much of the file those rows showed.
     pub(crate) view: DiffView,
+    /// The layout those rows were built for, which decides whether a changed line showed once.
+    pub(crate) layout: DiffLayout,
     /// The file tree.
     pub(crate) tree: Anchor,
     /// The file buffer.
@@ -304,6 +306,7 @@ impl Model {
             approved: self.folds.approved,
             policy: self.policy(),
             view: self.presented.view,
+            layout: self.presented.layout,
             tree: Anchor::at(self.tree_scroll.offset()),
             buffer: Anchor::at(self.buffer_scroll.target()),
         }
@@ -329,6 +332,7 @@ impl Model {
             approved,
             policy,
             view,
+            layout,
             tree,
             buffer,
         } = places;
@@ -363,7 +367,8 @@ impl Model {
             Some(key)
                 if self.folds.approved != approved
                     || self.policy() != policy
-                    || self.presented.view != view =>
+                    || self.presented.view != view
+                    || self.presented.layout != layout =>
             {
                 key.find(&self.rows)
                     .map_or(diff, |row| Anchor { row, ..diff })

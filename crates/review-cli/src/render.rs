@@ -372,8 +372,14 @@ fn render_unit(
     .ok();
     match &record.kind {
         UnitKind::Chunk(chunk) => {
-            render_lines(out, &chunk.removed, &chunk.removed_highlights, '-', painter);
-            render_lines(out, &chunk.added, &chunk.added_highlights, '+', painter);
+            render_lines(
+                out,
+                &chunk.removed,
+                &chunk.removed_highlights(),
+                '-',
+                painter,
+            );
+            render_lines(out, &chunk.added, &chunk.added_highlights(), '+', painter);
             if chunk.whitespace_only && !record.formatting_only {
                 writeln!(
                     out,

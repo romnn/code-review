@@ -148,13 +148,9 @@ fn demo_covers_every_feature() -> eyre::Result<()> {
         unordered_elements_are![
             eq(&MoveKind::Moved),
             eq(&MoveKind::MovedWithEdits),
-            // `scheduler.rs`'s `line_error`, re-indented as it left `mod config`, and its
-            // `occupancy_line`, re-indented into `mod worker` with a line rustfmt wrapped anew
-            // there, each proven a plain move.
-            eq(&MoveKind::Moved),
-            eq(&MoveKind::Moved),
             // `tools/stats.py`'s `spread`, re-indented into `main`, where Python makes it a
-            // function of its own: its syntax tree changes, so it keeps its edits.
+            // function of its own: its syntax tree changes, so it keeps its edits. `scheduler.rs`
+            // re-indents `line_error` and `occupancy_line` where they stand, which is no move.
             eq(&MoveKind::MovedWithEdits)
         ]
     );
@@ -174,7 +170,7 @@ fn demo_covers_every_feature() -> eyre::Result<()> {
         .iter()
         .filter(|unit| path_of(unit.file) == "src/engine.rs")
         .filter_map(|unit| unit.chunk())
-        .any(|chunk| chunk.added_highlights.len() == 1 && chunk.added.contains("250"));
+        .any(|chunk| chunk.added_highlights().len() == 1 && chunk.added.contains("250"));
     assert!(highlighted, "the engine's real edit is not highlighted");
     assert!(history.warnings().is_empty(), "{:?}", history.warnings());
 

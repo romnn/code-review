@@ -8,7 +8,7 @@ expect "revision":"1"
 expect "mode":"Tree"
 expect "client_decorated":true
 expect "theme":"carbonfox"
-expect "token_emphasis":false,"diff_style":"bold"
+expect "token_emphasis":true,"diff_style":"bold"
 expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
 shot 01-open
 
@@ -183,14 +183,14 @@ expect "layout":"unified","effective_layout":"unified"
 expect "previewing":false
 key ,
 key tab
-key e m p h a s i s space o n
+key e m p h a s i s space o f f
 state
-expect "cursor":"Token emphasis: on"
-expect "token_emphasis":true
-key escape
-key escape
-state
+expect "cursor":"Token emphasis: off"
 expect "token_emphasis":false
+key escape
+key escape
+state
+expect "token_emphasis":true
 expect "previewing":false
 key ,
 key tab

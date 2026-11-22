@@ -186,7 +186,7 @@ pub enum Collapse {
     Noise(NoiseCategory),
     /// Its change is proven formatting-only.
     FormattingOnly,
-    /// Plain moves cover all its lines; shown as one line naming the move.
+    /// One plain move covers all its lines; shown as one line naming the move.
     Moved(Box<MoveView>),
 }
 
@@ -409,7 +409,7 @@ pub struct FileChangeSummary {
     pub formatting_only: bool,
     /// Whether some of the file's lines are part of a detected move.
     pub moves: bool,
-    /// Whether plain moves cover every changed line.
+    /// Whether every chunk is covered by one plain move.
     pub moved_only: bool,
     /// The changes that are not line changes, other than the rename itself: binary content,
     /// mode, type, symlink and submodule changes.
@@ -670,12 +670,15 @@ impl<'h> RevisionView<'h> {
         if unit.formatting_only {
             return Ok(Some(Collapse::FormattingOnly));
         }
-        if unit.moved {
-            let plain = self
-                .moves_touching(id)
-                .into_iter()
-                .find(|found| found.kind == MoveKind::Moved);
-            if let Some(found) = plain {
+        if unit.moved
+            && let (Some(chunk), Some(analysis)) = (unit.chunk(), self.analysis())
+        {
+            let covering = analysis.moves.iter().enumerate().find(|(_, found)| {
+                found.kind == MoveKind::Moved && found.covers(id.index(), chunk)
+            });
+            if let Some(found) = covering
+                .and_then(|(index, found)| self.move_view(MoveId::new(self.number, index), found))
+            {
                 return Ok(Some(Collapse::Moved(Box::new(found))));
             }
         }
@@ -1003,14 +1006,10 @@ impl<'h> RevisionView<'h> {
         candidates.dedup();
         for index in candidates {
             let unit = self.id(index);
-            let Some(chunk) = self.unit(unit)?.chunk() else {
-                continue;
-            };
-            let side_covered = |lines: usize, side: crate::analysis::MoveSide| {
-                lines == 0 || (side.unit == index && side.offset == 0 && side.len == lines)
-            };
-            if side_covered(chunk.old.len, found.source)
-                && side_covered(chunk.new.len, found.target)
+            if self
+                .unit(unit)?
+                .chunk()
+                .is_some_and(|chunk| found.covers(index, chunk))
             {
                 covered.push(unit);
             }

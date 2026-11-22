@@ -179,6 +179,7 @@ impl Model {
         self.folds.texts.clear();
         self.folds.syntax.clear();
         self.folds.view = DiffView::Hunks;
+        self.folds.layout = self.presented.layout;
         self.folds.single_file = false;
         self.folds.pending.clone_from(&self.pending);
         let mut units: HashMap<&str, Vec<UnitId>> = HashMap::new();

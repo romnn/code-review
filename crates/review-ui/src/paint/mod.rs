@@ -46,6 +46,8 @@ pub struct Style {
     pub italic: bool,
     /// The color of a line under the text, one pixel thick in a window.
     pub underline: Option<Hsla>,
+    /// Whether a line strikes the text out, as deleted text shows.
+    pub strikethrough: bool,
 }
 
 impl Style {
@@ -92,6 +94,7 @@ impl Style {
             bold: above.bold || self.bold,
             italic: above.italic || self.italic,
             underline: above.underline.or(self.underline),
+            strikethrough: above.strikethrough || self.strikethrough,
         }
     }
 }

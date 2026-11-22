@@ -10,7 +10,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    Div, FontStyle, FontWeight, HighlightStyle, SharedString, StyledText, UnderlineStyle, div, px,
+    Div, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText,
+    UnderlineStyle, div, px,
 };
 use review_ui::paint::display::DisplayLine;
 use review_ui::paint::{self, Piece, Run, Style, Weight};
@@ -34,6 +35,7 @@ pub fn highlight(style: &Style) -> HighlightStyle {
         bold,
         italic,
         underline,
+        strikethrough,
     } = *style;
     HighlightStyle {
         color: color.map(to_gpui),
@@ -44,6 +46,10 @@ pub fn highlight(style: &Style) -> HighlightStyle {
             thickness: px(1.0),
             color: Some(to_gpui(color)),
             wavy: false,
+        }),
+        strikethrough: strikethrough.then(|| StrikethroughStyle {
+            thickness: px(1.0),
+            color: color.map(to_gpui),
         }),
         ..HighlightStyle::default()
     }

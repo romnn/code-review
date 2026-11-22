@@ -728,7 +728,6 @@ fn files_carry_their_change_kind() -> eyre::Result<()> {
     assert_that!(
         moves,
         eq(&vec![
-            "scheduler.rs",
             "src/format.rs",
             "src/hash.rs",
             "src/report.rs",
