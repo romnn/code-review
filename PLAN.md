@@ -1193,8 +1193,9 @@ it, muted, so it never reads as code.
   `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `S`
   hint names the style in use. In the unified layout a hunk shows its code once where nothing
   that changed would hide, as [ADR 6](adr/0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md)
-  describes: a line changed in place has a `~` and, until approved, only a soft line color of
-  the modified kind, neither red nor green, so what stayed the same reads as unchanged code,
+  describes, with the line colors of
+  [ADR 7](adr/0007-a-hunk-shows-its-review-state-in-its-bar.md): a line changed in place has a
+  `~` and, until approved, only a soft line color of the modified kind, neither red nor green, so what stayed the same reads as unchanged code,
   re-indented or rewrapped or not, and marks the tokens it inserted behind a
   stronger green and the ones it deleted struck out in red where they stood; copying and find
   skip the deleted text. Elsewhere a hunk shows its old lines above its new ones, and each line

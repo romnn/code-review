@@ -1,8 +1,9 @@
 # 6. A hunk shows its code once, with the tokens that changed
 
-**Status:** accepted · **Date:** 2026-11-21 · **Supersedes:** the non-goal "Tree-sitter proves
-formatting equivalence and highlights code; it never shapes the diff" in PLAN.md, for the
-unified layout
+**Status:** accepted, its line colors amended by
+[ADR 7](0007-a-hunk-shows-its-review-state-in-its-bar.md) · **Date:** 2026-11-21 ·
+**Supersedes:** the non-goal "Tree-sitter proves formatting equivalence and highlights code; it
+never shapes the diff" in PLAN.md, for the unified layout
 
 ## Context
 
