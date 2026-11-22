@@ -185,7 +185,7 @@ compress() {
 }
 
 # Writes the configuration `$1` with the theme `$2`, the diff style `$3`, and the approved hunks
-# and layout `$4` and `$5`.
+# and layout `$4` and `$5`, in the hunks view, whose headers the scenes show.
 write_config() {
     mkdir -p "$(dirname "$1")"
     cat >"$1" <<EOF
@@ -197,6 +197,7 @@ name = "$2"
 style = "$3"
 approved = "$4"
 layout = "$5"
+view = "hunks"
 EOF
 }
 
