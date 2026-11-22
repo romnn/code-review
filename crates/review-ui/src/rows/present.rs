@@ -778,12 +778,11 @@ mod tests {
             shifted.is_some(),
             "some context moved between base and head"
         );
-        // Each hunk's rows are contiguous from its header, and a row's unit is its hunk's.
+        // Each hunk's rows are contiguous from its unit's place, and a row's unit is its hunk's.
         for (hunk, units) in shown.hunks.iter().enumerate() {
             let rows: Vec<usize> = (0..shown.rows.len())
                 .filter(|&index| shown.rows[index].hunk == Some(hunk))
                 .collect();
-            assert_eq!(shown.rows[rows[0]].kind(), RowKind::Header);
             assert_eq!(shown.unit_rows[&units[0]], rows[0]);
             for &index in &rows {
                 assert!(units.contains(&shown.rows[index].unit));

@@ -203,7 +203,11 @@ pub fn tree_row(model: &Model, palette: &Palette, position: usize) -> Option<Tre
     let directory = node.kind == NodeKind::Directory;
     let progress = Progress::of(&node.counts);
     let collapsed = model.folded(node);
-    let shown = !directory && model.selected.as_deref() == Some(node.path.as_str());
+    let shown = if directory {
+        model.folder() == Some(node.path.as_str())
+    } else {
+        model.shown_file() == Some(node.path.as_str())
+    };
     let cursor = model.tree_cursor.min(visible.len().saturating_sub(1));
     let on_cursor = position == cursor && tree_focused(model);
     // As lazygit colors staged files, a done file is green whole, so what is done and what

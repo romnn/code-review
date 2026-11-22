@@ -818,10 +818,112 @@ impl Model {
         self.apply_look(look, &remembered, what);
     }
 
-    /// `v`: the whole file or each hunk apart.
+    /// `f` or `v`: the whole file or each hunk apart.
+    ///
+    /// The code stays exactly where it is on screen: a line of code both views show keeps its
+    /// row, the selected hunk's line nearest the reading line when one shows whole, else the
+    /// line nearest the reading line, never a hunk header only the hunks view has.
+    /// In the diff, the change of the selected hunk's line is the selected hunk in the other
+    /// view, so the code around the change the reviewer looks at opens up or folds away around
+    /// it; a selected hunk the other view puts off screen shows where the hunk keys put it, at
+    /// once, so a review key never acts on it before it shows.
     pub(super) fn toggle_view(&mut self) {
         let view = self.settings.appearance.applied.view.toggled();
+        let in_diff = self.mode == super::Mode::Diff;
+        let hunk_line = if in_diff {
+            self.hunk_line_shown()
+        } else {
+            None
+        };
+        let lines = self.lines_shown(|_| true);
         self.apply_view(view);
+        let viewport = self.grid().viewports.diff;
+        if let Some(hunk) = hunk_line.and_then(|line| self.hunk_of(line.key.unit())) {
+            self.hunk = hunk;
+        }
+        // The first of those lines the other view shows too keeps its row.
+        let kept = hunk_line.iter().chain(&lines).find_map(|line| {
+            let source = line.key.find_line(&self.rows)?;
+            Some((source, line.on_screen))
+        });
+        if let Some((source, on_screen)) = kept {
+            let at = super::present::diff_offset(
+                &self.rows,
+                super::present::Anchor {
+                    row: source,
+                    fraction: 0.0,
+                },
+            );
+            self.diff_scroll.jump(crate::frame::clamp(
+                at - on_screen,
+                self.rows.rows.len(),
+                viewport,
+            ));
+        }
+        if !in_diff {
+            return;
+        }
+        // A hunk of code shows once a line of it shows whole, never by a sliver of a row.
+        let offset = self.diff_scroll.offset();
+        let shown = self.hunk_rows.get(self.hunk).is_none_or(|rows| {
+            let code = rows.clone().any(|index| {
+                self.rows
+                    .rows
+                    .get(index)
+                    .is_some_and(crate::rows::Row::is_code)
+            });
+            if code {
+                self.hunk_line_shown().is_some()
+            } else {
+                crate::scroll::shows(rows, offset, viewport)
+            }
+        });
+        if !shown && let Some(target) = self.hunk_target(offset) {
+            self.diff_scroll
+                .jump(crate::frame::clamp(target, self.rows.rows.len(), viewport));
+        }
+    }
+
+    /// The line of code of the selected hunk whole in the diff's viewport nearest the reading
+    /// line, and how far down the viewport it is.
+    fn hunk_line_shown(&self) -> Option<LookedAt> {
+        let hunk = self.hunk;
+        self.lines_shown(|row| row.hunk == Some(hunk))
+            .into_iter()
+            .next()
+    }
+
+    /// The lines of code whole in the diff's viewport that `keep` takes, nearest the reading
+    /// line first, where the eye is, each with how far down the viewport it is.
+    ///
+    /// Only lines whole on screen count, which every front end draws in full.
+    fn lines_shown(&self, keep: impl Fn(&crate::rows::Row) -> bool) -> Vec<LookedAt> {
+        let Some(viewport) = self.grid().viewports.diff else {
+            return Vec::new();
+        };
+        let offset = self.diff_scroll.offset();
+        let first = crate::scroll::whole_rows(offset.ceil());
+        let last = crate::scroll::whole_rows(offset + viewport);
+        let reading = offset + viewport * crate::scroll::READING_LINE;
+        let mut lines: Vec<(usize, LookedAt)> = (first..last)
+            .filter_map(|index| {
+                let row = self.rows.rows.get(index)?;
+                (row.is_code() && keep(row)).then(|| {
+                    (
+                        index,
+                        LookedAt {
+                            key: super::present::RowKey::of(row),
+                            on_screen: crate::scroll::rows(index) - offset,
+                        },
+                    )
+                })
+            })
+            .collect();
+        lines.sort_by(|(first, _), (second, _)| {
+            let distance = |index: usize| (crate::scroll::rows(index) - reading).abs();
+            distance(*first).total_cmp(&distance(*second))
+        });
+        lines.into_iter().map(|(_, line)| line).collect()
     }
 
     /// Folds approved hunks or shows them, keeping the reviewer's place, and remembers it.
@@ -897,6 +999,15 @@ fn error_chain(err: &dyn std::error::Error) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(": ")
+}
+
+/// A line of code on screen, which a change of view keeps in place.
+#[derive(Debug, Clone, Copy)]
+struct LookedAt {
+    /// What the line shows, to find it in the other view's rows.
+    key: super::present::RowKey,
+    /// How far down the viewport it is, in rows.
+    on_screen: f64,
 }
 
 #[cfg(test)]

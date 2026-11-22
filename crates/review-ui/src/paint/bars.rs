@@ -251,10 +251,15 @@ pub fn bar_hints(
             hint.label = "scroll";
         }
     }
-    // `S` says which diff style shows, the one it moves on from.
+    // `S` says which diff style shows, the one it moves on from; `f` says which view it
+    // switches to, since `=` already says `file`.
     let style = model.look().style.name.clone();
     let label = |hint: &keymap::Hint| match hint.action {
         "ToggleDiffStyle" => style.clone(),
+        "ToggleView" => match model.look().view {
+            crate::config::DiffView::File => "hunks".to_owned(),
+            crate::config::DiffView::Hunks => "whole file".to_owned(),
+        },
         _ => hint.label.to_owned(),
     };
     let kept = keymap::fit(

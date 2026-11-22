@@ -144,6 +144,22 @@ state
 expect "selected":"tools/notify.rb"
 shot 06-next-file-past-folded
 key z shift-r
+# On a folder, the diff shows every change of the folder's files, each under its path, and
+# Tab opens the file under its reading line, so the diff's keys act on one file.
+file src/compat.rs
+key escape
+key k
+key k
+key k
+state
+expect "mode":"Tree"
+expect "folder":"src"
+expect "rows":\[\{"row":0,"source":0,"kind":"FileHeader"
+shot 06-folder-diff
+key tab
+state
+expect "mode":"Diff"
+expect "selected":"src/generated/schema.rs","shown":"src/generated/schema.rs","folder":null
 file src/engine.rs
 key 0
 state

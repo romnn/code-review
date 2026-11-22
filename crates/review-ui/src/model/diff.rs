@@ -77,7 +77,7 @@ impl Model {
     }
 
     /// Where the diff goes to show the selected hunk from `offset`, or `None` where it stays.
-    fn hunk_target(&self, offset: f64) -> Option<f64> {
+    pub(super) fn hunk_target(&self, offset: f64) -> Option<f64> {
         let rows = self.hunk_rows.get(self.hunk)?;
         // A list not laid out yet has no height, and reveals as well as it can.
         let viewport = self.grid().viewports.diff.unwrap_or(0.0);

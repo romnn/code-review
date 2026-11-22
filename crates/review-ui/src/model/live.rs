@@ -1035,7 +1035,9 @@ impl Model {
         {
             self.selected = self.file_near_cursor();
         }
-        if let Some(path) = self.selected.clone() {
+        // The place taken from the screen is the shown file's; behind a folder's diff, the
+        // selected file keeps its own, which follows its units below as every other does.
+        if let Some(path) = self.selected.clone().filter(|_| self.folder.is_none()) {
             self.places.remove(&path);
         }
         // Places kept for other files name units of the old snapshot; each follows its unit to
@@ -1096,6 +1098,9 @@ impl Model {
         {
             self.put_tree_cursor(review_core::tree::NodeKind::File, &path);
         }
+        // The folder under the cursor shows the files it has now, before anything reads what
+        // the keys act on.
+        self.sync_folder_preview();
     }
 
     /// Puts the tree cursor on the visible node of `kind` at `path`, when there is one.

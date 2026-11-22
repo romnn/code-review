@@ -963,7 +963,14 @@ it, muted, so it never reads as code.
   - *Files* (the left pane): `j`/`k` move and preview each file's diff, `n`/`N` move to the
     next and previous file, past folders and a folded folder's files, `h`/`l` fold and unfold
     folders, Enter folds a folder or opens a file, Tab or `0` opens the diff, Space approves or
-    unapproves the file or folder, `!` flags it and `u` resets it. `/` filters the tree as
+    unapproves the file or folder, `!` flags it and `u` resets it. On a folder the diff shows
+    the folder's diff, as lazygit does: every change of the files the tree shows of it, folded
+    folders' files too, each file under its path, always in the hunks view so a broad folder
+    reads as its changes alone, a file whose hunks all fold folding to its path. The folder's
+    diff is the tree's alone: Tab, `0`, a click in it or anything else that gives the diff the
+    keys opens the file under its reading line (or the click) at the same place on screen, so
+    the diff's keys only ever act on one file, and a folder's marks act on exactly the files its
+    diff shows. `/` filters the tree as
     lazygit does: typing narrows it to the files whose path contains the query (and their
     folders), Enter keeps the filter and returns to the list, Esc clears it. A filtered folder
     cannot be marked as a whole, since it hides some of its files. Folded folders are saved with
@@ -984,7 +991,13 @@ it, muted, so it never reads as code.
     mode, where `j`/`k` scroll a line until `s` again, or Esc, which goes back to the hunk
     scroll mode began at, the next Esc going to the files. The wheel scrolls without a mode,
     and in review-tui a row for each wheel event, since terminals already send several events
-    for one notch. Either way the
+    for one notch. A wheel kept turning fast builds momentum: each notch adds one to an energy
+    that fades within a few tenths of a second (a terminal's several events for one notch count
+    once), and past about six notches a second a notch scrolls further with the square of how
+    fast the wheel turns, about twice as far at ten a second and nine times at twenty, up to
+    twelve times, while an easy turn scrolls exactly its notches; turning back, another list or
+    other content starts from rest, and a touchpad's precise scrolling, which has momentum of
+    its own, is left as it is. Either way the
     selected hunk follows the view: when it leaves it, the hunk in view nearest the reading
     line a fifth down becomes the selected one, so the review keys act on what shows. With
     `[diff] cross_files = true` (or the settings list) `j`/`k` go on
@@ -1019,7 +1032,7 @@ it, muted, so it never reads as code.
     as it does from the diff, since Tab switches between the files and the code.
   - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
     request overview and `?` the keys, both overlays that own the keyboard until closed.
-  - `|` shows the diff side by side or unified, `v` the whole file or hunks apart (below),
+  - `|` shows the diff side by side or unified, `f` or `v` the whole file or hunks apart (below),
     `zA` shows or folds approved hunks in the hunks view, `S` cycles the diff styles, and `T`
     or `,` opens the settings list (below).
 - **Pickers.** Telescope's two most used, from every mode, as overlays that own the keyboard
@@ -1067,7 +1080,7 @@ it, muted, so it never reads as code.
   the file's header, so the bar does not repeat them. Keys that cannot act now are dimmed, not removed, and a
   narrow window drops whole hints from the highest rank down, so the bar never shifts as the
   selection changes.
-- **Views.** `[diff] view` says how much of a file its diff shows, and `v` or the settings list
+- **Views.** `[diff] view` says how much of a file its diff shows, and `f`, `v` or the settings list
   switches it. `file`, the default, is the whole file with its changes in place, as an editor
   shows it: no hunk headers, no gaps of unchanged lines, and approved hunks and reviewed files
   open, so every change reads in its context and approving one never moves the code. A hunk
@@ -1077,7 +1090,8 @@ it, muted, so it never reads as code.
   colors in every style, in either view: no line background, no red or green text and no
   change bar, only its `+` and `−` signs, its added lines reading as the file's code and its
   removed lines faded, as code that is gone; what still needs the reviewer is all that stays
-  in color. In the bold style, `[diff] soft_unselected` (on by default, in the configuration
+  in color. In the file view an approved hunk sits on the gray band the hunks view gives every
+  hunk, so approved code still stands apart from the file around it. In the bold style, `[diff] soft_unselected` (on by default, in the configuration
   file only) gives every hunk but the selected one soft line backgrounds, so the selected one
   stands out the more. Each change is a hunk of its own, a stop for `j`/`k` and a
   mark of its own, where the hunks view joins changes a few lines apart under one header with
@@ -1089,7 +1103,12 @@ it, muted, so it never reads as code.
   A hunk the reviewer folds keeps its header alone, so it can still be selected and unfolded,
   and so does a change without lines, such as a mode change. `hunks` is the view described
   under the visual grammar below: each hunk under its header with a few unchanged lines around
-  it, the rest folded into gaps, and approved hunks folded as `[diff] approved` says.
+  it, the rest folded into gaps, and approved hunks folded as `[diff] approved` says. Fewer
+  than ten unchanged lines between two changes, or between a change and the file's start or
+  end, show whole rather than as a gap, which would hide hardly more than it takes. Switching
+  the view keeps the code exactly where it is: a line of code both views show keeps its row
+  (in the diff the selected hunk's line nearest the reading line, which stays selected), never
+  a hunk header only the hunks view has. The bar offers `f` as `file/hunks`.
 - **Visual grammar.** Code rows keep one gutter: line number, sign, code. Our own rows sit on a
   separate band without a gutter, in muted text: a hunk header is one quiet line with the review
   state's glyph, the scope breadcrumb first with its innermost scope brightest (what the hunk
@@ -1102,8 +1121,9 @@ it, muted, so it never reads as code.
   unchanged lines`, Enter shows more); a note is a block of italic yellow text with a yellow
   bar; every hunk has a gray bar along its left edge, and its header is a gray band that turns
   green once all of it is approved and red once some of it is flagged. The selected hunk's bar
-  and header take the solid color of its state, blue while it still needs the reviewer, green
-  once approved, red once flagged, so each hunk's start, extent and state show at a glance.
+  takes the solid color of its state, blue while it still needs the reviewer, green once
+  approved, red once flagged, and its header is plain, on the editor's own background, as the
+  file view's code is, so each hunk's start, extent and state show at a glance.
   Enter or `p` (as `za`) shows a folded hunk's code and folds it again. Approved hunks fold to
   their header, and unchanged lines between folded hunks or between one and the file's edge
   show nothing, not even a gap rule or a blank row, so a run of folded hunks reads as a list of

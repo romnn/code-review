@@ -25,7 +25,7 @@ use crossterm::event::{Event, KeyEvent, KeyModifiers, MouseButton, MouseEvent, M
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
-use review_ui::frame::{List, Scale};
+use review_ui::frame::{List, Scale, Wheel};
 use review_ui::keys::{KeyDown, Keystroke, Matcher, Outcome, Replay, Resolution, Target};
 use review_ui::line_edit::{Edited, LineEdit};
 use review_ui::model::{
@@ -462,7 +462,7 @@ impl App {
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 if let (Some(list), Some(rows)) = (list, wheel_rows(event.kind)) {
-                    self.update(|model| model.wheel_list(list, f64::from(rows)));
+                    self.update(|model| model.wheel_list(list, notches(rows)));
                 }
             }
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
@@ -512,7 +512,7 @@ impl App {
             return;
         };
         if let Some(rows) = wheel_rows(event.kind) {
-            self.update(|model| model.wheel_list(List::Picker, f64::from(rows)));
+            self.update(|model| model.wheel_list(List::Picker, notches(rows)));
             return;
         }
         if event.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -533,7 +533,7 @@ impl App {
         };
         if let Some(rows) = wheel_rows(event.kind) {
             if at.list.contains(position) {
-                self.update(|model| model.wheel_list(List::Settings, f64::from(rows)));
+                self.update(|model| model.wheel_list(List::Settings, notches(rows)));
             }
             return;
         }
@@ -899,6 +899,15 @@ fn wheel_rows(kind: MouseEventKind) -> Option<i32> {
         MouseEventKind::ScrollDown => Some(WHEEL_ROWS),
         MouseEventKind::ScrollUp => Some(-WHEEL_ROWS),
         _ => None,
+    }
+}
+
+/// A wheel event's `rows` as notches arriving now, which build momentum when they keep coming
+/// fast.
+fn notches(rows: i32) -> Wheel {
+    Wheel::Notches {
+        rows: f64::from(rows),
+        at: Instant::now(),
     }
 }
 

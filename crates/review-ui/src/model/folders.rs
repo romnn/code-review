@@ -79,6 +79,16 @@ impl Model {
             return self.folders.saved.place.clone();
         }
         let path = self.selected.clone()?;
+        // While a folder's diff shows, the review opens again where the reviewer left the
+        // selected file.
+        if self.folder.is_some() {
+            let unit = self
+                .places
+                .get(&path)
+                .and_then(|place| place.unit)
+                .map(|unit| unit.to_string());
+            return Some(Place { path, unit });
+        }
         let laid_out = self
             .rows
             .files

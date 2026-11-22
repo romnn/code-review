@@ -411,7 +411,8 @@ pub struct Folds {
     /// How much of a file its section shows: the whole file without hunk headers, or each hunk
     /// with a few lines around it.
     pub view: DiffView,
-    /// Whether the layout is one file's diff, without file headers.
+    /// Whether the layout is one file's diff, without file headers: an empty row stands in for
+    /// its header.
     pub single_file: bool,
     /// Marks the reviewer made that are still saving, by unit: an approval folds its hunk the
     /// moment it is made, so the rows change only when the reviewer acts, never later when the
@@ -507,7 +508,9 @@ pub struct Layout {
 pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout {
     let mut layout = Layout::default();
     let notes = view.notes();
-    for group in file_groups(view, units) {
+    let groups = file_groups(view, units);
+    let file_units = file_units(view, &groups);
+    for group in groups {
         let file_index = layout.files.len();
         let Some(&first) = group.first() else {
             continue;
@@ -518,12 +521,22 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
             section.collapsed = false;
             let path = section.path.clone();
             layout.files.push(section);
+            // An empty row where a folder's diff names the file, so the file's code shows on
+            // the same rows alone as first in its folder's diff.
+            push_plain(
+                &mut layout,
+                file_index,
+                first,
+                RowKind::Spacer,
+                String::new(),
+            );
             let text = folds.texts.get(&path).cloned();
             section_rows(
                 &mut layout,
                 view,
                 file_index,
                 &group,
+                file_units.get(&path).map_or(&[][..], Vec::as_slice),
                 text.as_deref(),
                 folds.context,
                 folds,
@@ -570,6 +583,7 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
             view,
             file_index,
             &group,
+            file_units.get(&path).map_or(&[][..], Vec::as_slice),
             text.as_deref(),
             context,
             folds,
@@ -580,19 +594,40 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
         .hunks
         .iter()
         .map(|units| {
+            // Every unit has a header row, which knows its file section.
             let file = units
                 .first()
-                .and_then(|unit| {
-                    layout
-                        .files
-                        .iter()
-                        .position(|section| section.units.contains(unit))
-                })
-                .unwrap_or(0);
+                .and_then(|unit| layout.unit_rows.get(unit))
+                .and_then(|&row| layout.rows.get(row))
+                .map_or(0, |row| row.file);
             hunk_note(&layout, view, file, units, folds)
         })
         .collect();
     layout
+}
+
+/// Every unit of the files `groups` lay out, by display path, from one pass over the
+/// revision's files: a section's context leaves out the file's changes in other groups, and a
+/// folder's diff has many sections.
+fn file_units(view: &RevisionView<'_>, groups: &[Vec<UnitId>]) -> HashMap<String, Vec<UnitId>> {
+    let paths: HashSet<&str> = groups
+        .iter()
+        .filter_map(|group| view.file(*group.first()?).ok())
+        .map(review_core::analysis::FileChange::display_path)
+        .collect();
+    let mut units: HashMap<String, Vec<UnitId>> = HashMap::new();
+    if let Some(analysis) = view.analysis() {
+        for file in &analysis.files {
+            let path = file.display_path();
+            if paths.contains(path) {
+                units
+                    .entry(path.to_owned())
+                    .or_default()
+                    .extend(file.units.iter().map(|&index| view.id(index)));
+            }
+        }
+    }
+    units
 }
 
 /// Splits `units` into runs of consecutive units of one file.
@@ -641,12 +676,12 @@ fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> Fil
         }
     }
     let total = group.len();
-    // A fully reviewed file folds like its approved units, unless the reviewer chose.
+    // A file whose units all fold folds with them, unless the reviewer chose: a flagged or
+    // changed unit never folds, so neither does its file.
     let collapsed = folds.files.get(&path).copied().unwrap_or(
         folds.view == DiffView::Hunks
-            && folds.approved == Approved::Folded
             && total > 0
-            && reviewed == total,
+            && group.iter().all(|&unit| folds.is_folded(view, unit)),
     );
     FileSection {
         has_head: file.is_some_and(|file| file.new.is_some()),
@@ -985,20 +1020,23 @@ fn hunk_note(
     Note {
         badge: first.and_then(|first| view.standing(first).ok().map(Badge::of)),
         tag: hunk_tag(units.iter().map(|&unit| header_tag(view, unit)).collect()),
-        scope: first
-            .and_then(|first| view.scope_anchor(first).ok().flatten())
-            .and_then(|anchor| {
-                let syntax = folds.syntax.get(path.as_deref()?)?;
-                let side = match anchor.side {
-                    Side::Head => syntax.head.as_ref(),
-                    Side::Base => syntax.base.as_ref(),
-                }?;
-                let enclosing = side.scopes.enclosing(anchor.line);
-                (!enclosing.is_empty()).then(|| breadcrumb(&enclosing))
-            }),
+        scope: first.and_then(|first| unit_scope(view, path.as_deref()?, first, folds)),
         folded: units.iter().all(|&unit| folds.is_folded(view, unit)),
         ..Note::plain(RowKind::Header, text)
     }
+}
+
+/// The scopes around `unit` of the file at `path`, such as `impl Ledger › fn apply`, once its
+/// syntax is known.
+fn unit_scope(view: &RevisionView<'_>, path: &str, unit: UnitId, folds: &Folds) -> Option<String> {
+    let anchor = view.scope_anchor(unit).ok().flatten()?;
+    let syntax = folds.syntax.get(path)?;
+    let side = match anchor.side {
+        Side::Head => syntax.head.as_ref(),
+        Side::Base => syntax.base.as_ref(),
+    }?;
+    let enclosing = side.scopes.enclosing(anchor.line);
+    (!enclosing.is_empty()).then(|| breadcrumb(&enclosing))
 }
 
 /// A note's lines, one per row; an empty note still takes one.
@@ -1373,6 +1411,9 @@ fn interdiff_rows(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId
 /// around it from `text`, and gap rows for the unchanged lines left out. Without `text`, chunks
 /// show without context. With `context` at `usize::MAX`, the whole file shows.
 ///
+/// `all_units` are every unit of the file, those of other groups too, whose lines never show
+/// as unchanged context.
+///
 /// A folded hunk is its header alone, and unchanged lines between folded hunks or between one
 /// and the file's edge show nothing at all, so consecutive folded hunks read as a list of
 /// headers.
@@ -1386,6 +1427,7 @@ fn section_rows(
     view: &RevisionView<'_>,
     file: usize,
     group: &[UnitId],
+    all_units: &[UnitId],
     text: Option<&FullText>,
     context: usize,
     folds: &Folds,
@@ -1406,13 +1448,9 @@ fn section_rows(
             None => file_units.push(unit),
         }
     }
-    // Changes without lines, such as a rename and a mode change, are one hunk under one header
-    // in the hunks view, and a hunk each in the file view, as every change is there.
-    let file_hunks: Vec<Vec<UnitId>> = match folds.view {
-        DiffView::Hunks if !file_units.is_empty() => vec![file_units],
-        DiffView::Hunks => Vec::new(),
-        DiffView::File => file_units.into_iter().map(|unit| vec![unit]).collect(),
-    };
+    // Changes without lines, such as a rename and a mode change, are a hunk each, as every
+    // change is.
+    let file_hunks: Vec<Vec<UnitId>> = file_units.into_iter().map(|unit| vec![unit]).collect();
     for units in file_hunks {
         let hunk = layout.hunks.len();
         layout.hunks.push(units.clone());
@@ -1423,7 +1461,7 @@ fn section_rows(
     }
     let Some(text) = text else {
         let ids: Vec<UnitId> = chunks.iter().map(|&(unit, ..)| unit).collect();
-        for hunk in display_hunks(view, &ids, folds.view) {
+        for hunk in display_hunks(&ids) {
             let hunk_index = layout.hunks.len();
             hunk_header(layout, view, file, hunk_index, &hunk, folds);
             for &unit in &hunk {
@@ -1436,9 +1474,9 @@ fn section_rows(
     chunks.sort_by_key(|&(_, start, _)| start);
     // Changes of this file in other steps are never shown as unchanged context.
     let shown: HashSet<UnitId> = group.iter().copied().collect();
-    let others: Vec<(usize, usize, UnitId)> = view
-        .units_of_file(&path)
-        .into_iter()
+    let others: Vec<(usize, usize, UnitId)> = all_units
+        .iter()
+        .copied()
         .filter(|unit| !shown.contains(unit))
         .filter_map(|unit| {
             let chunk = view.unit(unit).ok()?.chunk()?;
@@ -1455,15 +1493,12 @@ fn section_rows(
         path: path.clone(),
         text,
         others: &others,
-        bases: BaseLines::of(view, &path),
+        bases: BaseLines::of(view, all_units),
     };
     // Display hunks come from the engine's grouping of the units alone, never from whether the
     // text has arrived, so a hunk approves the same units before and after.
     let sorted: Vec<UnitId> = chunks.iter().map(|&(unit, ..)| unit).collect();
-    let sizes: Vec<usize> = display_hunks(view, &sorted, folds.view)
-        .iter()
-        .map(Vec::len)
-        .collect();
+    let sizes: Vec<usize> = display_hunks(&sorted).iter().map(Vec::len).collect();
     if folds.view == DiffView::File {
         whole_file_rows(layout, view, &mut emitter, &chunks, &sizes, folds, notes);
         return;
@@ -1507,16 +1542,35 @@ fn section_rows(
             first_start.saturating_sub(context_before)
         }
         .max(line);
+        // A gap that would hide only a few lines shows them instead.
+        let from = if !hidden && from - line < SHOWN_UNCHANGED {
+            line
+        } else {
+            from
+        };
         if from > line && !hidden {
-            emitter.gap(layout, first, line..from, first_start);
+            // The gap already breaks the code's flow, so it names the scopes of the hunk after
+            // it, where a header row would break it once more.
+            let scope = unit_scope(view, &path, first, folds);
+            emitter.gap(layout, first, line..from, first_start, scope);
         }
         let hunk_index = layout.hunks.len();
-        hunk_header(layout, view, file, hunk_index, &hunk_units, folds);
+        // A header only where the hunk's code cannot say it: what kind of change it is, or the
+        // hunk itself while it is folded; else its code reads on from the code around it, as
+        // in the file view, and the file's header names the selected hunk's scopes.
+        let headed = folded
+            || hunk_units
+                .iter()
+                .any(|&unit| header_tag(view, unit).is_some());
+        if headed {
+            hunk_header(layout, view, file, hunk_index, &hunk_units, folds);
+        }
         layout.hunks.push(hunk_units);
         emitter.lines(layout, first, from..first_start);
         if folded {
-            let end = chunks.get(last).map_or(line, |&(_, _, end)| end);
-            line = end.max(first_start);
+            line = chunks
+                .get(last)
+                .map_or(first_start, |&(_, _, end)| end.max(first_start));
             index = last + 1;
             continue;
         }
@@ -1524,6 +1578,9 @@ fn section_rows(
             let Some(&(unit, start, end)) = chunks.get(position) else {
                 continue;
             };
+            if !headed {
+                layout.unit_rows.insert(unit, layout.rows.len());
+            }
             unit_rows(layout, view, file, hunk_index, unit, folds, notes);
             let until = match chunks.get(position + 1).filter(|_| position < last) {
                 Some(&(_, next, _)) => next,
@@ -1546,23 +1603,30 @@ fn section_rows(
         if let Some(owner) = owner {
             let revealed = folds.gaps.get(&(path.clone(), lines)).copied().unwrap_or(0);
             let until = line.saturating_add(revealed).min(lines);
+            // A gap that would hide only a few lines shows them instead.
+            let until = if lines - until < SHOWN_UNCHANGED {
+                lines
+            } else {
+                until
+            };
             emitter.lines(layout, owner, line..until);
             if until < lines {
-                emitter.gap(layout, owner, until..lines, lines);
+                emitter.gap(layout, owner, until..lines, lines, None);
             }
         }
     }
 }
 
-/// The display hunks of `units`, each a list of units marked together: in the hunks view the
-/// engine's grouping, which joins changes a few lines apart under one header with the context
-/// they share, and in the file view each unit alone, since there is no header or context to
-/// share and every change is a stop of its own.
-fn display_hunks(view: &RevisionView<'_>, units: &[UnitId], shown: DiffView) -> Vec<Vec<UnitId>> {
-    match shown {
-        DiffView::Hunks => view.display_hunks(units),
-        DiffView::File => units.iter().map(|&unit| vec![unit]).collect(),
-    }
+/// The fewest unchanged lines the hunks view folds into a gap row, between two hunks' context or
+/// between one and the file's start or end; fewer show whole, since a gap row would hide hardly
+/// more than it takes.
+const SHOWN_UNCHANGED: usize = 10;
+
+/// The display hunks of `units`, each a list of units marked together: each unit alone in
+/// either view, so every change is a stop and a mark of its own, and switching the view keeps
+/// every hunk.
+fn display_hunks(units: &[UnitId]) -> Vec<Vec<UnitId>> {
+    units.iter().map(|&unit| vec![unit]).collect()
 }
 
 /// Lays out the chunks of a file section in the file view: every head line of the file in
@@ -1643,11 +1707,11 @@ struct ChunkEnd {
 }
 
 impl BaseLines {
-    /// The chunks of the file at `path` in `view`.
-    fn of(view: &RevisionView<'_>, path: &str) -> Self {
-        let mut ends: Vec<ChunkEnd> = view
-            .units_of_file(path)
-            .into_iter()
+    /// The chunks of a file in `view`, whose units are `units`.
+    fn of(view: &RevisionView<'_>, units: &[UnitId]) -> Self {
+        let mut ends: Vec<ChunkEnd> = units
+            .iter()
+            .copied()
             .filter_map(|unit| {
                 let chunk = view.unit(unit).ok()?.chunk()?;
                 Some(ChunkEnd {
@@ -1718,8 +1782,16 @@ impl Context<'_> {
         }
     }
 
-    /// Pushes a gap row for the unchanged lines `range`, which ends at head line `at`.
-    fn gap(&mut self, layout: &mut Layout, owner: UnitId, range: Range<usize>, at: usize) {
+    /// Pushes a gap row for the unchanged lines `range`, which ends at head line `at`, naming
+    /// `scope`, the scopes of the hunk after it.
+    fn gap(
+        &mut self,
+        layout: &mut Layout,
+        owner: UnitId,
+        range: Range<usize>,
+        at: usize,
+        scope: Option<String>,
+    ) {
         let count = range.len();
         let text = format!(
             "{count} unchanged line{}",
@@ -1730,6 +1802,7 @@ impl Context<'_> {
                 file: self.file,
                 at,
             }),
+            scope,
             ..Note::plain(RowKind::Gap, text)
         };
         layout.rows.push(note_row(self.file, owner, None, note));
@@ -2127,12 +2200,12 @@ mod tests {
                 assert!(layout.hunks[hunk].contains(&row.unit), "{row:?}");
             }
         }
-        // Each hunk's rows are contiguous and start at its header.
+        // Each hunk's rows start where its unit's place is: its header, when it has one, or
+        // else its first changed line.
         for (hunk, units) in layout.hunks.iter().enumerate() {
             let rows: Vec<usize> = (0..layout.rows.len())
                 .filter(|&index| layout.rows[index].hunk == Some(hunk))
                 .collect();
-            assert_eq!(layout.rows[rows[0]].kind(), RowKind::Header);
             assert_eq!(layout.unit_rows[&units[0]], rows[0]);
         }
     }
@@ -2245,18 +2318,17 @@ mod tests {
         assert_eq!(layout.hunk_notes.len(), layout.hunks.len());
     }
 
-    /// The hunks view joins changes a few lines apart into one hunk under one header, as the
-    /// demo's `scripts/install.sh` has; the file view has no header to share, so each change is
-    /// a hunk of its own.
+    /// Each change is a hunk of its own in either view, as git's hunks are, never joined with
+    /// changes a few lines apart, as the demo's `scripts/install.sh` has.
     #[test]
-    fn the_file_view_makes_each_change_a_hunk() {
+    fn each_change_is_a_hunk() {
         let joined = |layout: &Layout| layout.hunks.iter().filter(|units| units.len() > 1).count();
         // Reviewed files open, so both views lay out every unit.
         let (_dir, hunks) = demo_layout(&Folds {
             approved: Approved::Shown,
             ..Folds::default()
         });
-        assert!(joined(&hunks) > 0, "the hunks view joins nearby changes");
+        assert_eq!(joined(&hunks), 0);
         let (_dir, file) = demo_layout(&Folds {
             view: DiffView::File,
             ..Folds::default()
@@ -2327,7 +2399,28 @@ mod tests {
     }
 
     fn kinds(layout: &Layout) -> Vec<RowKind> {
-        layout.rows.iter().map(Row::kind).collect()
+        let mut kinds: Vec<RowKind> = layout.rows.iter().map(Row::kind).collect();
+        // The empty row a single file's diff starts with, where a folder's diff names it.
+        if kinds.first() == Some(&RowKind::Spacer) {
+            kinds.remove(0);
+        }
+        kinds
+    }
+
+    /// A single file's diff starts with an empty row where a folder's diff names the file, so
+    /// its code shows on the same rows either way.
+    #[test]
+    fn a_single_files_diff_starts_with_an_empty_row() {
+        let (_dir, layout) = approved_engine(Folds {
+            single_file: true,
+            ..Folds::default()
+        });
+        assert_eq!(layout.rows.first().map(Row::kind), Some(RowKind::Spacer));
+        assert_eq!(
+            layout.rows.get(1).map(Row::kind),
+            Some(RowKind::Header),
+            "its first hunk follows"
+        );
     }
 
     /// Approved hunks fold to their headers, and with every hunk folded no unchanged line
@@ -2340,15 +2433,17 @@ mod tests {
         });
         assert_eq!(layout.hunks.len(), 3);
         assert_eq!(kinds(&layout), [RowKind::Header; 3]);
+        // After the empty row the diff starts with, only the folded headers.
         assert!(
             layout
                 .rows
                 .iter()
+                .skip(1)
                 .all(|row| row.note().is_some_and(|note| note.folded))
         );
         for (hunk, units) in layout.hunks.iter().enumerate() {
-            assert_eq!(layout.unit_rows[&units[0]], hunk);
-            assert_eq!(layout.rows[hunk].hunk, Some(hunk));
+            assert_eq!(layout.unit_rows[&units[0]], hunk + 1);
+            assert_eq!(layout.rows[hunk + 1].hunk, Some(hunk));
         }
     }
 
@@ -2401,8 +2496,12 @@ mod tests {
             ..Folds::default()
         });
         let kinds = kinds(&shown);
-        assert_eq!(kinds.first(), Some(&RowKind::Gap), "{kinds:?}");
-        assert_eq!(kinds.last(), Some(&RowKind::Gap), "{kinds:?}");
+        // The engine's first change is within its first ten lines and its last within its
+        // last ten, so its start and end show whole; longer stretches between hunks fold, and
+        // an open hunk without a tag has no header.
+        assert_eq!(kinds.first(), Some(&RowKind::Context), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&RowKind::Context), "{kinds:?}");
+        assert!(kinds.contains(&RowKind::Gap), "{kinds:?}");
         assert!(kinds.contains(&RowKind::Added) || kinds.contains(&RowKind::Removed));
         assert!(
             shown
@@ -2428,7 +2527,10 @@ mod tests {
             ..Folds::default()
         });
         let header = refolded.unit_rows[&first[0]];
-        assert_eq!(header, 0, "no context leads to a folded first hunk");
+        assert_eq!(
+            header, 1,
+            "no context leads to a folded first hunk, after the empty row"
+        );
         assert!(refolded.rows[header].note().unwrap().folded);
     }
 }

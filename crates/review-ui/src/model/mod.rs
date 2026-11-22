@@ -55,6 +55,7 @@ mod marks;
 pub mod overview;
 pub mod picker;
 pub mod present;
+mod preview;
 mod pulls;
 mod quit;
 mod search;
@@ -404,8 +405,12 @@ pub struct Model {
     pub tree_cursor: usize,
     /// Where the tree is scrolled.
     pub(crate) tree_scroll: ListScroll,
-    /// The file whose diff shows, by display path.
+    /// The file whose diff shows, by display path, or, while a folder previews, the file
+    /// whose diff showed last, which the diff opens again when the preview ends.
     pub selected: Option<String>,
+    /// The folder whose diff shows in place of the selected file's while the tree cursor is
+    /// on it; only while the files have the keys.
+    folder: Option<preview::FolderPreview>,
     /// The mode that owns the keyboard when no overlay does.
     pub mode: Mode,
     /// How the window divides its width.
@@ -443,6 +448,8 @@ pub struct Model {
     places: HashMap<String, Place>,
     /// Where the diff is scrolled.
     pub diff_scroll: ListScroll,
+    /// The momentum the mouse wheel has built.
+    wheel_momentum: crate::scroll::WheelMomentum,
     /// The file shown in full, in the buffer mode.
     pub buffer: Option<buffer::Buffer>,
     /// The last buffer identity handed out.
@@ -549,6 +556,7 @@ impl Model {
             tree_cursor: 0,
             tree_scroll: ListScroll::default(),
             selected: None,
+            folder: None,
             mode: Mode::Tree,
             screen: Screen::Split,
             overlay: None,
@@ -571,6 +579,7 @@ impl Model {
             },
             places: HashMap::new(),
             diff_scroll: ListScroll::default(),
+            wheel_momentum: crate::scroll::WheelMomentum::default(),
             buffer: None,
             buffer_ids: 0,
             buffer_scroll: ListScroll::default(),
@@ -678,6 +687,7 @@ impl Model {
     /// queued since the last update.
     fn after_update(&mut self) -> Vec<Effect> {
         self.show_waiting_capture();
+        self.sync_folder_preview();
         self.save_view_state();
         self.finish_quitting();
         std::mem::take(&mut self.effects)
@@ -987,6 +997,10 @@ impl Model {
     /// Lays out the selected file's diff after something it shows changed (marks, folds, text
     /// or highlights arriving, a new revision), keeping the selected hunk.
     fn rebuild(&mut self) {
+        if self.folder.is_some() {
+            self.rebuild_folder();
+            return;
+        }
         self.build_selected();
     }
 
@@ -999,18 +1013,22 @@ impl Model {
         let Some(view) = snapshot.view() else {
             return;
         };
-        let Some(path) = self.selected.clone() else {
-            self.rows = Arc::new(Layout::default());
-            self.hunk_rows.clear();
-            return;
-        };
         // The selection is the selected hunk's units; its index follows them into the new rows.
         let selected = self
             .rows
             .hunks
             .get(self.hunk)
             .and_then(|hunk| hunk.first().copied());
-        self.rows = Arc::new(self.lay_out(&view, &path));
+        let layout = match self.folder.as_ref().map(|folder| folder.path.clone()) {
+            Some(folder) => self.lay_out_folder(&view, &folder),
+            None => self.selected.clone().map(|path| self.lay_out(&view, &path)),
+        };
+        let Some(layout) = layout else {
+            self.rows = Arc::new(Layout::default());
+            self.hunk_rows.clear();
+            return;
+        };
+        self.rows = Arc::new(layout);
         self.hunk_rows = hunk_rows(&self.rows);
         if let Some(found) =
             selected.and_then(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)))
@@ -1032,6 +1050,7 @@ impl Model {
         self.folds.texts.clear();
         self.folds.syntax.clear();
         self.folds.view = self.presented.view;
+        self.folds.single_file = true;
         self.folds.pending.clone_from(&self.pending);
         if let Some(file) = file {
             if let Some(text) = file
@@ -1262,10 +1281,18 @@ impl Model {
     /// The versions of the selected file, base and head, each under its own path: a renamed
     /// file's base is under its old path, which is not the one the tree shows.
     fn selected_sides(&self) -> Vec<state::SideKey> {
-        self.selected
-            .as_deref()
-            .map(|path| self.highlights.sides_at(path))
-            .unwrap_or_default()
+        match &self.folder {
+            Some(folder) => folder
+                .files
+                .iter()
+                .flat_map(|path| self.highlights.sides_at(path))
+                .collect(),
+            None => self
+                .selected
+                .as_deref()
+                .map(|path| self.highlights.sides_at(path))
+                .unwrap_or_default(),
+        }
     }
 
     /// Takes in what a highlight job made, keeps it for the versions the shown revision has,

@@ -5,8 +5,6 @@
 
 use review_core::UnitId;
 
-use super::code::Frame;
-use super::palette::HunkTone;
 use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
 use crate::model::Model;
@@ -40,6 +38,14 @@ pub enum Annotation {
         /// The block's background.
         background: Hsla,
     },
+    /// A file's path in a folder's diff: a heading flush with the diff's own header above, from
+    /// the row's left edge rather than where code starts, which never moves with the code.
+    File {
+        /// The path, in bold.
+        path: Piece,
+        /// The row's background.
+        background: Hsla,
+    },
     /// A move, a collapsed unit or a description: one quiet line on the band.
     Line {
         /// The line.
@@ -59,9 +65,8 @@ pub const TAG_GAP_CELLS: u16 = 4;
 /// its code is folded away or no scope names it, and what kind of change it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HunkHeader {
-    /// The line's background: a gray a step above its hunk's band, so each hunk's start shows
-    /// at a glance, tinted green once approved and red once flagged; on the selected hunk, the
-    /// same solid blue, green or red as its bar.
+    /// The line's background: the editor's own, the same whether the hunk is selected or not,
+    /// beside the bar along its left edge.
     pub background: Hsla,
     /// `▸` when the hunk shows its header alone, `▾` when its code shows, in the gutter.
     pub fold: Piece,
@@ -126,22 +131,23 @@ pub fn note_pan(model: &Model, reach: f32) -> NotePan {
     NotePan::new(model.diff_text().offset(), overflow)
 }
 
-/// Diff row `row`, one of the tool's own rows showing `note`, in `frame`.
+/// Diff row `row`, one of the tool's own rows showing `note`.
 #[must_use]
-pub fn annotation(
-    model: &Model,
-    palette: &Palette,
-    row: &Row,
-    note: &Note,
-    frame: Frame,
-) -> Annotation {
+pub fn annotation(model: &Model, palette: &Palette, row: &Row, note: &Note) -> Annotation {
     match note.kind {
         RowKind::Spacer => Annotation::Spacer,
+        // A gap names the scopes of the hunk after it, where the code's flow breaks anyway.
         RowKind::Gap => Annotation::Gap {
-            label: Piece::new(note.text.clone(), palette.faint),
+            label: Piece::new(
+                match &note.scope {
+                    Some(scope) => format!("{} · {scope}", note.text),
+                    None => note.text.clone(),
+                },
+                palette.faint,
+            ),
             rule: palette.hairline,
         },
-        RowKind::Header => Annotation::Header(hunk_header(model, palette, row, note, frame)),
+        RowKind::Header => Annotation::Header(hunk_header(model, palette, row, note)),
         RowKind::Note => Annotation::Note {
             text: Piece::new(note.text.clone(), palette.note).italicized(),
             tag: note
@@ -150,6 +156,11 @@ pub fn annotation(
                 .map(|tag| Piece::new(tag.clone(), palette.dim)),
             accent: palette.note,
             background: palette.note_band,
+        },
+        // A file's path in a folder's diff stands out from the quiet lines within its section.
+        RowKind::FileHeader => Annotation::File {
+            path: Piece::new(note.text.clone(), palette.text).weighted(Weight::Bold),
+            background: palette.band,
         },
         _ => {
             let color = match note.kind {
@@ -198,13 +209,7 @@ fn all_chunks(model: &Model, units: &[UnitId]) -> bool {
 }
 
 /// The header of the hunk that `row` heads.
-fn hunk_header(
-    model: &Model,
-    palette: &Palette,
-    row: &Row,
-    note: &Note,
-    frame: Frame,
-) -> HunkHeader {
+fn hunk_header(model: &Model, palette: &Palette, row: &Row, note: &Note) -> HunkHeader {
     let units = row
         .hunk
         .and_then(|hunk| model.rows.hunks.get(hunk))
@@ -218,15 +223,9 @@ fn hunk_header(
     let folded = model
         .view()
         .is_some_and(|view| units.iter().all(|&unit| model.folds.is_folded(&view, unit)));
-    let tone = HunkTone::of(&badges);
-    let selected = frame.selected();
-    let (background, palette) = if selected {
-        let solid = palette.hunk_solid(tone);
-        (solid, palette.on(solid))
-    } else {
-        (palette.hunk_header(tone), palette.on_header(tone))
-    };
-    let palette = &palette;
+    // Every header is plain, as the file view's code is, and the same whether its hunk is
+    // selected or not: the glyph says its state, and the bar along its left edge marks it.
+    let background = palette.background;
     // What the hunk changes leads: the scopes around it, innermost brightest.
     // Where it is matters only when its code is folded away or no scope names it, since the
     // gutter numbers the lines that show; a file unit's text says what changed, so it stays.
