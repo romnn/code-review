@@ -2086,8 +2086,9 @@ fn a_remembered_place_shows_the_wrapped_line_from_its_start() {
     assert!(model.rows.starts_row(top), "from its start");
 }
 
-/// A wrapped line's piece carries over to other rows only on the very same line: the same text
-/// on another line, in another file, or on a line without a number shows from its start.
+/// A wrapped line's piece carries over on the same rows, and to other rows only on the very same
+/// line: the same text on another line, in another file, or on a line without a number shows
+/// from its start.
 #[test]
 fn a_piece_carries_over_only_to_the_same_line() {
     use super::present::same_start;
@@ -2127,7 +2128,16 @@ fn a_piece_carries_over_only_to_the_same_line() {
         cell.head = None;
         cell.base = None;
     }
-    assert_eq!(same_start(&unnumbered, second, &unnumbered, source), None);
+    assert_eq!(
+        same_start(&unnumbered, second, &unnumbered, source),
+        start,
+        "the same rows"
+    );
+    assert_eq!(
+        same_start(&unnumbered, second, &unnumbered.clone(), source),
+        None,
+        "other rows"
+    );
 }
 
 /// `w` lays the rows out on screen again where they are, never copying them.

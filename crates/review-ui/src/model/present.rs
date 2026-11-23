@@ -304,8 +304,9 @@ pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> DiffAnchor {
 /// Where in its line screen row `screen` of `old` starts, to show the same line on unified row
 /// `source` of `new` at the same piece: only when that row shows the very same line, the same
 /// text of the same numbered line of the same file on the same side; else `None`, which shows
-/// the line from its first screen row. A line without a number, such as one of a nested diff,
-/// cannot be told from another of the same text, so it never carries its piece over.
+/// the line from its first screen row. The very same rows show the very same cell; in other
+/// rows, a line without a number, such as one of a nested diff, cannot be told from another of
+/// the same text, so it never carries its piece over.
 #[must_use]
 pub(crate) fn same_start(
     old: &Layout,
@@ -315,8 +316,12 @@ pub(crate) fn same_start(
 ) -> Option<(usize, usize)> {
     let piece = old.screen.get(screen)?;
     let (side, byte) = piece.start()?;
+    let row = *new.projected.get(source)?;
+    if std::ptr::eq(old, new) {
+        return (row == piece.row).then_some((side, byte));
+    }
     let before = old.rows.get(piece.row)?;
-    let after = new.rows.get(*new.projected.get(source)?)?;
+    let after = new.rows.get(row)?;
     let text = before
         .sides()
         .get(side)
