@@ -2,6 +2,7 @@
 //! selection and the cursor), how the diff style inks them, their gutters, and the bar along a
 //! hunk's rows.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::palette::HunkTone;
@@ -145,7 +146,7 @@ pub struct RulerMark {
 /// scrolling to it.
 #[must_use]
 pub fn ruler(model: &Model, palette: &Palette) -> Vec<RulerMark> {
-    let rows = crate::scroll::float(model.rows.rows.len());
+    let rows = crate::scroll::float(model.rows.screen.len());
     if rows == 0.0 {
         return Vec::new();
     }
@@ -164,10 +165,10 @@ pub fn ruler(model: &Model, palette: &Palette) -> Vec<RulerMark> {
         .collect()
 }
 
-/// Where a line of code is drawn: its diff row, its file section and its column.
+/// Where a line of code is drawn: its screen row, its file section and its column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct At {
-    /// The diff row.
+    /// The screen row, by index into [`crate::rows::Layout::screen`].
     pub row: usize,
     /// The file section, by index into the layout's files.
     pub file: usize,
@@ -194,6 +195,10 @@ pub struct CodeCell {
     pub text_color: Option<Hsla>,
     /// The quiet `⏎` that stands for a blank changed line, so it never reads as an empty bar.
     pub blank: Option<Piece>,
+    /// The bytes of the line's text the screen row shows, which [`Self::layers`] cover from
+    /// their start: all of it, a piece of a wrapped line, or nothing on a side whose line ended
+    /// on an earlier screen row.
+    pub shown: Range<usize>,
 }
 
 /// How the diff style inks a line of code.
@@ -209,9 +214,19 @@ struct CellInk {
     bar: Option<Hsla>,
 }
 
-/// Line of code `cell` as the diff draws it at `at`.
+/// Line of code `cell` as the diff draws it at `at`: the piece of it the screen row shows,
+/// with the line number and sign on its first piece only and a dim `↪` on each piece after.
 #[must_use]
 pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeCell {
+    let piece = model.rows.screen.get(at.row);
+    // Selections and find matches name the row, whichever of its screen rows draws.
+    let line = piece.map_or(at.row, |piece| piece.row);
+    let side = usize::from(at.column == Column::Right);
+    let shown = match piece {
+        Some(piece) => piece.shown.get(side).cloned().flatten(),
+        None => Some(0..cell.text.len()),
+    };
+    let first = piece.is_none() || model.rows.starts_row(at.row);
     let mut ink = cell_ink(model, cell, palette);
     let frame = frame(model, at.row);
     // Bold backgrounds only on the selected hunk, when asked, so it stands out.
@@ -247,14 +262,14 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
     if let Some(find) = model.search_of(Mode::Diff) {
         let current = find.current.and_then(|current| find.matches.get(current));
         layers.push(around_deleted(
-            match_layer(&find.matches, current, at.row, Some(at.column), palette),
+            match_layer(&find.matches, current, line, Some(at.column), palette),
             &cell.deleted,
         ));
     }
     if let Some(range) = model
         .selection
         .filter(|selection| selection.pane == Pane::Diff && selection.covers(at.column))
-        .and_then(|selection| selection.range_in_row(at.row, cell.content_len))
+        .and_then(|selection| selection.range_in_row(line, cell.content_len))
     {
         layers.push(around_deleted(
             vec![Run {
@@ -264,21 +279,56 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
             &cell.deleted,
         ));
     }
-    let blank = (cell.text.is_empty()
+    let blank = (first
+        && cell.text.is_empty()
         && matches!(
             cell.kind,
             RowKind::Removed | RowKind::Added | RowKind::Edited
         ))
     .then(|| Piece::new("⏎", palette.faint));
+    let (number, sign) = match &shown {
+        _ if first => (
+            gutter(cell, at.column, frame.selected(), palette),
+            Piece::new(ink.sign, ink.sign_color),
+        ),
+        Some(_) => (
+            Piece::new("", palette.faint),
+            Piece::new("↪", palette.faint),
+        ),
+        None => (
+            Piece::new("", palette.faint),
+            Piece::new(" ", palette.faint),
+        ),
+    };
+    let shown = shown.unwrap_or(cell.text.len()..cell.text.len());
     CodeCell {
-        number: gutter(cell, at.column, frame.selected(), palette),
+        number,
         bar: ink.bar,
-        sign: Piece::new(ink.sign, ink.sign_color),
-        layers,
+        sign,
+        layers: layers
+            .into_iter()
+            .map(|layer| within(layer, &shown))
+            .collect(),
         background: ink.background,
         text_color: ink.text_color,
         blank,
+        shown,
     }
+}
+
+/// The runs of `layer` within the bytes `shown`, moved to start where `shown` starts.
+fn within(layer: Layer, shown: &Range<usize>) -> Layer {
+    layer
+        .into_iter()
+        .filter_map(|run| {
+            let start = run.range.start.max(shown.start);
+            let end = run.range.end.min(shown.end);
+            (start < end).then(|| Run {
+                range: start - shown.start..end - shown.start,
+                style: run.style,
+            })
+        })
+        .collect()
 }
 
 /// Whether `cell` is a line of a nested diff: an interdiff's or a move's edits.

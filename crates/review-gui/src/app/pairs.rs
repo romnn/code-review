@@ -32,7 +32,7 @@ use crate::color::to_gpui;
 impl ReviewApp {
     /// How far the diff's code has moved left, in pixels.
     pub(super) fn text_offset_px(&self) -> f32 {
-        super::scroll::narrow(self.diff_text().offset() * f64::from(self.sizes().code_cell()))
+        super::scroll::narrow(self.code_offset() * f64::from(self.sizes().code_cell()))
     }
 
     /// `content`, the code of a full-width row, clipped to the room it has and moved by the
@@ -68,7 +68,7 @@ impl ReviewApp {
             Column::Whole => list_width - FRAME - columns,
             Column::Left | Column::Right => (list_width - FRAME - DIVIDER) / 2.0 - columns,
         };
-        let offset = self.diff_text().offset();
+        let offset = self.code_offset();
         code::clipped(cells, offset, f64::from(room) / f64::from(code_cell))
             .then(|| clip_marker(code_cell, background, colors))
     }
@@ -162,7 +162,7 @@ impl ReviewApp {
             .insert((Pane::Diff, column, index), layout);
         // The half's own background lies over the row's band.
         let behind = line_background(colors, &[frame.band(colors), parts.painted_background]);
-        let marker = self.diff_clip_marker(cell.width(), column, behind, colors);
+        let marker = self.diff_clip_marker(parts.cells, column, behind, colors);
         base.when_some(parts.background, gpui::Styled::bg)
             .when_some(parts.text_color, gpui::Styled::text_color)
             .child(parts.gutter)

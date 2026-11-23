@@ -196,8 +196,7 @@ impl Model {
             let top = super::present::diff_anchor(&self.rows, offset);
             let key = self
                 .rows
-                .rows
-                .get(super::present::Anchor::at(offset).row)
+                .row_on_screen(super::present::Anchor::at(offset).row)
                 .map(super::present::RowKey::of);
             self.places.insert(
                 path,

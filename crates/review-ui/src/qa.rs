@@ -15,6 +15,7 @@ use crate::model::{Model, Phase};
 use crate::paint::{Palette, bars, files};
 use crate::rows::{Body, Cell};
 use crate::state::{self, Progress};
+use crate::text::Column;
 
 /// Where things are on a front end's screen, in its own units, for QA mode's `state`.
 pub trait Screen {
@@ -163,7 +164,7 @@ fn put_review(answer: &mut Map<String, Value>, model: &Model) {
             "queued",
             json!(model.marks.len() + usize::from(model.marking)),
         ),
-        ("row_count", json!(model.rows.rows.len())),
+        ("row_count", json!(model.rows.screen.len())),
     ];
     answer.extend(entries.map(|(key, value)| (key.to_owned(), value)));
 }
@@ -209,11 +210,14 @@ fn live(model: &Model) -> Value {
     })
 }
 
-/// The diff rows in `range`: where each comes from, what it is and where it is.
+/// The diff's screen rows in `range`: the row each shows a piece of, where it comes from, what
+/// it is, where it is and the text it draws.
 fn diff_rows(model: &Model, screen: &dyn Screen, range: Range<usize>) -> Vec<Value> {
     range
         .filter_map(|index| {
-            let row = model.rows.rows.get(index)?;
+            let line = model.rows.screen.get(index)?.row;
+            let row = model.rows.rows.get(line)?;
+            let shown = |column| model.diff_shown(index, column);
             // Where a row's code is in each file: one line across the width, or both sides.
             let code = match &row.body {
                 Body::Code(cell) => json!({
@@ -221,10 +225,14 @@ fn diff_rows(model: &Model, screen: &dyn Screen, range: Range<usize>) -> Vec<Val
                     "base": cell.base,
                 }),
                 Body::Pair(pair) => json!({
-                    "left": side(pair.left.as_ref()),
-                    "right": side(pair.right.as_ref()),
+                    "left": side(pair.left.as_ref(), shown(Column::Left)),
+                    "right": side(pair.right.as_ref(), shown(Column::Right)),
                 }),
                 Body::Note(_) => Value::Null,
+            };
+            let text = match &row.body {
+                Body::Pair(_) => "",
+                Body::Code(_) | Body::Note(_) => shown(Column::Whole).unwrap_or_default(),
             };
             Some(json!({
                 "row": index,
@@ -232,23 +240,25 @@ fn diff_rows(model: &Model, screen: &dyn Screen, range: Range<usize>) -> Vec<Val
                 "kind": format!("{:?}", row.kind()),
                 "hunk": row.hunk,
                 "y": screen.row_y(index),
-                "text": row.text().chars().take(80).collect::<String>(),
+                "text": text.chars().take(80).collect::<String>(),
                 "tag": row.note().and_then(|note| note.tag.clone()),
                 "scope": row.note().and_then(|note| note.scope.clone()),
                 "code": code,
+                "line": line,
             }))
         })
         .collect()
 }
 
-/// A side of a pair: its kind, both positions and its text, or `null` for padding.
-fn side(cell: Option<&Cell>) -> Value {
+/// A side of a pair: its kind, both positions and the text the screen row draws of it,
+/// `shown`, or `null` for padding.
+fn side(cell: Option<&Cell>, shown: Option<&str>) -> Value {
     cell.map_or(Value::Null, |cell| {
         json!({
             "kind": format!("{:?}", cell.kind),
             "head": cell.head.as_ref().map(|head| head.line),
             "base": cell.base,
-            "text": cell.text.chars().take(60).collect::<String>(),
+            "text": shown.unwrap_or_default().chars().take(60).collect::<String>(),
         })
     })
 }
@@ -369,6 +379,7 @@ fn view_state(model: &Model, screen: &dyn Screen) -> Value {
         "approved": model.folds.approved.name(),
         "view": look.view.name(),
         "effective_view": model.rows.presentation.view.name(),
+        "wrap": look.wrap,
         "hunk_position": look.hunk_position.name(),
         "cross_files": look.cross_files,
         "style": {

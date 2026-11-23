@@ -61,22 +61,22 @@ expect "overlay":null
 # za folds the selected hunk to its header and unfolds it again, keeping the place; a hunk
 # unfolded by hand stays open once approved.
 state
-expect "row_count":41,
+expect "row_count":45,
 key z a
 state
-expect "row_count":29,
+expect "row_count":27,
 expect "hunk":1,"hunks"
 key z a
 state
-expect "row_count":41,
+expect "row_count":45,
 
 # The mouse in the diff: a drag selects text across rows and copies nothing by itself, since
 # copy-on-select is off by default, and `y`, as Ctrl+C, copies it to the clipboard and the
 # primary selection; a press on a hunk's header selects that hunk, and one on a rule of
 # unchanged lines shows more of them.
-drag 44 6 59 8
+drag 44 7 59 9
 state
-expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[5,4\],"head":\[7,19\]\}
+expect "selection":\{"pane":"Diff","column":"Whole","anchor":\[6,4\],"head":\[8,19\]\}
 primary
 expect ^null
 key y
@@ -90,15 +90,15 @@ key ctrl-c
 clipboard
 expect ^"pub fn apply_batch
 shot 16-selection
-click 49 17
+click 49 26
 state
 expect "hunk":2,"hunks"
-click 49 3
+click 49 4
 state
-expect "row_count":55,
-click 49 3
+expect "row_count":59,
+click 49 4
 state
-expect "row_count":55,
+expect "row_count":59,
 
 # Shift with a press extends the selection from where it started.
 click 44 20
@@ -159,9 +159,9 @@ key n
 key n
 state
 expect "mode":"Diff"
-expect "target":"Diff","query":"balance","matches":8,"current":4
-expect "hunk":2,"hunks"
-expect "status":"Match 5 of 8"
+expect "target":"Diff","query":"balance","matches":13,"current":4
+expect "hunk":1,"hunks"
+expect "status":"Match 5 of 13"
 shot 11-diff-find
 key escape
 
@@ -213,18 +213,18 @@ file src/engine.rs
 key 0
 state
 expect "density":"normal"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":1,
 key shift-s
 state
 expect "diff_style":"soft"
 expect "background":"muted","change_bar":false
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":1,
 shot 06-soft
 key shift-s
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":1,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":1,
 shot 06-plain
 key shift-s
 state
@@ -258,12 +258,20 @@ state
 expect "effective_layout":"side-by-side"
 
 # Side by side, `/` finds each half's code apart, the base's half first in each row, and
-# highlights a match only in its own half.
+# highlights a match only in its own half: from the selected hunk, whose first match is in its
+# head half, N steps back to a row of unchanged code that matches in both halves, head then
+# base, and n forward again.
 key /
 key b a l a n c e
 key enter
 state
-expect "target":"Diff","query":"balance","matches":[0-9]+,"current":[0-9]+,"current_column":"Left"
+expect "target":"Diff","query":"balance","matches":[0-9]+,"current":[0-9]+,"current_column":"Right"
+key shift-n
+state
+expect "current_column":"Right"
+key shift-n
+state
+expect "current_column":"Left"
 key n
 state
 expect "current_column":"Right"
@@ -344,7 +352,7 @@ key shift-t
 state
 expect "overlay":"Settings"
 expect "cursor":"Theme: Carbonfox"
-expect "entries":35\}
+expect "entries":37\}
 expect "geometry":\{"width":31,"list_top":3,"cursor_top":4\}
 key j
 state
@@ -429,17 +437,17 @@ shot 07-file-done
 # Approved hunks fold to their headers; zA shows them like any other and folds them again.
 state
 expect "approved":"folded"
-expect "row_count":3,"rows":\[\{"row":0,"source":0,"kind":"Header"
+expect "row_count":4,"rows":\[\{"row":0,"source":0,"kind":"Spacer"
 key z shift-a
 state
 expect "approved":"shown"
 expect "status":"Approved hunks shown\."
-expect "row_count":56,
+expect "row_count":58,
 shot 07b-approved-shown
 key z shift-a
 state
 expect "approved":"folded"
-expect "row_count":3,
+expect "row_count":4,
 
 # The mouse in the files: a click on a tree row shows that file, a double click opens its
 # diff, and the wheel scrolls the list under it, a row an event, on a screen too short for
@@ -551,14 +559,12 @@ state
 expect "selected":"src/engine.rs"
 expect "hunk":2,"hunks"
 
-# The density comes from the configuration: compact rows leave out the blank row before each
-# hunk, which the normal density's 41 rows of this file have.
+# The density comes from the configuration.
 launch --demo --config scripts/qa/compact.toml
 expect "density":"compact","effective_density":"compact"
 file src/engine.rs
 state
 expect "row_count":27,
-expect "kind":"Gap".*"kind":"Header"
 shot 15-compact
 
 # A terminal too narrow to give the file finder's query any cells still draws it, cursor and

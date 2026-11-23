@@ -42,6 +42,8 @@ pub enum Choice {
     CrossFiles(bool),
     /// Whether changed tokens are underlined.
     Emphasis(bool),
+    /// Whether long lines wrap onto more rows.
+    Wrap(bool),
     /// Whether approved hunks fold to their header.
     Approved(Approved),
     /// Whether proven formatting-only hunks count as approved without a mark.
@@ -201,6 +203,18 @@ const OPTIONS: &[(&str, &str, &str, Choice)] = &[
         "go on to the next file",
         "j/k and ]/[ go on into the next or previous file",
         Choice::CrossFiles(true),
+    ),
+    (
+        "Long lines",
+        "cut",
+        "pan sideways to read their end · w",
+        Choice::Wrap(false),
+    ),
+    (
+        "Long lines",
+        "wrap",
+        "onto as many rows as they need · w",
+        Choice::Wrap(true),
     ),
     (
         "Token emphasis",
@@ -446,6 +460,10 @@ impl Model {
                 token_emphasis: *on,
                 ..applied.clone()
             },
+            Choice::Wrap(on) => Look {
+                wrap: *on,
+                ..applied.clone()
+            },
             Choice::Approved(_) | Choice::AutoApprove(_) | Choice::FontSize(_) => return None,
         };
         (look != *applied).then_some(look)
@@ -550,6 +568,7 @@ impl Model {
             Choice::HunkPosition(position) => applied.hunk_position == *position,
             Choice::CrossFiles(on) => applied.cross_files == *on,
             Choice::Emphasis(on) => applied.token_emphasis == *on,
+            Choice::Wrap(on) => applied.wrap == *on,
             Choice::Approved(approved) => self.approved_in_use() == *approved,
             Choice::AutoApprove(on) => self.policy_in_use().auto_approve_formatting == *on,
             Choice::FontSize(size) => {
@@ -661,6 +680,9 @@ impl Model {
             }
             Choice::CrossFiles(on) => {
                 return self.apply_cross_files(*on);
+            }
+            Choice::Wrap(on) => {
+                return self.apply_wrap(*on);
             }
             Choice::Approved(approved) => {
                 return self.apply_approved(*approved);
@@ -818,6 +840,26 @@ impl Model {
         self.apply_look(look, &remembered, what);
     }
 
+    /// Wraps long lines of code onto more rows, or cuts them and pans sideways, and remembers
+    /// it.
+    pub(super) fn apply_wrap(&mut self, on: bool) {
+        let look = Look {
+            wrap: on,
+            ..self.settings.appearance.applied.clone()
+        };
+        let remembered = [Remembered {
+            table: "diff",
+            key: "wrap",
+            value: on.into(),
+        }];
+        let what = if on {
+            "Long lines wrap"
+        } else {
+            "Long lines are cut; pan sideways to read them"
+        };
+        self.apply_look(look, &remembered, what);
+    }
+
     /// `f` or `v`: the whole file or each hunk apart.
     ///
     /// The code stays exactly where it is on screen: a line of code both views show keeps its
@@ -844,19 +886,15 @@ impl Model {
         // The first of those lines the other view shows too keeps its row.
         let kept = hunk_line.iter().chain(&lines).find_map(|line| {
             let source = line.key.find_line(&self.rows)?;
-            Some((source, line.on_screen))
+            Some((source, line))
         });
-        if let Some((source, on_screen)) = kept {
-            let at = super::present::diff_offset(
-                &self.rows,
-                super::present::Anchor {
-                    row: source,
-                    fraction: 0.0,
-                },
-            );
+        if let Some((source, line)) = kept {
+            let row = self.rows.projected.get(source).copied().unwrap_or(0);
+            let screen = self.rows.screen_rows(row);
+            let at = (screen.start + line.piece).min(screen.end.saturating_sub(1));
             self.diff_scroll.jump(crate::frame::clamp(
-                at - on_screen,
-                self.rows.rows.len(),
+                crate::scroll::rows(at) - line.on_screen,
+                self.rows.screen.len(),
                 viewport,
             ));
         }
@@ -868,8 +906,7 @@ impl Model {
         let shown = self.hunk_rows.get(self.hunk).is_none_or(|rows| {
             let code = rows.clone().any(|index| {
                 self.rows
-                    .rows
-                    .get(index)
+                    .row_on_screen(index)
                     .is_some_and(crate::rows::Row::is_code)
             });
             if code {
@@ -879,8 +916,11 @@ impl Model {
             }
         });
         if !shown && let Some(target) = self.hunk_target(offset) {
-            self.diff_scroll
-                .jump(crate::frame::clamp(target, self.rows.rows.len(), viewport));
+            self.diff_scroll.jump(crate::frame::clamp(
+                target,
+                self.rows.screen.len(),
+                viewport,
+            ));
         }
     }
 
@@ -907,13 +947,15 @@ impl Model {
         let reading = offset + viewport * crate::scroll::READING_LINE;
         let mut lines: Vec<(usize, LookedAt)> = (first..last)
             .filter_map(|index| {
-                let row = self.rows.rows.get(index)?;
+                let piece = self.rows.screen.get(index)?;
+                let row = self.rows.rows.get(piece.row)?;
                 (row.is_code() && keep(row)).then(|| {
                     (
                         index,
                         LookedAt {
                             key: super::present::RowKey::of(row),
                             on_screen: crate::scroll::rows(index) - offset,
+                            piece: index - self.rows.first_on_screen(piece.row),
                         },
                     )
                 })
@@ -1008,6 +1050,9 @@ struct LookedAt {
     key: super::present::RowKey,
     /// How far down the viewport it is, in rows.
     on_screen: f64,
+    /// Which of the line's screen rows it is, when the line wraps; the other view, as wide,
+    /// wraps the line alike.
+    piece: usize,
 }
 
 #[cfg(test)]

@@ -991,9 +991,12 @@ impl Model {
             hunk_line: self
                 .hunk_rows
                 .get(hunk)
-                .and_then(|rows| self.rows.rows.get(rows.start))
+                .and_then(|rows| self.rows.row_on_screen(rows.start))
                 .and_then(|row| RowKey::of(row).head()),
-            top: self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of),
+            top: self
+                .rows
+                .row_on_screen(Anchor::at(offset).row)
+                .map(RowKey::of),
             anchor: diff_anchor(&self.rows, offset),
             buffer: self
                 .buffer
@@ -1072,7 +1075,7 @@ impl Model {
         self.diff_scroll.stop();
         self.diff_scroll.jump(frame::clamp(
             diff_offset(&self.rows, top),
-            self.rows.rows.len(),
+            self.rows.screen.len(),
             viewport,
         ));
 
@@ -1192,8 +1195,7 @@ impl Model {
             .filter_map(|(hunk, rows)| {
                 let head = self
                     .rows
-                    .rows
-                    .get(rows.start)
+                    .row_on_screen(rows.start)
                     .and_then(|row| RowKey::of(row).head())?;
                 Some((hunk, head.abs_diff(line)))
             })

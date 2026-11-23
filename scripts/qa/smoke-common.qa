@@ -111,6 +111,14 @@ key tab
 state
 expect "mode":"Diff"
 
+# w wraps the diff's long lines onto rows of their own, and w again cuts them.
+key w
+state
+expect "wrap":true
+key w
+state
+expect "wrap":false
+
 # j and k step through the hunks in the diff; n and N step through the files in the tree's
 # order: from the diff each file shows at its first hunk that needs the reviewer, and in the
 # tree the cursor moves and previews it.

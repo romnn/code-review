@@ -545,19 +545,26 @@ impl Model {
                 })
             })
         });
-        let row = self.rows.rows.iter().position(|row| {
-            row.cells()
-                .any(|cell| cell.head.as_ref().is_some_and(|head| head.line == line))
+        // The screen row that shows the hit's column of that line, on the side it shows on.
+        let screen = self.rows.rows.iter().enumerate().find_map(|(index, row)| {
+            row.sides()
+                .into_iter()
+                .enumerate()
+                .find_map(|(side, cell)| {
+                    cell?.head.as_ref().filter(|head| head.line == line)?;
+                    let byte = cell?.shown_at(column, true);
+                    Some(self.rows.screen_row_of(index, side, byte))
+                })
         });
         if let Some(hunk) = hunk {
             self.enter_mode(Mode::Diff);
             self.select_hunk(hunk);
-            if let Some(row) = row.filter(|row| {
+            if let Some(screen) = screen.filter(|screen| {
                 self.hunk_rows
                     .get(hunk)
-                    .is_some_and(|rows| rows.contains(row))
+                    .is_some_and(|rows| rows.contains(screen))
             }) {
-                self.reveal_match(row);
+                self.reveal_match(screen..screen + 1);
             }
         } else {
             self.enter_buffer();

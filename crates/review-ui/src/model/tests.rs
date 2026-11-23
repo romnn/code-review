@@ -257,6 +257,7 @@ fn settings() -> Settings {
                 cross_files: config.cross_files,
                 soft_unselected: config.soft_unselected,
                 token_emphasis: config.token_emphasis,
+                wrap: config.wrap,
             },
             preview: None,
         },
@@ -1693,12 +1694,14 @@ fn engine_line(host: &mut Host) -> (usize, String) {
         .unwrap()
 }
 
-/// A single press in the diff's whole column at `row` and `col`.
+/// A single press in the diff's whole column at `row` and `col`, on rows that do not wrap,
+/// so each row is its own screen row.
 fn text_press(row: usize, col: usize) -> TextPress {
     TextPress {
         pane: Pane::Diff,
         column: Column::Whole,
         pos: TextPos { row, col },
+        screen: row,
         clicks: 1,
         extend: false,
     }
@@ -1831,6 +1834,173 @@ fn notes_move_by_what_they_draw() {
             shift: 1.0,
             cut: true
         }
+    );
+}
+
+/// The first row of the diff whose line wraps, with its screen rows.
+fn wrapped_row(model: &Model) -> (usize, std::ops::Range<usize>) {
+    (0..model.rows.rows.len())
+        .map(|row| (row, model.rows.screen_rows(row)))
+        .find(|(_, screen)| screen.len() > 1)
+        .unwrap()
+}
+
+/// `w` wraps long lines onto screen rows of their own, which nothing pans past, while the rows
+/// stay: a drag across a break selects and copies one line, and a press past a short piece's
+/// end lands at that end, not in the next piece. `w` again cuts the lines as before.
+#[test]
+fn long_lines_wrap_and_still_copy_as_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    let rows = host.model().rows.rows.len();
+    host.dispatch(Action::ToggleWrap);
+    lay_out(&mut host);
+    let model = host.model();
+    assert!(model.look().wrap);
+    assert!(model.rows.screen.len() > rows, "long lines take more rows");
+    assert_eq!(model.rows.rows.len(), rows, "the rows stay");
+    for screen in 0..model.rows.screen.len() {
+        let shown = model.diff_shown(screen, Column::Whole).unwrap_or_default();
+        assert!(
+            crate::paint::display::display_width(shown) <= 40,
+            "{shown:?} fits its room"
+        );
+    }
+    let wrapped_extent = model.unified_text.extent();
+
+    // Only the tool's own rows still pan; the code stays where it wraps.
+    host.dispatch(Action::PanRight);
+    assert_eq!(host.model().code_offset(), 0.0);
+    let model = host.model();
+    let (row, screen) = wrapped_row(model);
+    let rows::Body::Code(cell) = &model.rows.rows[row].body else {
+        panic!("a wrapped line across the width");
+    };
+    let code = cell.code().to_owned();
+    let second = model.rows.screen[screen.start + 1].shown[0]
+        .clone()
+        .unwrap();
+    let start = model.diff_pos(screen.start, Column::Whole, Hit::Byte(0));
+    let end = model.diff_pos(screen.start + 1, Column::Whole, Hit::End);
+    assert_eq!(start, Some(TextPos { row, col: 0 }));
+    assert_eq!(
+        model.diff_pos(screen.start, Column::Whole, Hit::Byte(1000)),
+        Some(TextPos {
+            row,
+            col: second.start
+        }),
+        "past the first piece's end, at its end"
+    );
+    host.update(|model| {
+        model.press_text(TextPress {
+            screen: screen.start,
+            ..text_press(row, 0)
+        });
+        model.drag_text(Pane::Diff, end.unwrap());
+    });
+    assert_eq!(
+        host.model().selected_text().as_deref(),
+        code.get(..second.end.min(code.len())),
+        "one line, without a break where it wraps"
+    );
+
+    host.dispatch(Action::ToggleWrap);
+    lay_out(&mut host);
+    let model = host.model();
+    assert_eq!(model.rows.screen.len(), rows);
+    assert_eq!(model.rows.wrapped, None);
+    assert!(
+        model.unified_text.extent() > wrapped_extent,
+        "long lines pan again"
+    );
+}
+
+/// Finding text on a later piece of a wrapped line scrolls to the screen row that shows it,
+/// not only to the line's first.
+#[test]
+fn a_match_on_a_wrapped_piece_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleWrap);
+    // Narrow enough that the line's first screen row and its last are far apart.
+    let narrow = Geometry {
+        diff_list: 12.0,
+        ..fixed_window()
+    };
+    host.update(|model| model.layout(narrow, Instant::now()));
+    // The last piece of the last line that wraps, which is far down the file.
+    let model = host.model();
+    let (row, screen) = (0..model.rows.rows.len())
+        .rev()
+        .map(|row| (row, model.rows.screen_rows(row)))
+        .find(|(_, screen)| screen.len() > 6)
+        .unwrap();
+    let last = screen.end - 1;
+    let query = model
+        .diff_shown(last, Column::Whole)
+        .unwrap()
+        .trim()
+        .to_owned();
+    host.update(|model| model.drag_list_to(List::Diff, 0.0));
+    host.dispatch(Action::OpenFind);
+    host.update(|model| model.edit_field(Field::Find, &query));
+    host.update(|model| model.submit_field(Field::Find));
+    let model = host.model();
+    let find = model.find.as_ref().unwrap();
+    let found = find.current.and_then(|current| find.matches.get(current));
+    assert_eq!(found.map(|found| found.row), Some(row), "{query:?}");
+    let top = model.diff_scroll.target();
+    let shows = scroll::rows(last) >= top && scroll::rows(last) + 1.0 <= top + 40.0;
+    assert!(shows, "screen row {last} shows from {top}");
+}
+
+/// A narrower diff wraps its lines again without laying them out anew: the selection still
+/// names the same text, and the text at the top stays at the top.
+#[test]
+fn a_resize_rewraps_and_keeps_the_selection_and_the_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleWrap);
+    lay_out(&mut host);
+    let (row, screen) = wrapped_row(host.model());
+    // The second piece of the line at the top, and a word of the line selected.
+    host.update(|model| {
+        model.drag_list_to(List::Diff, scroll::rows(screen.start + 1));
+        model.press_text(TextPress {
+            clicks: 2,
+            screen: screen.start,
+            ..text_press(row, 0)
+        });
+    });
+    let top = |model: &Model| {
+        let screen = scroll::whole_rows(model.diff_scroll.offset());
+        let piece = &model.rows.screen[screen];
+        (piece.row, piece.shown[0].clone().unwrap())
+    };
+    let (_, before) = top(host.model());
+    let selected = host.model().selected_text();
+    assert!(selected.is_some());
+
+    let narrower = Geometry {
+        diff_list: 30.0,
+        ..fixed_window()
+    };
+    host.update(|model| model.layout(narrower, Instant::now()));
+    let model = host.model();
+    assert_eq!(model.rows.wrapped.map(|room| room.whole), Some(30));
+    assert_eq!(model.selected_text(), selected, "the same text selected");
+    let (at, piece) = top(model);
+    assert_eq!(at, row, "the same line at the top");
+    assert!(
+        piece.start <= before.start && before.start < piece.end,
+        "the piece at the top holds the byte that was there: {piece:?}, {before:?}"
     );
 }
 

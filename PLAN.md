@@ -1049,7 +1049,7 @@ it, muted, so it never reads as code.
   - `+` widens the diff across the window and `_` brings the split back; `i` opens the pull
     request overview and `?` the keys, both overlays that own the keyboard until closed.
   - `|` shows the diff side by side or unified, `f` or `v` the whole file or hunks apart (below),
-    `zA` shows or folds approved hunks in the hunks view, `S` cycles the diff styles, and `T`
+    `w` wraps long lines or cuts them (below), `zA` shows or folds approved hunks in the hunks view, `S` cycles the diff styles, and `T`
     or `,` opens the settings list (below).
 - **Pickers.** Telescope's two most used, from every mode, as overlays that own the keyboard
   and the pointer: `Ctrl+P` finds a file by a fuzzy match of its path (`nucleo-matcher`, the
@@ -1228,7 +1228,12 @@ it, muted, so it never reads as code.
   the same width (`Note::width`) that sets how far the code pans.
   Shift+←/→ (or `z H`/`z L`) pans the code of either layout, and a line or a row of the tool's
   own that runs past the right edge ends in a dim `…`, so a clipped line never reads as
-  complete. When a half
+  complete. `w` (`[diff] wrap`, off by default) wraps long lines of code instead, in either
+  layout, after the last space that fits and never inside a cluster, each piece after the first
+  marked with a dim `↪` where the sign goes; wrapped code never pans, while the tool's own rows
+  still do. The rows keep their lines whole and only the screen rows the list scrolls follow
+  the width, so a selection, a find match and the reading place survive a resize; see
+  [ADR 8](adr/0008-long-lines-wrap-onto-screen-rows-that-own-no-text.md). When a half
   would show fewer than 40 cells, the diff shows unified and says so, without changing the
   remembered layout. A selection keeps the half it started in and copies that side's lines,
   skipping padding but keeping blank lines. `/` searches each half apart, the base's half before

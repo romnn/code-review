@@ -10,13 +10,17 @@
 //! Between frames, the model works out its grid from that geometry at its metrics, which a
 //! zoom or a font size's preview may have changed since.
 
+use std::sync::Arc;
 use std::time::Instant;
 
+use super::present::Anchor;
 use super::{Mode, Model};
 use crate::frame::{
-    Geometry, Grid, List, ListScroll, Metrics, PAN_SLACK, Sizes, TextPan, Wheel, pan_extent,
+    self, Geometry, Grid, List, ListScroll, Metrics, PAN_SLACK, Sizes, TextPan, Wheel, pan_extent,
 };
 use crate::paint::display::display_width;
+use crate::rows::{self, WrapRoom};
+use crate::scroll;
 
 impl Model {
     /// What the geometry depends on now.
@@ -71,19 +75,25 @@ impl Model {
         if self.presentation_in(&grid) != self.presented {
             self.transition(|_| {});
         }
+        self.follow_wrap();
         // How far the code can move follows the rows the diff shows, the tool's own among them,
         // and the buffer's lines.
         if self.list_shown(List::Diff) {
             let sizes = self.sizes();
-            let widest_code = self.rows.widest_code.map(|(_, cells)| cells);
+            // Wrapped code never runs past its room; only the tool's own rows still pan.
+            let wrapped = self.rows.wrapped.is_some();
+            let widest_code = self
+                .rows
+                .widest_code
+                .filter(|_| !wrapped)
+                .map(|(_, cells)| cells);
+            let widest_half = if wrapped { 0 } else { self.rows.widest_half };
             let notes = self.rows.widest_annotation.map_or(0.0, |(_, cells)| {
                 self.geometry.annotation_overflow(&sizes, cells)
             });
             let notes = if notes > 0.0 { notes + PAN_SLACK } else { 0.0 };
             if self.side_by_side() {
-                let extent = self
-                    .geometry
-                    .text_extent(&sizes, self.rows.widest_half, widest_code);
+                let extent = self.geometry.text_extent(&sizes, widest_half, widest_code);
                 self.text.set_extent(extent.max(notes));
             } else {
                 let room = self.code_room();
@@ -121,7 +131,7 @@ impl Model {
     #[must_use]
     pub fn list_rows(&self, list: List) -> usize {
         match list {
-            List::Diff => self.rows.rows.len(),
+            List::Diff => self.rows.screen.len(),
             List::Buffer => self
                 .buffer
                 .as_ref()
@@ -244,6 +254,68 @@ impl Model {
         } else {
             &self.unified_text
         }
+    }
+
+    /// How far the diff's code has moved left, in code cells: none while long lines wrap,
+    /// though the tool's own rows still pan by [`Self::diff_text`].
+    #[must_use]
+    pub fn code_offset(&self) -> f64 {
+        if self.rows.wrapped.is_some() {
+            0.0
+        } else {
+            self.diff_text().offset()
+        }
+    }
+
+    /// The room long lines of the diff wrap at now: `None` unless they wrap, and until the
+    /// diff has been laid out.
+    pub(super) fn wrap_room(&self) -> Option<WrapRoom> {
+        if !self.look().wrap || self.geometry.diff_list <= 0.0 {
+            return None;
+        }
+        let sizes = self.sizes();
+        let cells = |room: f64| scroll::whole_rows(room).max(1);
+        Some(WrapRoom {
+            whole: cells(self.geometry.code_room(&sizes)),
+            half: cells(self.geometry.half_room(&sizes)),
+        })
+    }
+
+    /// Lays the diff's rows out on screen again when the room its long lines wrap at changed,
+    /// or whether they wrap, keeping the text at the top where it is: the same byte of the same
+    /// line, whichever screen row now shows it.
+    ///
+    /// The rows themselves stay, and with them a selection, the find matches and the search's
+    /// place, which all name text rather than screen rows.
+    pub(super) fn follow_wrap(&mut self) {
+        let room = self.wrap_room();
+        if room == self.rows.wrapped {
+            return;
+        }
+        let top = Anchor::at(self.diff_scroll.offset());
+        // The top's row, and the side and byte of its line that the screen row starts at.
+        let place = self.rows.screen.get(top.row).map(|piece| {
+            let shown = piece
+                .shown
+                .iter()
+                .enumerate()
+                .find_map(|(side, shown)| shown.as_ref().map(|shown| (side, shown.start)));
+            (piece.row, shown)
+        });
+        // Motion aimed at the old screen rows stops.
+        self.diff_scroll.stop();
+        rows::project(Arc::make_mut(&mut self.rows), room);
+        self.hunk_rows = super::hunk_rows(&self.rows);
+        let screen = place.map_or(0, |(row, shown)| match shown {
+            Some((side, byte)) => self.rows.screen_row_of(row, side, byte),
+            None => self.rows.first_on_screen(row),
+        });
+        let viewport = self.grid().viewports.diff;
+        self.diff_scroll.jump(frame::clamp(
+            top.offset(screen),
+            self.rows.screen.len(),
+            viewport,
+        ));
     }
 
     fn diff_text_mut(&mut self) -> &mut TextPan {

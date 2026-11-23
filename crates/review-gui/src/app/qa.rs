@@ -650,7 +650,7 @@ impl ReviewApp {
         let viewport = self.lists.handles.diff.viewport_bounds();
         let height = f32::from(viewport.size.height);
         let rows = scroll::whole(offset / row_height)
-            ..scroll::whole(((offset + height) / row_height).ceil()).min(self.rows.rows.len());
+            ..scroll::whole(((offset + height) / row_height).ceil()).min(self.rows.screen.len());
         review_ui::qa::state(
             self,
             &WindowScreen {

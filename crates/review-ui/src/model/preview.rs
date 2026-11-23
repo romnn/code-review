@@ -154,7 +154,10 @@ impl Model {
     pub(super) fn rebuild_folder(&mut self) {
         let offset = self.diff_scroll.offset();
         let top = diff_anchor(&self.rows, offset);
-        let key = self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of);
+        let key = self
+            .rows
+            .row_on_screen(Anchor::at(offset).row)
+            .map(RowKey::of);
         self.build_selected();
         if let Some(row) = key.and_then(|key| key.find(&self.rows)) {
             self.diff_scroll
@@ -227,11 +230,11 @@ impl Model {
         ))
     }
 
-    /// Opens the file the preview shows at diff row `row`, or else at its reading line, in
+    /// Opens the file the preview shows at screen row `row`, or else at its reading line, in
     /// its own diff with that line where it was on screen, at its hunk there or the nearest
     /// one of that file. Returns whether a file opened; the caller gives the diff the keys.
     pub(super) fn open_from_folder(&mut self, row: Option<usize>) -> bool {
-        if self.folder.is_none() || self.rows.rows.is_empty() {
+        if self.folder.is_none() || self.rows.screen.is_empty() {
             return false;
         }
         let offset = self.diff_scroll.offset();
@@ -239,10 +242,17 @@ impl Model {
             let viewport = self.grid().viewports.diff.unwrap_or(0.0);
             scroll::whole_rows(offset + viewport * scroll::READING_LINE)
         });
-        let row = row.min(self.rows.rows.len() - 1);
-        let Some(target) = self.rows.rows.get(row) else {
+        let row = row.min(self.rows.screen.len() - 1);
+        let Some(target) = self.rows.row_on_screen(row) else {
             return false;
         };
+        // Which of its line's screen rows it is: the file's own diff, as wide, wraps the line
+        // alike.
+        let piece = self
+            .rows
+            .screen
+            .get(row)
+            .map_or(0, |piece| row - self.rows.first_on_screen(piece.row));
         let file = target.file;
         let Some(path) = self
             .rows
@@ -260,13 +270,15 @@ impl Model {
         // The preview ends here, so the file's own rows replace it.
         self.show_file(&path);
         let landed = key.find(&self.rows).map(|source| {
+            let line = self.rows.projected.get(source).copied().unwrap_or(0);
+            let pieces = self.rows.screen_rows(line).len();
             diff_offset(
                 &self.rows,
                 Anchor {
                     row: source,
                     fraction: 0.0,
                 },
-            )
+            ) + scroll::rows(piece.min(pieces.saturating_sub(1)))
         });
         if let Some(landed) = landed {
             self.diff_scroll.jump((landed - on_screen).max(0.0));

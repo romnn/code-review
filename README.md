@@ -89,6 +89,7 @@ shows within a second, keeping your place, and only what you mark is recorded.
 | `y`, right click | Copy the text selected with the mouse; `Y` copies the hunk's unit ID |
 | `/`, `Ctrl+P`, `Ctrl+G` | Find in the diff, find a file, search file contents |
 | `f`, `v` | The whole file around its changes, or each hunk apart |
+| `w` | Wrap long lines, or cut them and pan sideways |
 | `\|`, `S` | Side by side or unified, next diff style |
 | `T` | Settings: themes, diff styles, density, layout |
 | `i` | Pull request overview |

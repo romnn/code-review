@@ -6,7 +6,8 @@
 //!
 //! [`build`] lays out the unified rows; [`present`](fn@present) then projects them for the
 //! layout and density the reviewer chose, pairing lines side by side and adding air, without
-//! deciding anything new about what shows.
+//! deciding anything new about what shows; [`project`] lays those rows out on the screen rows
+//! the list scrolls, wrapping long lines when asked.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -25,8 +26,10 @@ use review_core::{
 mod moves;
 mod once;
 mod present;
+mod wrap;
 
 pub use present::{Presentation, present};
+pub use wrap::{ScreenRow, WrapRoom, project};
 
 /// What a row shows, which decides its color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +309,17 @@ impl Row {
         first.into_iter().chain(second)
     }
 
+    /// The row's lines of code by side, as [`ScreenRow::shown`] names them: the line across
+    /// the width or a pair's left line, then a pair's right line.
+    #[must_use]
+    pub fn sides(&self) -> [Option<&Cell>; 2] {
+        match &self.body {
+            Body::Code(cell) => [Some(cell), None],
+            Body::Pair(pair) => [pair.left.as_ref(), pair.right.as_ref()],
+            Body::Note(_) => [None, None],
+        }
+    }
+
     /// The row as a unified code row's or a note's text; a pair has none of its own.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -538,6 +552,72 @@ pub struct Layout {
     /// What each display hunk's header says, by index into [`Self::hunks`], whether or not
     /// the hunk has a header row: the file view shows the selected hunk's in the file header.
     pub hunk_notes: Vec<Note>,
+    /// The rows on screen, which the list scrolls, as [`project`] lays them out: one for each
+    /// row, or more for a line that wraps. Everything else here counts rows, not screen rows.
+    pub screen: Vec<ScreenRow>,
+    /// For each row, its first screen row, then the count of screen rows: row `r` shows on
+    /// `starts[r]..starts[r + 1]`.
+    pub starts: Vec<usize>,
+    /// The room long lines wrapped at, `None` while they do not wrap.
+    pub wrapped: Option<WrapRoom>,
+}
+
+impl Layout {
+    /// The row screen row `screen` shows a piece of.
+    #[must_use]
+    pub fn row_on_screen(&self, screen: usize) -> Option<&Row> {
+        self.rows.get(self.screen.get(screen)?.row)
+    }
+
+    /// The screen rows row `row` shows on; none past the last row.
+    #[must_use]
+    pub fn screen_rows(&self, row: usize) -> Range<usize> {
+        match (self.starts.get(row), self.starts.get(row + 1)) {
+            (Some(&start), Some(&end)) => start..end,
+            _ => self.screen.len()..self.screen.len(),
+        }
+    }
+
+    /// The rows screen rows `screen` show pieces of.
+    #[must_use]
+    pub fn rows_on_screen(&self, screen: Range<usize>) -> Range<usize> {
+        let row = |index: usize| self.screen.get(index).map(|piece| piece.row);
+        match (row(screen.start), screen.end.checked_sub(1).and_then(row)) {
+            (Some(start), Some(last)) => start..last + 1,
+            _ => 0..0,
+        }
+    }
+
+    /// The first screen row of row `row`, the end of the screen past the last row.
+    #[must_use]
+    pub fn first_on_screen(&self, row: usize) -> usize {
+        self.screen_rows(row).start
+    }
+
+    /// Whether screen row `screen` shows the first piece of its row, where the line number and
+    /// sign show.
+    #[must_use]
+    pub fn starts_row(&self, screen: usize) -> bool {
+        self.screen
+            .get(screen)
+            .is_some_and(|piece| self.first_on_screen(piece.row) == screen)
+    }
+
+    /// The screen row of row `row` that shows byte `byte` of its line on `side` (0 across the
+    /// width or on the left, 1 on the right): the last piece starting at or before it.
+    #[must_use]
+    pub fn screen_row_of(&self, row: usize, side: usize, byte: usize) -> usize {
+        let rows = self.screen_rows(row);
+        let start = rows.start;
+        rows.rev()
+            .find(|&screen| {
+                self.screen
+                    .get(screen)
+                    .and_then(|piece| piece.shown.get(side)?.as_ref())
+                    .is_some_and(|shown| shown.start <= byte)
+            })
+            .unwrap_or(start)
+    }
 }
 
 /// Lays out `units` (in review order) of `view` as unified rows, applying `folds`.

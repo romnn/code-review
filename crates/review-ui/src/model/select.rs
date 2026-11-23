@@ -43,6 +43,17 @@ fn deleted(row: &Row, column: Column) -> &[std::ops::Range<usize>] {
     cell.map_or(&[], |cell| &cell.deleted)
 }
 
+/// Where on a screen row of the diff the pointer is, for [`Model::diff_pos`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    /// At this byte of the text the row draws.
+    Byte(usize),
+    /// Above the list: at the start of what the row draws.
+    Start,
+    /// Below the list, or past the text the row draws: at its end.
+    End,
+}
+
 /// A press of the main button on text of the diff or the buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextPress {
@@ -52,6 +63,9 @@ pub struct TextPress {
     pub column: Column,
     /// Where in the pane's text the press is.
     pub pos: TextPos,
+    /// The screen row pressed, which is `pos.row` but in the diff, whose rows can take
+    /// several screen rows each.
+    pub screen: usize,
     /// Which click of a quick series it is: 2 selects a word, 3 or more a line.
     pub clicks: usize,
     /// Whether it extends the selection, as Shift does.
@@ -71,6 +85,47 @@ impl Model {
                 .and_then(|buffer| buffer.lines.lines.get(row))
                 .map(String::as_str),
         }
+    }
+
+    /// The text of `column` that screen row `screen` of the diff draws: a line's piece, a
+    /// note's text, or nothing on a side without a line or past where it ended.
+    #[must_use]
+    pub fn diff_shown(&self, screen: usize, column: Column) -> Option<&str> {
+        let range = self.diff_shown_range(screen, column)?;
+        let row = self.rows.row_on_screen(screen)?;
+        row_text(row, column)?.get(range)
+    }
+
+    /// The bytes of its row's text in `column` that screen row `screen` of the diff draws.
+    fn diff_shown_range(&self, screen: usize, column: Column) -> Option<std::ops::Range<usize>> {
+        let piece = self.rows.screen.get(screen)?;
+        match &self.rows.rows.get(piece.row)?.body {
+            Body::Note(note) => Some(0..note.text.len()),
+            Body::Code(_) | Body::Pair(_) => {
+                let side = usize::from(column == Column::Right);
+                piece.shown.get(side)?.clone()
+            }
+        }
+    }
+
+    /// Where `hit` on screen row `screen` of the diff is in its text in `column`: kept within
+    /// what the row draws, so a press past a wrapped piece's end lands at its end rather than
+    /// in the next one, and within the code copying takes.
+    #[must_use]
+    pub fn diff_pos(&self, screen: usize, column: Column, hit: Hit) -> Option<TextPos> {
+        let row = self.rows.screen.get(screen)?.row;
+        let len = self.copyable(Pane::Diff, column, row).map_or(0, str::len);
+        // A side whose line ended on an earlier screen row draws nothing: past its line's end.
+        let shown = self.diff_shown_range(screen, column).unwrap_or(len..len);
+        let col = match hit {
+            Hit::Byte(byte) => (shown.start + byte).min(shown.end),
+            Hit::Start => shown.start,
+            Hit::End => shown.end,
+        };
+        Some(TextPos {
+            row,
+            col: col.min(len),
+        })
     }
 
     /// The selected text; a selection across rows of the diff leaves out our annotations, and
@@ -123,6 +178,7 @@ impl Model {
             pane,
             column,
             pos,
+            screen,
             clicks,
             extend,
         } = press;
@@ -132,7 +188,7 @@ impl Model {
                     // A press in a folder's diff opens the file pressed, at the line pressed;
                     // the rows it pressed are gone, so nothing else of the press applies.
                     if self.folder.is_some() {
-                        if self.open_from_folder(Some(pos.row)) {
+                        if self.open_from_folder(Some(screen)) {
                             self.enter_mode(Mode::Diff);
                         }
                         return;

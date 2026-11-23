@@ -166,6 +166,8 @@ pub struct Look {
     pub soft_unselected: bool,
     /// Whether changed tokens within a line are underlined.
     pub token_emphasis: bool,
+    /// Whether long lines of code wrap onto more rows rather than pan sideways.
+    pub wrap: bool,
 }
 
 /// The look the reviewer applied, and the one previewed over it.

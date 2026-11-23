@@ -263,11 +263,11 @@ pub(crate) fn opening(
     }
 }
 
-/// The diff's top as a unified row of `layout`, from an offset in rows.
+/// The diff's top as a unified row of `layout`, from an offset in screen rows.
 #[must_use]
 pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> Anchor {
     let top = Anchor::at(offset);
-    match layout.rows.get(top.row) {
+    match layout.row_on_screen(top.row) {
         Some(row) => Anchor {
             row: row.source,
             ..top
@@ -276,11 +276,12 @@ pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> Anchor {
     }
 }
 
-/// The offset in rows that shows `anchor`, a unified row, at the top of `layout`.
+/// The offset in screen rows that shows `anchor`, a unified row, at the top of `layout`: its
+/// first screen row when its line wraps.
 #[must_use]
 pub(crate) fn diff_offset(layout: &Layout, anchor: Anchor) -> f64 {
     let row = layout.projected.get(anchor.row).copied().unwrap_or(0);
-    anchor.offset(row)
+    anchor.offset(layout.first_on_screen(row))
 }
 
 impl Model {
@@ -302,7 +303,10 @@ impl Model {
         let offset = self.diff_scroll.target();
         Places {
             diff: diff_anchor(&self.rows, offset),
-            diff_key: self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of),
+            diff_key: self
+                .rows
+                .row_on_screen(Anchor::at(offset).row)
+                .map(RowKey::of),
             approved: self.folds.approved,
             policy: self.policy(),
             view: self.presented.view,
@@ -381,7 +385,7 @@ impl Model {
             tree: tree_viewport,
             ..
         } = grid.viewports;
-        let rows = self.rows.rows.len();
+        let rows = self.rows.screen.len();
         self.diff_scroll.jump(frame::clamp(
             diff_offset(&self.rows, diff),
             rows,
@@ -398,6 +402,9 @@ impl Model {
         ));
         self.text.clamp_to_extent();
         self.unified_text.clamp_to_extent();
+        // A wrap turned on or off, or a code size that changes the room, lays the rows out on
+        // screen again.
+        self.follow_wrap();
     }
 
     /// `Ctrl+=`, `Ctrl+-` and `Ctrl+0`: the code size, kept to a sane range.

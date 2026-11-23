@@ -51,7 +51,7 @@ pub fn draw(
     let text_offset = text_offset(model);
     for (offset, y) in (list.top()..list.bottom()).enumerate() {
         let index = first + offset;
-        let Some(row) = model.rows.rows.get(index) else {
+        let Some(row) = model.rows.row_on_screen(index) else {
             break;
         };
         let at = RowAt {
@@ -69,13 +69,13 @@ pub fn draw(
 
 /// How far the diff's code has moved left, in whole cells.
 fn text_offset(model: &Model) -> usize {
-    review_ui::scroll::whole_rows(model.diff_text().offset())
+    review_ui::scroll::whole_rows(model.code_offset())
 }
 
 /// Where a diff row is drawn.
 #[derive(Debug, Clone, Copy)]
 struct RowAt {
-    /// The row's index among the diff's rows.
+    /// The screen row's index among the diff's screen rows.
     index: usize,
     /// The screen row.
     y: u16,
@@ -230,8 +230,9 @@ fn code_cell(
         foreground: parts.text_color.unwrap_or(palette.text),
         background: bg,
     };
-    let taken = painter.layered(text_at, y, text_room, skip, &cell.text, &parts.layers, ink);
-    let cells = DisplayLine::new(&cell.text).width();
+    let text = cell.text.get(parts.shown.clone()).unwrap_or_default();
+    let taken = painter.layered(text_at, y, text_room, skip, text, &parts.layers, ink);
+    let cells = DisplayLine::new(text).width();
     if let Some(blank) = &parts.blank {
         let blank_at = text_at + taken;
         if blank_at < right && cells >= skip {

@@ -346,6 +346,13 @@ impl Geometry {
         f64::from(room.max(0.0)) / f64::from(sizes.code_cell)
     }
 
+    /// The code cells a side of a side-by-side row has room for, after its gutter and sign.
+    #[must_use]
+    pub(crate) fn half_room(&self, sizes: &Sizes) -> f64 {
+        let room = self.diff_half - sizes.gutter - sizes.sign;
+        f64::from(room.max(0.0)) / f64::from(sizes.code_cell)
+    }
+
     /// Whether the buffer list has been laid out, so its room is known.
     #[must_use]
     pub(crate) fn buffer_measured(&self) -> bool {

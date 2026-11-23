@@ -61,7 +61,7 @@ pub fn display_width(text: &str) -> usize {
         return text.len() + tabs * (TAB_CELLS - 1);
     }
     let mut cells = 0;
-    walk(text, |_, shape| cells += shape.cells());
+    walk(text, |_, shape, _| cells += shape.cells());
     cells
 }
 
@@ -110,6 +110,9 @@ struct Part {
     /// Whether each byte of its shown text, all ASCII, takes a cell of its own, as a
     /// placeholder's and a tab's do; otherwise its shown text is one cluster.
     spread: bool,
+    /// Whether it starts a cluster of the source line, where the line may wrap: a part inside
+    /// one shows only together with the parts before it.
+    cluster: bool,
 }
 
 /// A line as it shows; see the module documentation.
@@ -140,12 +143,13 @@ impl DisplayLine {
         let mut text = String::with_capacity(line.len());
         let mut parts = Vec::with_capacity(line.len() + 1);
         let mut cell = 0;
-        walk(line, |byte, shape| {
+        walk(line, |byte, shape, cluster| {
             parts.push(Part {
                 byte,
                 shown: text.len(),
                 cell,
                 spread: !matches!(shape, Shape::Text { .. }),
+                cluster,
             });
             shape.push_to(&mut text);
             cell += shape.cells();
@@ -155,6 +159,7 @@ impl DisplayLine {
             shown: text.len(),
             cell,
             spread: false,
+            cluster: true,
         });
         Self { text, parts }
     }
@@ -309,6 +314,64 @@ impl DisplayLine {
         };
         self.parts.get(cut).map_or(0, |part| part.byte)
     }
+
+    /// The bytes of the source line each row shows when the line wraps at `cells` cells, in
+    /// order and covering it whole; an empty line takes one empty row.
+    ///
+    /// Rows break only between clusters, so a cluster or a placeholder is never split and one
+    /// wider than `cells` takes a row alone. A row ends after the last space or tab that fits
+    /// behind some other text, so words stay whole, and otherwise as far as it fits.
+    #[must_use]
+    pub fn wrap(&self, cells: usize) -> Vec<Range<usize>> {
+        let end = self.parts.len().saturating_sub(1);
+        let breaks = |index: usize| self.parts.get(index).is_some_and(|part| part.cluster);
+        let cell = |index: usize| self.parts.get(index).map_or(0, |part| part.cell);
+        let byte = |index: usize| self.parts.get(index).map_or(0, |part| part.byte);
+        let mut rows = Vec::new();
+        let mut first = 0;
+        while first < end {
+            let room = cell(first) + cells;
+            // Where the clusters after the row's first end, each a place the row may break.
+            let mut ends = (first + 1..=end).filter(|&index| breaks(index));
+            let alone = ends.next().unwrap_or(end);
+            let fitting: Vec<usize> = std::iter::once(alone)
+                .chain(ends)
+                .take_while(|&index| cell(index) <= room)
+                .collect();
+            let last = match fitting.last() {
+                None => alone,
+                Some(&reach) if reach == end => reach,
+                Some(&reach) => fitting
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&index| {
+                        self.is_space(index - 1)
+                            && breaks(index - 1)
+                            && (first..index - 1).any(|before| !self.is_space(before))
+                    })
+                    .unwrap_or(reach),
+            };
+            rows.push(byte(first)..byte(last));
+            first = last;
+        }
+        if rows.is_empty() {
+            rows.push(0..0);
+        }
+        rows
+    }
+
+    /// Whether part `index` shows as blank space: a space or a tab.
+    fn is_space(&self, index: usize) -> bool {
+        let shown = |index: usize| self.parts.get(index).map(|part| part.shown);
+        match (shown(index), shown(index + 1)) {
+            (Some(start), Some(end)) => self
+                .text
+                .get(start..end)
+                .is_some_and(|text| !text.is_empty() && text.bytes().all(|byte| byte == b' ')),
+            _ => false,
+        }
+    }
 }
 
 /// Whether `line` is printable ASCII and tabs, as most code is, which needs no clusters.
@@ -349,8 +412,9 @@ impl Shape<'_> {
     }
 }
 
-/// Calls `each` with the first byte and the shape of every part of `line`, in order.
-fn walk<'a>(line: &'a str, mut each: impl FnMut(usize, Shape<'a>)) {
+/// Calls `each` with the first byte and the shape of every part of `line`, in order, and
+/// whether the part starts a cluster.
+fn walk<'a>(line: &'a str, mut each: impl FnMut(usize, Shape<'a>, bool)) {
     if is_plain(line) {
         for (byte, character) in line.char_indices() {
             let shape = match character {
@@ -360,12 +424,14 @@ fn walk<'a>(line: &'a str, mut each: impl FnMut(usize, Shape<'a>)) {
                     cells: 1,
                 },
             };
-            each(byte, shape);
+            each(byte, shape, true);
         }
         return;
     }
     for (start, cluster) in line.grapheme_indices(true) {
-        cluster_parts(start, cluster, &mut each);
+        cluster_parts(start, cluster, &mut |byte, shape| {
+            each(byte, shape, byte == start);
+        });
     }
 }
 
@@ -573,6 +639,45 @@ mod tests {
         assert_eq!(ellipsize_middle("ab漢字cd.rs", 6), "ab…rs");
         // Control characters count as the caret notation they show as.
         assert_eq!(ellipsize_middle("a\u{1b}bcdefgh", 6), "a^[…gh");
+    }
+
+    /// The rows `line` wraps onto at `cells`, as text.
+    fn wrapped(line: &str, cells: usize) -> Vec<&str> {
+        DisplayLine::new(line)
+            .wrap(cells)
+            .into_iter()
+            .map(|range| &line[range])
+            .collect()
+    }
+
+    /// Wrapping breaks after the last space that fits, keeps words whole, and cuts a word
+    /// longer than the room where it runs out; the rows cover the line exactly.
+    #[test]
+    fn lines_wrap_after_spaces_and_cut_long_words() {
+        assert_eq!(
+            wrapped("the reference date of this evaluation", 16),
+            ["the reference ", "date of this ", "evaluation"]
+        );
+        assert_eq!(wrapped("fits", 4), ["fits"]);
+        assert_eq!(wrapped("", 4), [""]);
+        assert_eq!(wrapped("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        // Indentation alone is no place to break, and a word that ends at the edge leaves the
+        // space after it for the next row.
+        assert_eq!(wrapped("    longword", 6), ["    lo", "ngword"]);
+        assert_eq!(wrapped("abcd efgh", 4), ["abcd", " efg", "h"]);
+    }
+
+    /// A tab, a placeholder and a wide cluster each stay whole on one row, and one wider than
+    /// the room takes a row alone.
+    #[test]
+    fn wrapping_never_splits_what_shows_as_one() {
+        assert_eq!(wrapped("ab\tcd", 4), ["ab", "\t", "cd"]);
+        assert_eq!(wrapped("a\u{202e}b", 4), ["a", "\u{202e}", "b"]);
+        assert_eq!(wrapped("a漢字", 2), ["a", "漢", "字"]);
+        assert_eq!(wrapped("漢字", 1), ["漢", "字"]);
+        // A joiner between letters shows as its code inside the cluster of the letter before
+        // it, which stays whole however little room it has.
+        assert_eq!(wrapped("a\u{200d}b", 3), ["a\u{200d}", "b"]);
     }
 
     /// The texts and cells of `line`'s glyphs.
