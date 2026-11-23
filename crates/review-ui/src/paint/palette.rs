@@ -16,7 +16,7 @@ const HEADER_TINT: f32 = 0.22;
 /// What a hunk asks of the reviewer, which colors its header and, while selected, its bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkTone {
-    /// Something in it still needs the reviewer: blue.
+    /// Something in it still needs the reviewer: the theme's neutral open color.
     Open,
     /// All of it is approved: green.
     Approved,
@@ -43,6 +43,14 @@ const NOTE_TINT: f32 = 0.08;
 /// background, so it is about as strong as a changed line's.
 const MOVED_LINE_SHARE: f32 = 0.75;
 
+/// How far the selected approved hunk's band moves from the band toward the raised gray, a
+/// step brighter than the other approved hunks'.
+const SELECTED_BAND_SHARE: f32 = 0.5;
+
+/// How far a line changed in place moves from the modified color toward the editor's
+/// background: softer than a removed or an added line, since most of its code is unchanged.
+const EDITED_LINE_SHARE: f32 = 0.8;
+
 /// The colors of the window, by role, from the theme and the configured diff colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
@@ -52,6 +60,8 @@ pub struct Palette {
     pub surface: Hsla,
     /// Behind the rows of a hunk and the tool's own rows.
     pub band: Hsla,
+    /// Behind the rows of the selected hunk once approved: a step brighter than the band.
+    pub selected_band: Hsla,
     /// A step above the band: hunk headers, the cursor's row, chips.
     pub raised: Hsla,
     /// Rules and borders.
@@ -109,6 +119,9 @@ pub struct Palette {
     /// A moved line's background: the move's color as faint as a changed line's, after the
     /// diff style's muting.
     pub moved_line: Hsla,
+    /// A line changed in place's background: the modified color, soft, after the diff style's
+    /// muting.
+    pub edited_line: Hsla,
     /// A removed line's text, in a style without syntax colors.
     pub removed_text: Hsla,
     /// An added line's text, likewise.
@@ -154,6 +167,7 @@ impl Palette {
             background: theme.ui.background,
             surface: theme.ui.panel,
             band: theme.ui.band,
+            selected_band: theme::mix(theme.ui.band, theme.ui.raised, SELECTED_BAND_SHARE),
             raised: theme.ui.raised,
             hairline: theme.ui.hairline,
             text: theme.ui.text,
@@ -184,6 +198,10 @@ impl Palette {
             moved_line: line(
                 None,
                 theme::mix(theme.kind.moved, theme.ui.background, MOVED_LINE_SHARE),
+            ),
+            edited_line: line(
+                None,
+                theme::mix(theme.kind.modified, theme.ui.background, EDITED_LINE_SHARE),
             ),
             removed_text: theme.diff.removed_text,
             added_text: theme.diff.added_text,
@@ -231,11 +249,13 @@ impl Palette {
         }
     }
 
-    /// The solid color of a hunk of `tone` while selected: its header and its bar.
+    /// The solid color of a hunk of `tone`: its bar, its mark on the ruler and its header's
+    /// tint, as the files tree colors the same states. Open is the theme's neutral color, so it
+    /// never reads as approved or flagged, whatever hues the theme gives those.
     #[must_use]
     pub fn hunk_solid(&self, tone: HunkTone) -> Hsla {
         match tone {
-            HunkTone::Open => self.accent,
+            HunkTone::Open => self.open,
             HunkTone::Approved => self.accepted,
             HunkTone::Flagged => self.flagged,
         }
@@ -334,7 +354,7 @@ mod tests {
 
     fn header_colors(palette: &Palette, theme: &str) {
         let palette = *palette;
-        assert_eq!(palette.hunk_solid(HunkTone::Open), palette.accent);
+        assert_eq!(palette.hunk_solid(HunkTone::Open), palette.open);
         assert_eq!(palette.hunk_solid(HunkTone::Approved), palette.accepted);
         assert_eq!(palette.hunk_solid(HunkTone::Flagged), palette.flagged);
         assert_eq!(palette.hunk_header(HunkTone::Open), palette.raised);

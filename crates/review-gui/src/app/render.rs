@@ -863,6 +863,7 @@ impl ReviewApp {
             )
             .child(scroll::wheel_layer(cx.entity().downgrade(), List::Diff))
             .child(list)
+            .child(ruler(code::ruler(self, &colors)))
             .child(Scrollbar::vertical(&self.lists.diff_bar).mode(ScrollbarMode::Always))
             .child(Scrollbar::horizontal(&self.lists.text_bar))
             .children(empty.map(|card| {
@@ -1317,6 +1318,34 @@ pub(super) fn frame_bar(frame: Frame, colors: &Palette) -> Div {
         ),
         None => room,
     }
+}
+
+/// The lane of the diff's vertical scrollbar where its thumb runs, which the ruler marks:
+/// gpui-component's thumb is this wide, this far from the right edge.
+const RULER_WIDTH: f32 = 6.0;
+const RULER_INSET: f32 = 4.0;
+
+/// The least height of a ruler mark, so a one-line hunk of a long file still shows.
+const RULER_MIN_HEIGHT: f32 = 2.0;
+
+/// The diff's ruler: `marks` along the scrollbar's track, under its thumb.
+fn ruler(marks: Vec<code::RulerMark>) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right(px(RULER_INSET))
+        .w(px(RULER_WIDTH))
+        .children(marks.into_iter().map(|mark| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(relative(mark.start))
+                .h(relative(mark.end - mark.start))
+                .min_h(px(RULER_MIN_HEIGHT))
+                .bg(to_gpui(mark.color))
+        }))
 }
 
 /// A reviewed/total meter, for text cells `cell` pixels wide.

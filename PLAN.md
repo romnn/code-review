@@ -1101,13 +1101,21 @@ it, muted, so it never reads as code.
   shows it: no hunk headers, no gaps of unchanged lines, and approved hunks and reviewed files
   open, so every change reads in its context and approving one never moves the code. A hunk
   shows only by its lines and a bar along its left edge: the selected hunk's across the frame
-  in the solid color of its state, an approved one's a quieter green sliver and a flagged one's
-  a quieter red sliver, so the selected hunk shows at a glance. Approved code loses its diff
-  colors in every style, in either view: no line background, no red or green text and no
-  change bar, only its `+` and `−` signs, its added lines reading as the file's code and its
-  removed lines faded, as code that is gone; what still needs the reviewer is all that stays
-  in color. In the file view an approved hunk sits on the gray band the hunks view gives every
-  hunk, so approved code still stands apart from the file around it. In the bold style, `[diff] soft_unselected` (on by default, in the configuration
+  in the solid color of its state, every other hunk's a quieter, narrower bar of it, as the
+  files tree colors the same states: the theme's neutral text color while it still needs the
+  reviewer, green once approved and red once flagged, so no theme's hues can make open code
+  read as approved, and the selected hunk and each hunk's state show at a glance, whatever its
+  lines look like. The selected hunk's line numbers are in the text color, the others' quiet.
+  Approved code loses
+  its diff colors in every style, in either view: no line background, no red or green text and
+  no change bar, only its `+` and `−` signs, its added lines reading as the file's code and its
+  removed lines faded, as code that is gone, and a line changed in place its soft background,
+  its deleted text struck out in gray; what still needs the reviewer is all that stays in
+  color. review-gui marks each hunk that still needs the reviewer, or was flagged, on the
+  diff's scrollbar track in its state's color, so what is left of a long diff shows without
+  scrolling to it. In the file view an approved hunk sits on the gray band the hunks view gives
+  every hunk, so approved code still stands apart from the file around it, the selected one on
+  a brighter gray. In the bold style, `[diff] soft_unselected` (on by default, in the configuration
   file only) gives every hunk but the selected one soft line backgrounds, so the selected one
   stands out the more. Each change is a hunk of its own, a stop for `j`/`k` and a
   mark of its own, where the hunks view joins changes a few lines apart under one header with
@@ -1135,11 +1143,12 @@ it, muted, so it never reads as code.
   the tag italic and in parentheses, four cells apart, on the header's own background, so
   nothing breaks the band as a chip would; unchanged lines left out are one rule (`15
   unchanged lines`, Enter shows more); a note is a block of italic yellow text with a yellow
-  bar; every hunk has a gray bar along its left edge, and its header is a gray band that turns
-  green once all of it is approved and red once some of it is flagged. The selected hunk's bar
-  takes the solid color of its state, blue while it still needs the reviewer, green once
-  approved, red once flagged, and its header is plain, on the editor's own background, as the
-  file view's code is, so each hunk's start, extent and state show at a glance.
+  bar; every hunk has a bar along its left edge, as in the file view, and its header is a gray
+  band that turns green once all of it is approved and red once some of it is flagged. The
+  selected hunk's bar takes the solid color of its state, neutral while it still needs the
+  reviewer, green once approved, red once flagged, and its header is plain, on the editor's own
+  background, as the file view's code is, so each hunk's start, extent and state show at a
+  glance.
   Enter or `p` (as `za`) shows a folded hunk's code and folds it again. Approved hunks fold to
   their header, and unchanged lines between folded hunks or between one and the file's edge
   show nothing, not even a gap rule or a blank row, so a run of folded hunks reads as a list of
@@ -1184,8 +1193,10 @@ it, muted, so it never reads as code.
   `[diff] style` remembers the choice (the older `syntax` reads as `bold`), and the bar's `S`
   hint names the style in use. In the unified layout a hunk shows its code once where nothing
   that changed would hide, as [ADR 6](adr/0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md)
-  describes: a line changed in place has a `~` and no line color, so what stayed the same reads
-  as unchanged code, re-indented or rewrapped or not, and marks the tokens it inserted behind a
+  describes, with the line colors of
+  [ADR 7](adr/0007-a-hunk-shows-its-review-state-in-its-bar.md): a line changed in place has a
+  `~` and, until approved, only a soft line color of the modified kind, neither red nor green, so what stayed the same reads as unchanged code,
+  re-indented or rewrapped or not, and marks the tokens it inserted behind a
   stronger green and the ones it deleted struck out in red where they stood; copying and find
   skip the deleted text. Elsewhere a hunk shows its old lines above its new ones, and each line
   marks the words it changed behind a stronger red or green, and a line deleted or added whole
