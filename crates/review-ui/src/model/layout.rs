@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::present::Anchor;
+use super::present::{diff_anchor, diff_offset};
 use super::{Mode, Model};
 use crate::frame::{
     self, Geometry, Grid, List, ListScroll, Metrics, PAN_SLACK, Sizes, TextPan, Wheel, pan_extent,
@@ -292,27 +292,14 @@ impl Model {
         if room == self.rows.wrapped {
             return;
         }
-        let top = Anchor::at(self.diff_scroll.offset());
-        // The top's row, and the side and byte of its line that the screen row starts at.
-        let place = self.rows.screen.get(top.row).map(|piece| {
-            let shown = piece
-                .shown
-                .iter()
-                .enumerate()
-                .find_map(|(side, shown)| shown.as_ref().map(|shown| (side, shown.start)));
-            (piece.row, shown)
-        });
+        let place = diff_anchor(&self.rows, self.diff_scroll.offset());
         // Motion aimed at the old screen rows stops.
         self.diff_scroll.stop();
         rows::project(Arc::make_mut(&mut self.rows), room);
         self.hunk_rows = super::hunk_rows(&self.rows);
-        let screen = place.map_or(0, |(row, shown)| match shown {
-            Some((side, byte)) => self.rows.screen_row_of(row, side, byte),
-            None => self.rows.first_on_screen(row),
-        });
         let viewport = self.grid().viewports.diff;
         self.diff_scroll.jump(frame::clamp(
-            top.offset(screen),
+            diff_offset(&self.rows, place),
             self.rows.screen.len(),
             viewport,
         ));

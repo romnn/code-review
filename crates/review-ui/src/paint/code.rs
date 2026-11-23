@@ -247,22 +247,25 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
         ink.text_color = faded.then_some(palette.faint);
         ink.bar = None;
     }
+    // Only the runs within what the screen row shows are built, so a long line that wraps
+    // onto many screen rows is not styled whole for each of them.
+    let bounds = shown.clone().unwrap_or(cell.text.len()..cell.text.len());
     let syntax = if faded {
         Vec::new()
     } else {
-        syntax_layer(model, palette, at.file, cell)
+        syntax_layer(model, palette, at.file, cell, &bounds)
     };
     let mut layers = vec![syntax];
     if !approved {
-        layers.push(moved_edit_layer(cell, palette));
+        layers.push(moved_edit_layer(cell, palette, &bounds));
     }
     // Under the find matches and the selection, which tint behind the text and leave deleted
     // text its red and its line.
-    layers.push(marks_layer(model, cell, palette, approved));
+    layers.push(marks_layer(model, cell, palette, approved, &bounds));
     if let Some(find) = model.search_of(Mode::Diff) {
         let current = find.current.and_then(|current| find.matches.get(current));
         layers.push(around_deleted(
-            match_layer(&find.matches, current, line, Some(at.column), palette),
+            match_layer(&find.matches, current, line, at.column, &bounds, palette),
             &cell.deleted,
         ));
     }
@@ -295,10 +298,14 @@ pub fn code_cell(model: &Model, palette: &Palette, at: At, cell: &Cell) -> CodeC
             Piece::new("", palette.faint),
             Piece::new("↪", palette.faint),
         ),
-        None => (
-            Piece::new("", palette.faint),
-            Piece::new(" ", palette.faint),
-        ),
+        None => {
+            // A side whose line ended shows its background alone, without the change bar.
+            ink.bar = None;
+            (
+                Piece::new("", palette.faint),
+                Piece::new(" ", palette.faint),
+            )
+        }
     };
     let shown = shown.unwrap_or(cell.text.len()..cell.text.len());
     CodeCell {
@@ -485,7 +492,13 @@ pub fn syntax_runs(theme: &Theme, spans: &[Span], len: usize) -> Layer {
 /// A style without them, as lazygit draws a diff, has none anywhere, only red and green
 /// changed lines.
 /// A line of the head takes the head's colors, any other line of the base the base's.
-fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> Layer {
+fn syntax_layer(
+    model: &Model,
+    palette: &Palette,
+    file: usize,
+    cell: &Cell,
+    bounds: &Range<usize>,
+) -> Layer {
     let style = &model.look().style;
     if !style.syntax {
         return Vec::new();
@@ -518,6 +531,7 @@ fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> L
             .collect();
         spans = &shifted;
     }
+    let spans = overlapping(spans, bounds, |(range, _)| range);
     let mut layer = syntax_runs(model.theme(), spans, cell.content_len);
     // On a tinted line, dim colors such as comments lift toward the text color until they
     // stay readable against the line's final background.
@@ -545,7 +559,7 @@ fn syntax_layer(model: &Model, palette: &Palette, file: usize, cell: &Cell) -> L
 /// The words a move's edit changed, behind a stronger shade of the line's color, as delta marks
 /// them, so what the move edited stands out within the code it carried; and the indentation a
 /// re-indented line gained, in the move's color.
-fn moved_edit_layer(cell: &Cell, palette: &Palette) -> Layer {
+fn moved_edit_layer(cell: &Cell, palette: &Palette, bounds: &Range<usize>) -> Layer {
     let color = match cell.kind {
         _ if !cell.moved => return Vec::new(),
         RowKind::NestedOld => palette.removed_sign,
@@ -554,8 +568,7 @@ fn moved_edit_layer(cell: &Cell, palette: &Palette) -> Layer {
         RowKind::NestedSame => palette.moved,
         _ => return Vec::new(),
     };
-    cell.highlights
-        .iter()
+    within_bounds(&cell.highlights, bounds)
         .map(|range| Run {
             range: range.clone(),
             style: Style::behind(color.alpha(MOVED_EDIT_ALPHA)),
@@ -573,7 +586,13 @@ const MARK_ALPHA: f32 = 0.4;
 /// edited line always marks the tokens it inserted and strikes out the ones it deleted, which
 /// never read as code, in red until approved and gray after; a removed or an added line marks
 /// its changed words when the look emphasizes them.
-fn marks_layer(model: &Model, cell: &Cell, palette: &Palette, approved: bool) -> Layer {
+fn marks_layer(
+    model: &Model,
+    cell: &Cell,
+    palette: &Palette,
+    approved: bool,
+    bounds: &Range<usize>,
+) -> Layer {
     if cell.kind == RowKind::Edited {
         // Deleted text keeps a tint when approved too: it is no code, and a deleted space, or
         // any deleted text in a terminal that draws no line through it, has no other cue.
@@ -588,16 +607,14 @@ fn marks_layer(model: &Model, cell: &Cell, palette: &Palette, approved: bool) ->
             strikethrough: true,
             ..Style::default()
         };
-        let mut layer: Layer = cell
-            .deleted
-            .iter()
+        let mut layer: Layer = within_bounds(&cell.deleted, bounds)
             .map(|range| Run {
                 range: range.clone(),
                 style: deleted,
             })
             .collect();
         if !approved {
-            layer.extend(cell.highlights.iter().map(|range| Run {
+            layer.extend(within_bounds(&cell.highlights, bounds).map(|range| Run {
                 range: range.clone(),
                 style: Style::behind(palette.added_sign.alpha(MARK_ALPHA)),
             }));
@@ -613,13 +630,36 @@ fn marks_layer(model: &Model, cell: &Cell, palette: &Palette, approved: bool) ->
         RowKind::Added => palette.added_sign,
         _ => return Vec::new(),
     };
-    cell.highlights
-        .iter()
+    within_bounds(&cell.highlights, bounds)
         .map(|range| Run {
             range: range.clone(),
             style: Style::behind(color.alpha(MARK_ALPHA)),
         })
         .collect()
+}
+
+/// The ranges of `ranges` that reach into `bounds`.
+fn within_bounds<'a>(
+    ranges: &'a [Range<usize>],
+    bounds: &Range<usize>,
+) -> impl Iterator<Item = &'a Range<usize>> {
+    let bounds = bounds.clone();
+    ranges
+        .iter()
+        .filter(move |range| range.start < bounds.end && bounds.start < range.end)
+}
+
+/// The items of `items` that reach into `bounds`, found by binary search: `range` gives each
+/// item's bytes, which are sorted and do not overlap.
+fn overlapping<'a, T>(
+    items: &'a [T],
+    bounds: &Range<usize>,
+    range: impl Fn(&T) -> &Range<usize>,
+) -> &'a [T] {
+    let start = items.partition_point(|item| range(item).end <= bounds.start);
+    let rest = items.get(start..).unwrap_or_default();
+    let end = rest.partition_point(|item| range(item).start < bounds.end);
+    rest.get(..end).unwrap_or_default()
 }
 
 /// `layer` apart from an edited line's `deleted` text, which is no code to find or select, so
@@ -653,22 +693,25 @@ fn around_deleted(layer: Layer, deleted: &[std::ops::Range<usize>]) -> Layer {
     parts
 }
 
-/// The find matches on row `row`, in `column` when one is given: the current one as a solid
-/// block, the others tinted.
+/// The find matches on row `row` in `column` that reach into `bounds`: the current one as a
+/// solid block, the others tinted.
+///
+/// Matches are sorted by row, then column, then bytes, so those are found by binary search.
 fn match_layer(
     matches: &[Match],
     current: Option<&Match>,
     row: usize,
-    column: Option<Column>,
+    column: Column,
+    bounds: &Range<usize>,
     palette: &Palette,
 ) -> Layer {
-    let start = matches.partition_point(|found| found.row < row);
-    matches
-        .get(start..)
-        .unwrap_or_default()
+    let start = matches.partition_point(|found| (found.row, found.column) < (row, column));
+    let ours = matches.get(start..).unwrap_or_default();
+    let ours = ours
+        .get(..ours.partition_point(|found| (found.row, found.column) == (row, column)))
+        .unwrap_or_default();
+    overlapping(ours, bounds, |found| &found.range)
         .iter()
-        .take_while(|found| found.row == row)
-        .filter(|found| column.is_none_or(|column| found.column == column))
         .map(|found| Run {
             range: found.range.clone(),
             style: if current == Some(found) {
@@ -757,7 +800,8 @@ impl BufferLines {
             &self.matches,
             self.current.as_ref(),
             index,
-            None,
+            Column::Whole,
+            &(0..line.len()),
             palette,
         ));
         if let Some(range) = self

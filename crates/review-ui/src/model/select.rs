@@ -87,13 +87,21 @@ impl Model {
         }
     }
 
-    /// The text of `column` that screen row `screen` of the diff draws: a line's piece, a
-    /// note's text, or nothing on a side without a line or past where it ended.
+    /// The text of `column` that screen row `screen` of the diff draws: a line's piece, its
+    /// line-ending marker included, a note's text, or nothing on a side without a line or past
+    /// where it ended.
     #[must_use]
     pub fn diff_shown(&self, screen: usize, column: Column) -> Option<&str> {
         let range = self.diff_shown_range(screen, column)?;
         let row = self.rows.row_on_screen(screen)?;
-        row_text(row, column)?.get(range)
+        let text = match &row.body {
+            Body::Note(note) => &note.text,
+            Body::Code(_) | Body::Pair(_) => {
+                let side = usize::from(column == Column::Right);
+                &row.sides().get(side).copied().flatten()?.text
+            }
+        };
+        text.get(range)
     }
 
     /// The bytes of its row's text in `column` that screen row `screen` of the diff draws.

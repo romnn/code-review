@@ -13,7 +13,7 @@ use std::sync::Arc;
 use review_core::UnitId;
 use review_core::tree::NodeKind;
 
-use super::present::{Anchor, RowKey, diff_anchor, diff_offset};
+use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::{Mode, Model};
 use crate::config::DiffView;
 use crate::rows::{self, Layout};
@@ -161,7 +161,7 @@ impl Model {
         self.build_selected();
         if let Some(row) = key.and_then(|key| key.find(&self.rows)) {
             self.diff_scroll
-                .jump(diff_offset(&self.rows, Anchor { row, ..top }));
+                .jump(diff_offset(&self.rows, top.on_row(row)));
         }
     }
 
@@ -246,13 +246,8 @@ impl Model {
         let Some(target) = self.rows.row_on_screen(row) else {
             return false;
         };
-        // Which of its line's screen rows it is: the file's own diff, as wide, wraps the line
-        // alike.
-        let piece = self
-            .rows
-            .screen
-            .get(row)
-            .map_or(0, |piece| row - self.rows.first_on_screen(piece.row));
+        // Where in its line the screen row starts, when the line wraps.
+        let start = diff_anchor(&self.rows, scroll::rows(row)).start;
         let file = target.file;
         let Some(path) = self
             .rows
@@ -270,15 +265,16 @@ impl Model {
         // The preview ends here, so the file's own rows replace it.
         self.show_file(&path);
         let landed = key.find(&self.rows).map(|source| {
-            let line = self.rows.projected.get(source).copied().unwrap_or(0);
-            let pieces = self.rows.screen_rows(line).len();
             diff_offset(
                 &self.rows,
-                Anchor {
-                    row: source,
-                    fraction: 0.0,
+                DiffAnchor {
+                    top: Anchor {
+                        row: source,
+                        fraction: 0.0,
+                    },
+                    start,
                 },
-            ) + scroll::rows(piece.min(pieces.saturating_sub(1)))
+            )
         });
         if let Some(landed) = landed {
             self.diff_scroll.jump((landed - on_screen).max(0.0));

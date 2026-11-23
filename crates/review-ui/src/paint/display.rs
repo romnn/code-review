@@ -331,26 +331,32 @@ impl DisplayLine {
         let mut first = 0;
         while first < end {
             let room = cell(first) + cells;
-            // Where the clusters after the row's first end, each a place the row may break.
-            let mut ends = (first + 1..=end).filter(|&index| breaks(index));
-            let alone = ends.next().unwrap_or(end);
-            let fitting: Vec<usize> = std::iter::once(alone)
-                .chain(ends)
-                .take_while(|&index| cell(index) <= room)
-                .collect();
-            let last = match fitting.last() {
-                None => alone,
-                Some(&reach) if reach == end => reach,
-                Some(&reach) => fitting
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|&index| {
-                        self.is_space(index - 1)
-                            && breaks(index - 1)
-                            && (first..index - 1).any(|before| !self.is_space(before))
-                    })
-                    .unwrap_or(reach),
+            // The furthest cluster end that fits, the furthest of those right after a space
+            // with text before it, and the first that does not fit.
+            let mut reach = None;
+            let mut after_space = None;
+            let mut over = end;
+            let mut text = false;
+            for part in first..end {
+                let next = part + 1;
+                let space = self.is_space(part);
+                if breaks(next) {
+                    if cell(next) > room {
+                        over = next;
+                        break;
+                    }
+                    reach = Some(next);
+                    if space && text && breaks(part) {
+                        after_space = Some(next);
+                    }
+                }
+                text |= !space;
+            }
+            let last = match reach {
+                // The row's first cluster is wider than the room, and takes a row alone.
+                None => over,
+                Some(reach) if reach == end => reach,
+                Some(reach) => after_space.unwrap_or(reach),
             };
             rows.push(byte(first)..byte(last));
             first = last;

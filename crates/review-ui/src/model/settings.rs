@@ -889,11 +889,18 @@ impl Model {
             Some((source, line))
         });
         if let Some((source, line)) = kept {
-            let row = self.rows.projected.get(source).copied().unwrap_or(0);
-            let screen = self.rows.screen_rows(row);
-            let at = (screen.start + line.piece).min(screen.end.saturating_sub(1));
+            let at = super::present::diff_offset(
+                &self.rows,
+                super::present::DiffAnchor {
+                    top: super::present::Anchor {
+                        row: source,
+                        fraction: 0.0,
+                    },
+                    start: line.start,
+                },
+            );
             self.diff_scroll.jump(crate::frame::clamp(
-                crate::scroll::rows(at) - line.on_screen,
+                at - line.on_screen,
                 self.rows.screen.len(),
                 viewport,
             ));
@@ -947,15 +954,15 @@ impl Model {
         let reading = offset + viewport * crate::scroll::READING_LINE;
         let mut lines: Vec<(usize, LookedAt)> = (first..last)
             .filter_map(|index| {
-                let piece = self.rows.screen.get(index)?;
-                let row = self.rows.rows.get(piece.row)?;
+                let row = self.rows.row_on_screen(index)?;
                 (row.is_code() && keep(row)).then(|| {
+                    let at = crate::scroll::rows(index);
                     (
                         index,
                         LookedAt {
                             key: super::present::RowKey::of(row),
-                            on_screen: crate::scroll::rows(index) - offset,
-                            piece: index - self.rows.first_on_screen(piece.row),
+                            on_screen: at - offset,
+                            start: super::present::diff_anchor(&self.rows, at).start,
                         },
                     )
                 })
@@ -1050,9 +1057,8 @@ struct LookedAt {
     key: super::present::RowKey,
     /// How far down the viewport it is, in rows.
     on_screen: f64,
-    /// Which of the line's screen rows it is, when the line wraps; the other view, as wide,
-    /// wraps the line alike.
-    piece: usize,
+    /// Where in the line its screen row starts, when the line wraps.
+    start: Option<(usize, usize)>,
 }
 
 #[cfg(test)]

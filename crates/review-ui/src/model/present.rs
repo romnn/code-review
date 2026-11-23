@@ -64,6 +64,28 @@ impl Anchor {
     }
 }
 
+/// Where the diff is: its top as a unified row, and which screen row of that row's line, when
+/// it wraps, by the side and byte of the line that screen row starts at.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct DiffAnchor {
+    /// The unified row at the top, and how far into its screen row.
+    pub(crate) top: Anchor,
+    /// The side (0 across the width or on the left, 1 on the right) and byte of the line that
+    /// the top screen row starts at.
+    pub(crate) start: Option<(usize, usize)>,
+}
+
+impl DiffAnchor {
+    /// The same place on unified row `row`, as when the line is found again in other rows.
+    #[must_use]
+    pub(crate) fn on_row(self, row: usize) -> Self {
+        Self {
+            top: Anchor { row, ..self.top },
+            ..self
+        }
+    }
+}
+
 /// A diff row by what it shows rather than where it is, to find it again in rows laid out
 /// with other folds: its unit, and the head or base line of its code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +228,7 @@ fn several_files(layout: &Layout) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Places {
     /// The diff, by its unified row.
-    pub(crate) diff: Anchor,
+    pub(crate) diff: DiffAnchor,
     /// What the diff's top row shows, for rows laid out with other folds.
     pub(crate) diff_key: Option<RowKey>,
     /// Whether approved hunks folded in the rows the diff's place was taken on.
@@ -263,25 +285,37 @@ pub(crate) fn opening(
     }
 }
 
-/// The diff's top as a unified row of `layout`, from an offset in screen rows.
+/// The diff's place in `layout`, from an offset in screen rows.
 #[must_use]
-pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> Anchor {
+pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> DiffAnchor {
     let top = Anchor::at(offset);
-    match layout.row_on_screen(top.row) {
-        Some(row) => Anchor {
-            row: row.source,
+    let Some(piece) = layout.screen.get(top.row) else {
+        return DiffAnchor::default();
+    };
+    let start = piece
+        .shown
+        .iter()
+        .enumerate()
+        .find_map(|(side, shown)| shown.as_ref().map(|shown| (side, shown.start)));
+    DiffAnchor {
+        top: Anchor {
+            row: layout.rows.get(piece.row).map_or(0, |row| row.source),
             ..top
         },
-        None => Anchor::default(),
+        start,
     }
 }
 
-/// The offset in screen rows that shows `anchor`, a unified row, at the top of `layout`: its
-/// first screen row when its line wraps.
+/// The offset in screen rows that shows `anchor` at the top of `layout`: the screen row of its
+/// row that shows its byte, or else the row's first, as when the line no longer has that side.
 #[must_use]
-pub(crate) fn diff_offset(layout: &Layout, anchor: Anchor) -> f64 {
-    let row = layout.projected.get(anchor.row).copied().unwrap_or(0);
-    anchor.offset(layout.first_on_screen(row))
+pub(crate) fn diff_offset(layout: &Layout, anchor: DiffAnchor) -> f64 {
+    let row = layout.projected.get(anchor.top.row).copied().unwrap_or(0);
+    let screen = match anchor.start {
+        Some((side, byte)) => layout.screen_row_of(row, side, byte),
+        None => layout.first_on_screen(row),
+    };
+    anchor.top.offset(screen)
 }
 
 impl Model {
@@ -374,8 +408,7 @@ impl Model {
                     || self.presented.view != view
                     || self.presented.layout != layout =>
             {
-                key.find(&self.rows)
-                    .map_or(diff, |row| Anchor { row, ..diff })
+                key.find(&self.rows).map_or(diff, |row| diff.on_row(row))
             }
             _ => diff,
         };

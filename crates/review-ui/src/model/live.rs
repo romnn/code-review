@@ -45,7 +45,7 @@ use review_core::{
 
 use super::buffer::Origin;
 use super::effects::{Because, Completion, Outcome, Subject};
-use super::present::{Anchor, RowKey, diff_anchor, diff_offset};
+use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::pulls::Pulls;
 use super::sync::Tick;
 use super::{Effect, Grant, Mode, Model, Phase, is_regular};
@@ -1070,7 +1070,7 @@ impl Model {
                 let unit = moved.any(key.unit().index()).map(|index| view.id(index));
                 key.find_moved(unit, &self.rows)
             })
-            .map_or(was.anchor, |row| Anchor { row, ..was.anchor });
+            .map_or(was.anchor, |row| was.anchor.on_row(row));
         let viewport = self.grid().viewports.diff;
         self.diff_scroll.stop();
         self.diff_scroll.jump(frame::clamp(
@@ -1242,7 +1242,7 @@ struct WasOn {
     /// The diff's top row.
     top: Option<RowKey>,
     /// Where the diff is scrolled.
-    anchor: Anchor,
+    anchor: DiffAnchor,
     /// The cursor of the buffer of a file under review, while the reviewer is in it.
     buffer: Option<crate::text::TextPos>,
     /// The tree node under the cursor.

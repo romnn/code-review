@@ -281,7 +281,7 @@ impl Model {
             .get(self.hunk)
             .map(|rows| rows.start.min(screen.start)..rows.end.max(screen.end))
             .filter(|span| span.len() <= fits);
-        let alone = if screen.len() <= fits {
+        let alone = if screen.len() <= scroll::whole_rows(viewport) {
             screen.clone()
         } else {
             screen.start..screen.start + 1

@@ -1918,6 +1918,119 @@ fn long_lines_wrap_and_still_copy_as_lines() {
     );
 }
 
+/// A change of the diff's look keeps the piece of a wrapped line at the top, not only the line:
+/// a style changes no row, and a larger code size wraps the line again around the same byte.
+#[test]
+fn a_look_change_keeps_the_wrapped_piece_at_the_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleWrap);
+    lay_out(&mut host);
+    let (row, screen) = wrapped_row(host.model());
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(screen.start + 1)));
+    // The byte of the line at the top, and whether the top shows it.
+    let byte = host.model().rows.screen[screen.start + 1].shown[0]
+        .clone()
+        .unwrap()
+        .start;
+    let shows = |model: &Model| {
+        let top = scroll::whole_rows(model.diff_scroll.offset());
+        let piece = &model.rows.screen[top];
+        piece.row == row && piece.shown[0].clone().unwrap().contains(&byte)
+    };
+    host.dispatch(Action::ToggleDiffStyle);
+    assert!(shows(host.model()), "a style keeps it");
+    host.dispatch(Action::ZoomIn);
+    lay_out(&mut host);
+    assert!(shows(host.model()), "a larger code size keeps it");
+}
+
+/// Side by side, a side whose line ended on an earlier screen row shows its background alone:
+/// no number, no sign and no change bar beside the other side's wrapped line.
+#[test]
+fn a_finished_side_shows_no_change_bar() {
+    use crate::paint::Palette;
+    use crate::paint::code::{At, code_cell};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| {
+        model.settings.appearance.applied.style.change_bar = true;
+        model.show_file("src/engine.rs");
+    });
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleLayout);
+    host.dispatch(Action::ToggleWrap);
+    let narrow = Geometry {
+        diff_half: 20.0,
+        ..fixed_window()
+    };
+    host.update(|model| model.layout(narrow, Instant::now()));
+    let model = host.model();
+    let palette = Palette::of(model);
+    // A screen row with a line on its left whose piece ended on an earlier screen row.
+    let (screen, cell, file) = (0..model.rows.screen.len())
+        .find_map(|screen| {
+            let piece = &model.rows.screen[screen];
+            let row = &model.rows.rows[piece.row];
+            let cell = row.sides()[0].filter(|_| piece.shown[0].is_none())?;
+            cell.kind
+                .ne(&rows::RowKind::Context)
+                .then_some((screen, cell, row.file))
+        })
+        .unwrap();
+    let at = At {
+        row: screen,
+        file,
+        column: Column::Left,
+    };
+    let painted = code_cell(model, &palette, at, cell);
+    assert_eq!(painted.bar, None);
+    assert_eq!(painted.number.text, "");
+    assert_eq!(painted.shown, cell.text.len()..cell.text.len());
+}
+
+/// A row draws its line-ending marker after its code, which a press maps to like the code but
+/// never selects: past the code, it lands at the code's end.
+#[test]
+fn a_press_on_a_line_ending_lands_at_the_code_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    let text = "let crlf = 1;␍";
+    let code = "let crlf = 1;".len();
+    host.update(|model| {
+        let mut layout = rows::Layout {
+            rows: vec![rows::Row {
+                file: 0,
+                unit: "u1-0".parse().unwrap(),
+                hunk: None,
+                source: 0,
+                body: rows::Body::Code(rows::Cell {
+                    kind: rows::RowKind::Context,
+                    text: text.to_owned(),
+                    content_len: code,
+                    highlights: Vec::new(),
+                    deleted: Vec::new(),
+                    head: None,
+                    base: None,
+                    quiet: false,
+                    moved: false,
+                }),
+            }],
+            ..rows::Layout::default()
+        };
+        rows::project(&mut layout, None);
+        model.rows = Arc::new(layout);
+    });
+    let model = host.model();
+    assert_eq!(model.diff_shown(0, Column::Whole), Some(text));
+    let at = |byte| model.diff_pos(0, Column::Whole, Hit::Byte(byte));
+    assert_eq!(at(4), Some(TextPos { row: 0, col: 4 }));
+    assert_eq!(at(code + 1), Some(TextPos { row: 0, col: code }));
+}
+
 /// Finding text on a later piece of a wrapped line scrolls to the screen row that shows it,
 /// not only to the line's first.
 #[test]
@@ -1957,6 +2070,54 @@ fn a_match_on_a_wrapped_piece_shows() {
     let top = model.diff_scroll.target();
     let shows = scroll::rows(last) >= top && scroll::rows(last) + 1.0 <= top + 40.0;
     assert!(shows, "screen row {last} shows from {top}");
+}
+
+/// A match several screen rows tall shows whole when the diff is tall enough for it, even when
+/// the margins a match keeps around it no longer fit.
+#[test]
+fn a_tall_match_shows_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleWrap);
+    let short = Geometry {
+        diff_list: 12.0,
+        heights: Heights {
+            diff: Some(12.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    host.update(|model| model.layout(short, Instant::now()));
+    // Seven screen rows of the last line without deleted text that wraps onto eight or more.
+    let model = host.model();
+    let (row, screen) = (0..model.rows.rows.len())
+        .rev()
+        .filter(|&row| {
+            matches!(&model.rows.rows[row].body,
+                rows::Body::Code(cell) if cell.deleted.is_empty())
+        })
+        .map(|row| (row, model.rows.screen_rows(row)))
+        .find(|(_, screen)| screen.len() >= 8)
+        .unwrap();
+    let piece = |index: usize| model.rows.screen[index].shown[0].clone().unwrap();
+    let rows::Body::Code(cell) = &model.rows.rows[row].body else {
+        panic!("a wrapped line across the width");
+    };
+    let query = cell.text[piece(screen.start + 1).start..piece(screen.start + 7).end].to_owned();
+    let (first, last) = (screen.start + 1, screen.start + 7);
+    host.update(|model| model.drag_list_to(List::Diff, 0.0));
+    host.dispatch(Action::OpenFind);
+    host.update(|model| model.edit_field(Field::Find, &query));
+    host.update(|model| model.submit_field(Field::Find));
+    let top = host.model().diff_scroll.target();
+    let shows =
+        |screen: usize| scroll::rows(screen) >= top && scroll::rows(screen) + 1.0 <= top + 12.0;
+    assert!(
+        shows(first) && shows(last),
+        "screen rows {first} to {last} show from {top}"
+    );
 }
 
 /// A narrower diff wraps its lines again without laying them out anew: the selection still

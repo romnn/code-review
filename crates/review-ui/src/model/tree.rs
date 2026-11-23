@@ -167,11 +167,13 @@ impl Model {
         self.diff_scroll.stop();
         // A place taken in the other view names a row of other rows: it is found again by
         // what it showed.
-        let top = place.map_or_else(super::present::Anchor::default, |place| match place.key {
-            Some(key) if place.view != self.presented.view => key
-                .find(&self.rows)
-                .map_or(place.top, |row| super::present::Anchor { row, ..place.top }),
-            _ => place.top,
+        let top = place.map_or_else(super::present::DiffAnchor::default, |place| {
+            match place.key {
+                Some(key) if place.view != self.presented.view => key
+                    .find(&self.rows)
+                    .map_or(place.top, |row| place.top.on_row(row)),
+                _ => place.top,
+            }
         });
         // A file seen for the first time shows from its first change that needs the reviewer,
         // not from its first line.
