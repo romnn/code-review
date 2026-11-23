@@ -7,7 +7,7 @@ use gpui::{
     Context, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Window, point, px,
 };
 use gpui_component::scroll::ScrollbarHandle as _;
-use review_ui::model::{Model, TextPress, list_of};
+use review_ui::model::{Hit, Model, TextPress, list_of};
 use review_ui::rows::Body;
 use review_ui::text::{Column, Pane, TextPos};
 
@@ -32,41 +32,60 @@ impl ReviewApp {
     }
 
     /// Maps a window position over `pane` to a place in its text, reading a pair's line from
-    /// `column`.
+    /// `column`, and the screen row it is on.
     pub(super) fn text_pos(
         &self,
         pane: Pane,
         column: Column,
         position: Point<Pixels>,
-    ) -> Option<TextPos> {
+    ) -> Option<(TextPos, usize)> {
         let list = list_of(pane);
         let last_row = self.list_rows(list).checked_sub(1)?;
         let viewport = self.lists.handle(list).viewport_bounds();
         let y = f32::from(position.y - viewport.top()) + self.offset_px(list);
         let row = scroll::whole(y / self.sizes().row_height()).min(last_row);
-        let len = self.copyable(pane, column, row).map_or(0, str::len);
         // A pair's line is painted in its half; any other row across the whole width.
-        let painted_in = match self.rows.rows.get(row).map(|row| &row.body) {
+        let painted_in = match self.rows.row_on_screen(row).map(|row| &row.body) {
             Some(Body::Pair(_)) if pane == Pane::Diff => column,
             _ => Column::Whole,
         };
-        let col = match self.painted.borrow().get(&(pane, painted_in, row)) {
-            Some(painted) => {
+        // The byte of the painted text under the pointer; the layout is of the shown text,
+        // whose placeholders and tabs are longer than what they stand for.
+        let byte = self
+            .painted
+            .borrow()
+            .get(&(pane, painted_in, row))
+            .map(|painted| {
                 let bounds = painted.layout.bounds();
                 let inside = point(position.x, bounds.center().y);
-                // The layout is of the shown text, whose placeholders and tabs are longer
-                // than what they stand for.
                 match painted.layout.index_for_position(inside) {
                     Ok(index) | Err(index) => painted.line.byte_at_shown(index),
                 }
+            });
+        let above = position.y < viewport.top();
+        let pos = match pane {
+            Pane::Diff => {
+                let hit = match byte {
+                    Some(byte) => Hit::Byte(byte),
+                    None if above => Hit::Start,
+                    None => Hit::End,
+                };
+                self.diff_pos(row, column, hit)?
             }
-            None if position.y < viewport.top() => 0,
-            None => len,
+            Pane::Source => {
+                let len = self.copyable(pane, column, row).map_or(0, str::len);
+                let col = match byte {
+                    Some(byte) => byte,
+                    None if above => 0,
+                    None => len,
+                };
+                TextPos {
+                    row,
+                    col: col.min(len),
+                }
+            }
         };
-        Some(TextPos {
-            row,
-            col: col.min(len),
-        })
+        Some((pos, row))
     }
 
     /// A press in the diff or the buffer, handed to the model at the text under the pointer.
@@ -84,13 +103,14 @@ impl ReviewApp {
             Some(selection) if event.modifiers.shift && selection.pane == pane => selection.column,
             _ => self.column_at(pane, event.position.x),
         };
-        let Some(pos) = self.text_pos(pane, column, event.position) else {
+        let Some((pos, screen)) = self.text_pos(pane, column, event.position) else {
             return;
         };
         let press = TextPress {
             pane,
             column,
             pos,
+            screen,
             clicks: event.click_count,
             extend: event.modifiers.shift,
         };
@@ -142,7 +162,7 @@ impl ReviewApp {
         let column = self
             .selection
             .map_or(Column::Whole, |selection| selection.column);
-        if let Some(pos) = self.text_pos(pane, column, event.position)
+        if let Some((pos, _)) = self.text_pos(pane, column, event.position)
             && self
                 .selection
                 .is_some_and(|selection| selection.pane == pane && selection.head != pos)

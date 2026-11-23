@@ -20,6 +20,8 @@
 //! Places kept for files not shown are row identities too, so returning to a file after a
 //! density change lands on the same line.
 
+use std::sync::Arc;
+
 use super::{Model, ZOOM_RANGE};
 use crate::config::{Approved, Density, DiffLayout, DiffView};
 use crate::frame::{self, Geometry, Grid, Metrics, Scale, Viewports};
@@ -61,6 +63,25 @@ impl Anchor {
     #[must_use]
     pub(crate) fn offset(self, row: usize) -> f64 {
         f64::from(scroll::float(row) + self.fraction)
+    }
+}
+
+/// Where the diff is: its top as a unified row, and which screen row of that row's line, when
+/// it wraps, by the side and byte of the line that screen row starts at.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct DiffAnchor {
+    /// The unified row at the top, and how far into its screen row.
+    pub(crate) top: Anchor,
+    /// The side (0 across the width or on the left, 1 on the right) and byte of the line that
+    /// the top screen row starts at.
+    pub(crate) start: Option<(usize, usize)>,
+}
+
+impl DiffAnchor {
+    /// The place `top`, showing its line from its first screen row.
+    #[must_use]
+    pub(crate) fn line(top: Anchor) -> Self {
+        Self { top, start: None }
     }
 }
 
@@ -201,14 +222,15 @@ fn several_files(layout: &Layout) -> bool {
         .is_some_and(|row| row.kind() == RowKind::FileHeader)
 }
 
-/// Where every list is, by row: the diff by its unified row, the tree and the buffer by their
-/// own rows.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Where every list is, by row: the diff by its screen row in the rows the place was taken on,
+/// the tree and the buffer by their own rows.
+#[derive(Debug, Clone)]
 pub(crate) struct Places {
-    /// The diff, by its unified row.
+    /// The diff, by its screen row in [`Self::rows`].
     pub(crate) diff: Anchor,
-    /// What the diff's top row shows, for rows laid out with other folds.
-    pub(crate) diff_key: Option<RowKey>,
+    /// The diff's rows the place was taken on, to find its line again in the rows after a
+    /// change, and the piece of it when the line wraps.
+    pub(crate) rows: Arc<Layout>,
     /// Whether approved hunks folded in the rows the diff's place was taken on.
     pub(crate) approved: Approved,
     /// Which units counted as approved in those rows, which decides which of them folded.
@@ -263,24 +285,72 @@ pub(crate) fn opening(
     }
 }
 
-/// The diff's top as a unified row of `layout`, from an offset in rows.
+/// The diff's place in `layout`, from an offset in screen rows.
 #[must_use]
-pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> Anchor {
+pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> DiffAnchor {
     let top = Anchor::at(offset);
-    match layout.rows.get(top.row) {
-        Some(row) => Anchor {
-            row: row.source,
+    let Some(piece) = layout.screen.get(top.row) else {
+        return DiffAnchor::default();
+    };
+    DiffAnchor {
+        top: Anchor {
+            row: layout.rows.get(piece.row).map_or(0, |row| row.source),
             ..top
         },
-        None => Anchor::default(),
+        start: piece.start(),
     }
 }
 
-/// The offset in rows that shows `anchor`, a unified row, at the top of `layout`.
+/// Where in its line screen row `screen` of `old` starts, to show the same line on unified row
+/// `source` of `new` at the same piece: only when that row shows the very same line, the same
+/// text of the same numbered line of the same file on the same side; else `None`, which shows
+/// the line from its first screen row. The very same rows show the very same cell; in other
+/// rows, a line without a number, such as one of a nested diff, cannot be told from another of
+/// the same text, so it never carries its piece over.
 #[must_use]
-pub(crate) fn diff_offset(layout: &Layout, anchor: Anchor) -> f64 {
-    let row = layout.projected.get(anchor.row).copied().unwrap_or(0);
-    anchor.offset(row)
+pub(crate) fn same_start(
+    old: &Layout,
+    screen: usize,
+    new: &Layout,
+    source: usize,
+) -> Option<(usize, usize)> {
+    let piece = old.screen.get(screen)?;
+    let (side, byte) = piece.start()?;
+    let row = *new.projected.get(source)?;
+    if std::ptr::eq(old, new) {
+        return (row == piece.row).then_some((side, byte));
+    }
+    let before = old.rows.get(piece.row)?;
+    let after = new.rows.get(row)?;
+    let text = before
+        .sides()
+        .get(side)
+        .copied()
+        .flatten()
+        .filter(|cell| cell.head.is_some() || cell.base.is_some())?;
+    let same_text = after
+        .sides()
+        .get(side)
+        .copied()
+        .flatten()
+        .is_some_and(|cell| {
+            cell.text == text.text && cell.head == text.head && cell.base == text.base
+        });
+    let path = old.files.get(before.file).map(|file| &file.path);
+    let same_file = path.is_some() && path == new.files.get(after.file).map(|file| &file.path);
+    (same_text && same_file).then_some((side, byte))
+}
+
+/// The offset in screen rows that shows `anchor` at the top of `layout`: the screen row of its
+/// row that shows its byte, or else the row's first, as when the line no longer has that side.
+#[must_use]
+pub(crate) fn diff_offset(layout: &Layout, anchor: DiffAnchor) -> f64 {
+    let row = layout.projected.get(anchor.top.row).copied().unwrap_or(0);
+    let screen = match anchor.start {
+        Some((side, byte)) => layout.screen_row_of(row, side, byte),
+        None => layout.first_on_screen(row),
+    };
+    anchor.top.offset(screen)
 }
 
 impl Model {
@@ -301,8 +371,8 @@ impl Model {
     pub(super) fn places(&self) -> Places {
         let offset = self.diff_scroll.target();
         Places {
-            diff: diff_anchor(&self.rows, offset),
-            diff_key: self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of),
+            diff: Anchor::at(offset),
+            rows: Arc::clone(&self.rows),
             approved: self.folds.approved,
             policy: self.policy(),
             view: self.presented.view,
@@ -328,7 +398,7 @@ impl Model {
     pub(super) fn transition_from(&mut self, places: Places, change: impl FnOnce(&mut Self)) {
         let Places {
             diff,
-            diff_key,
+            rows: before,
             approved,
             policy,
             view,
@@ -362,26 +432,37 @@ impl Model {
             self.rebuild();
         }
 
-        // Every list back at its row, within the new extent.
-        let diff = match diff_key {
+        // Every list back at its row, within the new extent. Rows laid out with other folds
+        // are other rows, so the diff's line is found again by what it showed.
+        let top = before.row_on_screen(diff.row);
+        let source = match top.map(RowKey::of) {
             Some(key)
                 if self.folds.approved != approved
                     || self.policy() != policy
                     || self.presented.view != view
                     || self.presented.layout != layout =>
             {
-                key.find(&self.rows)
-                    .map_or(diff, |row| Anchor { row, ..diff })
+                key.find(&self.rows).or(top.map(|row| row.source))
             }
-            _ => diff,
+            _ => top.map(|row| row.source),
         };
+        let diff = source.map_or_else(DiffAnchor::default, |source| DiffAnchor {
+            top: Anchor {
+                row: source,
+                ..diff
+            },
+            start: same_start(&before, diff.row, &self.rows, source),
+        });
+        // Done with the rows the place was taken on, so rewrapping below changes the rows in
+        // place rather than copying them.
+        drop(before);
         let Viewports {
             diff: diff_viewport,
             buffer: buffer_viewport,
             tree: tree_viewport,
             ..
         } = grid.viewports;
-        let rows = self.rows.rows.len();
+        let rows = self.rows.screen.len();
         self.diff_scroll.jump(frame::clamp(
             diff_offset(&self.rows, diff),
             rows,
@@ -398,6 +479,9 @@ impl Model {
         ));
         self.text.clamp_to_extent();
         self.unified_text.clamp_to_extent();
+        // A wrap turned on or off, or a code size that changes the room, lays the rows out on
+        // screen again.
+        self.follow_wrap();
     }
 
     /// `Ctrl+=`, `Ctrl+-` and `Ctrl+0`: the code size, kept to a sane range.

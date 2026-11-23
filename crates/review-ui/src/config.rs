@@ -23,6 +23,8 @@
 //! removed = "#5f1519"   # overrides the theme's line backgrounds
 //! added = "#14471f"
 //! token_emphasis = true   # mark the words removed and added lines changed
+//! wrap = false          # long lines wrap onto more rows rather than pan sideways; `w`
+//!                       # toggles it
 //!
 //! [styles.calm]     # a diff style beside plain, bold and soft: colors only, never spacing
 //! syntax = true         # syntax colors in the diff
@@ -334,6 +336,7 @@ struct DiffSection {
     removed: Option<String>,
     added: Option<String>,
     token_emphasis: Option<bool>,
+    wrap: Option<bool>,
 }
 
 /// A `[styles.<name>]` table as written; every field is optional.
@@ -578,6 +581,8 @@ pub struct Config {
     /// Whether a removed or an added line marks the words it changed; a line shown once always
     /// marks what it inserted and deleted.
     pub token_emphasis: bool,
+    /// Whether long lines of code wrap onto more rows of the diff rather than pan sideways.
+    pub wrap: bool,
     /// Whether proven formatting-only units count as approved without a mark; see
     /// [`review_core::Standing`].
     pub auto_approve_formatting: bool,
@@ -617,6 +622,7 @@ impl Default for Config {
             added: None,
             theme: None,
             token_emphasis: true,
+            wrap: false,
             auto_approve_formatting: true,
             language_servers: true,
             live: true,
@@ -971,6 +977,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
         added: color(file.diff.added)?,
         theme: file.theme.name,
         token_emphasis: file.diff.token_emphasis.unwrap_or(defaults.token_emphasis),
+        wrap: file.diff.wrap.unwrap_or(defaults.wrap),
         auto_approve_formatting: file
             .review
             .auto_approve_formatting

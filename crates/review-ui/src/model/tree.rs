@@ -167,6 +167,7 @@ impl Model {
         self.diff_scroll.stop();
         // A place taken in the other view names a row of other rows: it is found again by
         // what it showed.
+        // A remembered place is its row alone: a wrapped line shows from its start.
         let top = place.map_or_else(super::present::Anchor::default, |place| match place.key {
             Some(key) if place.view != self.presented.view => key
                 .find(&self.rows)
@@ -176,7 +177,9 @@ impl Model {
         // A file seen for the first time shows from its first change that needs the reviewer,
         // not from its first line.
         let offset = match place {
-            Some(_) => super::present::diff_offset(&self.rows, top),
+            Some(_) => {
+                super::present::diff_offset(&self.rows, super::present::DiffAnchor::line(top))
+            }
             None => self.hunk_landing().unwrap_or(0.0),
         };
         self.diff_scroll.jump(offset);
@@ -193,11 +196,10 @@ impl Model {
         }
         if let Some(path) = self.selected.clone() {
             let offset = self.diff_scroll.offset();
-            let top = super::present::diff_anchor(&self.rows, offset);
+            let top = super::present::diff_anchor(&self.rows, offset).top;
             let key = self
                 .rows
-                .rows
-                .get(super::present::Anchor::at(offset).row)
+                .row_on_screen(super::present::Anchor::at(offset).row)
                 .map(super::present::RowKey::of);
             self.places.insert(
                 path,

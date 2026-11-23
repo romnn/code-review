@@ -181,6 +181,7 @@ fn settings_entry(
         | Choice::HunkPosition(_)
         | Choice::CrossFiles(_)
         | Choice::Emphasis(_)
+        | Choice::Wrap(_)
         | Choice::Approved(_)
         | Choice::AutoApprove(_)
         | Choice::FontSize(_) => None,

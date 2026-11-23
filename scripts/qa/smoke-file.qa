@@ -17,11 +17,11 @@ expect "mode":"Diff"
 expect "hunk":2,"hunks"
 expect "hunk_badges":\["Unreviewed"\]
 shot f01-whole-file
-# The file starts at its first line, unchanged code and all, and the approved first hunk still
-# shows its code.
+# The file starts at its first line under the empty row a single file's diff opens with,
+# unchanged code and all, and the approved first hunk still shows its code.
 key g g
 state
-expect "rows":\[\{"row":0,"source":0,"kind":"Context","hunk":null
+expect "rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null[^]]*\{"row":1,"source":1,"kind":"Context","hunk":null
 expect "hunk":0,"hunks"
 expect "hunk_badges":\["Accepted"\]
 expect "kind":"Edited","hunk":0,

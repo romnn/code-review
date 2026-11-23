@@ -642,6 +642,15 @@ const DEFAULTS: &[Default] = &[
         None,
     ),
     (
+        "ToggleWrap",
+        &["w"],
+        &[Area::Tree, Area::Diff],
+        "View",
+        "wrap long lines or pan them",
+        None,
+        None,
+    ),
+    (
         "OpenSettings",
         &["shift-t", ","],
         MODES,

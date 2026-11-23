@@ -139,6 +139,8 @@ pub(super) struct CellParts {
     pub painted_background: Option<review_ui::color::Hsla>,
     /// The text color, for changed lines in a style without syntax colors.
     pub text_color: Option<Hsla>,
+    /// The cells the text takes: the line's, or the piece of it a wrapped row shows.
+    pub cells: usize,
 }
 
 /// A line's number in its file, with the change bar along the gutter's edge when there is one,
@@ -188,7 +190,7 @@ impl ReviewApp {
         let row_height = self.sizes().row_height();
         let rows: Vec<AnyElement> = range
             .filter_map(|index| {
-                let row = self.rows.rows.get(index)?;
+                let row = self.rows.row_on_screen(index)?;
                 let frame = code::frame(self, index);
                 let element = match &row.body {
                     Body::Code(cell) => self
@@ -231,7 +233,9 @@ impl ReviewApp {
             },
             cell,
         );
-        let (text, line) = ink::code(&cell.text, paint::merge(cell.text.len(), &painted.layers));
+        let shown = cell.text.get(painted.shown.clone()).unwrap_or_default();
+        let (text, line) = ink::code(shown, paint::merge(shown.len(), &painted.layers));
+        let cells = line.width();
         let layout = super::PaintedLine {
             layout: text.layout().clone(),
             line,
@@ -252,6 +256,7 @@ impl ReviewApp {
             background: painted.background.map(to_gpui),
             painted_background: painted.background,
             text_color: painted.text_color.map(to_gpui),
+            cells,
         };
         (parts, layout)
     }
@@ -275,7 +280,7 @@ impl ReviewApp {
             colors,
             &[parts.painted_background.or(frame.band(colors))],
         );
-        let marker = self.diff_clip_marker(cell.width(), Column::Whole, behind, colors);
+        let marker = self.diff_clip_marker(parts.cells, Column::Whole, behind, colors);
         // Exactly the list's width, however long the line: the code pans inside it, and the
         // clip marker sits at the list's right edge rather than past the line's end.
         h_flex()
@@ -343,7 +348,11 @@ impl ReviewApp {
                 )
                 .hover(|row| row.bg(to_gpui(colors.band)))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.update_model(window, cx, |model| model.expand_gap(index));
+                    this.update_model(window, cx, |model| {
+                        if let Some(row) = model.rows.screen.get(index).map(|piece| piece.row) {
+                            model.expand_gap(row);
+                        }
+                    });
                 })),
             Annotation::Header(header) => self.hunk_header(header, frame, pan, base, colors),
             Annotation::Note {
@@ -837,7 +846,7 @@ impl ReviewApp {
         // instead, so gutters and the tool's own rows stay put; see `pairs`.
         let list = uniform_list(
             "rows",
-            self.rows.rows.len(),
+            self.rows.screen.len(),
             cx.processor(|this, range, _, cx| this.render_rows(range, cx)),
         )
         .track_scroll(&self.lists.handles.diff)

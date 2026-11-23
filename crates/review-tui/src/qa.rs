@@ -471,7 +471,7 @@ impl CellScreen<'_> {
 impl review_ui::qa::Screen for CellScreen<'_> {
     fn rows(&self) -> Range<usize> {
         let first = first_row(self.model, List::Diff);
-        let end = (first + usize::from(self.list().height)).min(self.model.rows.rows.len());
+        let end = (first + usize::from(self.list().height)).min(self.model.rows.screen.len());
         first.min(end)..end
     }
 

@@ -73,7 +73,7 @@ pub use fields::{Field, FieldState};
 pub use live::{Following, abbreviated, branch_and_base};
 pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
-pub use select::{TextPress, list_of};
+pub use select::{Hit, TextPress, list_of};
 pub use sync::{Sync, SyncStep};
 
 /// How many unchanged lines each expansion of a gap reveals.
@@ -439,7 +439,7 @@ pub struct Model {
     buffer_column_waits: bool,
     /// The settings list, while it is open.
     pub settings_panel: Option<settings::Panel>,
-    /// The rows of each display hunk of [`Self::rows`].
+    /// The screen rows of each display hunk of [`Self::rows`].
     pub hunk_rows: Vec<Range<usize>>,
     /// The selected hunk, by index into the layout's hunks.
     pub hunk: usize,
@@ -1028,6 +1028,8 @@ impl Model {
             self.hunk_rows.clear();
             return;
         };
+        let mut layout = layout;
+        rows::project(&mut layout, self.wrap_room());
         self.rows = Arc::new(layout);
         self.hunk_rows = hunk_rows(&self.rows);
         if let Some(found) =
@@ -1085,7 +1087,8 @@ impl Model {
     /// The row the diff's keyboard target starts at: the selected hunk's header.
     #[must_use]
     pub(crate) fn hunk_start(&self) -> Option<usize> {
-        self.hunk_rows.get(self.hunk).map(|rows| rows.start)
+        let screen = self.hunk_rows.get(self.hunk)?.start;
+        self.rows.screen.get(screen).map(|piece| piece.row)
     }
 
     /// Opens the cheat sheet or the overview over the window.
@@ -1583,11 +1586,13 @@ fn is_regular(side: &review_core::analysis::EntrySide) -> bool {
     side.mode.entry_type() == review_core::git::EntryType::File
 }
 
-/// The row range of each display hunk: the rows that carry its index, which are contiguous.
+/// The screen rows of each display hunk: those of the rows that carry its index, which are
+/// contiguous.
 fn hunk_rows(layout: &Layout) -> Vec<Range<usize>> {
     let mut ranges: Vec<Range<usize>> = vec![0..0; layout.hunks.len()];
-    for (index, row) in layout.rows.iter().enumerate() {
-        if let Some(range) = row.hunk.and_then(|hunk| ranges.get_mut(hunk)) {
+    for index in 0..layout.screen.len() {
+        let hunk = layout.row_on_screen(index).and_then(|row| row.hunk);
+        if let Some(range) = hunk.and_then(|hunk| ranges.get_mut(hunk)) {
             if range.start == range.end {
                 *range = index..index + 1;
             } else {

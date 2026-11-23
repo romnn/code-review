@@ -13,7 +13,7 @@ use std::sync::Arc;
 use review_core::UnitId;
 use review_core::tree::NodeKind;
 
-use super::present::{Anchor, RowKey, diff_anchor, diff_offset};
+use super::present::{Anchor, DiffAnchor, RowKey, diff_offset, same_start};
 use super::{Mode, Model};
 use crate::config::DiffView;
 use crate::rows::{self, Layout};
@@ -153,12 +153,16 @@ impl Model {
     /// files before it can grow or shrink as their text arrives or the view changes.
     pub(super) fn rebuild_folder(&mut self) {
         let offset = self.diff_scroll.offset();
-        let top = diff_anchor(&self.rows, offset);
-        let key = self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of);
+        let top = Anchor::at(offset);
+        let old = Arc::clone(&self.rows);
+        let key = self.rows.row_on_screen(top.row).map(RowKey::of);
         self.build_selected();
         if let Some(row) = key.and_then(|key| key.find(&self.rows)) {
-            self.diff_scroll
-                .jump(diff_offset(&self.rows, Anchor { row, ..top }));
+            let top = DiffAnchor {
+                top: Anchor { row, ..top },
+                start: same_start(&old, top.row, &self.rows, row),
+            };
+            self.diff_scroll.jump(diff_offset(&self.rows, top));
         }
     }
 
@@ -227,11 +231,11 @@ impl Model {
         ))
     }
 
-    /// Opens the file the preview shows at diff row `row`, or else at its reading line, in
+    /// Opens the file the preview shows at screen row `row`, or else at its reading line, in
     /// its own diff with that line where it was on screen, at its hunk there or the nearest
     /// one of that file. Returns whether a file opened; the caller gives the diff the keys.
     pub(super) fn open_from_folder(&mut self, row: Option<usize>) -> bool {
-        if self.folder.is_none() || self.rows.rows.is_empty() {
+        if self.folder.is_none() || self.rows.screen.is_empty() {
             return false;
         }
         let offset = self.diff_scroll.offset();
@@ -239,10 +243,11 @@ impl Model {
             let viewport = self.grid().viewports.diff.unwrap_or(0.0);
             scroll::whole_rows(offset + viewport * scroll::READING_LINE)
         });
-        let row = row.min(self.rows.rows.len() - 1);
-        let Some(target) = self.rows.rows.get(row) else {
+        let row = row.min(self.rows.screen.len() - 1);
+        let Some(target) = self.rows.row_on_screen(row) else {
             return false;
         };
+        let old = Arc::clone(&self.rows);
         let file = target.file;
         let Some(path) = self
             .rows
@@ -262,9 +267,12 @@ impl Model {
         let landed = key.find(&self.rows).map(|source| {
             diff_offset(
                 &self.rows,
-                Anchor {
-                    row: source,
-                    fraction: 0.0,
+                DiffAnchor {
+                    top: Anchor {
+                        row: source,
+                        fraction: 0.0,
+                    },
+                    start: same_start(&old, row, &self.rows, source),
                 },
             )
         });

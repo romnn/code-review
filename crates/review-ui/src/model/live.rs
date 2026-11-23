@@ -45,7 +45,7 @@ use review_core::{
 
 use super::buffer::Origin;
 use super::effects::{Because, Completion, Outcome, Subject};
-use super::present::{Anchor, RowKey, diff_anchor, diff_offset};
+use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::pulls::Pulls;
 use super::sync::Tick;
 use super::{Effect, Grant, Mode, Model, Phase, is_regular};
@@ -991,10 +991,13 @@ impl Model {
             hunk_line: self
                 .hunk_rows
                 .get(hunk)
-                .and_then(|rows| self.rows.rows.get(rows.start))
+                .and_then(|rows| self.rows.row_on_screen(rows.start))
                 .and_then(|row| RowKey::of(row).head()),
-            top: self.rows.rows.get(Anchor::at(offset).row).map(RowKey::of),
-            anchor: diff_anchor(&self.rows, offset),
+            top: self
+                .rows
+                .row_on_screen(Anchor::at(offset).row)
+                .map(RowKey::of),
+            anchor: diff_anchor(&self.rows, offset).top,
             buffer: self
                 .buffer
                 .as_ref()
@@ -1071,8 +1074,8 @@ impl Model {
         let viewport = self.grid().viewports.diff;
         self.diff_scroll.stop();
         self.diff_scroll.jump(frame::clamp(
-            diff_offset(&self.rows, top),
-            self.rows.rows.len(),
+            diff_offset(&self.rows, DiffAnchor::line(top)),
+            self.rows.screen.len(),
             viewport,
         ));
 
@@ -1192,8 +1195,7 @@ impl Model {
             .filter_map(|(hunk, rows)| {
                 let head = self
                     .rows
-                    .rows
-                    .get(rows.start)
+                    .row_on_screen(rows.start)
                     .and_then(|row| RowKey::of(row).head())?;
                 Some((hunk, head.abs_diff(line)))
             })

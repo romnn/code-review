@@ -53,26 +53,26 @@ expect "hunk_badges":\["Accepted"\]
 # their height and their places stay as they were.
 state
 expect "density":"normal"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":82.0,
 expect "row_height":28.0
 key shift-s
 state
 expect "diff_style":"soft"
 expect "background":"muted","change_bar":false
 expect "density":"normal"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":82.0,
 expect "row_height":28.0
 shot 06-soft
 key shift-s
 state
 expect "diff_style":"plain"
 expect "syntax":false,"background":"none"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":82.0,
 shot 06-plain
 key shift-s
 state
 expect "diff_style":"bold"
-expect "row_count":29,"rows":\[\{"row":0,"source":0,"kind":"Header","hunk":0,"y":82.0,
+expect "row_count":27,"rows":\[\{"row":0,"source":0,"kind":"Spacer","hunk":null,"y":82.0,
 
 # Side by side: removed lines beside added ones, each side with its own line numbers; a
 # selection in a half copies that side only, and when the diff gets too narrow it shows
@@ -108,17 +108,17 @@ shot 07-file-done
 # the place, and folds them again.
 state
 expect "approved":"folded"
-expect "row_count":3,"rows":\[\{"row":0,"source":0,"kind":"Header"
+expect "row_count":4,"rows":\[\{"row":0,"source":0,"kind":"Spacer"
 key z shift-a
 state
 expect "approved":"shown"
 expect "status":"Approved hunks shown\."
-expect "row_count":56,
+expect "row_count":58,
 shot 07b-approved-shown
 key z shift-a
 state
 expect "approved":"folded"
-expect "row_count":3,
+expect "row_count":4,
 
 # The settings list: T opens it on the theme in use and j previews the next one; Escape drops
 # the preview and keeps what was applied.
@@ -258,17 +258,17 @@ key u
 key 0
 scroll 5000
 state
-expect "scroll_offset":692.0,
+expect "scroll_offset":748.0,
 key ,
 key tab
 key f o n t
 state
 expect "cursor":"Font size: 10 pt"
-expect "scroll_offset":282.0,
+expect "scroll_offset":324.0,
 key escape
 key escape
 state
-expect "scroll_offset":(692\.0|691\.99[0-9]*),
+expect "scroll_offset":(748\.0|747\.99[0-9]*),
 
 # Clicking beside the settings list closes it and gives the keys back to the mode; clicking
 # its search field gives the field the keys, as Tab does.
@@ -296,7 +296,7 @@ key escape
 file src/engine.rs
 scroll 300
 state
-expect "rows":\[\{"row":24,"source":21,
+expect "rows":\[\{"row":26,"source":23,
 file src/compat.rs
 
 # Zed's look, a setting at a time, each found by search and applied with Enter: One Dark, the
@@ -332,7 +332,7 @@ expect "applied_theme":"one-dark"
 shot 10-zed
 file src/engine.rs
 state
-expect "rows":\[\{"row":[0-9]+,"source":21,
+expect "rows":\[\{"row":[0-9]+,"source":23,
 expect "row_height":30.0
 file src/engine.rs
 
@@ -403,9 +403,9 @@ key n
 key n
 state
 expect "mode":"Diff"
-expect "target":"Diff","query":"balance","matches":6,"current":4
+expect "target":"Diff","query":"balance","matches":11,"current":10
 expect "hunk":2,"hunks"
-expect "status":"Match 5 of 6"
+expect "status":"Match 11 of 11"
 shot 11-diff-find
 key escape
 
@@ -429,7 +429,9 @@ key |
 file src/engine.rs
 
 # Side by side, `/` finds each half's code apart, the base's half first in each row, and
-# highlights a match only in its own half.
+# highlights a match only in its own half: from the selected hunk, whose first match is in its
+# head half, N steps back to a row of unchanged code that matches in both halves, head then
+# base, and n forward again.
 key 0
 key |
 key /
@@ -437,7 +439,13 @@ key b a l a n c e
 key enter
 state
 expect "effective_layout":"side-by-side"
-expect "target":"Diff","query":"balance","matches":[0-9]+,"current":[0-9]+,"current_column":"Left"
+expect "target":"Diff","query":"balance","matches":[0-9]+,"current":[0-9]+,"current_column":"Right"
+key shift-n
+state
+expect "current_column":"Right"
+key shift-n
+state
+expect "current_column":"Left"
 key n
 state
 expect "current_column":"Right"

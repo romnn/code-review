@@ -29,7 +29,7 @@ use review_ui::frame::{List, Scale, Wheel};
 use review_ui::keys::{KeyDown, Keystroke, Matcher, Outcome, Replay, Resolution, Target};
 use review_ui::line_edit::{Edited, LineEdit};
 use review_ui::model::{
-    Action, Completion, Driver, Effect, Field, Loaded, Mode, Model, Overlay, Phase, QuitKind,
+    Action, Completion, Driver, Effect, Field, Hit, Loaded, Mode, Model, Overlay, Phase, QuitKind,
     Settings, TextPress, Updated, list_of,
 };
 use review_ui::paint::display::DisplayLine;
@@ -650,13 +650,14 @@ impl App {
             Some(selection) if shift && selection.pane == pane => selection.column,
             _ => self.column_at(panes, pane, position.x),
         };
-        let Some(pos) = self.text_pos(panes, pane, column, position) else {
+        let Some((pos, screen)) = self.text_pos(panes, pane, column, position) else {
             return;
         };
         let press = TextPress {
             pane,
             column,
             pos,
+            screen,
             clicks: count,
             extend: shift,
         };
@@ -694,7 +695,7 @@ impl App {
             .model()
             .selection
             .map_or(Column::Whole, |selection| selection.column);
-        if let Some(pos) = self.text_pos(panes, pane, column, position) {
+        if let Some((pos, _)) = self.text_pos(panes, pane, column, position) {
             self.update(|model| model.drag_text(pane, pos));
         }
     }
@@ -712,15 +713,16 @@ impl App {
         }
     }
 
-    /// The place in `pane`'s text at `position`, reading a pair's line from `column`: above
-    /// the list, the start of its first row; below it, the end of its last.
+    /// The place in `pane`'s text at `position`, reading a pair's line from `column`, and the
+    /// screen row it is on: above the list, the start of its first row; below it, the end of
+    /// its last.
     fn text_pos(
         &self,
         panes: &Panes,
         pane: Pane,
         column: Column,
         position: Position,
-    ) -> Option<TextPos> {
+    ) -> Option<(TextPos, usize)> {
         let model = self.model();
         let list = list_of(pane);
         let area = panes.list;
@@ -734,22 +736,34 @@ impl App {
         } else {
             (shown(position.y - area.top()), None)
         };
-        let len = model.copyable(pane, column, row).map_or(0, str::len);
-        let col = match edge {
-            Some(false) => 0,
-            Some(true) => len,
-            None => self
-                .byte_at(panes, pane, column, row, position.x)
-                .unwrap_or(len),
+        let byte = || self.byte_at(panes, pane, column, row, position.x);
+        let pos = match pane {
+            Pane::Diff => {
+                let hit = match edge {
+                    Some(false) => Hit::Start,
+                    Some(true) => Hit::End,
+                    None => byte().map_or(Hit::End, Hit::Byte),
+                };
+                model.diff_pos(row, column, hit)?
+            }
+            Pane::Source => {
+                let len = model.copyable(pane, column, row).map_or(0, str::len);
+                let col = match edge {
+                    Some(false) => 0,
+                    Some(true) => len,
+                    None => byte().unwrap_or(len),
+                };
+                TextPos {
+                    row,
+                    col: col.min(len),
+                }
+            }
         };
-        Some(TextPos {
-            row,
-            col: col.min(len),
-        })
+        Some((pos, row))
     }
 
-    /// The byte of `row`'s text in `pane` drawn at column `x`, reading a pair's line from
-    /// `column`; `None` on a row without code, such as one of the tool's own.
+    /// The byte of the text screen row `row` draws in `pane` at column `x`, reading a pair's
+    /// line from `column`; `None` on a row without code, such as one of the tool's own.
     fn byte_at(
         &self,
         panes: &Panes,
@@ -768,23 +782,22 @@ impl App {
                 (buffer.line(row), area.x + MARKER + numbers, skip)
             }
             Pane::Diff => {
-                let skip = review_ui::scroll::whole_rows(model.diff_text().offset());
+                let skip = review_ui::scroll::whole_rows(model.code_offset());
                 let (left, _) = halves(area.width);
-                match &model.rows.rows.get(row)?.body {
-                    Body::Code(cell) => (cell.text.as_str(), area.x + FRAME + GUTTER + SIGN, skip),
-                    Body::Pair(pair) => {
-                        let (cell, half_at) = match column {
-                            Column::Left => (pair.left.as_ref(), area.x + FRAME),
-                            Column::Right => (
-                                pair.right.as_ref(),
-                                area.x + FRAME + left + crate::measure::DIVIDER,
-                            ),
-                            Column::Whole => (None, area.x),
-                        };
-                        (cell?.text.as_str(), half_at + GUTTER + SIGN, skip)
-                    }
+                let code_at = match &model.rows.row_on_screen(row)?.body {
+                    Body::Code(_) => area.x + FRAME,
+                    Body::Pair(_) => match column {
+                        Column::Left => area.x + FRAME,
+                        Column::Right => area.x + FRAME + left + crate::measure::DIVIDER,
+                        Column::Whole => return None,
+                    },
                     Body::Note(_) => return None,
-                }
+                };
+                (
+                    model.diff_shown(row, column)?,
+                    code_at + GUTTER + SIGN,
+                    skip,
+                )
             }
         };
         let cell = usize::from(x.saturating_sub(code_at)) + skip;
@@ -1170,7 +1183,10 @@ mod tests {
         let first = first_row(app.model(), List::Diff);
         let (offset, text) = (0..panes.list.height)
             .find_map(|offset| {
-                let row = app.model().rows.rows.get(first + usize::from(offset))?;
+                let row = app
+                    .model()
+                    .rows
+                    .row_on_screen(first + usize::from(offset))?;
                 match &row.body {
                     Body::Code(cell) if cell.text.is_ascii() && cell.text.len() >= skip + 6 => {
                         Some((offset, cell.text.clone()))

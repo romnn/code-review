@@ -515,7 +515,7 @@ impl ReviewApp {
                     "first hunk visible after {:.1?}: {} files, {} rows",
                     process_started.elapsed(),
                     this.tree.len(),
-                    this.rows.rows.len()
+                    this.rows.screen.len()
                 );
                 cx.quit();
             }
@@ -615,10 +615,10 @@ impl ReviewApp {
     fn bench_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let grid = self.grid();
         let viewport = grid.viewports.diff.unwrap_or(0.0);
-        let max = scroll::rows(self.rows.rows.len()) - viewport;
+        let max = scroll::rows(self.rows.screen.len()) - viewport;
         let current = self.diff_scroll.offset();
         let animating = self.diff_scroll.animating();
-        let row_count = self.rows.rows.len();
+        let row_count = self.rows.screen.len();
         let next = {
             let paths = file_paths(&self.tree);
             self.selected

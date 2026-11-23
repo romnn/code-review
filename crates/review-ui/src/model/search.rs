@@ -252,7 +252,11 @@ impl Model {
             Mode::Diff => {
                 // The selected hunk follows the match, so the review keys act on what it
                 // found: the hunk that holds it, or for unchanged code the nearest one.
-                if let Some(hunk) = find::nearest_hunk(&self.hunk_rows, found.row) {
+                let side = usize::from(found.column == Column::Right);
+                let last = found.range.end.saturating_sub(1).max(found.range.start);
+                let screen = self.rows.screen_row_of(found.row, side, found.range.start)
+                    ..self.rows.screen_row_of(found.row, side, last) + 1;
+                if let Some(hunk) = find::nearest_hunk(&self.hunk_rows, screen.start) {
                     self.hunk = hunk;
                     self.selection = None;
                 }
@@ -260,24 +264,29 @@ impl Model {
                 if let Some(find) = &mut self.find {
                     find.hunk = Some(hunk);
                 }
-                self.reveal_match(found.row);
+                self.reveal_match(screen);
             }
             Mode::Tree => {}
         }
     }
 
-    /// Scrolls the diff so `row` has some rows of air.
-    /// Scrolls the diff so the match on `row` shows together with the selected hunk when both
-    /// fit, else the match alone; Space then shows the hunk before marking it.
-    pub(super) fn reveal_match(&mut self, row: usize) {
+    /// Scrolls the diff so a match on screen rows `screen` shows together with the selected
+    /// hunk when both fit, else the match alone, or its start when it is taller than the diff;
+    /// Space then shows the hunk before marking it.
+    pub(super) fn reveal_match(&mut self, screen: std::ops::Range<usize>) {
         let viewport = self.grid().viewports.diff.unwrap_or(0.0);
         let fits = scroll::whole_rows(viewport).saturating_sub(8);
         let span = self
             .hunk_rows
             .get(self.hunk)
-            .map(|rows| rows.start.min(row)..rows.end.max(row + 1))
+            .map(|rows| rows.start.min(screen.start)..rows.end.max(screen.end))
             .filter(|span| span.len() <= fits);
-        self.reveal_diff_rows(span.unwrap_or(row..row + 1));
+        let alone = if screen.len() <= scroll::whole_rows(viewport) {
+            screen.clone()
+        } else {
+            screen.start..screen.start + 1
+        };
+        self.reveal_diff_rows(span.unwrap_or(alone));
     }
 
     /// Scrolls the diff so `rows` have some rows of air.

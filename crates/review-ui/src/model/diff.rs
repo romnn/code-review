@@ -34,8 +34,11 @@ impl Model {
         if let Some(target) = self.hunk_target(self.diff_scroll.offset()) {
             let viewport = self.grid().viewports.diff;
             self.diff_scroll.stop();
-            self.diff_scroll
-                .jump(crate::frame::clamp(target, self.rows.rows.len(), viewport));
+            self.diff_scroll.jump(crate::frame::clamp(
+                target,
+                self.rows.screen.len(),
+                viewport,
+            ));
         }
     }
 
@@ -71,7 +74,7 @@ impl Model {
         };
         Some(crate::frame::clamp(
             target,
-            self.rows.rows.len(),
+            self.rows.screen.len(),
             Some(viewport),
         ))
     }
@@ -338,7 +341,11 @@ impl Model {
     /// collapsed unit to show its code, or else folds or unfolds the hunk, so an approved
     /// hunk's code shows without `z a`.
     pub(super) fn diff_activate(&mut self) {
-        let Some(rows) = self.hunk_rows.get(self.hunk).cloned() else {
+        let Some(rows) = self
+            .hunk_rows
+            .get(self.hunk)
+            .map(|screen| self.rows.rows_on_screen(screen.clone()))
+        else {
             return;
         };
         let link = self
