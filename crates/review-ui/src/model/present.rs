@@ -303,8 +303,9 @@ pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> DiffAnchor {
 
 /// Where in its line screen row `screen` of `old` starts, to show the same line on unified row
 /// `source` of `new` at the same piece: only when that row shows the very same line, the same
-/// text of the same line of the same file on the same side; else `None`, which shows the line
-/// from its first screen row.
+/// text of the same numbered line of the same file on the same side; else `None`, which shows
+/// the line from its first screen row. A line without a number, such as one of a nested diff,
+/// cannot be told from another of the same text, so it never carries its piece over.
 #[must_use]
 pub(crate) fn same_start(
     old: &Layout,
@@ -316,7 +317,12 @@ pub(crate) fn same_start(
     let (side, byte) = piece.start()?;
     let before = old.rows.get(piece.row)?;
     let after = new.rows.get(*new.projected.get(source)?)?;
-    let text = before.sides().get(side).copied().flatten()?;
+    let text = before
+        .sides()
+        .get(side)
+        .copied()
+        .flatten()
+        .filter(|cell| cell.head.is_some() || cell.base.is_some())?;
     let same_text = after
         .sides()
         .get(side)
@@ -442,6 +448,9 @@ impl Model {
             },
             start: same_start(&before, diff.row, &self.rows, source),
         });
+        // Done with the rows the place was taken on, so rewrapping below changes the rows in
+        // place rather than copying them.
+        drop(before);
         let Viewports {
             diff: diff_viewport,
             buffer: buffer_viewport,

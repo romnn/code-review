@@ -2087,7 +2087,7 @@ fn a_remembered_place_shows_the_wrapped_line_from_its_start() {
 }
 
 /// A wrapped line's piece carries over to other rows only on the very same line: the same text
-/// on another line, or in another file, shows from its start.
+/// on another line, in another file, or on a line without a number shows from its start.
 #[test]
 fn a_piece_carries_over_only_to_the_same_line() {
     use super::present::same_start;
@@ -2121,6 +2121,26 @@ fn a_piece_carries_over_only_to_the_same_line() {
     let mut other_file = old.clone();
     other_file.files[old.rows[row].file].path = "src/other.rs".to_owned();
     assert_eq!(same_start(&old, second, &other_file, source), None);
+
+    let mut unnumbered = old.clone();
+    if let rows::Body::Code(cell) = &mut unnumbered.rows[row].body {
+        cell.head = None;
+        cell.base = None;
+    }
+    assert_eq!(same_start(&unnumbered, second, &unnumbered, source), None);
+}
+
+/// `w` lays the rows out on screen again where they are, never copying them.
+#[test]
+fn wrapping_changes_the_rows_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    lay_out(&mut host);
+    let rows = Arc::as_ptr(&host.model().rows);
+    host.dispatch(Action::ToggleWrap);
+    assert!(host.model().rows.wrapped.is_some());
+    assert!(std::ptr::eq(Arc::as_ptr(&host.model().rows), rows));
 }
 
 /// A row draws its line-ending marker after its code, which a press maps to like the code but
