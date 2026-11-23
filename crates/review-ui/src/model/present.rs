@@ -76,12 +76,14 @@ pub(crate) struct DiffAnchor {
 }
 
 impl DiffAnchor {
-    /// The same place on unified row `row`, as when the line is found again in other rows.
+    /// The place on unified row `row`, as when the line is found again in other rows: from
+    /// its first screen row, since its byte may name other text there, another side's or a
+    /// newer revision's.
     #[must_use]
     pub(crate) fn on_row(self, row: usize) -> Self {
         Self {
             top: Anchor { row, ..self.top },
-            ..self
+            start: None,
         }
     }
 }

@@ -1992,6 +1992,55 @@ fn a_finished_side_shows_no_change_bar() {
     assert_eq!(painted.shown, cell.text.len()..cell.text.len());
 }
 
+/// Read partway into a wrapped added line, a switch to side by side shows that line from its
+/// start in its half, never the other half's line where the byte would fall.
+#[test]
+fn another_layout_shows_the_wrapped_line_from_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleWrap);
+    // Halves narrow enough that the base's line wraps too, and a diff short enough that the
+    // line can scroll to its top.
+    let narrow = Geometry {
+        diff_half: 12.0,
+        heights: Heights {
+            diff: Some(6.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    host.update(|model| model.layout(narrow, Instant::now()));
+    let model = host.model();
+    let (row, screen) = (0..model.rows.rows.len())
+        .map(|row| (row, model.rows.screen_rows(row)))
+        .find(|&(row, ref screen)| {
+            screen.len() > 1 && model.rows.rows[row].kind() == rows::RowKind::Added
+        })
+        .unwrap();
+    let line = model.rows.rows[row].sides()[0]
+        .and_then(|cell| cell.head.clone())
+        .unwrap()
+        .line;
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(screen.start + 1)));
+    host.dispatch(Action::ToggleLayout);
+    host.update(|model| model.layout(narrow, Instant::now()));
+    let model = host.model();
+    assert!(model.side_by_side());
+    let top = scroll::whole_rows(model.diff_scroll.offset());
+    let piece = &model.rows.screen[top];
+    let head = model.rows.rows[piece.row].sides()[1]
+        .and_then(|cell| cell.head.clone())
+        .map(|head| head.line);
+    assert_eq!(head, Some(line), "the same line at the top");
+    assert_eq!(
+        piece.shown[1].clone().map(|shown| shown.start),
+        Some(0),
+        "from its start"
+    );
+}
+
 /// A row draws its line-ending marker after its code, which a press maps to like the code but
 /// never selects: past the code, it lands at the code's end.
 #[test]

@@ -518,21 +518,17 @@ fn syntax_layer(
         (None, Some(base)) if !is_nested(cell) => syntax.base.as_ref().map(|side| side.line(base)),
         (None, _) => None,
     };
-    // An edited line's own bytes follow the deleted text spliced into it.
-    let shifted: Vec<Span>;
-    let mut spans = spans.unwrap_or_default();
-    if !cell.deleted.is_empty() {
-        shifted = spans
-            .iter()
-            .map(|(range, tone)| {
-                let start = cell.shown_at(range.start, true);
-                (start..cell.shown_at(range.end, false), *tone)
-            })
-            .collect();
-        spans = &shifted;
-    }
-    let spans = overlapping(spans, bounds, |(range, _)| range);
-    let mut layer = syntax_runs(model.theme(), spans, cell.content_len);
+    // An edited line's own bytes follow the deleted text spliced into it; only the spans that
+    // reach into what the screen row shows are moved there.
+    let shift = |(range, tone): &Span| {
+        let start = cell.shown_at(range.start, true);
+        (start..cell.shown_at(range.end, false), *tone)
+    };
+    let spans: Vec<Span> = overlapping(spans.unwrap_or_default(), bounds, |span| shift(span).0)
+        .iter()
+        .map(shift)
+        .collect();
+    let mut layer = syntax_runs(model.theme(), &spans, cell.content_len);
     // On a tinted line, dim colors such as comments lift toward the text color until they
     // stay readable against the line's final background.
     let tint = match cell.kind {
@@ -654,7 +650,7 @@ fn within_bounds<'a>(
 fn overlapping<'a, T>(
     items: &'a [T],
     bounds: &Range<usize>,
-    range: impl Fn(&T) -> &Range<usize>,
+    range: impl Fn(&T) -> Range<usize>,
 ) -> &'a [T] {
     let start = items.partition_point(|item| range(item).end <= bounds.start);
     let rest = items.get(start..).unwrap_or_default();
@@ -710,7 +706,7 @@ fn match_layer(
     let ours = ours
         .get(..ours.partition_point(|found| (found.row, found.column) == (row, column)))
         .unwrap_or_default();
-    overlapping(ours, bounds, |found| &found.range)
+    overlapping(ours, bounds, |found| found.range.clone())
         .iter()
         .map(|found| Run {
             range: found.range.clone(),

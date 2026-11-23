@@ -159,9 +159,13 @@ impl Model {
             .row_on_screen(Anchor::at(offset).row)
             .map(RowKey::of);
         self.build_selected();
+        // The same revision's text in the same view, so the line keeps its byte too.
         if let Some(row) = key.and_then(|key| key.find(&self.rows)) {
-            self.diff_scroll
-                .jump(diff_offset(&self.rows, top.on_row(row)));
+            let top = DiffAnchor {
+                top: Anchor { row, ..top.top },
+                ..top
+            };
+            self.diff_scroll.jump(diff_offset(&self.rows, top));
         }
     }
 
