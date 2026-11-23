@@ -221,7 +221,7 @@ pub enum Phase {
 struct Place {
     /// The selected hunk's first unit: a hunk's index depends on the view, its units do not.
     unit: Option<UnitId>,
-    top: present::DiffAnchor,
+    top: present::Anchor,
     /// What the top row showed, to find it again in rows laid out in another view.
     key: Option<present::RowKey>,
     /// The view the rows were laid out in when the place was taken.

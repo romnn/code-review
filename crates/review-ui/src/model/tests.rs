@@ -2041,6 +2041,51 @@ fn another_layout_shows_the_wrapped_line_from_its_start() {
     );
 }
 
+/// A file's remembered place is its row alone: back from another file, after the layout changed
+/// meanwhile, a wrapped line at the top shows from its start, never at a byte of other text.
+#[test]
+fn a_remembered_place_shows_the_wrapped_line_from_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleWrap);
+    let short = Geometry {
+        diff_half: 12.0,
+        heights: Heights {
+            diff: Some(6.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    host.update(|model| model.layout(short, Instant::now()));
+    let model = host.model();
+    let (row, screen) = (0..model.rows.rows.len())
+        .map(|row| (row, model.rows.screen_rows(row)))
+        .find(|&(row, ref screen)| {
+            screen.len() > 1 && model.rows.rows[row].kind() == rows::RowKind::Added
+        })
+        .unwrap();
+    let line = model.rows.rows[row].sides()[0]
+        .and_then(|cell| cell.head.clone())
+        .unwrap()
+        .line;
+    host.update(|model| model.drag_list_to(List::Diff, scroll::rows(screen.start + 1)));
+    host.update(|model| model.show_file("src/format.rs"));
+    host.dispatch(Action::ToggleLayout);
+    host.update(|model| model.layout(short, Instant::now()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.update(|model| model.layout(short, Instant::now()));
+    let model = host.model();
+    let top = scroll::whole_rows(model.diff_scroll.offset());
+    let piece = &model.rows.screen[top];
+    let head = model.rows.rows[piece.row].sides()[1]
+        .and_then(|cell| cell.head.clone())
+        .map(|head| head.line);
+    assert_eq!(head, Some(line), "the same line at the top");
+    assert!(model.rows.starts_row(top), "from its start");
+}
+
 /// A row draws its line-ending marker after its code, which a press maps to like the code but
 /// never selects: past the code, it lands at the code's end.
 #[test]

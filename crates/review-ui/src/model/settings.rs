@@ -878,6 +878,9 @@ impl Model {
             None
         };
         let lines = self.lines_shown(|_| true);
+        // The rows the lines were taken on, to keep a wrapped line's piece where the other
+        // view shows the very same text.
+        let old = std::sync::Arc::clone(&self.rows);
         self.apply_view(view);
         let viewport = self.grid().viewports.diff;
         if let Some(hunk) = hunk_line.and_then(|line| self.hunk_of(line.key.unit())) {
@@ -896,7 +899,7 @@ impl Model {
                         row: source,
                         fraction: 0.0,
                     },
-                    start: line.start,
+                    start: super::present::same_start(&old, line.screen, &self.rows, source),
                 },
             );
             self.diff_scroll.jump(crate::frame::clamp(
@@ -962,7 +965,7 @@ impl Model {
                         LookedAt {
                             key: super::present::RowKey::of(row),
                             on_screen: at - offset,
-                            start: super::present::diff_anchor(&self.rows, at).start,
+                            screen: index,
                         },
                     )
                 })
@@ -1057,8 +1060,8 @@ struct LookedAt {
     key: super::present::RowKey,
     /// How far down the viewport it is, in rows.
     on_screen: f64,
-    /// Where in the line its screen row starts, when the line wraps.
-    start: Option<(usize, usize)>,
+    /// Its screen row.
+    screen: usize,
 }
 
 #[cfg(test)]

@@ -997,7 +997,7 @@ impl Model {
                 .rows
                 .row_on_screen(Anchor::at(offset).row)
                 .map(RowKey::of),
-            anchor: diff_anchor(&self.rows, offset),
+            anchor: diff_anchor(&self.rows, offset).top,
             buffer: self
                 .buffer
                 .as_ref()
@@ -1070,11 +1070,11 @@ impl Model {
                 let unit = moved.any(key.unit().index()).map(|index| view.id(index));
                 key.find_moved(unit, &self.rows)
             })
-            .map_or(was.anchor, |row| was.anchor.on_row(row));
+            .map_or(was.anchor, |row| Anchor { row, ..was.anchor });
         let viewport = self.grid().viewports.diff;
         self.diff_scroll.stop();
         self.diff_scroll.jump(frame::clamp(
-            diff_offset(&self.rows, top),
+            diff_offset(&self.rows, DiffAnchor::line(top)),
             self.rows.screen.len(),
             viewport,
         ));
@@ -1242,7 +1242,7 @@ struct WasOn {
     /// The diff's top row.
     top: Option<RowKey>,
     /// Where the diff is scrolled.
-    anchor: DiffAnchor,
+    anchor: Anchor,
     /// The cursor of the buffer of a file under review, while the reviewer is in it.
     buffer: Option<crate::text::TextPos>,
     /// The tree node under the cursor.

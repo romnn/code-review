@@ -13,7 +13,7 @@ use std::sync::Arc;
 use review_core::UnitId;
 use review_core::tree::NodeKind;
 
-use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
+use super::present::{Anchor, DiffAnchor, RowKey, diff_offset, same_start};
 use super::{Mode, Model};
 use crate::config::DiffView;
 use crate::rows::{self, Layout};
@@ -153,17 +153,14 @@ impl Model {
     /// files before it can grow or shrink as their text arrives or the view changes.
     pub(super) fn rebuild_folder(&mut self) {
         let offset = self.diff_scroll.offset();
-        let top = diff_anchor(&self.rows, offset);
-        let key = self
-            .rows
-            .row_on_screen(Anchor::at(offset).row)
-            .map(RowKey::of);
+        let top = Anchor::at(offset);
+        let old = Arc::clone(&self.rows);
+        let key = self.rows.row_on_screen(top.row).map(RowKey::of);
         self.build_selected();
-        // The same revision's text in the same view, so the line keeps its byte too.
         if let Some(row) = key.and_then(|key| key.find(&self.rows)) {
             let top = DiffAnchor {
-                top: Anchor { row, ..top.top },
-                ..top
+                top: Anchor { row, ..top },
+                start: same_start(&old, top.row, &self.rows, row),
             };
             self.diff_scroll.jump(diff_offset(&self.rows, top));
         }
@@ -250,8 +247,7 @@ impl Model {
         let Some(target) = self.rows.row_on_screen(row) else {
             return false;
         };
-        // Where in its line the screen row starts, when the line wraps.
-        let start = diff_anchor(&self.rows, scroll::rows(row)).start;
+        let old = Arc::clone(&self.rows);
         let file = target.file;
         let Some(path) = self
             .rows
@@ -276,7 +272,7 @@ impl Model {
                         row: source,
                         fraction: 0.0,
                     },
-                    start,
+                    start: same_start(&old, row, &self.rows, source),
                 },
             )
         });

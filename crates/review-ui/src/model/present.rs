@@ -76,6 +76,12 @@ pub(crate) struct DiffAnchor {
 }
 
 impl DiffAnchor {
+    /// The place `top`, showing its line from its first screen row.
+    #[must_use]
+    pub(crate) fn line(top: Anchor) -> Self {
+        Self { top, start: None }
+    }
+
     /// The place on unified row `row`, as when the line is found again in other rows: from
     /// its first screen row, since its byte may name other text there, another side's or a
     /// newer revision's.
@@ -294,18 +300,39 @@ pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> DiffAnchor {
     let Some(piece) = layout.screen.get(top.row) else {
         return DiffAnchor::default();
     };
-    let start = piece
-        .shown
-        .iter()
-        .enumerate()
-        .find_map(|(side, shown)| shown.as_ref().map(|shown| (side, shown.start)));
     DiffAnchor {
         top: Anchor {
             row: layout.rows.get(piece.row).map_or(0, |row| row.source),
             ..top
         },
-        start,
+        start: piece.start(),
     }
+}
+
+/// Where in its line screen row `screen` of `old` starts, to show the same line on unified row
+/// `source` of `new` at the same piece: only when that row shows the very same text, of the
+/// same file and on the same side; else `None`, which shows the line from its first screen row.
+#[must_use]
+pub(crate) fn same_start(
+    old: &Layout,
+    screen: usize,
+    new: &Layout,
+    source: usize,
+) -> Option<(usize, usize)> {
+    let piece = old.screen.get(screen)?;
+    let (side, byte) = piece.start()?;
+    let before = old.rows.get(piece.row)?;
+    let after = new.rows.get(*new.projected.get(source)?)?;
+    let text = before.sides().get(side).copied().flatten()?;
+    let same_text = after
+        .sides()
+        .get(side)
+        .copied()
+        .flatten()
+        .is_some_and(|cell| cell.text == text.text);
+    let path = old.files.get(before.file).map(|file| &file.path);
+    let same_file = path.is_some() && path == new.files.get(after.file).map(|file| &file.path);
+    (same_text && same_file).then_some((side, byte))
 }
 
 /// The offset in screen rows that shows `anchor` at the top of `layout`: the screen row of its

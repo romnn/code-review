@@ -30,6 +30,18 @@ pub struct ScreenRow {
     pub shown: [Option<Range<usize>>; 2],
 }
 
+impl ScreenRow {
+    /// The side and byte of its row's line where it starts: on the first side it shows text
+    /// of, `None` for a note.
+    #[must_use]
+    pub fn start(&self) -> Option<(usize, usize)> {
+        self.shown
+            .iter()
+            .enumerate()
+            .find_map(|(side, shown)| shown.as_ref().map(|shown| (side, shown.start)))
+    }
+}
+
 /// Lays `layout`'s rows out on screen rows, wrapping lines of code wider than `room` when
 /// there is one, and notes the room in [`Layout::wrapped`].
 pub fn project(layout: &mut Layout, room: Option<WrapRoom>) {
