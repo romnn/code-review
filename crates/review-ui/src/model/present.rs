@@ -20,6 +20,8 @@
 //! Places kept for files not shown are row identities too, so returning to a file after a
 //! density change lands on the same line.
 
+use std::sync::Arc;
+
 use super::{Model, ZOOM_RANGE};
 use crate::config::{Approved, Density, DiffLayout, DiffView};
 use crate::frame::{self, Geometry, Grid, Metrics, Scale, Viewports};
@@ -80,17 +82,6 @@ impl DiffAnchor {
     #[must_use]
     pub(crate) fn line(top: Anchor) -> Self {
         Self { top, start: None }
-    }
-
-    /// The place on unified row `row`, as when the line is found again in other rows: from
-    /// its first screen row, since its byte may name other text there, another side's or a
-    /// newer revision's.
-    #[must_use]
-    pub(crate) fn on_row(self, row: usize) -> Self {
-        Self {
-            top: Anchor { row, ..self.top },
-            start: None,
-        }
     }
 }
 
@@ -231,14 +222,15 @@ fn several_files(layout: &Layout) -> bool {
         .is_some_and(|row| row.kind() == RowKind::FileHeader)
 }
 
-/// Where every list is, by row: the diff by its unified row, the tree and the buffer by their
-/// own rows.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Where every list is, by row: the diff by its screen row in the rows the place was taken on,
+/// the tree and the buffer by their own rows.
+#[derive(Debug, Clone)]
 pub(crate) struct Places {
-    /// The diff, by its unified row.
-    pub(crate) diff: DiffAnchor,
-    /// What the diff's top row shows, for rows laid out with other folds.
-    pub(crate) diff_key: Option<RowKey>,
+    /// The diff, by its screen row in [`Self::rows`].
+    pub(crate) diff: Anchor,
+    /// The diff's rows the place was taken on, to find its line again in the rows after a
+    /// change, and the piece of it when the line wraps.
+    pub(crate) rows: Arc<Layout>,
     /// Whether approved hunks folded in the rows the diff's place was taken on.
     pub(crate) approved: Approved,
     /// Which units counted as approved in those rows, which decides which of them folded.
@@ -310,8 +302,9 @@ pub(crate) fn diff_anchor(layout: &Layout, offset: f64) -> DiffAnchor {
 }
 
 /// Where in its line screen row `screen` of `old` starts, to show the same line on unified row
-/// `source` of `new` at the same piece: only when that row shows the very same text, of the
-/// same file and on the same side; else `None`, which shows the line from its first screen row.
+/// `source` of `new` at the same piece: only when that row shows the very same line, the same
+/// text of the same line of the same file on the same side; else `None`, which shows the line
+/// from its first screen row.
 #[must_use]
 pub(crate) fn same_start(
     old: &Layout,
@@ -329,7 +322,9 @@ pub(crate) fn same_start(
         .get(side)
         .copied()
         .flatten()
-        .is_some_and(|cell| cell.text == text.text);
+        .is_some_and(|cell| {
+            cell.text == text.text && cell.head == text.head && cell.base == text.base
+        });
     let path = old.files.get(before.file).map(|file| &file.path);
     let same_file = path.is_some() && path == new.files.get(after.file).map(|file| &file.path);
     (same_text && same_file).then_some((side, byte))
@@ -365,11 +360,8 @@ impl Model {
     pub(super) fn places(&self) -> Places {
         let offset = self.diff_scroll.target();
         Places {
-            diff: diff_anchor(&self.rows, offset),
-            diff_key: self
-                .rows
-                .row_on_screen(Anchor::at(offset).row)
-                .map(RowKey::of),
+            diff: Anchor::at(offset),
+            rows: Arc::clone(&self.rows),
             approved: self.folds.approved,
             policy: self.policy(),
             view: self.presented.view,
@@ -395,7 +387,7 @@ impl Model {
     pub(super) fn transition_from(&mut self, places: Places, change: impl FnOnce(&mut Self)) {
         let Places {
             diff,
-            diff_key,
+            rows: before,
             approved,
             policy,
             view,
@@ -429,18 +421,27 @@ impl Model {
             self.rebuild();
         }
 
-        // Every list back at its row, within the new extent.
-        let diff = match diff_key {
+        // Every list back at its row, within the new extent. Rows laid out with other folds
+        // are other rows, so the diff's line is found again by what it showed.
+        let top = before.row_on_screen(diff.row);
+        let source = match top.map(RowKey::of) {
             Some(key)
                 if self.folds.approved != approved
                     || self.policy() != policy
                     || self.presented.view != view
                     || self.presented.layout != layout =>
             {
-                key.find(&self.rows).map_or(diff, |row| diff.on_row(row))
+                key.find(&self.rows).or(top.map(|row| row.source))
             }
-            _ => diff,
+            _ => top.map(|row| row.source),
         };
+        let diff = source.map_or_else(DiffAnchor::default, |source| DiffAnchor {
+            top: Anchor {
+                row: source,
+                ..diff
+            },
+            start: same_start(&before, diff.row, &self.rows, source),
+        });
         let Viewports {
             diff: diff_viewport,
             buffer: buffer_viewport,

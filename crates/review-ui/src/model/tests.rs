@@ -1837,10 +1837,10 @@ fn notes_move_by_what_they_draw() {
     );
 }
 
-/// The first row of the diff whose line wraps, with its screen rows.
-fn wrapped_row(model: &Model) -> (usize, std::ops::Range<usize>) {
-    (0..model.rows.rows.len())
-        .map(|row| (row, model.rows.screen_rows(row)))
+/// The first row of `layout` whose line wraps, with its screen rows.
+fn wrapped_row(layout: &rows::Layout) -> (usize, std::ops::Range<usize>) {
+    (0..layout.rows.len())
+        .map(|row| (row, layout.screen_rows(row)))
         .find(|(_, screen)| screen.len() > 1)
         .unwrap()
 }
@@ -1875,7 +1875,7 @@ fn long_lines_wrap_and_still_copy_as_lines() {
     host.dispatch(Action::PanRight);
     assert_eq!(host.model().code_offset(), 0.0);
     let model = host.model();
-    let (row, screen) = wrapped_row(model);
+    let (row, screen) = wrapped_row(&model.rows);
     let rows::Body::Code(cell) = &model.rows.rows[row].body else {
         panic!("a wrapped line across the width");
     };
@@ -1928,7 +1928,7 @@ fn a_look_change_keeps_the_wrapped_piece_at_the_top() {
     host.dispatch(Action::FocusDiff);
     host.dispatch(Action::ToggleWrap);
     lay_out(&mut host);
-    let (row, screen) = wrapped_row(host.model());
+    let (row, screen) = wrapped_row(&host.model().rows);
     host.update(|model| model.drag_list_to(List::Diff, scroll::rows(screen.start + 1)));
     // The byte of the line at the top, and whether the top shows it.
     let byte = host.model().rows.screen[screen.start + 1].shown[0]
@@ -2086,6 +2086,43 @@ fn a_remembered_place_shows_the_wrapped_line_from_its_start() {
     assert!(model.rows.starts_row(top), "from its start");
 }
 
+/// A wrapped line's piece carries over to other rows only on the very same line: the same text
+/// on another line, or in another file, shows from its start.
+#[test]
+fn a_piece_carries_over_only_to_the_same_line() {
+    use super::present::same_start;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), marks_only());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::ToggleWrap);
+    lay_out(&mut host);
+    let old = host.model().rows.as_ref().clone();
+    let (row, screen) = wrapped_row(&old);
+    let second = screen.start + 1;
+    let source = old.rows[row].source;
+    let start = old.screen[second].start();
+    assert_eq!(
+        same_start(&old, second, &old, source),
+        start,
+        "the same line"
+    );
+
+    let mut other_line = old.clone();
+    if let rows::Body::Code(cell) = &mut other_line.rows[row].body {
+        cell.head = cell.head.clone().map(|head| rows::HeadLine {
+            line: head.line + 1,
+            ..head
+        });
+        cell.base = cell.base.map(|base| base + 1);
+    }
+    assert_eq!(same_start(&old, second, &other_line, source), None);
+
+    let mut other_file = old.clone();
+    other_file.files[old.rows[row].file].path = "src/other.rs".to_owned();
+    assert_eq!(same_start(&old, second, &other_file, source), None);
+}
+
 /// A row draws its line-ending marker after its code, which a press maps to like the code but
 /// never selects: past the code, it lands at the code's end.
 #[test]
@@ -2224,7 +2261,7 @@ fn a_resize_rewraps_and_keeps_the_selection_and_the_place() {
     host.dispatch(Action::FocusDiff);
     host.dispatch(Action::ToggleWrap);
     lay_out(&mut host);
-    let (row, screen) = wrapped_row(host.model());
+    let (row, screen) = wrapped_row(&host.model().rows);
     // The second piece of the line at the top, and a word of the line selected.
     host.update(|model| {
         model.drag_list_to(List::Diff, scroll::rows(screen.start + 1));

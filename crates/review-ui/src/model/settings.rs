@@ -539,7 +539,11 @@ impl Model {
     /// Changes what shows with `change`: while the list is open, from where the lists were when
     /// it opened, and otherwise from where they are.
     fn settings_transition(&mut self, change: impl FnOnce(&mut Self)) {
-        match self.settings_panel.as_ref().map(|panel| panel.places) {
+        match self
+            .settings_panel
+            .as_ref()
+            .map(|panel| panel.places.clone())
+        {
             Some(places) => self.transition_from(places, change),
             None => self.transition(change),
         }

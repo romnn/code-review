@@ -38,12 +38,10 @@ own, a resize would change what they mean.
 
 - Every place that turns a scroll offset into a row goes through `Layout::row_on_screen` or
   `Layout::first_on_screen`, and every place that scrolls to a row goes through `Layout::starts`.
-- A piece is a byte of one cell's text, so it carries over only where that text is known to be
-  the same: rewrapping and changes of style, size or density keep it on the same rows, and `f`,
-  opening a file from a folder's diff and a folder's rebuild keep it when the line found again
-  shows the very same text, of the same file and on the same side. A change of layout, view,
-  folding or policy, a file's remembered place and a live update show the line from its first
-  piece.
+- A piece is a byte of one cell's text, so it carries over to other rows only when the line
+  found there is the very same line: the same text of the same line of the same file, on the
+  same side (`same_start`); otherwise the line shows from its first piece. Rewrapping keeps it
+  on the same rows. A file's remembered place and a live update keep rows alone.
 
 ## References
 
