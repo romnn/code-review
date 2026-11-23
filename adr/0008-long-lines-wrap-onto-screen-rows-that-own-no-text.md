@@ -38,9 +38,12 @@ own, a resize would change what they mean.
 
 - Every place that turns a scroll offset into a row goes through `Layout::row_on_screen` or
   `Layout::first_on_screen`, and every place that scrolls to a row goes through `Layout::starts`.
-- Changing the view (`f`) or opening a file from a folder's diff keeps the reviewer's piece of
-  the line on screen, since the other rows are as wide and wrap the line alike. Other changes of
-  presentation, such as the layout or the density, land on the line's first piece.
+- A piece is a byte of one cell's text, so it carries over only where that text is known to be
+  the same: rewrapping and changes of style, size or density keep it on the same rows, and `f`,
+  opening a file from a folder's diff and a folder's rebuild keep it when the line found again
+  shows the very same text, of the same file and on the same side. A change of layout, view,
+  folding or policy, a file's remembered place and a live update show the line from its first
+  piece.
 
 ## References
 
