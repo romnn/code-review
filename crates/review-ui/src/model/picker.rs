@@ -536,13 +536,13 @@ impl Model {
         };
         // The hunk whose units changed that head line, even when it is folded.
         let hunk = self.view().and_then(|view| {
-            self.rows.hunks.iter().position(|units| {
-                units.iter().any(|&unit| {
-                    view.unit(unit)
-                        .ok()
-                        .and_then(|record| record.chunk())
-                        .is_some_and(|chunk| chunk.new.range().contains(&line))
-                })
+            self.rows.hunks.iter().position(|hunk| match hunk.lines() {
+                Some(lines) => lines.contains(&line),
+                None => view
+                    .unit(hunk.unit)
+                    .ok()
+                    .and_then(|record| record.chunk())
+                    .is_some_and(|chunk| chunk.new.range().contains(&line)),
             })
         });
         // The screen row that shows the hit's column of that line, on the side it shows on.

@@ -58,7 +58,7 @@ comment in `crates/review-gui/src/app/qa.rs`; read it when a command here fails.
 | `key <keystrokes>` | Types through gpui's key dispatch, so the real bindings apply: `key j`, `key shift-t`, `key z a`, `key ctrl-d`. Several keystrokes are typed one after another, so `key b a l` types into the find bar. |
 | `action <name>` | Does what one of the model's actions does, as its key would, such as `action NextHunk`. |
 | `rapid <command>` | Runs a command and answers at once, without waiting for background work or a frame; a few `rapid` lines in a row race input against saving marks and loading. `rapid state` prints the state right away. |
-| `repeat <count> <ms> <keystroke>` | Types a keystroke `count` times, one every `ms`, as a held key repeats, then prints JSON with each keystroke's handling time and the input-to-frame latency percentiles over the burst; `repeat 25 33 j` in the tree measures holding `j`. Use `QA_BINARY=target/release/review-gui` for release numbers. |
+| `repeat <count> <ms> <keystroke>` | Types a keystroke `count` times, one every `ms`, as a held key repeats, gpui reporting every one after the first as held, then prints JSON with each keystroke's handling time and the input-to-frame latency percentiles over the burst; `repeat 25 33 j` in the tree measures holding `j`. Use `QA_BINARY=target/release/review-gui` for release numbers. |
 | `file <path>` | Moves the files cursor to a file and shows its diff, as `j`/`k` would. |
 | `click <x> <y> [count] [ctrl] [shift] [right]` | Mouse click at window coordinates; `count` 2 or 3 makes a double or triple click. |
 | `drag <x1> <y1> <x2> <y2>` | Press, render a frame, move in steps, release; use it for selection, pane dividers and the title bar. |

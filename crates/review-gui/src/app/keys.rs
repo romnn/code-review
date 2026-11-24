@@ -29,6 +29,9 @@
 //! overlay or bar inside it names its area; a text field's own `Input` context is not an area.
 //! The focus identity is gpui's focus handle, so keys waiting for a sequence are dropped when
 //! the focus moves, as gpui drops its own.
+//!
+//! An action a key press resolves to goes to the model with whether gpui reports the key held
+//! down, which tells the model's guard on review keys a repeat from a press.
 
 use std::time::Instant;
 
@@ -55,6 +58,9 @@ pub(super) struct Keys {
     /// Whether the keystroke interceptor resolved the key in hand, so the capture listener
     /// leaves it alone.
     intercepted: bool,
+    /// Whether the key press in hand repeats a key held down, as gpui reports it; `None` for
+    /// keys that are no key press of their own, such as those the matcher replays.
+    held: Option<bool>,
     /// Hands lone modifier taps to the matcher while the window lives.
     #[expect(
         dead_code,
@@ -80,6 +86,7 @@ impl Keys {
             timer: None,
             resending: false,
             intercepted: false,
+            held: None,
             taps,
         }
     }
@@ -130,7 +137,10 @@ impl ReviewApp {
             keystroke: keystroke(&event.keystroke),
             prefer_character_input: event.prefer_character_input,
         };
-        if self.resolve_key(&key, Some(&event.keystroke), window, cx) {
+        self.keys.held = Some(event.is_held);
+        let claimed = self.resolve_key(&key, Some(&event.keystroke), window, cx);
+        self.keys.held = None;
+        if claimed {
             cx.stop_propagation();
         }
     }
@@ -260,10 +270,11 @@ impl ReviewApp {
     /// gpui finished the event in hand when they resend keystrokes, because gpui dispatches one
     /// key at a time.
     fn run_steps(&mut self, steps: Vec<Step>, window: &mut Window, cx: &mut Context<Self>) {
+        let held = self.keys.held;
         if !steps.iter().any(Step::sends) {
             for step in steps {
                 match step {
-                    Step::Dispatch(action) => self.dispatch(action, window, cx),
+                    Step::Dispatch(action) => self.key(action, held, window, cx),
                     Step::Type(text) => self.type_text(&text, window, cx),
                     Step::Resend(_) | Step::Send(_) => {}
                 }
@@ -275,7 +286,7 @@ impl ReviewApp {
             for step in steps {
                 match step {
                     Step::Dispatch(action) => {
-                        this.update(cx, |this, cx| this.dispatch(action, window, cx));
+                        this.update(cx, |this, cx| this.key(action, held, window, cx));
                     }
                     Step::Type(text) => {
                         this.update(cx, |this, cx| this.type_text(&text, window, cx));

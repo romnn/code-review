@@ -130,7 +130,7 @@ pub struct Interdiff {
 /// current change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinceReviewed<'h> {
-    /// The reviewed head's lines against the current head's; see [`Delta`].
+    /// The reviewed lines against the current head's; see [`Delta`].
     Delta(Delta<'h>),
     /// The whole current change, for this reason.
     Whole(Reopened),
@@ -140,60 +140,103 @@ pub enum SinceReviewed<'h> {
 /// reviewed change and the [runs](Self::runs) together are the whole current change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Delta<'h> {
-    /// The unit that was reviewed.
+    /// The unit whose change this is.
+    pub unit: UnitId,
+    /// The unit the reviewed text was approved on: the unit a whole mark was made on, or the
+    /// one the last partial approval was.
     pub reviewed: UnitId,
-    /// The head file the reviewed lines are in, for their syntax.
-    pub reviewed_head: &'h EntrySide,
-    /// The change as it was reviewed.
-    pub before: &'h Chunk,
+    /// The reviewed text: the head lines a whole mark approved, or those partial approvals
+    /// left, each with its terminator.
+    pub before: &'h str,
+    /// Where `before` comes from.
+    pub baseline: ReviewedBaseline<'h>,
     /// The change now.
     pub after: &'h Chunk,
+}
+
+/// Where the reviewed text of a [`Delta`] comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewedBaseline<'h> {
+    /// The head lines a whole mark approved, in the head file it was reviewed in, for their
+    /// syntax.
+    Head(ReviewedHead<'h>),
+    /// The text partial approvals left, which is in no file.
+    Partial,
+}
+
+/// Where a reviewed text is in a head file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewedHead<'h> {
+    /// The head file.
+    pub entry: &'h EntrySide,
+    /// The zero-based line of the text's first line there.
+    pub start: usize,
 }
 
 impl<'h> Delta<'h> {
     /// The runs of lines that differ, in order; the lines between them are the same in both.
     #[must_use]
     pub fn runs(&self) -> Vec<LineRun<'h>> {
-        let (before, after): (&'h Chunk, &'h Chunk) = (self.before, self.after);
-        let old = split_lines(&before.added);
-        let new = split_lines(&after.added);
-        // Where each line of a text starts, and where the text ends.
-        let starts = |lines: &[&str]| -> Vec<usize> {
-            std::iter::once(0)
-                .chain(lines.iter().scan(0, |end, line| {
-                    *end += line.len();
-                    Some(*end)
-                }))
-                .collect()
-        };
-        let (old_starts, new_starts) = (starts(&old), starts(&new));
-        // The lines `range` of `text`, whose lines start at `starts`, as one slice of it.
-        let text = |text: &'h str, starts: &[usize], range: &std::ops::Range<usize>| {
-            let at = |line: usize| starts.get(line).copied().unwrap_or_default();
-            text.get(at(range.start)..at(range.end)).unwrap_or_default()
-        };
+        let (before, after): (&'h str, &'h str) = (self.before, &self.after.added);
+        let old = split_lines(before);
+        let new = split_lines(after);
+        let (old_starts, new_starts) = (line_starts(&old), line_starts(&new));
         diff_lines(&old, &new)
             .into_iter()
             .map(|run| LineRun {
+                unit: self.unit,
                 old: LineRange {
-                    start: before.new.start + run.before.start,
+                    start: run.before.start,
                     len: run.before.len(),
                 },
                 new: LineRange {
-                    start: after.new.start + run.after.start,
+                    start: self.after.new.start + run.after.start,
                     len: run.after.len(),
                 },
-                removed: text(&before.added, &old_starts, &run.before),
-                added: text(&after.added, &new_starts, &run.after),
+                removed: lines_of(before, &old_starts, &run.before),
+                added: lines_of(after, &new_starts, &run.after),
             })
             .collect()
     }
+
+    /// The reviewed text with `run`, one of [`Self::runs`], approved: its reviewed lines
+    /// replaced by its current ones, byte for byte, so line terminators and a missing final
+    /// newline stay as they are on each side.
+    pub(crate) fn approving(&self, run: &LineRun<'_>) -> String {
+        let lines = split_lines(self.before);
+        let starts = line_starts(&lines);
+        let kept = |range: std::ops::Range<usize>| lines_of(self.before, &starts, &range);
+        [
+            kept(0..run.old.start),
+            run.added,
+            kept(run.old.end()..lines.len()),
+        ]
+        .concat()
+    }
+}
+
+/// Where each of `lines` starts in their text, and where the text ends.
+fn line_starts(lines: &[&str]) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(lines.iter().scan(0, |end, line| {
+            *end += line.len();
+            Some(*end)
+        }))
+        .collect()
+}
+
+/// The lines `range` of `text`, whose lines start at `starts`, as one slice of it.
+fn lines_of<'t>(text: &'t str, starts: &[usize], range: &std::ops::Range<usize>) -> &'t str {
+    let at = |line: usize| starts.get(line).copied().unwrap_or_default();
+    text.get(at(range.start)..at(range.end)).unwrap_or_default()
 }
 
 /// A run of lines that differ between a reviewed change and the current one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRun<'h> {
-    /// The lines in the reviewed head.
+    /// The unit whose change it is, which only its delta knows.
+    unit: UnitId,
+    /// The lines of the reviewed text, counted from its first line.
     pub old: LineRange,
     /// The lines in the current head.
     pub new: LineRange,
@@ -203,8 +246,44 @@ pub struct LineRun<'h> {
     pub added: &'h str,
 }
 
+/// A change since review of one unit as a view showed it, for
+/// [`Review::approve_run`](crate::Review::approve_run) to approve once the log still has it.
+///
+/// Two are equal when they are the same change: the same unit, current lines at the same
+/// place, and reviewed lines replaced, which is what the engine compares a run with.
+/// Where the reviewed lines are in the reviewed text is no part of it: approving another
+/// change of the unit before them moves them without changing what the change does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownRun {
+    /// The unit.
+    pub unit: UnitId,
+    /// Its lines in the current head.
+    pub new: LineRange,
+    /// The reviewed lines, each with its terminator.
+    pub removed: String,
+    /// The current lines, each with its terminator.
+    pub added: String,
+}
+
 impl LineRun<'_> {
-    /// The run as a chunk with its edit script, to show it as a change.
+    /// The run as it is shown, to approve later.
+    #[must_use]
+    pub fn shown(&self) -> ShownRun {
+        ShownRun {
+            unit: self.unit,
+            new: self.new,
+            removed: self.removed.to_owned(),
+            added: self.added.to_owned(),
+        }
+    }
+
+    /// Whether the run is the change `shown` is, as [`ShownRun`]'s equality has it.
+    pub(crate) fn is(&self, shown: &ShownRun) -> bool {
+        self.shown() == *shown
+    }
+
+    /// The run as a chunk with its edit script, to show it as a change; its old lines count
+    /// from the reviewed text's first line, as [`Self::old`] does.
     #[must_use]
     pub fn to_chunk(&self) -> Chunk {
         Chunk::of_lines(
@@ -941,7 +1020,8 @@ impl<'h> RevisionView<'h> {
     }
 
     /// Returns the interdiff of unit `id` against its last reviewed predecessor, if it is
-    /// changed since reviewed.
+    /// changed since reviewed; the added side compares with the text partial approvals left,
+    /// when they were the last review.
     ///
     /// # Errors
     ///
@@ -958,7 +1038,12 @@ impl<'h> RevisionView<'h> {
         let (base, head) = match (&reviewed_unit.kind, &current_unit.kind) {
             (UnitKind::Chunk(before), UnitKind::Chunk(after)) => (
                 side_diff(&before.removed, &after.removed),
-                side_diff(&before.added, &after.added),
+                side_diff(
+                    self.history
+                        .approved_text(reviewed)
+                        .unwrap_or(&before.added),
+                    &after.added,
+                ),
             ),
             _ => (
                 side_diff(
@@ -984,6 +1069,11 @@ impl<'h> RevisionView<'h> {
     /// every link back to the reviewed unit is one-to-one and trusted, and else the whole
     /// current change; `None` for any other unit.
     ///
+    /// The reviewed change is the text partial approvals left when one was the last review,
+    /// and else the reviewed unit's head lines.
+    /// A current change equal to it after a changed link shows whole as
+    /// [`Reopened::SameCode`]: only a mark approves it.
+    ///
     /// # Errors
     ///
     /// Returns the same errors as [`Self::unit`].
@@ -999,6 +1089,8 @@ impl<'h> RevisionView<'h> {
         else {
             return Ok(None);
         };
+        let approved = self.history.approved_text(reviewed);
+        let reviewed_text = approved.unwrap_or(&before.added);
         let reviewed_head = match (&reviewed_file.new, &current_file.new) {
             (Some(older), Some(newer)) if older.path == newer.path && older.mode == newer.mode => {
                 Some(older)
@@ -1013,16 +1105,23 @@ impl<'h> RevisionView<'h> {
             Some(Reopened::OtherBaseLines)
         } else if reviewed_head.is_none() || !self.trusted_chain(id, reviewed) {
             Some(Reopened::Uncertain)
-        } else if before.added == after.added {
+        } else if reviewed_text == after.added {
             Some(Reopened::SameCode)
         } else {
             None
         };
         Ok(Some(match (reopened, reviewed_head) {
-            (None, Some(reviewed_head)) => SinceReviewed::Delta(Delta {
+            (None, Some(entry)) => SinceReviewed::Delta(Delta {
+                unit: id,
                 reviewed,
-                reviewed_head,
-                before,
+                before: reviewed_text,
+                baseline: match approved {
+                    Some(_) => ReviewedBaseline::Partial,
+                    None => ReviewedBaseline::Head(ReviewedHead {
+                        entry,
+                        start: before.new.start,
+                    }),
+                },
                 after,
             }),
             (reopened, _) => SinceReviewed::Whole(reopened.unwrap_or(Reopened::Uncertain)),

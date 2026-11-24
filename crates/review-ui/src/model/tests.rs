@@ -180,6 +180,11 @@ impl Host {
         self.update(|model| model.dispatch(action));
     }
 
+    /// Delivers a key bound to `action` as a front end does, `held` saying whether it repeats.
+    fn key(&mut self, action: Action, held: Option<bool>) {
+        self.update(|model| model.key(action, held));
+    }
+
     /// Runs the oldest waiting job and returns its completion, not yet applied.
     fn run_job(&mut self) -> Completion {
         let job = self.jobs.pop_front().expect("a job waits");
@@ -404,7 +409,7 @@ fn a_mark_landing_after_moving_on_keeps_the_next_file_in_place() {
             rows::present(rows::build(&view, &units, &folds), Presentation::default()).hunks;
         assert!(hunks.len() > 2, "the engine has several hunks");
         review
-            .mark(&view, &hunks[0], MarkVerdict::Accepted)
+            .mark(&view, &[hunks[0].unit], MarkVerdict::Accepted)
             .unwrap();
     }
     let mut host = Host::open(review);
@@ -443,7 +448,7 @@ fn a_mark_landing_after_moving_on_keeps_the_next_file_in_place() {
     assert_eq!(model.hunk, opened_at);
     let view = model.view().unwrap();
     let approved = |hunk: usize| {
-        crate::state::badges(&view, &model.rows.hunks[hunk], &model.pending)
+        crate::state::badges(&view, &[model.rows.hunks[hunk].unit], &model.pending)
             .into_iter()
             .all(crate::state::is_approved)
     };
@@ -917,9 +922,8 @@ fn marks_are_refused_while_quitting_waits() {
         .model()
         .rows
         .hunks
-        .concat()
-        .into_iter()
-        .map(|unit| (unit, MarkVerdict::Unseen))
+        .iter()
+        .map(|hunk| (hunk.unit, MarkVerdict::Unseen))
         .collect();
     let before = recorded(host.model(), &units);
     host.dispatch(Action::ToggleApprove);
@@ -2653,7 +2657,12 @@ fn the_sheet_keys_scroll_the_front_ends_sheet() {
 /// The badges of hunk `hunk` of the shown file, pending verdicts included.
 fn hunk_badges(model: &Model, hunk: usize) -> Vec<rows::Badge> {
     let view = model.view().unwrap();
-    let units = model.rows.hunks.get(hunk).cloned().unwrap_or_default();
+    let units = model
+        .rows
+        .hunks
+        .get(hunk)
+        .map(|hunk| vec![hunk.unit])
+        .unwrap_or_default();
     state::badges(&view, &units, &model.pending)
 }
 
@@ -3608,15 +3617,13 @@ fn a_key_held_across_a_change_never_marks_it() {
     let (mut host, repo) = live_host(dir.path());
     edit_and_capture(&mut host, &repo, "uno", "two");
     host.update(|model| {
-        let live = model.live.as_mut().unwrap();
-        live.age(Duration::from_secs(3));
-        live.hold_since(Duration::from_secs(5));
+        model.live.as_mut().unwrap().age(Duration::from_secs(3));
+        model.hold_since(Duration::from_secs(5));
     });
-    host.dispatch(Action::ToggleApprove);
+    host.key(Action::ToggleApprove, None);
     assert!(host.model().status.starts_with("Not marked"), "still held");
     assert!(host.model().marks.is_empty());
 
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::ZERO));
     host.dispatch(Action::ToggleApprove);
     assert!(!host.model().pending.is_empty(), "a new press marks");
 }
@@ -4581,7 +4588,7 @@ fn the_buffer_marks_the_unit_under_its_cursor_whatever_the_view() {
     assert_eq!(host.model().buffer_hunk(), Some(hunk));
     host.update(|model| model.apply_view(crate::config::DiffView::Hunks));
     let shown = host.model().buffer_hunk().unwrap();
-    assert_eq!(host.model().rows.hunks[shown], [unit]);
+    assert_eq!(host.model().rows.hunks[shown].unit, unit);
 }
 
 /// A file left with a hunk selected comes back to the hunk holding the same change in the other
@@ -4779,7 +4786,7 @@ fn a_new_branch_is_announced_and_moves_nothing() {
 }
 
 /// A capture taken before the watch saw another change never shows: the view on screen stays,
-/// as updating, and refuses marks until the capture of the change lands.
+/// as updating, and a mark on it is queued, for the engine to check against what showed.
 #[test]
 fn a_capture_older_than_a_change_never_shows() {
     let dir = tempfile::tempdir().unwrap();
@@ -4804,13 +4811,11 @@ fn a_capture_older_than_a_change_never_shows() {
     assert!(bar(host.model()).contains("updating…"));
     host.dispatch(Action::ToggleApprove);
     assert!(
-        host.model()
-            .status
-            .starts_with("Not marked: the working tree changed"),
+        !host.model().status.starts_with("Not marked"),
         "{}",
         host.model().status
     );
-    assert!(host.model().marks.is_empty() && host.model().pending.is_empty());
+    assert!(!host.model().pending.is_empty(), "queued");
 
     host.settle();
     let model = host.model();
@@ -4972,9 +4977,10 @@ fn the_pull_request_follows_the_branch() {
     assert_eq!(header(host.model()), "#12 merged · feat → origin/main");
 }
 
-/// A capture that lands only after the notice of a write it overlapped never takes marks: the
-/// watch says so at the burst's first change, before it settles, and a capture that lands
-/// while the burst is under way does not show.
+/// A capture that lands only after the notice of a write it overlapped still takes marks on
+/// what it showed: the watch says so at the burst's first change, before it settles, and a
+/// capture that lands while the burst is under way does not show, but a press on the one on
+/// screen is queued, not refused.
 #[test]
 fn a_change_under_way_refuses_marks_on_the_capture_it_overlapped() {
     let dir = tempfile::tempdir().unwrap();
@@ -4998,13 +5004,11 @@ fn a_change_under_way_refuses_marks_on_the_capture_it_overlapped() {
     host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
     host.dispatch(Action::ToggleApprove);
     assert!(
-        host.model()
-            .status
-            .starts_with("Not marked: the working tree changed"),
+        !host.model().status.starts_with("Not marked"),
         "{}",
         host.model().status
     );
-    assert!(host.model().marks.is_empty() && host.model().pending.is_empty());
+    assert!(!host.model().pending.is_empty(), "queued");
 
     // A capture taken while the burst is under way does not show either.
     host.update(|model| model.capture(false));
@@ -5698,45 +5702,83 @@ fn a_folder_and_its_first_file_show_the_code_on_the_same_rows() {
 /// revision whose line 16 changed at the next, showing `path`; the directory holds the
 /// repository.
 fn accepted_then_changed(dir: &Path, path: &str) -> Host {
+    accepted_then_edited(dir, path, &[15])
+}
+
+/// The window over a working-tree review of `path`, a 60-line function accepted at one
+/// revision whose statements `edited` changed at the next, showing `path`; statement `n` is on
+/// line `n + 2`, and the directory holds the repository.
+fn accepted_then_edited(dir: &Path, path: &str, edited: &[usize]) -> Host {
+    accepted_then(
+        dir,
+        path,
+        &statements(edited, "1"),
+        &statements(edited, "2"),
+    )
+}
+
+/// A 60-line function whose statements `edited` assign `label`, the others `0`.
+fn statements(edited: &[usize], label: &str) -> String {
     use std::fmt::Write as _;
 
-    let file = |label: &str| {
-        let mut text = "fn a() {\n".to_owned();
-        for line in 0..60 {
-            let value = if line == 15 { label } else { "0" };
-            writeln!(text, "    let v{line} = {value};").unwrap();
-        }
-        text.push_str("}\n");
-        text
-    };
+    let mut text = "fn a() {\n".to_owned();
+    for line in 0..60 {
+        let value = if edited.contains(&line) { label } else { "0" };
+        writeln!(text, "    let v{line} = {value};").unwrap();
+    }
+    text.push_str("}\n");
+    text
+}
+
+/// The window over a working-tree review of `path`, `first` accepted at one revision and
+/// `second` at the next, showing `path`, beside a new change to `b.rs`; the directory holds
+/// the repository.
+fn accepted_then(dir: &Path, path: &str, first: &str, second: &str) -> Host {
+    accepted_below(dir, path, "", first, second, settings())
+}
+
+/// [`accepted_then`] with `above` above the function in every version, base too.
+fn accepted_below(
+    dir: &Path,
+    path: &str,
+    above: &str,
+    first: &str,
+    second: &str,
+    settings: Settings,
+) -> Host {
+    let base = formatdoc! {"
+        {above}fn a() {{
+        }}
+    "};
+    let (first, second) = (format!("{above}{first}"), format!("{above}{second}"));
+    let (first, second) = (first.as_str(), second.as_str());
     let (review, repo) = worktree_review_of(
         dir,
-        &[(
-            path,
-            indoc! {"
-            fn a() {
-            }
-        "},
-        )],
-        &[(path, &file("1"))],
+        &[(path, &base), ("b.rs", "fn b() {}\n")],
+        &[(path, first), ("b.rs", "fn b() { b(); }\n")],
     );
     let history = review.history().unwrap();
     let view = history.current_view().unwrap();
     review
         .mark(&view, &view.units_of_file(path), MarkVerdict::Accepted)
         .unwrap();
-    std::fs::write(repo.join(path), file("2")).unwrap();
+    std::fs::write(repo.join(path), second).unwrap();
     review.refresh().unwrap();
-    let mut host = Host::open(review);
+    let mut host = Host::open_with(review, settings);
     host.update(|model| model.show_file(path));
     host.settle();
     host
 }
 
+/// The head lines each change since review starts at, of the hunks that are one such change.
+fn run_lines(model: &Model) -> Vec<usize> {
+    model.rows.hunks.iter().filter_map(rows::Hunk::at).collect()
+}
+
 /// A long change accepted at one revision whose one line changed at the next shows what changed
-/// on top of it, as a new change shows: in the hunks view the hunk is the changed line under its
-/// header, with the accepted lines around it as context, colored by the head they were accepted
-/// in, and the rest folded into gaps.
+/// on top of it, as a new change shows: in the hunks view the hunk is the changed line alone,
+/// with the accepted lines around it as context, colored by the head they were accepted in, and
+/// the rest folded into gaps.
 #[test]
 fn a_change_since_review_shows_on_top_of_the_accepted_change() {
     let dir = tempfile::tempdir().unwrap();
@@ -5757,14 +5799,15 @@ fn a_change_since_review_shows_on_top_of_the_accepted_change() {
     };
     assert_eq!(edited.kind(), rows::RowKind::Edited);
     assert_eq!(edited.text(), "    let v15 = 12;");
-    // The hunk is the change alone, its header right above the lines around it; those lines are
-    // the same as reviewed, so they come from the head reviewed then and have no base line.
+    // The hunk is the change alone, without a header, so its bar runs along nothing else; the
+    // lines around it are the same as reviewed, so they come from the head reviewed then and
+    // have no base line.
     let hunk: Vec<rows::RowKind> = rows
         .iter()
         .filter(|row| row.hunk.is_some())
         .map(rows::Row::kind)
         .collect();
-    assert_eq!(hunk, [rows::RowKind::Header, rows::RowKind::Edited]);
+    assert_eq!(hunk, [rows::RowKind::Edited]);
     let edited_row = rows
         .iter()
         .position(|row| row.kind() == rows::RowKind::Edited)
@@ -5862,7 +5905,7 @@ fn a_change_since_review_is_selected_at_the_change() {
 fn an_expanded_noise_file_changed_since_review_shows_each_line_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = accepted_then_changed(dir.path(), "Cargo.lock");
-    let unit = host.model().rows.hunks[0][0];
+    let unit = host.model().rows.hunks[0].unit;
     host.update(|model| {
         model.folds.expanded.insert(unit);
         model.rebuild();
@@ -5879,5 +5922,686 @@ fn an_expanded_noise_file_changed_since_review_shows_each_line_once() {
     assert!(
         lines.windows(2).all(|pair| pair[0] < pair[1]),
         "every head line once, in order: {lines:?}"
+    );
+}
+
+/// Two distant edits on top of an accepted change are two hunks, each a stop: Space approves
+/// only the selected one, which nothing shows approved until it is saved; then its lines are
+/// context, the other change is selected, and approving it too accepts the unit.
+#[test]
+fn each_change_since_review_is_approved_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    let unit = host.model().rows.hunks[0].unit;
+    assert_eq!(run_lines(host.model()), [11, 41]);
+    assert_eq!(host.model().rows.hunks.len(), 2, "a stop for each change");
+    host.dispatch(Action::NextHunk);
+    assert_eq!(host.model().hunk, 1);
+    host.dispatch(Action::PreviousHunk);
+    assert_eq!(host.model().hunk, 0);
+
+    // The approval shows nothing until it is saved, so the other change never looks approved.
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().pending.is_empty());
+    assert_eq!(hunk_badges(host.model(), 1), [rows::Badge::Changed]);
+    host.settle();
+    assert_eq!(run_lines(host.model()), [41]);
+    assert_eq!(host.model().hunk, 0, "the change left is selected");
+    assert_eq!(hunk_badges(host.model(), 0), [rows::Badge::Changed]);
+    assert!(
+        host.model().status.contains("1 change of this unit left"),
+        "{}",
+        host.model().status
+    );
+    // The approved line is context now, outside every hunk, and in no file of its own; the
+    // file view shows it.
+    host.dispatch(Action::ToggleView);
+    let approved = host
+        .model()
+        .rows
+        .rows
+        .iter()
+        .find(|row| {
+            row.cells()
+                .any(|cell| cell.head.as_ref().is_some_and(|head| head.line == 11))
+        })
+        .unwrap();
+    assert_eq!(approved.kind(), rows::RowKind::Context);
+    assert_eq!(approved.hunk, None);
+    let rows::Body::Code(cell) = &approved.body else {
+        panic!("a code row");
+    };
+    assert_eq!((cell.base, cell.reviewed.as_ref()), (None, None));
+    host.dispatch(Action::ToggleView);
+
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    let view = host.model().view().unwrap();
+    assert!(
+        matches!(
+            view.state(unit).unwrap(),
+            review_core::UnitState::Reviewed {
+                verdict: review_core::Verdict::Accepted,
+                ..
+            }
+        ),
+        "the last change accepts the unit"
+    );
+}
+
+/// Switching between the hunks and the file view keeps the selected change, though every
+/// change of the unit has the same unit ID.
+#[test]
+fn switching_views_keeps_the_selected_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    for _ in 0..2 {
+        host.dispatch(Action::ToggleView);
+        let model = host.model();
+        assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
+    }
+}
+
+/// In the buffer, the review keys act on the change under the cursor, and on nothing on a line
+/// the same as reviewed between two changes, never on the whole unit.
+#[test]
+fn the_buffer_approves_only_the_change_under_the_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().mode, Mode::Buffer);
+    assert_eq!(host.model().buffer.as_ref().unwrap().cursor.row, 41);
+    assert_eq!(host.model().buffer_hunk(), Some(1));
+
+    host.update(|model| model.buffer.as_mut().unwrap().cursor.row = 25);
+    assert_eq!(host.model().buffer_hunk(), None);
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().marks.is_empty() && !host.model().marking);
+
+    host.update(|model| model.buffer.as_mut().unwrap().cursor.row = 41);
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert_eq!(run_lines(host.model()), [11]);
+}
+
+/// Flagging a change since review flags the whole unit, which then shows whole as one hunk.
+#[test]
+fn a_flag_on_a_change_since_review_flags_the_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleFlag);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.rows.hunks.len(), 1);
+    assert_eq!(model.rows.hunks[0].change, None);
+    assert_eq!(hunk_badges(model, 0), [rows::Badge::Flagged]);
+}
+
+/// Change `index` of `unit` as a view of the review read now shows it.
+fn shown_change(review: &Review, unit: UnitId, index: usize) -> review_core::ShownRun {
+    let history = review.history().unwrap();
+    let view = history.view(unit.revision()).unwrap();
+    let Ok(Some(review_core::SinceReviewed::Delta(delta))) = view.since_reviewed(unit) else {
+        panic!("{unit} shows what changed since it was reviewed");
+    };
+    delta.runs()[index].shown()
+}
+
+/// An approval of a change another window approved meanwhile is refused and says so, as a
+/// failure to save: a quit waiting for it stops, so the reviewer sees it; the rows show what is
+/// left.
+#[test]
+fn an_approval_of_a_change_approved_meanwhile_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    let unit = host.model().rows.hunks[0].unit;
+    // Another window approves the first change.
+    let review = host.model().review.clone().unwrap();
+    let history = review.history().unwrap();
+    review
+        .approve_run(
+            &history.view(unit.revision()).unwrap(),
+            &shown_change(&review, unit, 0),
+        )
+        .unwrap();
+
+    // The keys come as a front end delivers them; Space moves on to the second change at once.
+    host.key(Action::ToggleApprove, None);
+    assert_eq!(host.model().rows.hunks[host.model().hunk].at(), Some(41));
+    host.key(Action::Quit, None);
+    host.settle();
+    assert_eq!(host.quits, 0, "the refusal keeps the app open");
+    assert_eq!(host.model().quitting, Quitting::Stopped);
+    assert!(
+        host.model()
+            .status
+            .starts_with("Nothing approved at a.rs:12:"),
+        "{}",
+        host.model().status
+    );
+    assert_eq!(
+        run_lines(host.model()),
+        [41],
+        "the second change is still open"
+    );
+    let model = host.model();
+    assert_eq!(
+        model.rows.hunks[model.hunk].at(),
+        Some(41),
+        "the selection stays"
+    );
+}
+
+/// Space on one change and then on the other before the first save lands approves both: an
+/// approval saving never turns a press away, and the second still finds its change. The change
+/// on its way shows approved alone, never its unit's other changes, and a press on it again
+/// waits for it.
+#[test]
+fn changes_pressed_while_another_saves_are_all_approved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    let unit = host.model().rows.hunks[0].unit;
+    host.dispatch(Action::ToggleApprove);
+    let model = host.model();
+    assert_eq!(model.hunk, 1, "on to the second change at once");
+    assert_eq!(model.hunk_badge(0), Some(rows::Badge::Accepted));
+    assert_eq!(model.hunk_badge(1), Some(rows::Badge::Changed));
+    host.dispatch(Action::PreviousHunk);
+    host.dispatch(Action::ToggleApprove);
+    assert!(
+        host.model().status.starts_with("Approving"),
+        "{}",
+        host.model().status
+    );
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleApprove);
+    assert_eq!(host.model().marks.len(), 1, "one saves, one waits");
+    host.settle();
+    let view = host.model().view().unwrap();
+    assert!(
+        view.state(unit).unwrap().is_reviewed(),
+        "{}",
+        host.model().status
+    );
+    assert_eq!(run_lines(host.model()), Vec::<usize>::new());
+}
+
+/// A flag of the whole unit made while the approval of one of its changes saves shows on that
+/// change too, as the tree shows it, since the flag is what the unit ends up with.
+#[test]
+fn a_flag_after_a_change_approval_shows_on_every_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleApprove);
+    assert_eq!(host.model().hunk_badge(0), Some(rows::Badge::Accepted));
+    host.dispatch(Action::ToggleFlag);
+    let model = host.model();
+    assert_eq!(model.hunk_badge(0), Some(rows::Badge::Flagged));
+    assert_eq!(model.hunk_badge(1), Some(rows::Badge::Flagged));
+}
+
+/// Once every change of a file is on its way to approval, the keys that go on to a file that
+/// needs the reviewer pass it by, although its meter still counts its unit open.
+#[test]
+fn a_file_whose_changes_are_all_saving_is_no_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = whole_file();
+    settings.appearance.applied.cross_files = true;
+    let edited = [10, 40];
+    let mut host = accepted_below(
+        dir.path(),
+        "a.rs",
+        "",
+        &statements(&edited, "1"),
+        &statements(&edited, "2"),
+        settings,
+    );
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleApprove);
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().marking, "the approvals are still saving");
+    host.update(|model| model.show_file("b.rs"));
+    host.dispatch(Action::FocusDiff);
+    assert_eq!(host.model().next_open_file(), None);
+    host.dispatch(Action::PreviousOpenHunk);
+    assert_eq!(host.model().selected.as_deref(), Some("b.rs"));
+}
+
+/// When the approval of a long change that only removes lines saves, the rows it took go, and
+/// the change Space moved on to stays on screen, so the next Space approves it.
+#[test]
+fn a_saved_approval_keeps_the_next_change_on_screen() {
+    use std::fmt::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Sixty statements go, and one far below them changes.
+    let (mut long, mut second) = (String::from("fn a() {\n"), String::from("fn a() {\n"));
+    for line in 0..160 {
+        let value = usize::from(line == 150);
+        writeln!(long, "    let v{line} = {value};").unwrap();
+        if !(19..79).contains(&line) {
+            writeln!(second, "    let v{line} = {};", value * 2).unwrap();
+        }
+    }
+    long.push_str("}\n");
+    second.push_str("}\n");
+    let mut host = accepted_below(dir.path(), "a.rs", "", &long, &second, whole_file());
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    assert_eq!(
+        host.model().hunk_rows.len(),
+        2,
+        "{:?}",
+        run_lines(host.model())
+    );
+    host.dispatch(Action::ToggleApprove);
+    assert_eq!(host.model().hunk, 1);
+    assert!(host.model().hunk_in_view());
+    host.settle();
+    lay_out(&mut host);
+    assert_eq!(host.model().hunk_rows.len(), 1);
+    assert!(
+        host.model().hunk_in_view(),
+        "{}",
+        host.model().diff_scroll.offset()
+    );
+}
+
+/// Approving the last change of a long unit, which then shows whole as one hunk from its start,
+/// keeps the code the reviewer reads where it is on screen.
+#[test]
+fn approving_a_units_last_change_keeps_the_code_on_screen() {
+    use std::fmt::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut long = String::from("fn a() {\n");
+    for line in 0..160 {
+        writeln!(long, "    let v{line} = 0;").unwrap();
+    }
+    long.push_str("}\n");
+    let second = long.replace("v150 = 0", "v150 = 2");
+    let mut host = accepted_below(dir.path(), "a.rs", "", &long, &second, whole_file());
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    assert_eq!(run_lines(host.model()), [151]);
+    let before = host.model().diff_scroll.target();
+    assert!(before > 100.0, "the change is far down the unit: {before}");
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    lay_out(&mut host);
+    assert_eq!(run_lines(host.model()), Vec::<usize>::new());
+    let after = host.model().diff_scroll.target();
+    assert!((after - before).abs() < 2.0, "{before} → {after}");
+}
+
+/// Space on a unit the reviewer folded never approves its changes since review unseen: it
+/// unfolds the unit at its first change.
+#[test]
+fn space_on_a_folded_unit_shows_its_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleFold);
+    assert_eq!(
+        run_lines(host.model()),
+        Vec::<usize>::new(),
+        "one folded hunk"
+    );
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().marks.is_empty() && !host.model().marking);
+    assert_eq!(run_lines(host.model()), [11, 41]);
+    let model = host.model();
+    assert_eq!(model.rows.hunks[model.hunk].at(), Some(11));
+    assert!(model.status.starts_with("Unfolded"), "{}", model.status);
+}
+
+/// The selected change is kept as itself, not by its place among the unit's changes: when
+/// another window approves the change before it, the same change stays selected, and when it
+/// approves the selected one, the next is selected, which a held Space never acts on and a new
+/// press does.
+#[test]
+fn the_selected_change_is_kept_by_where_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 30, 50]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    let unit = host.model().rows.hunks[0].unit;
+    let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
+    assert_eq!(selected(&host), Some(31));
+    let review = host.model().review.clone().unwrap();
+    let approve_elsewhere = |index: usize| {
+        let history = review.history().unwrap();
+        review
+            .approve_run(
+                &history.view(unit.revision()).unwrap(),
+                &shown_change(&review, unit, index),
+            )
+            .unwrap();
+    };
+
+    approve_elsewhere(0);
+    host.dispatch(Action::Refresh);
+    host.settle();
+    assert_eq!(run_lines(host.model()), [31, 51]);
+    assert_eq!(selected(&host), Some(31), "the same change");
+
+    approve_elsewhere(0);
+    host.key(Action::ToggleApprove, None);
+    // The other window's approval shows as a change on disk would, with no key between.
+    host.update(Model::refresh);
+    host.settle();
+    assert_eq!(selected(&host), Some(51), "the next change");
+    // The press that was saving is refused; the key still held never acts on the change now
+    // selected, whether or not the front end tells repeats.
+    for held in [None, Some(true)] {
+        host.key(Action::ToggleApprove, held);
+        assert!(host.model().marks.is_empty() && !host.model().marking);
+        assert!(
+            host.model().status.contains("held down"),
+            "{}",
+            host.model().status
+        );
+    }
+    host.update(|model| model.pause_keys(super::guard::REPEAT));
+    host.key(Action::ToggleApprove, None);
+    host.settle();
+    assert_eq!(run_lines(host.model()), Vec::<usize>::new(), "a new press");
+}
+
+/// A key held down across the approval of a change approves that change alone: the repeats
+/// that come while it saves wait, and once the diff moved on to the next change, never act on
+/// it, whether the front end tells repeats or, as in tmux, only time does.
+#[test]
+fn held_repeats_across_an_approval_approve_only_the_first_change() {
+    for held in [Some(true), None] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+        host.dispatch(Action::FocusDiff);
+        host.key(Action::ToggleApprove, held.map(|_| false));
+        for _ in 0..5 {
+            host.key(Action::ToggleApprove, held);
+        }
+        host.settle();
+        let model = host.model();
+        assert_eq!(run_lines(model), [41], "{held:?}");
+        assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
+        assert!(model.marks.is_empty() && !model.marking);
+        assert!(model.status.contains("held down"), "{}", model.status);
+    }
+}
+
+/// Space, `j` and Space typed before the first approval saves act on what each sees: the first
+/// Space approves the first change and moves on to the second at once, `j` moves past it to
+/// the third, and the second Space, a new press after another key, approves the third.
+#[test]
+fn space_j_space_before_a_save_approve_the_changes_each_sees() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 30, 50]);
+    host.dispatch(Action::FocusDiff);
+    let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
+    assert_eq!(selected(&host), Some(11));
+    host.key(Action::ToggleApprove, None);
+    assert_eq!(selected(&host), Some(31));
+    host.key(Action::NextHunk, None);
+    assert_eq!(selected(&host), Some(51));
+    host.key(Action::ToggleApprove, None);
+    assert!(host.model().marking && host.model().marks.len() == 1);
+    host.settle();
+    assert_eq!(run_lines(host.model()), [31]);
+    assert_eq!(selected(&host), Some(31), "the one change left");
+}
+
+/// A recapture that moves a unit along an unchanged link keeps its selected change as itself,
+/// its lines moved with the unit, and a key held on it goes on acting on that change, never on
+/// the change that came to stand where it stood.
+#[test]
+fn a_recapture_keeps_the_selected_change_as_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let header = "// header\n".repeat(10);
+    let edited = [10, 30, 50];
+    let mut host = accepted_below(
+        dir.path(),
+        "a.rs",
+        &header,
+        &statements(&edited, "1"),
+        &statements(&edited, "2"),
+        settings(),
+    );
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
+    assert_eq!(selected(&host), Some(41));
+    host.update(|model| model.hold_since(Duration::from_millis(100)));
+
+    // Twenty lines that change nothing reviewed come above the header.
+    let above = "// new\n".repeat(20);
+    let repo = dir.path().join("repo");
+    std::fs::write(
+        repo.join("a.rs"),
+        above + &header + &statements(&edited, "2"),
+    )
+    .unwrap();
+    host.update(|model| model.capture(false));
+    host.settle();
+    assert_eq!(run_lines(host.model()), [41, 61, 81]);
+    assert_eq!(selected(&host), Some(61), "the same change, moved");
+
+    host.key(Action::ToggleApprove, Some(true));
+    host.settle();
+    assert_eq!(
+        run_lines(host.model()),
+        [41, 81],
+        "the held key approved it"
+    );
+    host.key(Action::ToggleApprove, Some(true));
+    host.settle();
+    assert_eq!(run_lines(host.model()), [41, 81], "and nothing after it");
+}
+
+/// A press that reveals what it acts on, by unfolding a unit, showing a hunk scrolled away or
+/// leaving the buffer for a change only the diff shows, never approves anything while it is
+/// held.
+#[test]
+fn repeats_after_a_reveal_approve_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleFold);
+    host.key(Action::ToggleApprove, None);
+    assert!(host.model().status.starts_with("Unfolded"));
+    host.key(Action::ToggleApprove, None);
+    assert!(
+        host.model().marks.is_empty() && !host.model().marking,
+        "unfolded"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("server.go"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.update(|model| {
+        model.drag_list_to(List::Diff, 1e6);
+        model.hunk = 0;
+    });
+    host.key(Action::ToggleApprove, Some(false));
+    assert!(
+        host.model().status.contains("off screen"),
+        "{}",
+        host.model().status
+    );
+    host.key(Action::ToggleApprove, Some(true));
+    assert!(
+        host.model().marks.is_empty() && !host.model().marking,
+        "scrolled to"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = edits_and_a_removal(dir.path());
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleBuffer);
+    host.key(Action::ToggleApprove, None);
+    assert_eq!(host.model().mode, Mode::Diff);
+    host.key(Action::ToggleApprove, None);
+    assert!(
+        host.model().marks.is_empty() && !host.model().marking,
+        "left the buffer"
+    );
+}
+
+/// Coming back to a file, and switching the view on a change that only removes lines, which
+/// after a partial approval has no line of any file, keep the selected change rather than the
+/// unit's first.
+#[test]
+fn the_selected_change_survives_leaving_the_file_and_switching_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = edits_and_a_removal(dir.path());
+    host.dispatch(Action::FocusDiff);
+    let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
+    assert_eq!(run_lines(host.model()), [11, 26, 41]);
+    // Approving the second edit leaves the first and the removal after it, which shows against
+    // text in no file.
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert_eq!(run_lines(host.model()), [11, 41]);
+    assert_eq!(selected(&host), Some(41));
+    host.dispatch(Action::ToggleView);
+    assert_eq!(selected(&host), Some(41));
+    host.dispatch(Action::ToggleView);
+    assert_eq!(selected(&host), Some(41));
+    host.update(|model| model.show_file("b.rs"));
+    host.update(|model| model.show_file("a.rs"));
+    assert_eq!(selected(&host), Some(41));
+}
+
+/// The window of [`accepted_then`] where statements 10 and 25 changed and statement 40 was
+/// removed: changes at lines 11 and 26, and a removal standing at line 41.
+fn edits_and_a_removal(dir: &Path) -> Host {
+    let first = statements(&[10, 25], "1");
+    let second = statements(&[10, 25], "2").replace("    let v40 = 0;\n", "");
+    accepted_then(dir, "a.rs", &first, &second)
+}
+
+/// Space in the buffer on a change that only removes lines, which the buffer cannot show,
+/// shows it in the diff rather than approving it.
+#[test]
+fn space_on_a_removal_in_the_buffer_shows_it_in_the_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = edits_and_a_removal(dir.path());
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().buffer.as_ref().unwrap().cursor.row, 41);
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().marks.is_empty() && !host.model().marking);
+    let model = host.model();
+    assert_eq!(model.mode, Mode::Diff);
+    assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
+    assert!(
+        model.status.starts_with("This change only removes"),
+        "{}",
+        model.status
+    );
+}
+
+/// The buffer's gutter marks only the open changes of a unit that shows them apart, the lines
+/// Space acts on; Space on a change that only removes lines shows it in the diff first.
+#[test]
+fn the_buffer_marks_only_the_open_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleBuffer);
+    let marked: Vec<usize> = host
+        .model()
+        .buffer
+        .as_ref()
+        .unwrap()
+        .markers
+        .iter()
+        .enumerate()
+        .filter_map(|(row, marker)| marker.map(|_| row))
+        .collect();
+    assert_eq!(marked, [11, 41]);
+}
+
+/// The file header's meter counts units, so one unit of two changes since review reads 0/1
+/// before and after its first change is approved, and 1/1 after its last; folding the unit
+/// changes nothing.
+#[test]
+fn the_file_meter_counts_units_not_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    let meter = |host: &Host| {
+        let model = host.model();
+        let palette = crate::paint::Palette::of(model);
+        let room = crate::paint::Room {
+            budget: 400.0,
+            cell: 1.0,
+            gap: 1.0,
+        };
+        let header = crate::paint::header::file_header(model, &palette, room, 1.0).unwrap();
+        header.meter.unwrap().counts.text.trim().to_owned()
+    };
+    assert_eq!(meter(&host), "0/1");
+    host.dispatch(Action::ToggleFold);
+    assert_eq!(meter(&host), "0/1", "folding counts the same");
+    host.dispatch(Action::ToggleFold);
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert_eq!(meter(&host), "0/1");
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert_eq!(meter(&host), "1/1");
+}
+
+/// A press on a change whose approval is saving waits for it, even after an approval above it
+/// saved meanwhile and moved where its reviewed lines are in the reviewed text: it is the same
+/// change by the identity the engine compares, so it never queues an approval the engine
+/// would refuse once the first lands.
+#[test]
+fn a_press_on_a_change_saving_waits_after_a_shift_above_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = statements(&[40], "1");
+    let inserted = ["    let v10 = 0;\n", "    let inserted = 0;\n"].concat();
+    let second = statements(&[40], "2").replacen("    let v10 = 0;\n", &inserted, 1);
+    let mut host = accepted_then(dir.path(), "a.rs", &first, &second);
+    host.dispatch(Action::FocusDiff);
+    let unit = host.model().rows.hunks[0].unit;
+    assert_eq!(run_lines(host.model()), [12, 42]);
+
+    // The insertion saves while the edit below it waits.
+    host.dispatch(Action::ToggleApprove);
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleApprove);
+    let inserted = host.run_job();
+    host.complete(inserted);
+    assert!(host.model().marking, "the edit is saving now");
+
+    // Space again on the edit, as the rows read after the insertion show it.
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().marks.is_empty(), "nothing queued twice");
+    host.settle();
+    let view = host.model().view().unwrap();
+    assert!(
+        view.state(unit).unwrap().is_reviewed(),
+        "{}",
+        host.model().status
     );
 }

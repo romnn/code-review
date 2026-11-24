@@ -110,12 +110,7 @@ pub fn frame(model: &Model, index: usize) -> Frame {
 /// The tone of hunk `hunk`, from its units' review states and the marks still saving.
 #[must_use]
 pub fn hunk_tone(model: &Model, hunk: usize) -> HunkTone {
-    let units = model.rows.hunks.get(hunk).map_or(&[][..], Vec::as_slice);
-    let badges = model
-        .view()
-        .map(|view| crate::state::badges(&view, units, &model.pending))
-        .unwrap_or_default();
-    HunkTone::of(&badges)
+    HunkTone::of(model.hunk_badge(hunk).as_slice())
 }
 
 /// The hunk that diff row `index` belongs to for its band and bar: from the hunk's first row

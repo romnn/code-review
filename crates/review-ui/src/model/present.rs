@@ -572,7 +572,7 @@ mod tests {
         let shown = lay_out(Approved::Shown);
         let folded = lay_out(Approved::Folded);
 
-        let unit = folded.hunks[1][0];
+        let unit = folded.hunks[1].unit;
         let header = RowKey::of(&folded.rows[folded.unit_rows[&unit]]);
         assert_eq!(header.find(&shown), Some(shown.unit_rows[&unit]));
 

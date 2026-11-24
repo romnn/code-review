@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use review_core::UnitId;
+use review_core::{RevisionView, UnitId};
 
 use super::effects::{Outcome, Subject};
 use super::{DEFINITION_DEADLINE, Mode, Model, Running, ServerKey, Servers};
@@ -107,29 +107,31 @@ impl Buffer {
 
 impl Model {
     /// The display hunk of the line under the buffer cursor, only in a review buffer of the
-    /// selected file: the hunk of the diff's rows now that holds the line's unit.
+    /// selected file: the hunk of the diff's rows now that holds the line's unit, or for a unit
+    /// that shows its changes since it was reviewed as hunks of their own, the one the line is
+    /// in, and none on a line the same as reviewed.
     #[must_use]
     pub fn buffer_hunk(&self) -> Option<usize> {
         let buffer = self.buffer.as_ref()?;
         if buffer.origin != Origin::Review(self.selected.clone()?) {
             return None;
         }
-        let unit = buffer
-            .markers
-            .get(buffer.cursor.row)
-            .copied()
-            .flatten()?
-            .unit();
-        self.hunk_of(unit)
+        let row = buffer.cursor.row;
+        let unit = buffer.markers.get(row).copied().flatten()?.unit();
+        let last = buffer.markers.len().saturating_sub(1);
+        self.rows.hunks.iter().position(|hunk| {
+            hunk.unit == unit
+                && hunk.lines().is_none_or(|lines| {
+                    // A change that only removes lines stands at the line after them.
+                    lines.contains(&row) || (lines.is_empty() && lines.start.min(last) == row)
+                })
+        })
     }
 
-    /// The display hunk of the shown rows that holds `unit`.
+    /// The first display hunk of the shown rows that holds `unit`.
     #[must_use]
     pub(crate) fn hunk_of(&self, unit: UnitId) -> Option<usize> {
-        self.rows
-            .hunks
-            .iter()
-            .position(|units| units.contains(&unit))
+        self.rows.hunk_of(unit, None)
     }
 
     /// `=`: the whole file at the selected hunk, or back to the diff at the hunk under the
@@ -163,29 +165,15 @@ impl Model {
             self.set_status("This file is binary or not read yet.");
             return;
         };
-        let mut markers = vec![None; lines.lines.len().max(1)];
-        let mut start_row = None;
-        for (hunk, hunk_units) in self.rows.hunks.iter().enumerate() {
-            for &unit in hunk_units {
-                let Some(chunk) = view.unit(unit).ok().and_then(|record| record.chunk()) else {
-                    continue;
-                };
-                if hunk == self.hunk && start_row.is_none() {
-                    start_row = Some(chunk.new.start);
-                }
-                if chunk.new.len == 0 {
-                    let at = chunk.new.start.min(markers.len().saturating_sub(1));
-                    if let Some(slot) = markers.get_mut(at) {
-                        slot.get_or_insert(Marker::Removed(unit));
-                    }
-                }
-                for row in chunk.new.range() {
-                    if let Some(slot) = markers.get_mut(row) {
-                        *slot = Some(Marker::Added(unit));
-                    }
-                }
-            }
-        }
+        let markers = self.buffer_markers(&view, lines.lines.len());
+        let start_row = self
+            .rows
+            .hunks
+            .get(self.hunk)
+            .and_then(|hunk| match hunk.at() {
+                Some(start) => Some(start),
+                None => Some(view.unit(hunk.unit).ok()?.chunk()?.new.start),
+            });
         let row = start_row
             .unwrap_or(0)
             .min(lines.lines.len().saturating_sub(1));
@@ -203,6 +191,54 @@ impl Model {
         // The list may not be laid out yet, so the cursor is centered once it is.
         self.buffer_scroll.request(Request::Center(row));
         self.enter_mode(Mode::Buffer);
+    }
+
+    /// The change markers of a review buffer of the shown file, `len` lines long: each display
+    /// hunk's lines, so a unit that shows its changes since review apart marks only those, as
+    /// the review keys act on them.
+    fn buffer_markers(&self, view: &RevisionView<'_>, len: usize) -> Vec<Option<Marker>> {
+        let mut markers = vec![None; len.max(1)];
+        let last = markers.len().saturating_sub(1);
+        for hunk in &self.rows.hunks {
+            let unit = hunk.unit;
+            let lines = match hunk.lines() {
+                Some(lines) => lines,
+                None => match view.unit(unit).ok().and_then(|record| record.chunk()) {
+                    Some(chunk) => chunk.new.range(),
+                    None => continue,
+                },
+            };
+            if lines.is_empty()
+                && let Some(slot) = markers.get_mut(lines.start.min(last))
+            {
+                slot.get_or_insert(Marker::Removed(unit));
+            }
+            for row in lines {
+                if let Some(slot) = markers.get_mut(row) {
+                    *slot = Some(Marker::Added(unit));
+                }
+            }
+        }
+        markers
+    }
+
+    /// Marks again the lines of the review buffer of the shown file after its rows changed,
+    /// such as when one change of a unit was approved.
+    pub(super) fn remark_buffer(&mut self) {
+        let markers = {
+            let (Some(view), Some(buffer), Some(path)) =
+                (self.view(), &self.buffer, &self.selected)
+            else {
+                return;
+            };
+            if buffer.origin != Origin::Review(path.clone()) {
+                return;
+            }
+            self.buffer_markers(&view, buffer.lines.lines.len())
+        };
+        if let Some(buffer) = &mut self.buffer {
+            buffer.markers = Arc::new(markers);
+        }
     }
 
     /// A fresh buffer identity.
@@ -231,7 +267,7 @@ impl Model {
     }
 
     /// Back to the diff, at the hunk the cursor is in or the last one before it.
-    fn leave_buffer(&mut self) {
+    pub(super) fn leave_buffer(&mut self) {
         let row = self.buffer.as_ref().map(|buffer| buffer.cursor.row);
         let hunk = self.buffer_hunk().or_else(|| {
             let row = row?;

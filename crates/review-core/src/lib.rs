@@ -84,6 +84,6 @@ pub use store::events::{MarkVerdict, TrustScope};
 pub use view::{
     ChangeKind, Collapse, Counts, Delta, DiffLine, DiffLineKind, FileChangeSummary, FileStatus,
     FileTone, Interdiff, LineEnding, LineRun, Location, MoveEnd, MoveView, NoteAttachment,
-    Reopened, ResolvedNote, RevisionView, ScopeAnchor, Side, SideDiff, SinceReviewed, SplitLine,
-    Status, split_line_ending,
+    Reopened, ResolvedNote, ReviewedBaseline, ReviewedHead, RevisionView, ScopeAnchor, ShownRun,
+    Side, SideDiff, SinceReviewed, SplitLine, Status, split_line_ending,
 };

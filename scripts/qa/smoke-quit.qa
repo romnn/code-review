@@ -1,12 +1,14 @@
 # Quitting saves what the reviewer did first: three hunks approved and q, typed faster than the
 # marks save, are all there when the review opens again, at the hunk where the reviewer quit.
+# A terminal tells a held key by time alone, so `k j` between taps of Space keeps each one a
+# press of its own there.
 # Both front ends end their smoke runs with it, since it relaunches.
 launch --demo
 file src/compat.rs
 key 0
 state
 expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
-rapid key space space space q
+rapid key space k j space k j space q
 exited
 launch --demo-revision 1
 expect "progress":\{"files":\[7,54\],"hunks":\[18,292\],"auto_approved":6\}
@@ -22,7 +24,7 @@ file src/generated/schema.rs
 key 0
 state
 expect "progress":\{"files":\[7,54\],"hunks":\[18,292\],"auto_approved":6\}
-rapid key space space q space q
+rapid key space k j space q space q
 exited
 launch --demo-revision 1
 expect "progress":\{"files":\[8,54\],"hunks":\[20,292\],"auto_approved":6\}

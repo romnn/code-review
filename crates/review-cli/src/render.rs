@@ -8,8 +8,8 @@ use review_core::analysis::{EntrySide, NoiseCategory, UnitKind};
 use review_core::walkthrough::{Partition, StepKind};
 use review_core::{
     Collapse, Delta, DiffLineKind, Interdiff, LineEnding, Location, NoteAttachment, Recorded,
-    Reopened, ReviewKey, ReviewTag, RevisionNumber, RevisionView, SideDiff, SinceReviewed,
-    SplitLine, Standing, Status, Subject, Tagged, UnitId, UnitState, filtered_note,
+    Reopened, ReviewKey, ReviewTag, ReviewedBaseline, RevisionNumber, RevisionView, SideDiff,
+    SinceReviewed, SplitLine, Standing, Status, Subject, Tagged, UnitId, UnitState, filtered_note,
     split_line_ending,
 };
 use serde::Serialize;
@@ -203,7 +203,14 @@ pub fn partition(view: &RevisionView<'_>, parts: &Partition) -> String {
 fn standing_label(view: &RevisionView<'_>, unit: UnitId) -> eyre::Result<String> {
     Ok(match view.standing(unit)? {
         Standing::AutoApproved => "approved automatically · reformatted only".to_owned(),
-        _ => state_label(view.state(unit)?),
+        _ => match view.since_reviewed(unit)? {
+            Some(SinceReviewed::Delta(Delta {
+                reviewed,
+                baseline: ReviewedBaseline::Partial,
+                ..
+            })) => format!("partly approved at {reviewed}"),
+            _ => state_label(view.state(unit)?),
+        },
     })
 }
 

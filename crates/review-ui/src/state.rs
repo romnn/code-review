@@ -10,8 +10,8 @@ use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use review_core::{
-    Counts, FileStatus, History, MarkVerdict, ObjectId, ReviewPolicy, RevisionNumber, RevisionView,
-    Standing, UnitId, Verdict,
+    Counts, FileStatus, History, MarkVerdict, ObjectId, Review, ReviewPolicy, RevisionNumber,
+    RevisionView, ShownRun, Standing, UnitId, Verdict,
 };
 
 use review_core::tree::{NodeKind, TreeNode};
@@ -48,18 +48,47 @@ impl Snapshot {
     }
 }
 
-/// A mark the reviewer asked for: the exact units, the revision they were shown in, and the
-/// history that showed them.
+/// A mark the reviewer asked for: what it marks, the revision that was shown in, and the
+/// history that showed it.
 #[derive(Clone)]
 pub struct MarkJob {
-    /// The units, resolved when the reviewer acted.
-    pub units: Vec<UnitId>,
+    /// What it marks, resolved when the reviewer acted.
+    pub mark: Mark,
     /// The revision the units were shown in.
     pub revision: RevisionNumber,
-    /// The verdict.
-    pub verdict: MarkVerdict,
     /// The history the units were resolved in, which the engine checks the mark against.
     pub history: Arc<History>,
+}
+
+/// What a [`MarkJob`] records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mark {
+    /// `verdict` on each of `units`.
+    Units {
+        /// The units.
+        units: Vec<UnitId>,
+        /// The verdict.
+        verdict: MarkVerdict,
+    },
+    /// The approval of one change of a unit that shows what changed since it was reviewed, as
+    /// the job's history shows it.
+    Run(ShownRun),
+}
+
+impl MarkJob {
+    /// Records the job with `review`, against the view it was resolved in.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's refusal, such as for a revision no longer current or, for a
+    /// change, one the review no longer shows.
+    pub fn save(&self, review: &Review) -> Result<(), review_core::Error> {
+        let view = self.history.view(self.revision)?;
+        match &self.mark {
+            Mark::Units { units, verdict } => review.mark(&view, units, *verdict),
+            Mark::Run(run) => review.approve_run(&view, run),
+        }
+    }
 }
 
 /// One version of a file: its blob under its path, which together decide its syntax, since the
@@ -199,11 +228,21 @@ pub fn badges<S: BuildHasher>(
 ) -> Vec<Badge> {
     units
         .iter()
-        .map(|unit| match pending.get(unit) {
-            Some(&verdict) => Badge::of(pending_standing(verdict)),
-            None => view.standing(*unit).map_or(Badge::Unreviewed, Badge::of),
-        })
+        .map(|&unit| badge(view, unit, pending))
         .collect()
+}
+
+/// The badge of `unit`, its pending verdict in place of where the engine says it stands.
+#[must_use]
+pub fn badge<S: BuildHasher>(
+    view: &RevisionView<'_>,
+    unit: UnitId,
+    pending: &HashMap<UnitId, MarkVerdict, S>,
+) -> Badge {
+    match pending.get(&unit) {
+        Some(&verdict) => Badge::of(pending_standing(verdict)),
+        None => view.standing(unit).map_or(Badge::Unreviewed, Badge::of),
+    }
 }
 
 /// Whether a badge counts as approved: seen, accepted or approved automatically, and not
@@ -344,18 +383,17 @@ mod tests {
         let view = history.view(revision).unwrap();
         let units = view.units_under(&["src/engine.rs".to_owned()]);
         let job = MarkJob {
-            units: units.clone(),
+            mark: Mark::Units {
+                units: units.clone(),
+                verdict: MarkVerdict::Accepted,
+            },
             revision,
-            verdict: MarkVerdict::Accepted,
             history: Arc::clone(&history),
         };
         // Another process records revision 2 while the mark waits.
         let second = review_core::RevisionNumber::new(2).unwrap();
         let review = prepare(&paths, &fixture_dir(), DemoRequest::UpTo(second)).unwrap();
-        let saved = job
-            .history
-            .view(job.revision)
-            .and_then(|view| review.mark(&view, &job.units, job.verdict));
+        let saved = job.save(&review);
         assert!(
             saved.is_err(),
             "a mark against revision 1 must not land on revision 2"

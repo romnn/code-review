@@ -145,6 +145,13 @@ pub enum Error {
         /// The current revision.
         current: Option<RevisionNumber>,
     },
+    /// One change of a unit was to be approved, but the unit no longer shows that change as
+    /// the review's log has it now: it was approved, or the unit changed, since it was shown.
+    #[error("the review changed since {unit} was shown; nothing was approved")]
+    ChangedSinceShown {
+        /// The unit whose change was to be approved.
+        unit: UnitId,
+    },
     /// A unit ID is out of range for its revision.
     #[error("unit {0} does not exist")]
     UnknownUnit(UnitId),

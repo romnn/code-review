@@ -8,14 +8,14 @@
 
 use std::sync::Arc;
 
-use review_core::{History, MarkVerdict, Recorded, Review, TrustScope, UnitId};
+use review_core::{History, MarkVerdict, Recorded, Review, ShownRun, TrustScope, UnitId};
 
 use super::effects::{Because, Outcome, Subject};
 use super::{
     Effect, Grant, Mode, Model, QuitKind, Quitting, SyncStep, buffer, live, overview, plural,
 };
 use crate::rows;
-use crate::state::{self, MarkJob};
+use crate::state::{self, Mark, MarkJob};
 
 impl Model {
     /// The units the current mode's review keys act on, and what to call them, resolved from
@@ -84,7 +84,7 @@ impl Model {
             }
             Mode::Buffer => {
                 let hunk = self.buffer_hunk().ok_or_else(nothing)?;
-                let units = self.rows.hunks.get(hunk).ok_or_else(nothing)?.clone();
+                let units = vec![self.rows.hunks.get(hunk).ok_or_else(nothing)?.unit];
                 Ok((
                     units,
                     format!("hunk {} of {}", hunk + 1, self.rows.hunks.len()),
@@ -104,9 +104,14 @@ impl Model {
             ));
             return;
         }
+        if let Some(why) = self.held_refusal() {
+            self.set_status(why);
+            return;
+        }
         // The selected hunk must be on screen; one scrolled away is shown first, not marked.
         if self.mode == Mode::Diff && !self.hunk_in_view() {
             self.reveal_hunk();
+            self.revealed();
             self.set_status(format!(
                 "Hunk {} of {} was off screen; it shows now. Press again to mark it.",
                 self.hunk + 1,
@@ -128,6 +133,27 @@ impl Model {
         if self.refuses_changed(&units, &what) {
             return;
         }
+        // One change of a unit that shows what changed since it was reviewed is approved on
+        // its own, and Space never approves such a unit whole; flags and resets act on the
+        // whole unit.
+        if toward == MarkVerdict::Accepted
+            && let Some(hunk) = self.target_hunk().cloned()
+        {
+            match hunk.change {
+                Some(change) => {
+                    self.approve_change(change, &what);
+                    return;
+                }
+                None if self
+                    .view()
+                    .is_some_and(|view| rows::shows_changes_apart(&view, hunk.unit)) =>
+                {
+                    self.unfold_changes(hunk.unit);
+                    return;
+                }
+                None => {}
+            }
+        }
         let Some(view) = self.view() else {
             return;
         };
@@ -143,6 +169,100 @@ impl Model {
         if self.mode == Mode::Diff && verdict == MarkVerdict::Accepted {
             self.after_approval();
         }
+    }
+
+    /// The display hunk the review keys act on: the selected hunk in the diff, the one under the
+    /// cursor in a review buffer, and none in the tree, whose keys act on files and folders.
+    pub(super) fn target_hunk(&self) -> Option<&rows::Hunk> {
+        let hunk = match self.mode {
+            Mode::Diff => Some(self.hunk),
+            Mode::Buffer => self.buffer_hunk(),
+            Mode::Tree => None,
+        }?;
+        self.rows.hunks.get(hunk)
+    }
+
+    /// Space on a unit the reviewer folded whose changes since review show as hunks of their
+    /// own: unfolds it and selects its first change, so Space never approves changes it hides.
+    fn unfold_changes(&mut self, unit: UnitId) {
+        self.revealed();
+        self.folds.units.remove(&unit);
+        self.folds.opened.insert(unit);
+        self.rebuild();
+        if self.mode == Mode::Diff
+            && let Some(first) = self.rows.hunk_of(unit, None)
+        {
+            self.select_hunk(first);
+        }
+        self.set_status("Unfolded: press Space to approve this change.");
+    }
+
+    /// Queues the approval of `change` as the shown revision has it, or in a review buffer,
+    /// shows a change that only removes lines in the diff first.
+    ///
+    /// The change shows approved at once, and the diff moves on to the next change that needs
+    /// the reviewer, as after approving a hunk; the unit's other changes stay open, so it
+    /// never looks approved as a whole. Once saved, the rows show what is left. A press on a
+    /// change already on its way waits for it rather than asking again.
+    fn approve_change(&mut self, change: ShownRun, what: &str) {
+        if self.mode == Mode::Buffer && change.new.range().is_empty() {
+            self.revealed();
+            self.leave_buffer();
+            self.set_status(
+                "This change only removes lines, which only the diff shows; press Space to \
+                 approve it.",
+            );
+            return;
+        }
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        if let Some(newer) = snapshot.newer() {
+            self.fail(format!(
+                "Revision {newer} is available; press R to switch to it before reviewing."
+            ));
+            return;
+        }
+        if self.approving_change(&change) {
+            self.set_status(format!("Approving {what}…"));
+            return;
+        }
+        if self.quitting == Quitting::Stopped {
+            self.quitting = Quitting::No;
+        }
+        let unit = change.unit;
+        self.marks.push_back(MarkJob {
+            mark: Mark::Run(change),
+            revision: snapshot.revision,
+            history: snapshot.history,
+        });
+        let left = self
+            .rows
+            .hunks
+            .iter()
+            .filter_map(|hunk| hunk.change.as_ref())
+            .filter(|change| change.unit == unit && !self.approving_change(change))
+            .count();
+        self.set_status(match left {
+            0 => "Approved the last change of this unit.".to_owned(),
+            left => format!(
+                "Approved the change; {} of this unit left.",
+                plural(left, "change")
+            ),
+        });
+        self.next_mark();
+        if self.mode == Mode::Diff {
+            self.after_approval();
+        }
+    }
+
+    /// Whether the approval of `change` is saving or waiting to.
+    pub(super) fn approving_change(&self, change: &ShownRun) -> bool {
+        self.approving.as_ref() == Some(change)
+            || self
+                .marks
+                .iter()
+                .any(|job| matches!(&job.mark, Mark::Run(run) if run == change))
     }
 
     /// After approving a hunk, selects the next one in the file that needs the reviewer, as
@@ -202,9 +322,8 @@ impl Model {
         }
         let count = units.len();
         self.marks.push_back(MarkJob {
-            units,
+            mark: Mark::Units { units, verdict },
             revision: snapshot.revision,
-            verdict,
             history: snapshot.history,
         });
         self.refresh_tree();
@@ -233,11 +352,12 @@ impl Model {
             return;
         };
         self.marking = true;
+        self.approving = match &job.mark {
+            Mark::Run(run) => Some(run.clone()),
+            Mark::Units { .. } => None,
+        };
         self.spawn(Subject::Always(Because::Save), move || {
-            let saved = job
-                .history
-                .view(job.revision)
-                .and_then(|view| review.mark(&view, &job.units, job.verdict));
+            let saved = job.save(&review);
             let history = review.history();
             Outcome::Marked(Marked {
                 job,
@@ -269,20 +389,41 @@ impl Model {
         // Pending verdicts are exactly those of the marks still queued.
         self.pending.clear();
         for queued in &self.marks {
-            for &unit in &queued.units {
-                self.pending.insert(unit, queued.verdict);
+            if let Mark::Units { units, verdict } = &queued.mark {
+                for &unit in units {
+                    self.pending.insert(unit, *verdict);
+                }
             }
         }
+        self.approving = None;
         let mut failures = Vec::new();
-        let unsaved = match saved {
-            Ok(()) => false,
-            Err(err) => {
-                let units = plural(job.units.len(), "unit");
+        let unsaved = match (saved, &job.mark) {
+            (Ok(()), _) => false,
+            // The rows are read again below, so the reviewer sees what the change is now; the
+            // message says where it is, since Space has moved on from it.
+            (Err(err @ review_core::Error::ChangedSinceShown { .. }), Mark::Run(run)) => {
+                self.effect(Effect::Log(format!("did not approve a change: {err:#}")));
+                let path = self
+                    .view()
+                    .and_then(|view| Some(view.file(run.unit).ok()?.display_path().to_owned()))
+                    .unwrap_or_else(|| run.unit.to_string());
+                failures.push(format!(
+                    "Nothing approved at {path}:{}: the change was approved or changed since \
+                     it showed, and shows as it is now",
+                    run.new.start + 1
+                ));
+                true
+            }
+            (Err(err), mark) => {
+                let what = match mark {
+                    Mark::Units { units, .. } => {
+                        format!("the mark of {}", plural(units.len(), "unit"))
+                    }
+                    Mark::Run(run) => format!("the approval of a change of {}", run.unit),
+                };
                 // The log keeps it for when the app quits before anyone reads the status line.
-                self.effect(Effect::Log(format!(
-                    "could not record the mark of {units}: {err:#}"
-                )));
-                failures.push(format!("Could not record the mark of {units}: {err}"));
+                self.effect(Effect::Log(format!("could not record {what}: {err:#}")));
+                failures.push(format!("Could not record {what}: {err}"));
                 true
             }
         };
@@ -307,7 +448,7 @@ impl Model {
             self.fail(failures.join(". "));
         }
         self.refresh_tree();
-        self.rebuild();
+        self.rebuild_in_place();
     }
 
     /// Installs a freshly read history that has the snapshot on screen, the same revision of

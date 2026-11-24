@@ -65,6 +65,8 @@ pub(crate) struct LogWriter<'lock> {
     path: PathBuf,
     file: File,
     events: Vec<Event>,
+    /// The log's length in bytes, every record complete.
+    length: u64,
     _lock: &'lock LockGuard,
 }
 
@@ -86,8 +88,8 @@ impl<'lock> LogWriter<'lock> {
             .iter()
             .rposition(|&byte| byte == b'\n')
             .map_or(0, |newline| newline + 1);
+        let length = u64::try_from(complete).unwrap_or(u64::MAX);
         if complete < bytes.len() {
-            let length = u64::try_from(complete).unwrap_or(u64::MAX);
             file.set_len(length)
                 .map_err(|source| Error::io("truncate", path, source))?;
             file.sync_data()
@@ -98,8 +100,15 @@ impl<'lock> LogWriter<'lock> {
             path: path.to_path_buf(),
             file,
             events,
+            length,
             _lock: lock,
         })
+    }
+
+    /// Returns the log's length in bytes, which a [`History`](crate::History) read from it
+    /// before any append since has as its [version](crate::History::version).
+    pub(crate) fn length(&self) -> u64 {
+        self.length
     }
 
     /// Returns every event in the log.
@@ -123,6 +132,7 @@ impl<'lock> LogWriter<'lock> {
         self.file
             .sync_data()
             .map_err(|source| Error::io("sync", &self.path, source))?;
+        self.length += u64::try_from(record.len()).unwrap_or(u64::MAX);
         self.events.push(event);
         Ok(())
     }

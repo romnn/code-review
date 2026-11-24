@@ -13,6 +13,7 @@ mod ignore;
 mod info;
 mod live;
 mod moves;
+mod partial;
 mod perf;
 mod repository;
 mod scope;

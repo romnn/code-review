@@ -48,6 +48,7 @@ mod diff;
 mod effects;
 mod fields;
 mod folders;
+mod guard;
 mod highlights;
 mod layout;
 mod live;
@@ -217,10 +218,10 @@ pub enum Phase {
 
 /// Where the reviewer was in a file, kept while other files show: the selected hunk, and the
 /// unified row at the top, which survives any change of layout, density or font.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Place {
-    /// The selected hunk's first unit: a hunk's index depends on the view, its units do not.
-    unit: Option<UnitId>,
+    /// The selected hunk: its index depends on the view, the hunk does not.
+    hunk: Option<crate::rows::Hunk>,
     top: present::Anchor,
     /// What the top row showed, to find it again in rows laid out in another view.
     key: Option<present::RowKey>,
@@ -414,8 +415,9 @@ fn reviewed_heads(
     for &index in &file.units {
         if let Ok(Some(review_core::SinceReviewed::Delta(delta))) =
             view.since_reviewed(view.id(index))
+            && let review_core::ReviewedBaseline::Head(reviewed) = delta.baseline
         {
-            let head = side_key(delta.reviewed_head);
+            let head = side_key(reviewed.entry);
             if !heads.contains(&head) {
                 heads.push(head);
             }
@@ -527,6 +529,14 @@ pub struct Model {
     pub marks: VecDeque<MarkJob>,
     /// Whether a mark is being saved.
     pub marking: bool,
+    /// The change whose approval is saving now: with those queued, it shows approved until
+    /// saved, and a press on it waits for it rather than asking for it again, which the engine
+    /// would refuse.
+    approving: Option<review_core::ShownRun>,
+    /// The key in hand.
+    input: Option<guard::KeyInput>,
+    /// The review key pressed last, while it may still repeat.
+    press: Option<guard::Press>,
     /// Verdicts asked for but not yet recorded, shown at once.
     pub pending: HashMap<UnitId, MarkVerdict>,
     /// Whether a fetch of the latest changes runs.
@@ -545,7 +555,7 @@ pub struct Model {
     /// Whether the diff is in scroll mode, where the hunk keys scroll a line.
     pub scroll_mode: bool,
     /// The first unit of the hunk selected when scroll mode began, which Esc goes back to.
-    scrolled_from: Option<UnitId>,
+    scrolled_from: Option<rows::Hunk>,
     /// When the status line last reported a failure, for tinting it.
     pub failed_at: Option<Instant>,
     /// Whether a definition lookup runs.
@@ -641,6 +651,9 @@ impl Model {
             live: None,
             marks: VecDeque::new(),
             marking: false,
+            approving: None,
+            input: None,
+            press: None,
             pending: HashMap::new(),
             refreshing: false,
             sync: Sync::default(),
@@ -1061,12 +1074,8 @@ impl Model {
         let Some(view) = snapshot.view() else {
             return;
         };
-        // The selection is the selected hunk's units; its index follows them into the new rows.
-        let selected = self
-            .rows
-            .hunks
-            .get(self.hunk)
-            .and_then(|hunk| hunk.first().copied());
+        // The selection is the selected hunk; its index follows it into the new rows.
+        let selected = self.rows.hunks.get(self.hunk).cloned();
         let layout = match self.folder.as_ref().map(|folder| folder.path.clone()) {
             Some(folder) => self.lay_out_folder(&view, &folder),
             None => self.selected.clone().map(|path| self.lay_out(&view, &path)),
@@ -1080,12 +1089,11 @@ impl Model {
         rows::project(&mut layout, self.wrap_room());
         self.rows = Arc::new(layout);
         self.hunk_rows = hunk_rows(&self.rows);
-        if let Some(found) =
-            selected.and_then(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)))
-        {
+        if let Some(found) = selected.and_then(|hunk| self.rows.hunk_like(&hunk)) {
             self.hunk = found;
         }
         self.hunk = self.hunk.min(self.hunk_rows.len().saturating_sub(1));
+        self.remark_buffer();
         self.refresh_find(Mode::Diff);
     }
 
@@ -1120,7 +1128,11 @@ impl Model {
     /// The units of the selected hunk.
     #[must_use]
     pub fn hunk_units(&self) -> Vec<UnitId> {
-        self.rows.hunks.get(self.hunk).cloned().unwrap_or_default()
+        self.rows
+            .hunks
+            .get(self.hunk)
+            .map(|hunk| vec![hunk.unit])
+            .unwrap_or_default()
     }
 
     /// The row the diff's keyboard target starts at: the selected hunk's header.
@@ -1474,7 +1486,7 @@ pub struct LiveState<'a> {
     pub lookup_failed: Option<&'a str>,
     /// The paths the capture kept at their staged version, under a filter driver.
     pub filtered: &'a [String],
-    /// Whether the view may miss a change and takes no marks until it is captured again.
+    /// Whether the view may miss a change, until it is captured again.
     pub updating: bool,
     /// What git is busy with in the checkout, which keeps the view on screen.
     pub busy: Option<review_core::Busy>,

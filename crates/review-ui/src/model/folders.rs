@@ -85,7 +85,7 @@ impl Model {
             let unit = self
                 .places
                 .get(&path)
-                .and_then(|place| place.unit)
+                .and_then(|place| Some(place.hunk.as_ref()?.unit))
                 .map(|unit| unit.to_string());
             return Some(Place { path, unit });
         }

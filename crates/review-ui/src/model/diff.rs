@@ -277,7 +277,7 @@ impl Model {
         self.scroll_mode = !self.scroll_mode;
         self.scrolled_from = self
             .scroll_mode
-            .then(|| self.hunk_units().first().copied())
+            .then(|| self.rows.hunks.get(self.hunk).cloned())
             .flatten();
         self.set_status(if self.scroll_mode {
             "Scroll mode: j and k scroll a line; s stays here, Esc goes back to the hunk."
@@ -293,7 +293,7 @@ impl Model {
         let from = self
             .scrolled_from
             .take()
-            .and_then(|unit| self.hunk_of(unit));
+            .and_then(|hunk| self.rows.hunk_like(&hunk));
         self.select_hunk(from.unwrap_or(self.hunk));
         self.set_status("Back at the hunk; j and k move between hunks again.");
     }
@@ -389,12 +389,7 @@ impl Model {
             return;
         };
         self.show_file(&path);
-        if let Some(hunk) = self
-            .rows
-            .hunks
-            .iter()
-            .position(|units| units.contains(&unit))
-        {
+        if let Some(hunk) = self.rows.hunk_of(unit, None) {
             self.select_hunk(hunk);
         }
         self.set_status(format!("Followed the move to {path}."));
@@ -475,13 +470,71 @@ impl Model {
     /// Whether hunk `hunk` of the shown file still needs the reviewer: some unit of it is not
     /// approved, counting the marks still saving.
     fn hunk_open(&self, hunk: usize) -> bool {
-        let Some(view) = self.view() else {
-            return false;
+        self.hunk_badge(hunk)
+            .is_some_and(|badge| !state::is_approved(badge))
+    }
+
+    /// The badge of hunk `hunk`: its unit's verdict still saving, else approved for a change
+    /// whose approval is on its way, else where its unit stands.
+    #[must_use]
+    pub fn hunk_badge(&self, hunk: usize) -> Option<crate::rows::Badge> {
+        let hunk = self.rows.hunks.get(hunk)?;
+        let view = self.view()?;
+        let pending = self.pending.contains_key(&hunk.unit);
+        if !pending
+            && hunk
+                .change
+                .as_ref()
+                .is_some_and(|change| self.approving_change(change))
+        {
+            return Some(crate::rows::Badge::of(state::pending_standing(
+                review_core::MarkVerdict::Accepted,
+            )));
+        }
+        Some(state::badge(&view, hunk.unit, &self.pending))
+    }
+
+    /// Lays out the diff again after what it shows changed under the reviewer, as when a save
+    /// lands, keeping on screen what they look at: the selected hunk where it is when it shows
+    /// and is still there, or else the row at the top, wherever either went in the new rows;
+    /// with neither, the offset stays.
+    pub(super) fn rebuild_in_place(&mut self) {
+        let target = self.diff_scroll.target();
+        let viewport = self.grid().viewports.diff;
+        let selected = self
+            .hunk_rows
+            .get(self.hunk)
+            .filter(|rows| scroll::shows(rows, target, viewport))
+            .zip(self.rows.hunks.get(self.hunk))
+            .map(|(rows, hunk)| (rows.start, hunk.clone()));
+        let top = super::present::diff_anchor(&self.rows, target).top;
+        let top_at = super::present::diff_offset(&self.rows, super::present::DiffAnchor::line(top));
+        let key = self
+            .rows
+            .row_on_screen(super::present::Anchor::at(target).row)
+            .map(super::present::RowKey::of);
+        self.rebuild();
+        // Only the very hunk anchors: one found in its place, such as the whole unit after its
+        // last change was approved, may start far from where the reviewer reads.
+        let same = selected.filter(|(_, hunk)| self.rows.hunks.get(self.hunk) == Some(hunk));
+        let offset = match same {
+            Some((start, _)) => self
+                .hunk_rows
+                .get(self.hunk)
+                .map(|rows| target + scroll::rows(rows.start) - scroll::rows(start)),
+            // A line no longer there, such as a removed one, keeps the offset rather than falling
+            // back to its unit's start.
+            None => key.and_then(|key| key.find_line(&self.rows)).map(|row| {
+                let top = super::present::Anchor { row, ..top };
+                let now_at =
+                    super::present::diff_offset(&self.rows, super::present::DiffAnchor::line(top));
+                target + now_at - top_at
+            }),
         };
-        let units = self.rows.hunks.get(hunk).map_or(&[][..], Vec::as_slice);
-        !state::badges(&view, units, &self.pending)
-            .into_iter()
-            .all(state::is_approved)
+        if let Some(offset) = offset.filter(|&offset| (offset - target).abs() > f64::EPSILON) {
+            self.diff_scroll.stop();
+            self.diff_scroll.jump(offset);
+        }
     }
 
     /// Whether the shown file still needs the reviewer.

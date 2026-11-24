@@ -1,6 +1,7 @@
 # 9. A hunk changed since it was reviewed shows what changed on top of it
 
-**Status:** accepted · **Date:** 2026-11-23 · amends
+**Status:** accepted, its one stop and one mark superseded by
+[ADR 10](0010-each-change-since-a-review-is-approved-on-its-own.md) · **Date:** 2026-11-23 · amends
 [ADR 6](0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md): an interdiff no longer
 shows as nested blocks; what changed since a review shows through the same script as a hunk
 

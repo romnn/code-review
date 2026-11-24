@@ -882,12 +882,19 @@ impl Model {
             None
         };
         let lines = self.lines_shown(|_| true);
+        let selected = self.rows.hunks.get(self.hunk).cloned();
         // The rows the lines were taken on, to keep a wrapped line's piece where the other
         // view shows the very same text.
         let old = std::sync::Arc::clone(&self.rows);
         self.apply_view(view);
         let viewport = self.grid().viewports.diff;
-        if let Some(hunk) = hunk_line.and_then(|line| self.hunk_of(line.key.unit())) {
+        // One change since review of a unit is found as itself, which none of its rows may
+        // show, as for one that only removes lines; any other hunk by its line.
+        let hunk = match selected.filter(|hunk| hunk.change.is_some()) {
+            Some(change) if in_diff => self.rows.hunk_like(&change),
+            _ => hunk_line.and_then(|line| self.hunk_of(line.key.unit())),
+        };
+        if let Some(hunk) = hunk {
             self.hunk = hunk;
         }
         // The first of those lines the other view shows too keeps its row.

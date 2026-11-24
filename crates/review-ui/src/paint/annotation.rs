@@ -213,13 +213,10 @@ fn hunk_header(model: &Model, palette: &Palette, row: &Row, note: &Note) -> Hunk
     let units = row
         .hunk
         .and_then(|hunk| model.rows.hunks.get(hunk))
-        .cloned()
+        .map(|hunk| vec![hunk.unit])
         .unwrap_or_default();
-    let badges = model
-        .view()
-        .map(|view| state::badges(&view, &units, &model.pending))
-        .unwrap_or_default();
-    let (badge, glyph) = badges_glyph(&badges);
+    let badge = row.hunk.and_then(|hunk| model.hunk_badge(hunk));
+    let (badge, glyph) = badges_glyph(badge.as_slice());
     let folded = model
         .view()
         .is_some_and(|view| units.iter().all(|&unit| model.folds.is_folded(&view, unit)));

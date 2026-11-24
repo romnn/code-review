@@ -643,11 +643,27 @@ A unit then is:
 - **changed since reviewed** otherwise. When the file's base and the chunk's base lines are the
   same as reviewed and every link back is one-to-one and trusted, it shows what changed on top of
   the reviewed change, as lazygit shows unstaged changes on top of staged ones: the reviewed
-  head's lines against the current head's, as a new change shows, its hunk spanning only its
-  first change to its last and the lines the same as reviewed as context. Otherwise,
+  lines against the current head's, each run of lines that differ a hunk of its own, as a new
+  change shows, and the lines the same as reviewed as context. Otherwise,
   such as when the target branch moved, it shows the whole current change and says why
   ([ADR 9](adr/0009-a-hunk-changed-since-it-was-reviewed-shows-what-changed-on-top-of-it.md));
 - **new** when it has no marked predecessor.
+
+Each such run is approved on its own
+([ADR 10](adr/0010-each-change-since-a-review-is-approved-on-its-own.md)). The reviewed lines
+are the unit's **effective baseline**: the head lines a whole `seen` or `accepted` mark approved,
+or the text a **partial approval** left. Approving a run replaces exactly its reviewed bytes in
+the baseline with its current ones and records the result as a `partial_approval` event on the
+unit, with its evidence; when the result is the whole current change, it records an ordinary
+`accepted` mark instead. Review actions on a unit apply in log order and the latest wins, so a
+whole mark replaces a partial approval and `unseen` cuts inheritance as always. A partially
+approved unit stays changed since reviewed and counts as one changed unit. An unchanged link
+carries it with what is still open; a changed link compares the new head with the baseline under
+the same checks as above, and a head that becomes equal to the baseline shows whole as the same
+code reopened, since only a mark approves a unit. An approval names the run as the reviewer saw
+it: `Review::approve_run` derives the unit's comparison again under the lock and approves the
+run only while that comparison still has it, the same current lines at the same place replacing
+the same reviewed lines.
 
 Notes follow the same chains. A note whose chain ends, or splits ambiguously, attaches to the file
 and is flagged as outdated, keeping its original revision and text as provenance.
@@ -690,8 +706,8 @@ A walkthrough is JSON written for one revision:
 
 Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
 
-- `events.jsonl`: an append-only event log of revisions observed, marks, notes and walkthrough
-  imports.
+- `events.jsonl`: an append-only event log of revisions observed, marks, partial approvals, notes
+  and walkthrough imports.
 - `analysis/<base>-<head>.json`: the analysis of a revision (units, evidence, classifications,
   moves), content-addressed by its snapshot IDs, written atomically (temporary file and rename) and
   recomputable from git.
@@ -773,7 +789,9 @@ its history would end in a revision it never saw. The window shows each capture 
 file, the hunk, the top row and the folds through the correspondence between the two; a
 capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
 way, and one compared with a snapshot no longer on screen is taken again. A hunk that changed
-refuses review keys for a second, and while a key pressed before the change repeats. A capture
+refuses review keys for a second; a capture under way does not, since a mark marks the capture
+on screen. A held review key acts only on what its press began on, whatever moved the selection
+([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md)). A capture
 every 30 seconds catches what a watch cannot see, walking the tree again every 5 minutes;
 `[review] live = false` turns it off.
 
@@ -1037,7 +1055,10 @@ it, muted, so it never reads as code.
     the file that needs the reviewer, as lazygit moves on after staging a hunk, coming around
     from the file's start; once the file has nothing left to review, it stays and the status
     line names the next file to review. It never leaves the file by itself, so a held Space
-    never approves code of a file the reviewer has not seen. `!` flags, `za` folds, Tab, Esc or `h` goes back
+    never approves code of a file the reviewer has not seen, and a held Space never acts on the
+    hunk it moved on to: a repeat acts only on what its press began on, told by gpui, and in a
+    terminal by time
+    ([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md)). `!` flags, `za` folds, Tab, Esc or `h` goes back
     to the files.
     `n`/`N` show the next and previous file in the tree's visible order, at its first hunk that
     needs the reviewer, as the tree's cursor moves: folders are no stops, a folded folder's
@@ -1124,7 +1145,15 @@ it, muted, so it never reads as code.
   file only) gives every hunk but the selected one soft line backgrounds, so the selected one
   stands out the more. Each change is a hunk of its own, a stop for `j`/`k` and a
   mark of its own, where the hunks view joins changes a few lines apart under one header with
-  the context they share. The file's header names the selected hunk's scopes and label
+  the context they share. So is each change since a review of a unit that shows what changed on
+  top of the reviewed change: Space approves that change alone, and once the engine has
+  recorded it, its lines read as context and the next change is selected; flags, resets and
+  marks of a file or folder still act on whole units, and a unit the reviewer folds is one hunk,
+  its header alone, which Space unfolds rather than approves. Such a change has no header in
+  either view, so its bar runs along it alone; the file's header gives its label, and its
+  meter counts units. A change is followed as the engine made it, its lines and bytes, so the
+  selection, a file's remembered place, a view switch and a capture that moves its unit keep
+  it. Space moves on at once, the change showing approved alone until it is saved. The file's header names the selected hunk's scopes and label
   after the path (`src/engine.rs › impl Ledger › fn apply_batch`), what its header would say.
   Short of room, the header keeps the file name and the innermost scope longest: the file's
   length goes first, and only beside the whole scope; then the path's middle folders shorten;
@@ -1659,6 +1688,13 @@ Each runs against temporary git repositories built in the test:
   the chunk is changed since reviewed, the interdiff shows the removed side, and the chunk shows
   whole.
 - Deletion-only chunks carry over and reopen like others.
+- Partial approval: two distant edits to an accepted addition are approved one at a time, the
+  last with an ordinary `accepted` mark; a deletion and a line-ending change splice exactly; a
+  run shown before another run's approval is still approved, while one approved or changed since
+  is refused, and so is one from another capture of the working tree with the same revision
+  number; the approved text carries along an unchanged link and is
+  compared with after a changed one, a head equal to it stays open, an untrusted link shows the
+  unit whole, and a whole mark replaces it.
 - Ambiguity: two identical files with identical edits, renamed in a rebase, reopen; so does an edit
   repeated in a file whose context does not distinguish it.
 - `unseen` on an inherited mark keeps the unit unreviewed in later revisions.

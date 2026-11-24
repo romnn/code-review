@@ -5,7 +5,7 @@ use googletest::prelude::*;
 use indoc::{formatdoc, indoc};
 use review_core::{
     DiffLineKind, LineEnding, MarkVerdict, NoteAttachment, Reopened, Repo, Review, ReviewTarget,
-    SinceReviewed, UnitState, Verdict,
+    ReviewedBaseline, SinceReviewed, UnitState, Verdict,
 };
 
 use crate::common::{TestRepo, find, mark_all, refresh, rust_functions, summaries};
@@ -232,7 +232,12 @@ fn skipped_revision_interdiff() -> eyre::Result<()> {
         return Err(eyre::eyre!("expected a delta"));
     };
     assert_that!(delta.reviewed, eq(reviewed));
-    assert_that!(delta.reviewed_head.path, eq("src/lib.rs"));
+    let ReviewedBaseline::Head(reviewed_head) = delta.baseline else {
+        return Err(eyre::eyre!(
+            "expected the reviewed lines to be in a head file"
+        ));
+    };
+    assert_that!(reviewed_head.entry.path, eq("src/lib.rs"));
     let runs = delta.runs();
     let [run] = runs.as_slice() else {
         return Err(eyre::eyre!("expected one run, got {runs:?}"));
@@ -241,7 +246,7 @@ fn skipped_revision_interdiff() -> eyre::Result<()> {
     assert_that!(run.added, eq("    let value = 402;\n"));
     let line = view.location(changed.id)?.line - 1;
     assert_that!(run.new.start, eq(line));
-    assert_that!(run.old.start, eq(line));
+    assert_that!(reviewed_head.start + run.old.start, eq(line));
     Ok(())
 }
 

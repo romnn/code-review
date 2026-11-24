@@ -15,9 +15,7 @@ use crate::correspond::{Correspondence, Link, LinkKind};
 use crate::error::Error;
 use crate::ids::{ObjectId, RevisionNumber, UnitId, UnitIndex};
 use crate::standing::ReviewPolicy;
-use crate::store::events::{
-    Event, MarkEvent, MarkVerdict, NoteEvent, RevisionEvent, WalkthroughEvent,
-};
+use crate::store::events::{Event, MarkVerdict, NoteEvent, RevisionEvent, WalkthroughEvent};
 use crate::view::RevisionView;
 
 /// A verdict that counts as reviewed.
@@ -64,11 +62,14 @@ pub enum UnitState {
         /// Whether the mark was made on an earlier revision.
         inherited: bool,
     },
-    /// A predecessor was reviewed, but the change differs since, or its identity is uncertain.
+    /// A predecessor was reviewed, but the change differs since, or its identity is uncertain;
+    /// or some of its changes since were approved and others were not.
     ChangedSinceReviewed {
         /// The verdict of the last review.
         verdict: Verdict,
-        /// The unit that was last reviewed, for the interdiff.
+        /// The unit that was last reviewed, for the interdiff: the unit a whole mark was made
+        /// on, or the one the last partial approval was, whose approved text then stands for
+        /// the reviewed change.
         reviewed: UnitId,
     },
 }
@@ -156,6 +157,9 @@ pub(crate) struct RevisionData {
 /// recorded, so it takes part in no other history; see [`Self::is_provisional`].
 pub struct History {
     revisions: Vec<RevisionData>,
+    /// The reviewed text of each unit whose latest review action is a partial approval, which
+    /// every later unit whose state names that unit compares with.
+    approved: HashMap<UnitId, String>,
     notes: Vec<NoteEvent>,
     walkthroughs: Vec<WalkthroughEvent>,
     warnings: Vec<String>,
@@ -186,13 +190,24 @@ impl History {
             provisional,
         } = input;
         let mut records = Vec::new();
-        let mut marks = Vec::new();
+        let mut actions = Vec::new();
         let mut notes = Vec::new();
         let mut walkthroughs = Vec::new();
         for event in events {
             match event {
                 Event::Revision(revision) => records.push(RevisionRecord::from(&revision)),
-                Event::Mark(mark) => marks.push(mark),
+                Event::Mark(mark) => actions.push(LoggedAction {
+                    revision: mark.revision,
+                    unit: mark.unit,
+                    evidence: mark.evidence,
+                    action: Action::Mark(mark.verdict),
+                }),
+                Event::PartialApproval(approval) => actions.push(LoggedAction {
+                    revision: approval.revision,
+                    unit: approval.unit,
+                    evidence: approval.evidence,
+                    action: Action::Partial(approval.text),
+                }),
                 Event::Note(note) => notes.push(note),
                 Event::Walkthrough(walkthrough) => walkthroughs.push(walkthrough),
                 // Trust gates tools in the front ends; it does not change review state.
@@ -227,6 +242,7 @@ impl History {
         }
         let mut history = Self {
             revisions,
+            approved: HashMap::new(),
             notes: Vec::new(),
             walkthroughs: Vec::new(),
             warnings: Vec::new(),
@@ -242,8 +258,15 @@ impl History {
             })
             .collect();
         history.walkthroughs = walkthroughs;
-        let direct = history.direct_marks(&marks);
+        let direct = history.direct_actions(actions);
         history.derive_states(&direct);
+        history.approved = direct
+            .into_iter()
+            .filter_map(|(unit, action)| match action {
+                Action::Partial(text) => Some((unit, text)),
+                Action::Mark(_) => None,
+            })
+            .collect();
         history
     }
 
@@ -273,21 +296,26 @@ impl History {
         found
     }
 
-    /// Returns the latest valid mark per unit, keyed by revision and unit.
-    fn direct_marks(&mut self, marks: &[MarkEvent]) -> HashMap<UnitId, MarkVerdict> {
+    /// Returns the latest valid review action per unit, keyed by revision and unit: a later
+    /// mark replaces a partial approval and the other way around.
+    fn direct_actions(&mut self, actions: Vec<LoggedAction>) -> HashMap<UnitId, Action> {
         let mut direct = HashMap::new();
-        for mark in marks {
+        for recorded in actions {
+            let what = match recorded.action {
+                Action::Mark(_) => "mark",
+                Action::Partial(_) => "partial approval",
+            };
             if let Some(unit) =
-                self.check_evidence(mark.revision, mark.unit, &mark.evidence, "mark")
+                self.check_evidence(recorded.revision, recorded.unit, &recorded.evidence, what)
             {
-                direct.insert(UnitId::new(mark.revision, unit), mark.verdict);
+                direct.insert(UnitId::new(recorded.revision, unit), recorded.action);
             }
         }
         direct
     }
 
     /// Derives every unit's state, revision by revision.
-    fn derive_states(&mut self, direct: &HashMap<UnitId, MarkVerdict>) {
+    fn derive_states(&mut self, direct: &HashMap<UnitId, Action>) {
         for index in 0..self.revisions.len() {
             let Some(number) = RevisionNumber::from_index(index) else {
                 continue;
@@ -308,12 +336,7 @@ impl History {
                         .get(unit.get())
                         .map(|links| links.predecessors.as_slice());
                     let id = UnitId::new(number, unit);
-                    state_of(
-                        id,
-                        direct.get(&id).copied(),
-                        links.unwrap_or_default(),
-                        &previous,
-                    )
+                    state_of(id, direct.get(&id), links.unwrap_or_default(), &previous)
                 })
                 .collect();
         }
@@ -429,6 +452,12 @@ impl History {
         &self.walkthroughs
     }
 
+    /// Returns the reviewed text a partial approval left on unit `unit`, when that is the
+    /// unit's latest review action.
+    pub(crate) fn approved_text(&self, unit: UnitId) -> Option<&str> {
+        self.approved.get(&unit).map(String::as_str)
+    }
+
     /// Returns the predecessor links of a unit.
     pub(crate) fn predecessors(&self, unit: UnitId) -> &[Link] {
         self.revision(unit.revision())
@@ -444,18 +473,42 @@ impl History {
     }
 }
 
-/// Derives one unit's state from its own mark and its predecessors' states.
+/// A review action recorded in the log, before its unit reference is checked.
+struct LoggedAction {
+    revision: RevisionNumber,
+    unit: UnitIndex,
+    evidence: String,
+    action: Action,
+}
+
+/// What a reviewer did to a unit.
+enum Action {
+    /// Marked it as a whole.
+    Mark(MarkVerdict),
+    /// Approved one of its changes since it was reviewed, leaving this reviewed text.
+    Partial(String),
+}
+
+/// Derives one unit's state from its own latest review action and its predecessors' states.
 fn state_of(
     unit: UnitId,
-    direct: Option<MarkVerdict>,
+    direct: Option<&Action>,
     predecessors: &[Link],
     previous: &[UnitState],
 ) -> UnitState {
     let verdict = match direct {
-        Some(MarkVerdict::Unseen) => return UnitState::Unseen { marked: unit },
-        Some(MarkVerdict::Seen) => Some(Verdict::Seen),
-        Some(MarkVerdict::Accepted) => Some(Verdict::Accepted),
-        Some(MarkVerdict::Flagged) => Some(Verdict::Flagged),
+        Some(Action::Mark(MarkVerdict::Unseen)) => return UnitState::Unseen { marked: unit },
+        Some(Action::Mark(MarkVerdict::Seen)) => Some(Verdict::Seen),
+        Some(Action::Mark(MarkVerdict::Accepted)) => Some(Verdict::Accepted),
+        Some(Action::Mark(MarkVerdict::Flagged)) => Some(Verdict::Flagged),
+        // Part of the unit is approved, so it stays open, with the approved text to compare
+        // the rest with.
+        Some(Action::Partial(_)) => {
+            return UnitState::ChangedSinceReviewed {
+                verdict: Verdict::Accepted,
+                reviewed: unit,
+            };
+        }
         None => None,
     };
     if let Some(verdict) = verdict {

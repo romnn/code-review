@@ -251,7 +251,10 @@ impl Model {
         let key = RowKey::of(target);
         // A row of a change names its unit, which may share a hunk here with others it does
         // not share in the file's own diff.
-        let unit = target.hunk.map(|_| target.unit);
+        let opened = target
+            .hunk
+            .and_then(|hunk| self.rows.hunks.get(hunk))
+            .cloned();
         let on_screen = scroll::rows(row) - offset;
         // The preview ends here, so the file's own rows replace it.
         self.show_file(&path);
@@ -271,20 +274,22 @@ impl Model {
             self.diff_scroll.jump((landed - on_screen).max(0.0));
         }
         // The hunk of the unit opened at, or else the one nearest the line opened at.
-        let hunk = unit.and_then(|unit| self.hunk_of(unit)).or_else(|| {
-            let at = scroll::whole_rows(landed?);
-            self.hunk_rows
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, rows)| {
-                    if rows.contains(&at) {
-                        0
-                    } else {
-                        rows.start.abs_diff(at).min(rows.end.abs_diff(at + 1))
-                    }
-                })
-                .map(|(hunk, _)| hunk)
-        });
+        let hunk = opened
+            .and_then(|hunk| self.rows.hunk_like(&hunk))
+            .or_else(|| {
+                let at = scroll::whole_rows(landed?);
+                self.hunk_rows
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, rows)| {
+                        if rows.contains(&at) {
+                            0
+                        } else {
+                            rows.start.abs_diff(at).min(rows.end.abs_diff(at + 1))
+                        }
+                    })
+                    .map(|(hunk, _)| hunk)
+            });
         if let Some(hunk) = hunk {
             self.hunk = hunk;
         }

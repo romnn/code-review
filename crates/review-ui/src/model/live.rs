@@ -11,19 +11,19 @@
 //!
 //! A review key never acts on a hunk that changed under it: a mark that covers a hunk is
 //! refused for a moment after the hunk changed, and for as long as a key pressed before the
-//! change keeps repeating.
-//! A terminal sends a held key as repeated presses, so a press is told from a held key by the
-//! time between them.
+//! change keeps repeating, as the model's guard on review keys tells a repeat.
+//! A capture carries the selected change of a unit it links unchanged as that very change, its
+//! lines moved with the unit; any other hunk it lands on is new under the keys.
 //!
 //! Every change the watch reports, and every change of the branch's pull request, counts one
 //! more observation, and a capture carries the count it was taken at.
 //! The watch reports a burst of changes twice: as soon as its first change arrives, and once it
 //! settles, when the capture of it is taken.
 //! One taken before the newest observation may miss it, so it never shows, and neither does one
-//! that lands while a burst is under way: the view on screen stays, marked as updating, and
-//! refuses marks until a capture of the newest observation lands.
-//! From a burst's first change, the view on screen refuses marks too, since the capture it shows
-//! may have caught the change half-made.
+//! that lands while a burst is under way: the view on screen stays, marked as updating, until a
+//! capture of the newest observation lands.
+//! A mark on it is still taken: it marks what the reviewer saw, the capture on screen, which
+//! the engine records as shown and checks under the review's lock.
 //! Without a watch, as while it starts or when the working tree cannot be watched, and once the
 //! watch could not watch a directory, each capture looks twice and shows only when both looks
 //! saw the same.
@@ -40,11 +40,12 @@ use std::time::{Duration, Instant};
 use review_core::correspond::{Link, LinkKind, correspond};
 use review_core::{
     Busy, Capture, Commit, History, LiveCapture, ObjectId, ReviewInfo, ReviewTarget,
-    RevisionRecord, RevisionView, Session, UnitId, UnitIndex,
+    RevisionRecord, RevisionView, Session, ShownRun, UnitId, UnitIndex,
 };
 
 use super::buffer::Origin;
 use super::effects::{Because, Completion, Outcome, Subject};
+use super::guard::Aim;
 use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::pulls::Pulls;
 use super::sync::Tick;
@@ -72,9 +73,6 @@ const MOVED_ATTEMPTS: u32 = 3;
 /// How long a hunk that changed refuses review keys.
 const SETTLE: Duration = Duration::from_secs(1);
 
-/// Review keys closer together than this are one key held down.
-const REPEAT: Duration = Duration::from_millis(500);
-
 /// Following the working tree.
 #[derive(Default)]
 pub(crate) struct Live {
@@ -92,8 +90,6 @@ pub(crate) struct Live {
     waiting: Option<Box<Captured>>,
     /// When each unit on screen last changed, for those that changed since the review opened.
     changed: HashMap<UnitId, Instant>,
-    /// The review key held or pressed last.
-    press: Option<Press>,
     /// Whether the watch's trouble was logged already, so it is logged once.
     troubled: bool,
     /// When the watched tree was last walked, by the watch's start or a periodic capture.
@@ -105,7 +101,7 @@ pub(crate) struct Live {
     /// Whether a burst of changes the watch reported is still under way, so no capture shows
     /// until it settles.
     stirring: bool,
-    /// Whether the view on screen may miss an observation, so it takes no marks until a
+    /// Whether the view on screen may miss an observation, so it shows as updating until a
     /// capture of the newest one lands.
     updating: bool,
     /// What git was busy with at the last capture, which keeps the view on screen.
@@ -147,7 +143,7 @@ impl Live {
         self.capturing
     }
 
-    /// Whether the view on screen may miss a change and takes no marks until it is captured.
+    /// Whether the view on screen may miss a change, until it is captured.
     pub(crate) fn updating(&self) -> bool {
         self.updating
     }
@@ -296,13 +292,6 @@ fn provisional_or_tip_tree(review: &review_core::Review, history: &History) -> O
     let tip = history.current()?;
     let head = history.view(tip).ok()?.record()?.head.clone();
     review.repo().tree_of(&head).ok()
-}
-
-/// A review key pressed, and held for as long as it repeats.
-#[derive(Debug, Clone, Copy)]
-struct Press {
-    started: Instant,
-    last: Instant,
 }
 
 /// A watch that started, with its waiter.
@@ -516,8 +505,8 @@ impl Model {
     /// until the burst settles, no capture shows.
     ///
     /// The view on screen, and a capture running, may have caught the change half-made, as
-    /// when an editor saved one file of several, so neither takes marks until the capture of
-    /// the settled burst lands.
+    /// when an editor saved one file of several, so the view shows as updating until the
+    /// capture of the settled burst lands.
     pub(super) fn stirred(&mut self) {
         let Some(live) = &mut self.live else {
             return;
@@ -529,8 +518,8 @@ impl Model {
 
     /// Takes in a change the watch saw, once its burst settled: counts it, and captures it.
     ///
-    /// A capture already running may have missed the change, so the view on screen takes no
-    /// marks until the capture of the change lands.
+    /// A capture already running may have missed the change, so the view on screen shows as
+    /// updating until the capture of the change lands.
     pub(super) fn changed(&mut self) {
         let Some(live) = &mut self.live else {
             return;
@@ -628,7 +617,7 @@ impl Model {
     }
 
     /// Captures again because what a capture compares with may have changed, such as the
-    /// branch's pull request: the view on screen takes no marks until that capture lands.
+    /// branch's pull request: the view on screen shows as updating until that capture lands.
     pub(super) fn recapture_for_subject(&mut self) {
         let Some(live) = &mut self.live else {
             return;
@@ -654,8 +643,11 @@ impl Model {
         self.look_up_pull_request_now();
     }
 
-    /// Why the view on screen takes no marks now, if it takes none: it may miss a change, git
-    /// is busy, or the checkout is another clone.
+    /// Why the view on screen takes no marks now, if it takes none: git is busy, or the
+    /// checkout is another clone.
+    ///
+    /// A capture under way does not stop a mark: it acts on the capture on screen, which the
+    /// engine records only as shown, and checks under the review's lock.
     pub(super) fn live_refusal(&self) -> Option<String> {
         let live = self.live.as_ref()?;
         if live.replaced {
@@ -664,16 +656,11 @@ impl Model {
                     .to_owned(),
             );
         }
-        if let Some(busy) = live.busy {
-            return Some(format!(
-                "Not marked: git is busy ({busy}), so what shows may be out of date; mark \
-                 again once it finishes."
-            ));
-        }
-        live.updating.then(|| {
-            "Not marked: the working tree changed while it was captured; it shows again in a \
-             moment."
-                .to_owned()
+        live.busy.map(|busy| {
+            format!(
+                "Not marked: git is busy ({busy}), so what shows may be out of date; mark again \
+                 once it finishes."
+            )
         })
     }
 
@@ -876,7 +863,9 @@ impl Model {
         self.folds.units = carry(&self.folds.units);
         self.folds.opened = carry(&self.folds.opened);
         self.folds.expanded = carry(&self.folds.expanded);
-        self.keep_place(&was, &view, &moved);
+        // The snapshot on screen was laid out from its view, so it has one.
+        let old_view = old.view();
+        self.keep_place(&was, old_view.as_ref(), &view, &moved);
         self.protect_changes(&old, &view, &moved, &old_target);
         // A grant of a review of the working tree covers the snapshot it was made for.
         self.read_snapshot_trust();
@@ -987,7 +976,7 @@ impl Model {
             _ => self.hunk,
         };
         WasOn {
-            hunk: self.rows.hunks.get(hunk).cloned().unwrap_or_default(),
+            hunk: self.rows.hunks.get(hunk).cloned(),
             hunk_line: self
                 .hunk_rows
                 .get(hunk)
@@ -1010,13 +999,20 @@ impl Model {
         }
     }
 
-    /// Lays out the new snapshot where the reviewer `was`: the same file, or the one now where
-    /// it was in the tree; the hunk its units went to, or the nearest; the same top row; the
-    /// tree cursor on the same node; and a review buffer the reviewer was in, on the same hunk.
+    /// Lays out the new snapshot where the reviewer `was`, coming from the snapshot `old`: the
+    /// same file, or the one now where it was in the tree; the same hunk, or the nearest; the
+    /// same top row; the tree cursor on the same node; and a review buffer the reviewer was
+    /// in, on the same hunk.
     ///
     /// Buffers of the old snapshot's files go, and so does the way back from a definition into
     /// one, since their change markers number the old snapshot's hunks.
-    fn keep_place(&mut self, was: &WasOn, view: &RevisionView<'_>, moved: &Moved) {
+    fn keep_place(
+        &mut self,
+        was: &WasOn,
+        old: Option<&RevisionView<'_>>,
+        view: &RevisionView<'_>,
+        moved: &Moved,
+    ) {
         self.selection = None;
         let reviewed = |buffer: &super::buffer::Buffer| matches!(buffer.origin, Origin::Review(_));
         if self.buffer.as_ref().is_some_and(reviewed) {
@@ -1048,7 +1044,10 @@ impl Model {
         let follow =
             |unit: review_core::UnitId| moved.any(unit.index()).map(|index| view.id(index));
         for place in self.places.values_mut() {
-            place.unit = place.unit.and_then(follow);
+            place.hunk = place
+                .hunk
+                .take()
+                .and_then(|hunk| carried(&hunk, old, view, moved));
             place.key = place
                 .key
                 .and_then(|key| follow(key.unit()).map(|unit| key.with_unit(unit)));
@@ -1058,11 +1057,17 @@ impl Model {
         self.build_selected();
         let followed = was
             .hunk
-            .iter()
-            .filter_map(|unit| moved.any(unit.index()))
-            .map(|index| view.id(index))
-            .find_map(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)));
+            .as_ref()
+            .and_then(|hunk| carried(hunk, old, view, moved))
+            .and_then(|hunk| self.rows.hunk_like(&hunk));
         self.hunk = followed.unwrap_or_else(|| self.nearest_hunk(was.hunk_line));
+        // A review key held on the old snapshot goes on acting on what it began on, there too.
+        if let Some(press) = &mut self.press {
+            press.target = press
+                .target
+                .take()
+                .and_then(|aim| carried_aim(aim, old, view, moved));
+        }
 
         let top = was
             .top
@@ -1085,7 +1090,7 @@ impl Model {
             self.enter_buffer();
             if let Some(start) = self.buffer.as_ref().map(|buffer| buffer.cursor) {
                 self.set_buffer_cursor(cursor.row, cursor.col);
-                if !was.hunk.is_empty() && self.buffer_hunk() != Some(self.hunk) {
+                if was.hunk.is_some() && self.buffer_hunk() != Some(self.hunk) {
                     self.set_buffer_cursor(start.row, start.col);
                 }
             }
@@ -1204,25 +1209,17 @@ impl Model {
     }
 
     /// Refuses a review key on `units` while one of them changed under it: within [`SETTLE`]
-    /// of the change, or since before the press that is still repeating; says why and returns
-    /// whether it refused.
+    /// of the change, or since before the press that is still repeating, which
+    /// [`Self::held_refusal`] keeps; says why and returns whether it refused.
     pub(super) fn refuses_changed(&mut self, units: &[UnitId], what: &str) -> bool {
-        let Some(live) = &mut self.live else {
+        let (Some(live), Some(press), Some(input)) = (&self.live, &self.press, &self.input) else {
             return false;
         };
-        let now = Instant::now();
-        let press = match live.press {
-            Some(press) if now.duration_since(press.last) < REPEAT => Press { last: now, ..press },
-            _ => Press {
-                started: now,
-                last: now,
-            },
-        };
-        live.press = Some(press);
+        let now = input.at;
         let changed = units
             .iter()
             .filter_map(|unit| live.changed.get(unit))
-            .any(|&at| at >= press.started || now.duration_since(at) < SETTLE);
+            .any(|&at| at >= press.started || now.saturating_duration_since(at) < SETTLE);
         if changed {
             self.set_status(format!(
                 "Not marked: {what} just changed in the working tree. Read it, then press \
@@ -1235,8 +1232,8 @@ impl Model {
 
 /// Where the reviewer was in the snapshot on screen, to keep the place in the next one.
 struct WasOn {
-    /// The units of the selected hunk.
-    hunk: Vec<UnitId>,
+    /// The selected hunk.
+    hunk: Option<crate::rows::Hunk>,
     /// The head line the selected hunk starts on.
     hunk_line: Option<usize>,
     /// The diff's top row.
@@ -1491,6 +1488,68 @@ fn provisional_record(history: &History) -> Option<RevisionRecord> {
     history.view(tip).ok()?.record().cloned()
 }
 
+/// `hunk` of the snapshot `old` as the snapshot `new` has it, `moved` linking their units.
+///
+/// The unit it went to along an unchanged link shows the same changes since review, their lines
+/// moved as the unit's did, so the hunk is found again as itself. A hunk of a unit that changed
+/// keeps its lines, a place to read on from that no review key takes for the same change.
+fn carried(
+    hunk: &crate::rows::Hunk,
+    old: Option<&RevisionView<'_>>,
+    new: &RevisionView<'_>,
+    moved: &Moved,
+) -> Option<crate::rows::Hunk> {
+    let unit = new.id(moved.any(hunk.unit.index())?);
+    let change = hunk.change.as_ref().map(|change| {
+        carried_change(change, old, new, moved).unwrap_or_else(|| ShownRun {
+            unit,
+            ..change.clone()
+        })
+    });
+    Some(crate::rows::Hunk { unit, change })
+}
+
+/// `change` of the snapshot `old` as the snapshot `new` has it, when its unit is linked
+/// unchanged: its lines moved as far as the unit's.
+fn carried_change(
+    change: &ShownRun,
+    old: Option<&RevisionView<'_>>,
+    new: &RevisionView<'_>,
+    moved: &Moved,
+) -> Option<ShownRun> {
+    let unit = new.id(moved.unchanged(change.unit.index())?);
+    let start = |view: &RevisionView<'_>, unit| Some(view.unit(unit).ok()?.chunk()?.new.start);
+    let mut carried = ShownRun {
+        unit,
+        ..change.clone()
+    };
+    if let (Some(from), Some(to)) = (
+        old.and_then(|old| start(old, change.unit)),
+        start(new, unit),
+    ) {
+        carried.new.start = (carried.new.start + to).saturating_sub(from);
+    }
+    Some(carried)
+}
+
+/// What a review key acted on in the snapshot `old` as the snapshot `new` has it: only along
+/// unchanged links, since anything else is new under the key.
+fn carried_aim(
+    aim: Aim,
+    old: Option<&RevisionView<'_>>,
+    new: &RevisionView<'_>,
+    moved: &Moved,
+) -> Option<Aim> {
+    match aim {
+        Aim::Change(change) => carried_change(&change, old, new, moved).map(Aim::Change),
+        Aim::Units(units) => units
+            .iter()
+            .map(|unit| Some(new.id(moved.unchanged(unit.index())?)))
+            .collect::<Option<_>>()
+            .map(Aim::Units),
+    }
+}
+
 /// The correspondence from the old snapshot to the new one, by unit index.
 struct Moved {
     /// Where each old unit went, by any link that is not ambiguous.
@@ -1552,16 +1611,6 @@ impl Live {
         for at in self.changed.values_mut() {
             *at = at.checked_sub(by).unwrap_or(*at);
         }
-        self.press = None;
-    }
-
-    /// Holds a review key down since `ago`, repeating until now.
-    pub(super) fn hold_since(&mut self, ago: Duration) {
-        let now = Instant::now();
-        self.press = Some(Press {
-            started: now.checked_sub(ago).unwrap_or(now),
-            last: now,
-        });
     }
 
     /// Whether a capture waits for the reviewer.

@@ -535,14 +535,14 @@ expect "collapsed":\["src/generated"\]
 shot 14-folded
 
 # Revision 2 simulates a force-push: approvals carry over where the code is unchanged, and
-# hunks that changed since they were reviewed say so.
+# each change to a hunk since it was reviewed is a hunk of its own, still to review.
 launch --demo-revision 2
 expect "revision":"2"
 expect "collapsed":\["src/generated"\]
 file src/engine.rs
-find changed since
+find pub const LIMIT
 state
-expect "tag":"changed since revision 1"
+expect "hunk_badges":\["Changed"\]
 shot 09-revision-2
 
 # Moving on while a mark is saved opens the next file at once, at its first hunk that needs the

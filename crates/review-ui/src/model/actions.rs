@@ -235,10 +235,17 @@ impl Action {
 }
 
 impl Model {
-    /// Does what `action` does where the keyboard is now; an action the front end cannot honor
-    /// (see [`crate::front_end::Capabilities::allows`]) does nothing.
-    #[tracing::instrument(skip_all, fields(?action))]
+    /// Does what `action` does where the keyboard is now, as a press of a key bound to it; an
+    /// action the front end cannot honor (see [`crate::front_end::Capabilities::allows`]) does
+    /// nothing. Keys the front end delivers go to [`Self::key`] instead, which says whether
+    /// they repeat.
     pub fn dispatch(&mut self, action: Action) {
+        self.act(super::guard::KeyInput::pressed(action));
+    }
+
+    /// Does what `action` does where the keyboard is now.
+    #[tracing::instrument(skip_all, fields(?action))]
+    pub(super) fn perform(&mut self, action: Action) {
         if !self.settings.front_end.capabilities().allows(action) {
             return;
         }
