@@ -267,7 +267,7 @@ pub fn run(settings: Settings, loaded: Loaded) -> color_eyre::eyre::Result<()> {
         let wake = if waiting.is_some() && !session.app.busy() {
             Some(Instant::now())
         } else {
-            session.app.wake_at(Instant::now())
+            session.app.wake_at(Instant::now(), true)
         };
         let Some(batch) = next_batch(&receiver, wake) else {
             break;

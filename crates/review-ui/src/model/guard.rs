@@ -7,21 +7,17 @@
 //! Where nothing tells, as in a terminal, every key is a press and acts, as in lazygit: quick
 //! taps are never mistaken for a held key.
 
-use std::time::Instant;
-
 use review_core::{ShownRun, UnitId};
 
 use super::{Action, Model};
 
-/// A key the front end delivered, with when it came.
+/// A key the front end delivered.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KeyInput {
     /// The action it is bound to.
     pub(super) action: Action,
     /// Whether the front end reports it as a repeat of a key held down.
     pub(super) held: bool,
-    /// When it came.
-    pub(super) at: Instant,
 }
 
 impl KeyInput {
@@ -30,7 +26,6 @@ impl KeyInput {
         Self {
             action,
             held: false,
-            at: Instant::now(),
         }
     }
 }
@@ -39,8 +34,6 @@ impl KeyInput {
 #[derive(Debug, Clone)]
 pub(super) struct Press {
     action: Action,
-    /// When the press began.
-    pub(super) started: Instant,
     /// What the press began on; `None` once it revealed something, which no repeat acts on.
     pub(super) target: Option<Aim>,
 }
@@ -57,11 +50,7 @@ impl Model {
     /// Does what `action` does, as a key the front end delivered: `held` says whether the front
     /// end reports it as a repeat of a key held down, which a terminal never does.
     pub fn key(&mut self, action: Action, held: bool) {
-        self.act(KeyInput {
-            action,
-            held,
-            at: Instant::now(),
-        });
+        self.act(KeyInput { action, held });
     }
 
     /// Does what the key `input` does; a key of another action ends a review key's press.
@@ -80,7 +69,7 @@ impl Model {
     /// Decides whether the review key in hand acts: a press does, and so does a repeat on what
     /// its press began on; says why it does not otherwise. Every review key passes here first.
     pub(super) fn held_refusal(&mut self) -> Option<String> {
-        let KeyInput { action, held, at } = self.input?;
+        let KeyInput { action, held } = self.input?;
         let target = self.aim();
         let refusal = || {
             Some(
@@ -98,17 +87,12 @@ impl Model {
             None if held => {
                 self.press = Some(Press {
                     action,
-                    started: at,
                     target: None,
                 });
                 return refusal();
             }
             None => {
-                self.press = Some(Press {
-                    action,
-                    started: at,
-                    target,
-                });
+                self.press = Some(Press { action, target });
             }
         }
         None
@@ -138,12 +122,10 @@ impl Model {
 
 #[cfg(test)]
 impl Model {
-    /// Holds a review key down since `ago`, on what the keys act on now.
-    pub(super) fn hold_since(&mut self, ago: std::time::Duration) {
-        let now = Instant::now();
+    /// Holds a review key down on what the keys act on now.
+    pub(super) fn hold(&mut self) {
         self.press = Some(Press {
             action: Action::ToggleApprove,
-            started: now.checked_sub(ago).unwrap_or(now),
             target: self.aim(),
         });
     }

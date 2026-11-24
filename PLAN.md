@@ -788,9 +788,11 @@ was compared. A capture during which the review recorded another revision is dis
 its history would end in a revision it never saw. The window shows each capture in place of the snapshot on screen, keeping the
 file, the hunk, the top row and the folds through the correspondence between the two; a
 capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
-way, and one compared with a snapshot no longer on screen is taken again. A hunk that changed
-refuses review keys for a second; a capture under way does not, since a mark marks the capture
-on screen. A held review key acts only on what its press began on, whatever moved the selection,
+way, and one compared with a snapshot no longer on screen is taken again. A capture shows only in
+the turn that draws the next frame, so every key acts on what the last frame showed, and nothing
+refuses a review key for its timing: a mark marks the capture on screen, and a later capture
+carries it only where the code stayed the same
+([ADR 13](adr/0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)). A held review key acts only on what its press began on, whatever moved the selection,
 where the front end tells a repeat; in a terminal every key is a press
 ([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md),
 [ADR 12](adr/0012-every-key-a-terminal-sends-is-a-press.md)). A capture
@@ -848,9 +850,9 @@ git directory, loose or in `packed-refs` (whose rewrites count only when those r
 and git starting or finishing an operation; never `refs/code-review/`. Each change it reports,
 and each change of the pull request, counts one more observation; a capture carries the count it
 was taken at, and one older than the newest never shows: the view on screen stays, marked
-`updating…`, and refuses marks until a capture of the newest lands. The view refuses marks too
-while git is busy (`git busy: rebase in progress`) and once the checkout is another clone, which
-ends the following with "reopen cr". `r` captures again and looks the pull request up again,
+`updating…`, and still takes marks on what it shows, until a capture of the newest lands. While
+git is busy (`git busy: rebase in progress`) the view stays and takes marks too; once the checkout
+is another clone, it refuses marks and ends the following with "reopen cr". `r` captures again and looks the pull request up again,
 recording nothing.
 
 The window looks the branch's pull request up in the background (`review_ui::model::pulls`): one

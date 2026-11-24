@@ -3,9 +3,10 @@
 //!
 //! The model knows no UI toolkit.
 //! A front end draws it, turns its input into [`Model::dispatch`] and typed calls through
-//! [`Driver::update`], hands each frame's [`Geometry`] to the layout phase ([`Model::layout`]),
-//! and runs the [`Effect`]s the model queues: background jobs, timers, the clipboard, the
-//! window title.
+//! [`Driver::update`], shows the capture that waits for a frame ([`Model::publish`]) in the
+//! turn that draws one, hands each frame's [`Geometry`] to the layout phase
+//! ([`Model::layout`]), and runs the [`Effect`]s the model queues: background jobs, timers,
+//! the clipboard, the window title.
 //!
 //! The model keeps three kinds of state apart:
 //!
@@ -552,6 +553,9 @@ pub struct Model {
     pub layout: PaneLayout,
     /// The status line.
     pub status: String,
+    /// Whether the status line says how the snapshot on screen stands, such as that a file is
+    /// done, which no longer holds once another capture shows; an action's outcome stays.
+    about_view: bool,
     /// Whether the diff is in scroll mode, where the hunk keys scroll a line.
     pub scroll_mode: bool,
     /// The first unit of the hunk selected when scroll mode began, which Esc goes back to.
@@ -664,6 +668,7 @@ impl Model {
             scroll_mode: false,
             scrolled_from: None,
             failed_at: None,
+            about_view: false,
             looking_up: false,
             highlighting: 0,
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
@@ -747,17 +752,18 @@ impl Model {
     /// once nothing is left to save after the reviewer asked to, and hands over the effects
     /// queued since the last update.
     fn after_update(&mut self) -> Vec<Effect> {
-        self.show_waiting_capture();
         self.sync_folder_preview();
         self.save_view_state();
         self.finish_quitting();
         std::mem::take(&mut self.effects)
     }
 
-    /// Whether background work the model started, or an eased scroll, is still running.
+    /// Whether background work the model started, or an eased scroll, is still running, or a
+    /// capture waits to show with the next frame.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.marking
+        self.publishes()
+            || self.marking
             || !self.marks.is_empty()
             || self.looking_up
             || self.highlighting > 0
@@ -935,6 +941,14 @@ impl Model {
     fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
         self.failed_at = None;
+        self.about_view = false;
+    }
+
+    /// Says how the snapshot on screen stands, such as which file is next to review: the status
+    /// clears once another capture shows, as it may no longer hold there.
+    fn set_view_status(&mut self, status: impl Into<String>) {
+        self.set_status(status);
+        self.about_view = true;
     }
 
     /// Says `status` in the status line, as the front end's own news: input it could not
@@ -955,6 +969,7 @@ impl Model {
     fn fail(&mut self, status: impl Into<String>) {
         self.status = status.into();
         self.failed_at = Some(Instant::now());
+        self.about_view = false;
     }
 
     /// The look on screen: the preview of the settings list, or the applied look.

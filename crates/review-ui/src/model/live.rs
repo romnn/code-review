@@ -4,16 +4,19 @@
 //! A capture is compared with the snapshot on screen when it is taken, and lands only on that
 //! snapshot: the correspondence between the two carries the reviewer's place and folds over,
 //! and tells which hunks changed.
-//! It waits while the reviewer is in the middle of something it would pull the rows from
+//! It shows only in the turn that draws the next frame, which the front end runs with
+//! [`Model::publish`], so every key acts on what the last frame showed.
+//! It waits longer while the reviewer is in the middle of something it would pull the rows from
 //! under: marks being saved, a picker or overlay, a drag, a search being typed.
 //! Only the newest waiting capture is kept, and one compared with a snapshot no longer on
 //! screen, or read before a mark was saved, is taken again.
 //!
-//! A review key never acts on a hunk that changed under it: a mark that covers a hunk is
-//! refused for a moment after the hunk changed, and for as long as a key pressed before the
-//! change keeps repeating, as the model's guard on review keys tells a repeat.
+//! A review key acts on the capture on screen, however recently its code changed: the mark
+//! names that capture, and the next one carries it only where the code stayed the same.
+//! A key held down since before a capture never acts on what it moved the selection onto, as
+//! the model's guard on review keys tells a repeat.
 //! A capture carries the selected change of a unit it links unchanged as that very change, its
-//! lines moved with the unit; any other hunk it lands on is new under the keys.
+//! lines moved with the unit.
 //!
 //! Every change the watch reports, and every change of the branch's pull request, counts one
 //! more observation, and a capture carries the count it was taken at.
@@ -27,8 +30,8 @@
 //! Without a watch, as while it starts or when the working tree cannot be watched, and once the
 //! watch could not watch a directory, each capture looks twice and shows only when both looks
 //! saw the same.
-//! Nor does a view take marks while git is busy in the checkout, or once the checkout is
-//! another clone.
+//! While git is busy in the checkout, the view stays and still takes marks; once the checkout is
+//! another clone, it takes none.
 //!
 //! What a capture was of, its subject, shows with it: the branch, its pull request and the
 //! base, which the header names and the status line announces when they change.
@@ -70,8 +73,9 @@ const REWALK: Duration = Duration::from_secs(300);
 /// How many times a capture is taken again at once when git moved while it was taken.
 const MOVED_ATTEMPTS: u32 = 3;
 
-/// How long a hunk that changed refuses review keys.
-const SETTLE: Duration = Duration::from_secs(1);
+/// What the status line says while a capture the reviewer asked for runs; the capture answers
+/// only while it still says so.
+const CAPTURING_AGAIN: &str = "Capturing the working tree again…";
 
 /// Following the working tree.
 #[derive(Default)]
@@ -88,8 +92,6 @@ pub(crate) struct Live {
     again: Option<bool>,
     /// The newest capture that waits for the reviewer.
     waiting: Option<Box<Captured>>,
-    /// When each unit on screen last changed, for those that changed since the review opened.
-    changed: HashMap<UnitId, Instant>,
     /// Whether the watch's trouble was logged already, so it is logged once.
     troubled: bool,
     /// When the watched tree was last walked, by the watch's start or a periodic capture.
@@ -161,6 +163,11 @@ impl Live {
     /// What the capture on screen was of.
     pub(crate) fn subject(&self) -> Option<&review_core::Subject> {
         self.subject.as_ref()
+    }
+
+    /// What the capture waiting to show was of.
+    pub(crate) fn waiting_subject(&self) -> Option<&review_core::Subject> {
+        self.waiting.as_ref()?.subject.as_ref()
     }
 
     /// The paths the capture on screen kept at their staged version, under a filter driver.
@@ -638,34 +645,25 @@ impl Model {
             return;
         }
         live.asked = true;
-        self.set_status("Capturing the working tree again…");
+        self.set_status(CAPTURING_AGAIN);
         self.capture(false);
         self.look_up_pull_request_now();
     }
 
-    /// Why the view on screen takes no marks now, if it takes none: git is busy, or the
-    /// checkout is another clone.
+    /// Why the view on screen takes no marks now, if it takes none: the checkout is another
+    /// clone.
     ///
-    /// A capture under way does not stop a mark: it acts on the capture on screen, which the
-    /// engine records only as shown, and checks under the review's lock.
+    /// Neither a capture under way nor busy git stops a mark: it acts on the capture on screen,
+    /// which the engine records as shown, and checks under the review's lock.
     pub(super) fn live_refusal(&self) -> Option<String> {
-        let live = self.live.as_ref()?;
-        if live.replaced {
-            return Some(
-                "Not marked: this checkout was replaced by another clone; reopen cr to review it."
-                    .to_owned(),
-            );
-        }
-        live.busy.map(|busy| {
-            format!(
-                "Not marked: git is busy ({busy}), so what shows may be out of date; mark again \
-                 once it finishes."
-            )
+        self.live.as_ref().filter(|live| live.replaced).map(|_| {
+            "Not marked: this checkout was replaced by another clone; reopen cr to review it."
+                .to_owned()
         })
     }
 
-    /// Takes in a capture: shows it, or keeps it for when the reviewer is done, and starts the
-    /// capture asked for meanwhile.
+    /// Takes in a capture: keeps it to show with the next frame, and starts the capture asked
+    /// for meanwhile.
     ///
     /// A capture taken before the newest observation never shows: the view on screen stays,
     /// as updating, and the capture asked for by that observation follows.
@@ -693,22 +691,16 @@ impl Model {
                     live.updating = true;
                     again = Some(again.unwrap_or(false));
                 } else {
-                    if live.busy.take().is_some() {
-                        self.set_status("Git is no longer busy.");
-                    }
+                    live.busy = None;
                     self.offer(captured);
                 }
             }
-            Err(Missed::Busy(busy)) => {
-                if live.busy.replace(busy) != Some(busy) {
-                    self.set_status(format!(
-                        "Git is busy: {busy}. What shows stays until it finishes."
-                    ));
-                }
-            }
+            // The overview says what git is doing; what shows stays, and takes marks.
+            Err(Missed::Busy(busy)) => live.busy = Some(busy),
             Err(Missed::Replaced) => {
                 live.replaced = true;
                 live.watch = None;
+                live.waiting = None;
                 again = None;
                 self.fail("This checkout was replaced by another clone; reopen cr to review it.");
             }
@@ -724,28 +716,27 @@ impl Model {
         }
     }
 
-    /// Shows `captured` when it was compared with the snapshot on screen and nothing holds it
-    /// back, keeps it while something does, and takes another capture when it was compared with
-    /// another snapshot or read before a mark was saved.
+    /// Keeps `captured` to show with the next frame when it was compared with the snapshot on
+    /// screen, and takes another capture when it was compared with another snapshot or read
+    /// before a mark was saved.
     fn offer(&mut self, captured: Box<Captured>) {
         if captured.from != self.shown || captured.history.version() < self.version {
             self.capture(false);
             return;
         }
-        if self.live_waits() {
-            if let Some(live) = &mut self.live {
-                live.waiting = Some(captured);
-            }
-            return;
+        if let Some(live) = &mut self.live {
+            live.waiting = Some(captured);
         }
-        self.show_capture(*captured);
     }
 
-    /// Shows the waiting capture once nothing holds it back; runs after every update.
+    /// Shows the waiting capture, unless the reviewer is in the middle of something it would
+    /// pull the rows from under.
     ///
+    /// The front end calls it in the turn that draws the next frame, and nowhere else, so a key
+    /// always acts on what the last frame showed: never on a capture that landed after it.
     /// One taken before a change seen since it waited never shows: the capture of that change
     /// is running or follows, and the view on screen is updating until it lands.
-    pub(super) fn show_waiting_capture(&mut self) {
+    pub fn publish(&mut self) {
         if self.live_waits() {
             return;
         }
@@ -759,7 +750,21 @@ impl Model {
             live.updating = true;
             return;
         }
-        self.offer(waiting);
+        if waiting.from != self.shown || waiting.history.version() < self.version {
+            self.capture(false);
+            return;
+        }
+        self.show_capture(*waiting);
+    }
+
+    /// Whether a capture waits to show with the next frame and nothing holds it back, so the
+    /// front end must draw one.
+    #[must_use]
+    pub fn publishes(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.waiting.is_some())
+            && !self.live_waits()
     }
 
     /// Whether the reviewer is in the middle of something a new snapshot would pull the rows
@@ -826,7 +831,9 @@ impl Model {
             }
             match news {
                 Some(news) => self.set_status(news),
-                None if asked => self.set_status(format!("Up to date. {}", self.summary())),
+                None if asked && self.status == CAPTURING_AGAIN => {
+                    self.set_view_status(format!("Up to date. {}", self.summary()));
+                }
                 None => {}
             }
             return;
@@ -836,10 +843,6 @@ impl Model {
         };
         let moved = Moved::new(&links);
         let was = self.was_on();
-        let old_target = self
-            .review_target()
-            .map(|(units, _)| units)
-            .unwrap_or_default();
         let old_head = old
             .view()
             .and_then(|view| view.record().map(|record| record.head.clone()));
@@ -866,7 +869,6 @@ impl Model {
         // The snapshot on screen was laid out from its view, so it has one.
         let old_view = old.view();
         self.keep_place(&was, old_view.as_ref(), &view, &moved);
-        self.protect_changes(&old, &view, &moved, &old_target);
         // A grant of a review of the working tree covers the snapshot it was made for.
         self.read_snapshot_trust();
 
@@ -878,20 +880,38 @@ impl Model {
         }
         self.request_syntax();
         let changed = self.what_changed(&view, moved_to.filter(|_| same_code));
-        self.set_status(match news {
-            Some(news) => format!("{news} {changed}"),
-            None => changed,
-        });
+        self.announce_capture(news, changed, asked);
+    }
+
+    /// Says on the status line what the capture that shows now brought: `news` about its
+    /// subject and what `changed` about it.
+    ///
+    /// A capture that only brings edits says nothing, so the status line keeps the outcome of
+    /// the reviewer's last action; what it said about the snapshot before, such as that a file
+    /// is done, clears, since the header's progress tells how this one stands. A refresh the
+    /// reviewer `asked` for answers while its request still shows.
+    fn announce_capture(&mut self, news: Option<String>, changed: Option<String>, asked: bool) {
+        let status = match (news, changed) {
+            (Some(news), Some(changed)) => Some(format!("{news} {changed}")),
+            (news, changed) => news.or(changed),
+        };
+        match status {
+            Some(status) => self.set_status(status),
+            None if asked && self.status == CAPTURING_AGAIN => {
+                self.set_view_status(format!("Updated. {}", self.summary()));
+            }
+            None if self.about_view => self.set_status(""),
+            None => {}
+        }
     }
 
     /// What the status line says about the capture `view` that shows now: why there is nothing
-    /// to review in it, that the branch only moved to `moved_to` with the code the same, or
-    /// that the working tree changed.
+    /// to review in it, or that the branch only moved to `moved_to` with the code the same.
     fn what_changed(
         &self,
         view: &RevisionView<'_>,
         moved_to: Option<(String, ObjectId)>,
-    ) -> String {
+    ) -> Option<String> {
         let nothing = self
             .live
             .as_ref()
@@ -900,13 +920,13 @@ impl Model {
             .filter(|_| view.unit_ids().is_empty())
             .map(|(subject, record)| subject.nothing_to_review(&record.base, &record.head));
         match (nothing, moved_to) {
-            (Some(nothing), _) => nothing,
-            (None, Some((branch, head))) => format!(
+            (Some(nothing), _) => Some(nothing),
+            (None, Some((branch, head))) => Some(format!(
                 "{branch} is at {} now; the code is the same. {}",
                 abbreviated(&head),
                 self.summary()
-            ),
-            (None, None) => format!("The working tree changed. {}", self.summary()),
+            )),
+            (None, None) => None,
         }
     }
 
@@ -1123,56 +1143,6 @@ impl Model {
         }
     }
 
-    /// Records which units changed: those without an unchanged link from the snapshot `old`
-    /// changed now, and the others when their source last changed.
-    ///
-    /// What the review keys act on now changed now too unless it is exactly where what they
-    /// acted on before, `old_target`, went: a hunk, file or folder the reviewer was moved onto
-    /// is new under the keys, however unchanged it is.
-    fn protect_changes(
-        &mut self,
-        old: &Snapshot,
-        view: &RevisionView<'_>,
-        moved: &Moved,
-        old_target: &[UnitId],
-    ) {
-        let now = Instant::now();
-        let went: HashSet<UnitId> = old_target
-            .iter()
-            .filter_map(|unit| moved.any(unit.index()))
-            .map(|index| view.id(index))
-            .collect();
-        let target = self
-            .review_target()
-            .map(|(units, _)| units)
-            .unwrap_or_default();
-        let target = if target.iter().all(|unit| went.contains(unit)) {
-            Vec::new()
-        } else {
-            target
-        };
-        let Some(live) = &mut self.live else {
-            return;
-        };
-        let previous: HashMap<UnitIndex, Instant> = std::mem::take(&mut live.changed)
-            .into_iter()
-            .filter(|(unit, _)| unit.revision() == old.revision)
-            .map(|(unit, at)| (unit.index(), at))
-            .collect();
-        for unit in view.unit_ids() {
-            let at = match moved.unchanged_from(unit.index()) {
-                Some(older) => previous.get(&older).copied(),
-                None => Some(now),
-            };
-            if let Some(at) = at {
-                live.changed.insert(unit, at);
-            }
-        }
-        for unit in target {
-            live.changed.insert(unit, now);
-        }
-    }
-
     /// The file at the tree cursor, or the nearest file before it, or the first.
     fn file_near_cursor(&self) -> Option<String> {
         let visible = self.visible_tree();
@@ -1206,27 +1176,6 @@ impl Model {
             })
             .min_by_key(|&(_, distance)| distance)
             .map_or(0, |(hunk, _)| hunk)
-    }
-
-    /// Refuses a review key on `units` while one of them changed under it: within [`SETTLE`]
-    /// of the change, or since before the press that is still repeating, which
-    /// [`Self::held_refusal`] keeps; says why and returns whether it refused.
-    pub(super) fn refuses_changed(&mut self, units: &[UnitId], what: &str) -> bool {
-        let (Some(live), Some(press), Some(input)) = (&self.live, &self.press, &self.input) else {
-            return false;
-        };
-        let now = input.at;
-        let changed = units
-            .iter()
-            .filter_map(|unit| live.changed.get(unit))
-            .any(|&at| at >= press.started || now.saturating_duration_since(at) < SETTLE);
-        if changed {
-            self.set_status(format!(
-                "Not marked: {what} just changed in the working tree. Read it, then press \
-                 again."
-            ));
-        }
-        changed
     }
 }
 
@@ -1556,8 +1505,6 @@ struct Moved {
     any: HashMap<UnitIndex, UnitIndex>,
     /// Where each old unit went unchanged, at a trusted position.
     unchanged: HashMap<UnitIndex, UnitIndex>,
-    /// Where each new unit came from unchanged.
-    unchanged_from: HashMap<UnitIndex, UnitIndex>,
 }
 
 impl Moved {
@@ -1565,7 +1512,6 @@ impl Moved {
         let mut moved = Self {
             any: HashMap::new(),
             unchanged: HashMap::new(),
-            unchanged_from: HashMap::new(),
         };
         for link in links {
             if link.kind != LinkKind::Ambiguous {
@@ -1573,7 +1519,6 @@ impl Moved {
             }
             if link.kind == LinkKind::Unchanged {
                 moved.unchanged.insert(link.older, link.newer);
-                moved.unchanged_from.insert(link.newer, link.older);
             }
         }
         moved
@@ -1585,10 +1530,6 @@ impl Moved {
 
     fn unchanged(&self, older: UnitIndex) -> Option<UnitIndex> {
         self.unchanged.get(&older).copied()
-    }
-
-    fn unchanged_from(&self, newer: UnitIndex) -> Option<UnitIndex> {
-        self.unchanged_from.get(&newer).copied()
     }
 }
 
@@ -1606,13 +1547,6 @@ fn causes(err: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 impl Live {
-    /// Moves every change `by` into the past, as if that much time passed since.
-    pub(super) fn age(&mut self, by: Duration) {
-        for at in self.changed.values_mut() {
-            *at = at.checked_sub(by).unwrap_or(*at);
-        }
-    }
-
     /// Whether a capture waits for the reviewer.
     pub(super) fn has_waiting(&self) -> bool {
         self.waiting.is_some()

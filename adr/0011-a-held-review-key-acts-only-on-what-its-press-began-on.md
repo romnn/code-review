@@ -1,7 +1,9 @@
 # 11. A held review key acts only on what its press began on
 
 **Status:** accepted, its terminal timing superseded by
-[ADR 12](0012-every-key-a-terminal-sends-is-a-press.md) · **Date:** 2026-11-24
+[ADR 12](0012-every-key-a-terminal-sends-is-a-press.md), its refusals while git is busy and on a
+changed hunk by [ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md) ·
+**Date:** 2026-11-24
 
 ## Context
 

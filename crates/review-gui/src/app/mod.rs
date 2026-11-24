@@ -200,6 +200,8 @@ pub struct ReviewApp {
     first_hunk: Option<Duration>,
     /// Whether QA mode is answering a command, so the app quits only once it has answered.
     answering: bool,
+    /// Whether the next frame shows the capture waiting for it.
+    publishing: bool,
 }
 
 /// The view reads the model as its own state; it changes it only through
@@ -262,6 +264,7 @@ impl ReviewApp {
             starting: true,
             first_hunk: None,
             answering: false,
+            publishing: false,
         };
         // The compositor's close button closes as Ctrl+W does, once everything is saved.
         let view = cx.entity().downgrade();
@@ -294,8 +297,26 @@ impl ReviewApp {
         let Updated { value, effects } = self.driver.update(change);
         self.run(effects, window, cx);
         self.sync(window, cx);
+        self.publish_with_next_frame(window, cx);
         cx.notify();
         value
+    }
+
+    /// Shows the capture that waits in the turn of the next frame, before gpui draws it, so a
+    /// key always acts on what the last frame showed: a key can make gpui render to dispatch it
+    /// without presenting that render, so the capture never shows from `render`.
+    fn publish_with_next_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.publishing || !self.publishes() {
+            return;
+        }
+        self.publishing = true;
+        let this = cx.entity();
+        window.on_next_frame(move |window, cx| {
+            this.update(cx, |this, cx| {
+                this.publishing = false;
+                this.update_model(window, cx, Model::publish);
+            });
+        });
     }
 
     /// Does what `action` does, as its key would.

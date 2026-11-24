@@ -189,7 +189,7 @@ impl Model {
             return;
         }
         if !self.look().cross_files {
-            self.set_status(if forward {
+            self.set_view_status(if forward {
                 "This is the file's last hunk."
             } else {
                 "This is the file's first hunk."
@@ -202,7 +202,7 @@ impl Model {
             .and_then(|index| self.tree.get(index))
             .map(|node| node.path.clone())
         else {
-            self.set_status(if forward {
+            self.set_view_status(if forward {
                 "This is the last hunk of the last file."
             } else {
                 "This is the first hunk of the first file."
@@ -246,11 +246,11 @@ impl Model {
                 }
                 (false, false, None) => "Nothing left to review.".to_owned(),
             };
-            self.set_status(status);
+            self.set_view_status(status);
             return;
         }
         let Some(path) = self.open_file_toward(forward) else {
-            self.set_status(if self.open_hunk_after(None).is_some() {
+            self.set_view_status(if self.open_hunk_after(None).is_some() {
                 if forward {
                     "No other file needs review; this one still has hunks to review further up."
                 } else {
