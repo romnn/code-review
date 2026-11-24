@@ -46,11 +46,14 @@ pub(super) struct FileSides {
     pub(super) old: Option<SideKey>,
     /// The head version.
     pub(super) new: Option<SideKey>,
+    /// The heads of earlier revisions its chunks that changed since they were reviewed show
+    /// their reviewed lines from.
+    pub(super) reviewed: Vec<SideKey>,
 }
 
 impl FileSides {
     fn sides(&self) -> impl Iterator<Item = &SideKey> {
-        self.old.iter().chain(&self.new)
+        self.old.iter().chain(&self.new).chain(&self.reviewed)
     }
 }
 
@@ -374,6 +377,7 @@ mod tests {
         FileSides {
             old: Some(side(path, base)),
             new: Some(side(path, head)),
+            reviewed: Vec::new(),
         }
     }
 

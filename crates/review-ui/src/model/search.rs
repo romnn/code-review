@@ -340,6 +340,7 @@ mod tests {
             base: None,
             quiet: false,
             moved: false,
+            reviewed: None,
         };
         let ranges = |query: &str| -> Vec<Range<usize>> {
             cell_matches(0, Column::Whole, &cell, query)

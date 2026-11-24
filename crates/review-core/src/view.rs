@@ -4,7 +4,8 @@
 use serde::Serialize;
 
 use crate::analysis::{
-    Analysis, EntrySide, FileChange, FileUnit, Move, MoveKind, NoiseCategory, Unit, UnitKind,
+    Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Move, MoveKind, NoiseCategory,
+    Unit, UnitKind,
 };
 use crate::correspond::{LinkKind, same_entry};
 use crate::error::Error;
@@ -122,6 +123,113 @@ pub struct Interdiff {
     /// Whether the file's base entry (path, mode or content) differs from the reviewed one's:
     /// the code around the unit changed in the base, even where both sides of the change did not.
     pub base_file_changed: bool,
+}
+
+/// What a chunk that changed since it was reviewed shows: only what changed on top of the
+/// reviewed change, or, where that cannot show everything the change does now, the whole
+/// current change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinceReviewed<'h> {
+    /// The reviewed head's lines against the current head's; see [`Delta`].
+    Delta(Delta<'h>),
+    /// The whole current change, for this reason.
+    Whole(Reopened),
+}
+
+/// What changed on top of a reviewed change whose base lines stayed the same, so that the
+/// reviewed change and the [runs](Self::runs) together are the whole current change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delta<'h> {
+    /// The unit that was reviewed.
+    pub reviewed: UnitId,
+    /// The head file the reviewed lines are in, for their syntax.
+    pub reviewed_head: &'h EntrySide,
+    /// The change as it was reviewed.
+    pub before: &'h Chunk,
+    /// The change now.
+    pub after: &'h Chunk,
+}
+
+impl<'h> Delta<'h> {
+    /// The runs of lines that differ, in order; the lines between them are the same in both.
+    #[must_use]
+    pub fn runs(&self) -> Vec<LineRun<'h>> {
+        let (before, after): (&'h Chunk, &'h Chunk) = (self.before, self.after);
+        let old = split_lines(&before.added);
+        let new = split_lines(&after.added);
+        // Where each line of a text starts, and where the text ends.
+        let starts = |lines: &[&str]| -> Vec<usize> {
+            std::iter::once(0)
+                .chain(lines.iter().scan(0, |end, line| {
+                    *end += line.len();
+                    Some(*end)
+                }))
+                .collect()
+        };
+        let (old_starts, new_starts) = (starts(&old), starts(&new));
+        // The lines `range` of `text`, whose lines start at `starts`, as one slice of it.
+        let text = |text: &'h str, starts: &[usize], range: &std::ops::Range<usize>| {
+            let at = |line: usize| starts.get(line).copied().unwrap_or_default();
+            text.get(at(range.start)..at(range.end)).unwrap_or_default()
+        };
+        diff_lines(&old, &new)
+            .into_iter()
+            .map(|run| LineRun {
+                old: LineRange {
+                    start: before.new.start + run.before.start,
+                    len: run.before.len(),
+                },
+                new: LineRange {
+                    start: after.new.start + run.after.start,
+                    len: run.after.len(),
+                },
+                removed: text(&before.added, &old_starts, &run.before),
+                added: text(&after.added, &new_starts, &run.after),
+            })
+            .collect()
+    }
+}
+
+/// A run of lines that differ between a reviewed change and the current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRun<'h> {
+    /// The lines in the reviewed head.
+    pub old: LineRange,
+    /// The lines in the current head.
+    pub new: LineRange,
+    /// The reviewed lines, each with its terminator.
+    pub removed: &'h str,
+    /// The current lines, each with its terminator.
+    pub added: &'h str,
+}
+
+impl LineRun<'_> {
+    /// The run as a chunk with its edit script, to show it as a change.
+    #[must_use]
+    pub fn to_chunk(&self) -> Chunk {
+        Chunk::of_lines(
+            self.old,
+            self.new,
+            self.removed.to_owned(),
+            self.added.to_owned(),
+        )
+    }
+}
+
+/// Why a chunk that changed since it was reviewed shows its whole current change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reopened {
+    /// The file's base entry changed: the target branch moved.
+    TargetMoved,
+    /// The change now affects other base lines than the reviewed one did.
+    OtherBaseLines,
+    /// The chain back to the reviewed unit is not one-to-one with trusted links, or the head
+    /// file is not the same file, so the reviewed lines may be another change's.
+    Uncertain,
+    /// The change is the same as the reviewed one, but it was reopened in between.
+    SameCode,
+    /// The reviewer flagged the change as it was, so all of it still needs them.
+    Flagged,
 }
 
 /// Where a note is attached in the viewed revision.
@@ -869,6 +977,79 @@ impl<'h> RevisionView<'h> {
             head,
             base_file_changed: !same_entry(reviewed_file.old.as_ref(), current_file.old.as_ref()),
         }))
+    }
+
+    /// Returns what chunk unit `id` shows when it changed since it was reviewed: only what
+    /// changed on top of the reviewed change when its base lines and file stayed the same and
+    /// every link back to the reviewed unit is one-to-one and trusted, and else the whole
+    /// current change; `None` for any other unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::unit`].
+    pub fn since_reviewed(&self, id: UnitId) -> Result<Option<SinceReviewed<'h>>, Error> {
+        let UnitState::ChangedSinceReviewed { reviewed, verdict } = self.state(id)? else {
+            return Ok(None);
+        };
+        let current_file = self.file(id)?;
+        let reviewed_view = self.history.view(reviewed.revision())?;
+        let reviewed_file = reviewed_view.file(reviewed)?;
+        let (UnitKind::Chunk(before), UnitKind::Chunk(after)) =
+            (&reviewed_view.unit(reviewed)?.kind, &self.unit(id)?.kind)
+        else {
+            return Ok(None);
+        };
+        let reviewed_head = match (&reviewed_file.new, &current_file.new) {
+            (Some(older), Some(newer)) if older.path == newer.path && older.mode == newer.mode => {
+                Some(older)
+            }
+            _ => None,
+        };
+        let reopened = if verdict == Verdict::Flagged {
+            Some(Reopened::Flagged)
+        } else if !same_entry(reviewed_file.old.as_ref(), current_file.old.as_ref()) {
+            Some(Reopened::TargetMoved)
+        } else if before.old != after.old {
+            Some(Reopened::OtherBaseLines)
+        } else if reviewed_head.is_none() || !self.trusted_chain(id, reviewed) {
+            Some(Reopened::Uncertain)
+        } else if before.added == after.added {
+            Some(Reopened::SameCode)
+        } else {
+            None
+        };
+        Ok(Some(match (reopened, reviewed_head) {
+            (None, Some(reviewed_head)) => SinceReviewed::Delta(Delta {
+                reviewed,
+                reviewed_head,
+                before,
+                after,
+            }),
+            (reopened, _) => SinceReviewed::Whole(reopened.unwrap_or(Reopened::Uncertain)),
+        }))
+    }
+
+    /// Whether every link from unit `id` back to unit `reviewed` is the only link of both its
+    /// ends and says the change is unchanged or changed, never untrusted or ambiguous.
+    fn trusted_chain(&self, id: UnitId, reviewed: UnitId) -> bool {
+        let mut current = id;
+        while current != reviewed {
+            let [link] = self.history.predecessors(current) else {
+                return false;
+            };
+            let Some(revision) = current.revision().previous() else {
+                return false;
+            };
+            let older = UnitId::new(revision, link.older);
+            if !matches!(link.kind, LinkKind::Unchanged | LinkKind::Changed)
+                || self.history.successors(older).len() != 1
+                || revision < reviewed.revision()
+            {
+                return false;
+            }
+            current = older;
+        }
+        true
     }
 
     /// Returns every note written on this revision or earlier, resolved for this revision.

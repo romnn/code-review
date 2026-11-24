@@ -318,6 +318,26 @@ impl Blobs {
         self.resolved.retain(|side, _| sides.contains(side));
     }
 
+    /// The highlights of `file`'s versions that are made by now: its base and head, and the
+    /// heads its chunks that changed since they were reviewed show their reviewed lines from.
+    fn file_syntax(
+        &self,
+        view: &review_core::RevisionView<'_>,
+        file: &review_core::analysis::FileChange,
+    ) -> crate::syntax::FileSyntax {
+        let side = |side: Option<&review_core::analysis::EntrySide>| {
+            side.and_then(|side| self.side_syntax(side))
+        };
+        crate::syntax::FileSyntax {
+            head: side(file.new.as_ref()),
+            base: side(file.old.as_ref()),
+            reviewed: reviewed_heads(view, file)
+                .into_iter()
+                .filter_map(|head| Some((head.clone(), self.syntax_of(&head)?)))
+                .collect(),
+        }
+    }
+
     /// The highlights of the file version `side`, once its syntax is resolved and highlighted.
     fn side_syntax(&self, side: &review_core::analysis::EntrySide) -> Option<Arc<SideSyntax>> {
         self.syntax_of(&state::SideKey {
@@ -361,19 +381,47 @@ impl Blobs {
     }
 }
 
-/// Every file version `view` shows, by blob and path.
+/// Every file version `view` shows, by blob and path, reviewed heads included.
 fn shown_sides<'a>(
     view: &'a review_core::RevisionView<'_>,
 ) -> impl Iterator<Item = state::SideKey> + 'a {
     view.analysis()
         .into_iter()
         .flat_map(|analysis| &analysis.files)
-        .flat_map(|file| [file.old.as_ref(), file.new.as_ref()])
-        .flatten()
-        .map(|side| state::SideKey {
-            oid: side.oid.clone(),
-            path: side.path.clone(),
+        .flat_map(|file| {
+            [file.old.as_ref(), file.new.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(side_key)
+                .chain(reviewed_heads(view, file))
         })
+}
+
+fn side_key(side: &review_core::analysis::EntrySide) -> state::SideKey {
+    state::SideKey {
+        oid: side.oid.clone(),
+        path: side.path.clone(),
+    }
+}
+
+/// The heads that `file`'s chunks that changed since they were reviewed show their reviewed
+/// lines from.
+fn reviewed_heads(
+    view: &review_core::RevisionView<'_>,
+    file: &review_core::analysis::FileChange,
+) -> Vec<state::SideKey> {
+    let mut heads: Vec<state::SideKey> = Vec::new();
+    for &index in &file.units {
+        if let Ok(Some(review_core::SinceReviewed::Delta(delta))) =
+            view.since_reviewed(view.id(index))
+        {
+            let head = side_key(delta.reviewed_head);
+            if !heads.contains(&head) {
+                heads.push(head);
+            }
+        }
+    }
+    heads
 }
 
 /// The review window's state and behavior; see the module documentation.
@@ -1063,16 +1111,7 @@ impl Model {
             {
                 self.folds.texts.insert(path.clone(), Arc::clone(text));
             }
-            let syntax = crate::syntax::FileSyntax {
-                head: file
-                    .new
-                    .as_ref()
-                    .and_then(|side| self.blobs.side_syntax(side)),
-                base: file
-                    .old
-                    .as_ref()
-                    .and_then(|side| self.blobs.side_syntax(side)),
-            };
+            let syntax = self.blobs.file_syntax(view, file);
             self.folds.syntax.insert(path.clone(), Arc::new(syntax));
         }
         rows::present(rows::build(view, &units, &self.folds), self.presented)
@@ -1344,16 +1383,21 @@ impl Model {
 
 /// The versions of `view`'s files that can be highlighted, in review order.
 fn highlight_files(view: &review_core::RevisionView<'_>) -> Vec<highlights::FileSides> {
-    let key = |side: &review_core::analysis::EntrySide| state::SideKey {
-        oid: side.oid.clone(),
-        path: side.path.clone(),
-    };
     view.analysis()
         .into_iter()
         .flat_map(|analysis| &analysis.files)
         .map(|file| highlights::FileSides {
-            old: file.old.as_ref().filter(|side| is_regular(side)).map(key),
-            new: file.new.as_ref().filter(|side| is_regular(side)).map(key),
+            old: file
+                .old
+                .as_ref()
+                .filter(|side| is_regular(side))
+                .map(side_key),
+            new: file
+                .new
+                .as_ref()
+                .filter(|side| is_regular(side))
+                .map(side_key),
+            reviewed: reviewed_heads(view, file),
         })
         .collect()
 }

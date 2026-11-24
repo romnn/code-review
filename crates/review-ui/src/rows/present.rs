@@ -336,6 +336,7 @@ mod tests {
                 base: None,
                 quiet: false,
                 moved: false,
+                reviewed: None,
             }),
         }
     }
@@ -698,7 +699,7 @@ mod tests {
     }
 
     /// On the demo, side by side: every line of code shows exactly once on its side, in order;
-    /// moves, interdiffs and line-ending markers survive; context shows each side's own line
+    /// moves and line-ending markers survive; context shows each side's own line
     /// numbers; and hunks keep their rows contiguous from their header.
     #[test]
     fn demo_pairs_keep_every_line_and_its_evidence() {
@@ -755,13 +756,6 @@ mod tests {
                 .iter()
                 .any(|row| row.kind() == RowKind::Moved && row.text().contains("with edits")),
             "moves survive"
-        );
-        assert!(
-            shown
-                .rows
-                .iter()
-                .any(|row| row.kind() == RowKind::Interdiff),
-            "interdiffs survive"
         );
         // An unchanged line shows its base line on the left and its head line on the right.
         let shifted = shown.rows.iter().find_map(|row| match &row.body {
@@ -898,53 +892,51 @@ mod tests {
         assert!(rights.windows(2).all(|pair| pair[1] == pair[0] + 1));
     }
 
-    /// Side by side, what changed since a review pairs too: the reviewed version's lines on
-    /// the left, the current ones on the right, each block under its own title.
+    /// Side by side, what changed since a review pairs the line as it was reviewed, on the
+    /// left, with the current line, on the right; each side knows where it is in its own head,
+    /// the reviewed one in the head reviewed then, for its colors, and has no base line.
     #[test]
-    fn an_interdiff_pairs_the_reviewed_and_the_current_version() {
+    fn a_change_since_review_pairs_the_reviewed_and_the_current_line() {
         let (_dir, review) = demo_review(2);
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let order = review_core::walkthrough::partition(&view).order();
-        let unified = build(&view, &order, &Folds::default());
-        let shown = present(unified.clone(), SIDE_BY_SIDE);
-        let titles: Vec<usize> = (0..shown.rows.len())
-            .filter(|&index| shown.rows[index].kind() == RowKind::Interdiff)
-            .collect();
-        assert!(
-            !titles.is_empty(),
-            "the demo's second revision has interdiffs"
-        );
-        let mut changed = 0;
-        for title in titles {
-            let block = nested_block(&shown.rows, title);
-            for (_, pair) in block {
-                assert!(pair.left.iter().all(|cell| cell.kind != RowKind::NestedNew));
-                assert!(
-                    pair.right
-                        .iter()
-                        .all(|cell| cell.kind != RowKind::NestedOld)
-                );
-                if let (Some(left), Some(right)) = (&pair.left, &pair.right)
-                    && left.kind == RowKind::NestedOld
-                {
-                    assert_eq!(right.kind, RowKind::NestedNew);
-                    changed += 1;
-                }
-            }
-        }
-        assert!(changed > 0, "a changed line shows beside what was reviewed");
-        let old = |rows: &[Row]| -> Vec<String> {
-            rows.iter()
-                .flat_map(|row| match &row.body {
-                    Body::Code(cell) => vec![cell],
-                    Body::Pair(pair) => pair.left.iter().collect(),
-                    Body::Note(_) => Vec::new(),
-                })
-                .filter(|cell| cell.kind == RowKind::NestedOld)
-                .map(|cell| cell.text.clone())
-                .collect()
+        let folds = Folds {
+            layout: DiffLayout::SideBySide,
+            ..Folds::default()
         };
-        assert_eq!(old(&shown.rows), old(&unified.rows));
+        let shown = present(build(&view, &order, &folds), SIDE_BY_SIDE);
+        let pairs: Vec<&Pair> = shown
+            .rows
+            .iter()
+            .filter_map(|row| match &row.body {
+                Body::Pair(pair) => Some(pair),
+                Body::Code(_) | Body::Note(_) => None,
+            })
+            .filter(|pair| {
+                pair.left
+                    .as_ref()
+                    .is_some_and(|left| left.reviewed.is_some())
+            })
+            .collect();
+        let changed: Vec<(&Cell, &Cell)> = pairs
+            .iter()
+            .filter_map(|pair| Some((pair.left.as_ref()?, pair.right.as_ref()?)))
+            .filter(|(left, _)| left.kind == RowKind::Removed)
+            .collect();
+        let [(left, right)] = changed.as_slice() else {
+            panic!("one line of the demo's engine.rs changed since its review: {changed:?}");
+        };
+        assert_eq!(left.text, "pub const LIMIT: u32 = 250;");
+        assert_eq!(right.kind, RowKind::Added);
+        assert_eq!(right.text, "pub const LIMIT: u32 = 300;");
+        assert_eq!(left.base, None);
+        assert_eq!(left.head, None);
+        let (reviewed, head) = (
+            left.reviewed.as_ref().unwrap(),
+            right.head.as_ref().unwrap(),
+        );
+        assert_eq!(reviewed.side.path, "src/engine.rs");
+        assert_eq!(reviewed.line, head.line);
     }
 }

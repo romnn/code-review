@@ -204,16 +204,7 @@ impl Model {
                 {
                     self.folds.texts.insert(shown.to_owned(), Arc::clone(text));
                 }
-                let syntax = crate::syntax::FileSyntax {
-                    head: file
-                        .new
-                        .as_ref()
-                        .and_then(|side| self.blobs.side_syntax(side)),
-                    base: file
-                        .old
-                        .as_ref()
-                        .and_then(|side| self.blobs.side_syntax(side)),
-                };
+                let syntax = self.blobs.file_syntax(view, file);
                 self.folds.syntax.insert(shown.to_owned(), Arc::new(syntax));
             }
         }

@@ -2178,6 +2178,7 @@ fn a_press_on_a_line_ending_lands_at_the_code_end() {
                     base: None,
                     quiet: false,
                     moved: false,
+                    reviewed: None,
                 }),
             }],
             ..rows::Layout::default()
@@ -5691,4 +5692,192 @@ fn a_folder_and_its_first_file_show_the_code_on_the_same_rows() {
     lay_out(&mut host);
     assert!((host.model().diff_scroll.offset()).abs() < f64::EPSILON);
     assert_eq!(lines(host.model()), in_folder);
+}
+
+/// The window over a working-tree review of `path`, a 60-line function accepted at one
+/// revision whose line 16 changed at the next, showing `path`; the directory holds the
+/// repository.
+fn accepted_then_changed(dir: &Path, path: &str) -> Host {
+    use std::fmt::Write as _;
+
+    let file = |label: &str| {
+        let mut text = "fn a() {\n".to_owned();
+        for line in 0..60 {
+            let value = if line == 15 { label } else { "0" };
+            writeln!(text, "    let v{line} = {value};").unwrap();
+        }
+        text.push_str("}\n");
+        text
+    };
+    let (review, repo) = worktree_review_of(
+        dir,
+        &[(
+            path,
+            indoc! {"
+            fn a() {
+            }
+        "},
+        )],
+        &[(path, &file("1"))],
+    );
+    let history = review.history().unwrap();
+    let view = history.current_view().unwrap();
+    review
+        .mark(&view, &view.units_of_file(path), MarkVerdict::Accepted)
+        .unwrap();
+    std::fs::write(repo.join(path), file("2")).unwrap();
+    review.refresh().unwrap();
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file(path));
+    host.settle();
+    host
+}
+
+/// A long change accepted at one revision whose one line changed at the next shows what changed
+/// on top of it, as a new change shows: in the hunks view the hunk is the changed line under its
+/// header, with the accepted lines around it as context, colored by the head they were accepted
+/// in, and the rest folded into gaps.
+#[test]
+fn a_change_since_review_shows_on_top_of_the_accepted_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_changed(dir.path(), "a.rs");
+
+    let rows = &host.model().rows.rows;
+    let changed: Vec<&rows::Row> = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind(),
+                rows::RowKind::Edited | rows::RowKind::Removed | rows::RowKind::Added
+            )
+        })
+        .collect();
+    let [edited] = changed.as_slice() else {
+        panic!("one line changed since the review: {changed:?}");
+    };
+    assert_eq!(edited.kind(), rows::RowKind::Edited);
+    assert_eq!(edited.text(), "    let v15 = 12;");
+    // The hunk is the change alone, its header right above the lines around it; those lines are
+    // the same as reviewed, so they come from the head reviewed then and have no base line.
+    let hunk: Vec<rows::RowKind> = rows
+        .iter()
+        .filter(|row| row.hunk.is_some())
+        .map(rows::Row::kind)
+        .collect();
+    assert_eq!(hunk, [rows::RowKind::Header, rows::RowKind::Edited]);
+    let edited_row = rows
+        .iter()
+        .position(|row| row.kind() == rows::RowKind::Edited)
+        .unwrap();
+    let rows::Body::Code(before) = &rows[edited_row - 1].body else {
+        panic!("context right above the change");
+    };
+    assert_eq!(before.text, "    let v14 = 0;");
+    assert_eq!(before.base, None);
+    assert_eq!(before.reviewed.as_ref().map(|line| line.line), Some(15));
+    let gaps: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.kind() == rows::RowKind::Gap)
+        .map(rows::Row::text)
+        .collect();
+    assert_eq!(gaps, ["13 unchanged lines", "42 unchanged lines"]);
+    let reviewed = rows
+        .iter()
+        .find_map(|row| match &row.body {
+            rows::Body::Code(cell) => cell.reviewed.clone(),
+            rows::Body::Pair(_) | rows::Body::Note(_) => None,
+        })
+        .expect("the accepted lines know the head they were accepted in");
+    let syntax = host.model().folds.syntax.get("a.rs").unwrap();
+    assert!(
+        syntax.reviewed.contains_key(&reviewed.side),
+        "the head it was accepted in is highlighted"
+    );
+
+    // Opening the gap after the change shows the lines right after it first.
+    let gap = host
+        .model()
+        .rows
+        .rows
+        .iter()
+        .rposition(|row| row.kind() == rows::RowKind::Gap)
+        .unwrap();
+    host.update(|model| model.expand_gap(gap));
+    let after: Vec<&str> = host
+        .model()
+        .rows
+        .rows
+        .iter()
+        .skip_while(|row| row.kind() != rows::RowKind::Edited)
+        .skip(1)
+        .take(4)
+        .map(rows::Row::text)
+        .collect();
+    assert_eq!(
+        after,
+        [
+            "    let v16 = 0;",
+            "    let v17 = 0;",
+            "    let v18 = 0;",
+            "    let v19 = 0;"
+        ]
+    );
+}
+
+/// In the file view, a change since review shows every line, and its hunk, bar and stop are the
+/// changed line alone.
+#[test]
+fn a_change_since_review_is_selected_at_the_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_changed(dir.path(), "a.rs");
+
+    host.dispatch(Action::ToggleView);
+    let model = host.model();
+    let hunk: Vec<rows::RowKind> = model
+        .rows
+        .rows
+        .iter()
+        .filter(|row| row.hunk.is_some())
+        .map(rows::Row::kind)
+        .collect();
+    assert_eq!(hunk, [rows::RowKind::Edited]);
+    let start = model.hunk_rows[model.hunk].start;
+    assert_eq!(
+        model.rows.row_on_screen(start).map(rows::Row::kind),
+        Some(rows::RowKind::Edited)
+    );
+    assert!(
+        !model
+            .rows
+            .rows
+            .iter()
+            .any(|row| row.kind() == rows::RowKind::Gap),
+        "the file view shows every line"
+    );
+}
+
+/// A noise file that changed since it was reviewed stays folded as noise, and expanded shows its
+/// whole change once, every line in order.
+#[test]
+fn an_expanded_noise_file_changed_since_review_shows_each_line_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_changed(dir.path(), "Cargo.lock");
+    let unit = host.model().rows.hunks[0][0];
+    host.update(|model| {
+        model.folds.expanded.insert(unit);
+        model.rebuild();
+    });
+    let lines: Vec<usize> = host
+        .model()
+        .rows
+        .rows
+        .iter()
+        .flat_map(rows::Row::cells)
+        .filter_map(|cell| cell.head.as_ref().map(|head| head.line))
+        .collect();
+    assert_ne!(lines, Vec::<usize>::new());
+    assert!(
+        lines.windows(2).all(|pair| pair[0] < pair[1]),
+        "every head line once, in order: {lines:?}"
+    );
 }

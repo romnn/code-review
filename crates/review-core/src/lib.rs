@@ -82,7 +82,8 @@ pub use review::{
 pub use standing::{ReviewPolicy, Standing};
 pub use store::events::{MarkVerdict, TrustScope};
 pub use view::{
-    ChangeKind, Collapse, Counts, DiffLine, DiffLineKind, FileChangeSummary, FileStatus, FileTone,
-    Interdiff, LineEnding, Location, MoveEnd, MoveView, NoteAttachment, ResolvedNote, RevisionView,
-    ScopeAnchor, Side, SideDiff, SplitLine, Status, split_line_ending,
+    ChangeKind, Collapse, Counts, Delta, DiffLine, DiffLineKind, FileChangeSummary, FileStatus,
+    FileTone, Interdiff, LineEnding, LineRun, Location, MoveEnd, MoveView, NoteAttachment,
+    Reopened, ResolvedNote, RevisionView, ScopeAnchor, Side, SideDiff, SinceReviewed, SplitLine,
+    Status, split_line_ending,
 };

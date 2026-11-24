@@ -7,9 +7,10 @@ use color_eyre::eyre;
 use review_core::analysis::{EntrySide, NoiseCategory, UnitKind};
 use review_core::walkthrough::{Partition, StepKind};
 use review_core::{
-    Collapse, DiffLineKind, Interdiff, LineEnding, Location, NoteAttachment, Recorded, ReviewKey,
-    ReviewTag, RevisionNumber, RevisionView, SideDiff, SplitLine, Standing, Status, Subject,
-    Tagged, UnitId, UnitState, filtered_note, split_line_ending,
+    Collapse, Delta, DiffLineKind, Interdiff, LineEnding, Location, NoteAttachment, Recorded,
+    Reopened, ReviewKey, ReviewTag, RevisionNumber, RevisionView, SideDiff, SinceReviewed,
+    SplitLine, Standing, Status, Subject, Tagged, UnitId, UnitState, filtered_note,
+    split_line_ending,
 };
 use serde::Serialize;
 
@@ -275,8 +276,14 @@ pub fn show(shown: &Shown<'_>, expand: bool, painter: Painter) -> eyre::Result<S
         let mut hidden_approved = 0;
         let mut hidden_noise: Vec<NoiseCategory> = Vec::new();
         for &unit in &step.units {
+            // What changed since a review shows even where the whole change is reformatting or
+            // a move.
+            let since = view.since_reviewed(unit)?;
             match view.collapse(unit)? {
                 Some(Collapse::Noise(category)) if !expand => hidden_noise.push(category),
+                _ if since.is_some() => {
+                    render_unit(&mut out, view, tagged(key, unit), since, painter)?;
+                }
                 Some(Collapse::FormattingOnly) if !expand => {
                     hidden_formatting += 1;
                     hidden_approved += usize::from(view.standing(unit)? == Standing::AutoApproved);
@@ -284,7 +291,7 @@ pub fn show(shown: &Shown<'_>, expand: bool, painter: Painter) -> eyre::Result<S
                 Some(Collapse::Moved(_)) if !expand => {
                     render_move_line(&mut out, view, tagged(key, unit), painter)?;
                 }
-                _ => render_unit(&mut out, view, tagged(key, unit), painter)?,
+                _ => render_unit(&mut out, view, tagged(key, unit), since, painter)?,
             }
         }
         if hidden_formatting > 0 {
@@ -348,10 +355,12 @@ fn render_move_line(
     Ok(())
 }
 
+/// Writes a unit; `since` is what it shows when it changed since it was reviewed.
 fn render_unit(
     out: &mut String,
     view: &RevisionView<'_>,
     tagged: Tagged<UnitId>,
+    since: Option<SinceReviewed<'_>>,
     painter: Painter,
 ) -> eyre::Result<()> {
     let unit = tagged.id;
@@ -370,8 +379,26 @@ fn render_unit(
         location_text(&view.location(unit)?)
     )
     .ok();
-    match &record.kind {
-        UnitKind::Chunk(chunk) => {
+    match (&record.kind, since) {
+        (UnitKind::Chunk(_), Some(SinceReviewed::Delta(delta))) => {
+            render_delta(out, &delta, painter);
+        }
+        (UnitKind::Chunk(chunk), since) => {
+            if let Some(SinceReviewed::Whole(reopened)) = since {
+                let why = match reopened {
+                    Reopened::TargetMoved => "the target branch moved since it was reviewed",
+                    Reopened::OtherBaseLines => "it changes other lines than when it was reviewed",
+                    Reopened::Uncertain => "changed since it was reviewed",
+                    Reopened::SameCode => "the same as reviewed, but reopened in between",
+                    Reopened::Flagged => "changed since it was flagged",
+                };
+                writeln!(
+                    out,
+                    "    {}",
+                    painter.dim(&format!("{why}; the whole change:"))
+                )
+                .ok();
+            }
             render_lines(
                 out,
                 &chunk.removed,
@@ -389,7 +416,7 @@ fn render_unit(
                 .ok();
             }
         }
-        UnitKind::File(_) => {
+        (UnitKind::File(_), _) => {
             writeln!(out, "    {}", view.describe(unit)?.unwrap_or_default()).ok();
         }
     }
@@ -409,9 +436,6 @@ fn render_unit(
             writeln!(out, "    {}", painter.dim(&description)).ok();
         }
     }
-    if let Some(interdiff) = view.interdiff(unit)? {
-        render_interdiff(out, &interdiff, painter);
-    }
     for note in view.notes() {
         if note.attached == (NoteAttachment::Unit { unit }) {
             writeln!(out, "    note ({}): {}", note.written_on, note.text).ok();
@@ -420,7 +444,60 @@ fn render_unit(
     Ok(())
 }
 
-/// Writes the lines of an interdiff side or a move's inner diff.
+/// Writes a chunk that changed since it was reviewed as what changed on top of the reviewed
+/// change: each changed run's reviewed and current lines, with up to [`DELTA_CONTEXT`] of the
+/// lines the same as reviewed around it, and a count of the others.
+fn render_delta(out: &mut String, delta: &Delta<'_>, painter: Painter) {
+    let current = delta.after;
+    let lines: Vec<&str> = current.added.split_inclusive('\n').collect();
+    let start = current.new.start;
+    let mut line = start;
+    let runs = delta.runs();
+    for (index, run) in runs.iter().map(Some).chain([None]).enumerate() {
+        let until = run.map_or(start + lines.len(), |run| run.new.start);
+        let kept = lines.get(line - start..until - start).unwrap_or_default();
+        let head = if index == 0 { 0 } else { DELTA_CONTEXT };
+        let tail = if run.is_some() { DELTA_CONTEXT } else { 0 };
+        if kept.len() > head + tail + 1 {
+            render_lines(
+                out,
+                &kept.get(..head).unwrap_or_default().concat(),
+                &[],
+                ' ',
+                painter,
+            );
+            let hidden = kept.len() - head - tail;
+            // Writing to a `String` cannot fail.
+            writeln!(
+                out,
+                "    {}",
+                painter.dim(&format!("⋯ {hidden} lines as reviewed"))
+            )
+            .ok();
+            render_lines(
+                out,
+                &kept.get(kept.len() - tail..).unwrap_or_default().concat(),
+                &[],
+                ' ',
+                painter,
+            );
+        } else {
+            render_lines(out, &kept.concat(), &[], ' ', painter);
+        }
+        if let Some(run) = run {
+            let run = run.to_chunk();
+            render_lines(out, &run.removed, &run.removed_highlights(), '-', painter);
+            render_lines(out, &run.added, &run.added_highlights(), '+', painter);
+            line = run.new.end();
+        }
+    }
+}
+
+/// The lines the same as reviewed that `cr show` prints before and after each change since a
+/// review.
+const DELTA_CONTEXT: usize = 3;
+
+/// Writes the lines of a move's inner diff.
 fn render_diff_lines(out: &mut String, diff: &SideDiff, painter: Painter) {
     for line in &diff.lines {
         let text = format!("{}{}", line.text, crlf_marker(line.ending));
@@ -435,37 +512,6 @@ fn render_diff_lines(out: &mut String, diff: &SideDiff, painter: Painter) {
             writeln!(out, "       {}", painter.dim(NO_FINAL_NEWLINE)).ok();
         }
     }
-}
-
-fn render_interdiff(out: &mut String, interdiff: &Interdiff, painter: Painter) {
-    let side = |out: &mut String, title: &str, diff: &SideDiff| {
-        if !diff.changed {
-            return;
-        }
-        // Writing to a `String` cannot fail.
-        writeln!(out, "    {}", painter.yellow(title)).ok();
-        render_diff_lines(out, diff, painter);
-    };
-    // Writing to a `String` cannot fail.
-    writeln!(out, "    interdiff against {}:", interdiff.reviewed).ok();
-    if !interdiff.base.changed && !interdiff.head.changed {
-        let why = if interdiff.base_file_changed {
-            "identical to the reviewed version, but the code around it changed in the base"
-        } else {
-            "identical to the reviewed version, but it changed in between"
-        };
-        writeln!(out, "    {}", painter.dim(why)).ok();
-    }
-    side(
-        out,
-        "removed side changed (the target branch moved):",
-        &interdiff.base,
-    );
-    side(
-        out,
-        "added side changed (the change itself changed):",
-        &interdiff.head,
-    );
 }
 
 /// Shown after a line that has no terminator, as `git diff` does.
@@ -490,10 +536,10 @@ fn render_lines(
 ) {
     for line in highlighted_lines(text, highlights, painter) {
         let rendered = format!("{sign}{}{}", line.text, crlf_marker(line.ending));
-        let colored = if sign == '-' {
-            painter.red(&rendered)
-        } else {
-            painter.green(&rendered)
+        let colored = match sign {
+            '-' => painter.red(&rendered),
+            '+' => painter.green(&rendered),
+            _ => rendered,
         };
         // Writing to a `String` cannot fail.
         writeln!(out, "    {colored}").ok();

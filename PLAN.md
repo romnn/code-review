@@ -615,7 +615,7 @@ computes a correspondence between their units:
 5. **Confirm**: otherwise the correspondence is **unchanged** only when all of these hold:
    - the file's base entry is the same on both revisions (path, mode and object ID; absent on
      both counts as the same), so any change of the base around a unit (a rebase, a moved target,
-     a base-side rename) reopens it, and the interdiff says the code around it changed in the base;
+     a base-side rename) reopens it, and it shows whole, saying the target branch moved;
    - the file's head mode is the same on both revisions, so a chunk carries through a head-side
      rename of a file with a base; for a file absent from both bases the whole head entry must be
      the same, path included, so an added file never carries through a head-side rename;
@@ -640,9 +640,13 @@ A unit then is:
 
 - **reviewed** when every link back to that marked predecessor is unchanged and no explicit
   `unseen` mark lies on the chain;
-- **changed since reviewed** otherwise, shown with an interdiff of the two changes: both the removed
-  and the added sides, with base-side differences (the target branch moved) distinguished from
-  head-side differences (the PR changed);
+- **changed since reviewed** otherwise. When the file's base and the chunk's base lines are the
+  same as reviewed and every link back is one-to-one and trusted, it shows what changed on top of
+  the reviewed change, as lazygit shows unstaged changes on top of staged ones: the reviewed
+  head's lines against the current head's, as a new change shows, its hunk spanning only its
+  first change to its last and the lines the same as reviewed as context. Otherwise,
+  such as when the target branch moved, it shows the whole current change and says why
+  ([ADR 9](adr/0009-a-hunk-changed-since-it-was-reviewed-shows-what-changed-on-top-of-it.md));
 - **new** when it has no marked predecessor.
 
 Notes follow the same chains. A note whose chain ends, or splits ambiguously, attaches to the file
@@ -954,7 +958,8 @@ either becomes a full product:
 - Open a review by PR number, PR URL or range; show the revision and its progress.
 - Sidebar with walkthrough steps, each with progress.
 - Main view: the current step's hunks, virtualized; moved and formatting-only units collapsed to
-  one line with a toggle; changed-since-reviewed units show their interdiff.
+  one line with a toggle; changed-since-reviewed units show what changed on top of the reviewed
+  change.
 - Keyboard: next and previous unit, next and previous step, mark seen and advance, accept, flag.
 - Scroll a 50,000-line diff smoothly.
 - Go to definition from a hunk into the revision's worktree.
@@ -1215,8 +1220,8 @@ it, muted, so it never reads as code.
   padded; unchanged lines on both sides with each side's own line number. A nested diff pairs
   the same way within its own block and never with the chunk's lines: a move's edits show the
   source's lines numbered as in the source file on the left and the moved lines numbered as in
-  the target on the right, and an interdiff the reviewed version on the left and the current
-  one on the right. Every line of code shows exactly once, in order on its side; notes, gaps,
+  the target on the right. What changed since a review shows the reviewed lines on the left and
+  the current ones on the right. Every line of code shows exactly once, in order on its side; notes, gaps,
   headers and move rows keep their rows across the width, and every row keeps its owners. Each
   half is a fixed viewport, and one text offset moves the code of every row while gutters, the
   middle divider and the tool's own rows stay put, so a hunk's header and a move's link never
@@ -1319,13 +1324,14 @@ it, muted, so it never reads as code.
   and resolved syntax, its breadcrumbs' scopes included, within a two-second budget past which
   the rest stays plain. Files are highlighted one at a time in the
   background after the first frame, the selected one first, each landing on its own; added and
-  unchanged lines take the head's colors and removed lines the base's.
+  unchanged lines take the head's colors, removed lines the base's, and a line as it was
+  reviewed those of the head it was reviewed in.
 - **Scope breadcrumbs.** `review_core::scope` finds named scopes (`impl Ledger › fn apply`,
   `class Parser › def parse`, `func (*Ledger) Apply`, `[package]`) for every supported language,
   and `RevisionView::scope` gives a unit's breadcrumb, read from the head, or from the base for a
   deletion-only chunk. Each hunk header shows it.
 - **Rendering.** `review_ui::rows` lays out single-line rows for the selected file from the
-  engine's answers: collapse reasons, moves, interdiffs, display hunks and notes. Front ends never
+  engine's answers: collapse reasons, moves, what changed since a review, display hunks and notes. Front ends never
   decide these themselves. review-gui draws them in a `uniform_list`; `gpui-component`'s editor
   and its diff view are not used: a uniform list of prepared rows is the simplest thing that
   stays smooth at 50,000 lines. Walkthrough steps stay in the engine and the CLI; the apps order
@@ -1648,9 +1654,10 @@ Each runs against temporary git repositories built in the test:
 - Duplicate edit: an identical edit added earlier in the file is new, and the reviewed one stays
   reviewed.
 - Skipped revision: reviewed at revision 1, unreviewed changes at 2, more at 3; revision 3 shows the
-  interdiff against revision 1.
+  interdiff against revision 1, and only what changed on top of the change reviewed then.
 - Base-only change: the head stays, the target branch changes the removed side of a reviewed chunk;
-  the chunk is changed since reviewed and the interdiff shows the removed side.
+  the chunk is changed since reviewed, the interdiff shows the removed side, and the chunk shows
+  whole.
 - Deletion-only chunks carry over and reopen like others.
 - Ambiguity: two identical files with identical edits, renamed in a rebase, reopen; so does an edit
   repeated in a file whose context does not distinguish it.

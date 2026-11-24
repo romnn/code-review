@@ -67,13 +67,16 @@ impl SideSyntax {
     }
 }
 
-/// The highlights and scopes of both versions of a changed file.
+/// The highlights and scopes of both versions of a changed file, and of the heads its chunks
+/// that changed since they were reviewed show their reviewed lines from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileSyntax {
     /// The head version.
     pub head: Option<Arc<SideSyntax>>,
     /// The base version.
     pub base: Option<Arc<SideSyntax>>,
+    /// Reviewed heads of earlier revisions, by version.
+    pub reviewed: std::collections::HashMap<crate::state::SideKey, Arc<SideSyntax>>,
 }
 
 /// What highlights a text.

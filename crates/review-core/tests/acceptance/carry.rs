@@ -4,8 +4,8 @@ use color_eyre::eyre;
 use googletest::prelude::*;
 use indoc::{formatdoc, indoc};
 use review_core::{
-    DiffLineKind, LineEnding, MarkVerdict, NoteAttachment, Repo, Review, ReviewTarget, UnitState,
-    Verdict,
+    DiffLineKind, LineEnding, MarkVerdict, NoteAttachment, Reopened, Repo, Review, ReviewTarget,
+    SinceReviewed, UnitState, Verdict,
 };
 
 use crate::common::{TestRepo, find, mark_all, refresh, rust_functions, summaries};
@@ -170,7 +170,8 @@ fn duplicate_edit_is_new() -> eyre::Result<()> {
 }
 
 /// Reviewed at revision 1, unreviewed changes at 2, more at 3: revision 3 shows the interdiff
-/// against revision 1.
+/// against revision 1, and, since the base stayed, only what changed on top of the reviewed
+/// change: the reviewed line against the current one, where each is in its head.
 #[test]
 fn skipped_revision_interdiff() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
@@ -225,6 +226,22 @@ fn skipped_revision_interdiff() -> eyre::Result<()> {
             eq(&(DiffLineKind::New, "    let value = 402;"))
         ]
     );
+
+    let view = history.view(third)?;
+    let Some(SinceReviewed::Delta(delta)) = view.since_reviewed(changed.id)? else {
+        return Err(eyre::eyre!("expected a delta"));
+    };
+    assert_that!(delta.reviewed, eq(reviewed));
+    assert_that!(delta.reviewed_head.path, eq("src/lib.rs"));
+    let runs = delta.runs();
+    let [run] = runs.as_slice() else {
+        return Err(eyre::eyre!("expected one run, got {runs:?}"));
+    };
+    assert_that!(run.removed, eq("    let value = 400;\n"));
+    assert_that!(run.added, eq("    let value = 402;\n"));
+    let line = view.location(changed.id)?.line - 1;
+    assert_that!(run.new.start, eq(line));
+    assert_that!(run.old.start, eq(line));
     Ok(())
 }
 
@@ -287,6 +304,12 @@ fn base_only_change_reopens() -> eyre::Result<()> {
             .lines
             .iter()
             .any(|line| line.kind == DiffLineKind::New && line.text.contains("value = 20;"))
+    );
+    // A change against another base shows whole: no head-to-head delta could show that it now
+    // replaces the target's `20`.
+    assert_that!(
+        history.view(second)?.since_reviewed(unit.id)?,
+        some(eq(SinceReviewed::Whole(Reopened::TargetMoved)))
     );
     Ok(())
 }
@@ -1148,6 +1171,40 @@ fn line_ending_changes_stay_visible_in_interdiffs() -> eyre::Result<()> {
             eq(&(DiffLineKind::Old, LineEnding::Lf)),
             eq(&(DiffLineKind::New, LineEnding::CrLf))
         ]
+    );
+    Ok(())
+}
+
+/// A flagged chunk that changed shows whole: an unrelated edit never folds the code the reviewer
+/// flagged into lines shown as reviewed.
+#[test]
+fn a_flagged_chunk_that_changed_shows_whole() -> eyre::Result<()> {
+    let repo = TestRepo::new()?;
+    let base = rust_functions(4);
+    repo.write("src/lib.rs", &base)?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    repo.write(
+        "src/lib.rs",
+        &base.replace("let value = 2;", "let value = 222;"),
+    )?;
+    repo.commit("feature")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    mark_all(&review, first, MarkVerdict::Flagged)?;
+    repo.write(
+        "src/lib.rs",
+        &base.replace("let value = 2;", "let value = 223;"),
+    )?;
+    repo.commit("amended")?;
+    let second = refresh(&review)?;
+
+    let history = review.history()?;
+    let units = summaries(&history, second)?;
+    let unit = find(&units, "223")?;
+    assert_that!(
+        history.view(second)?.since_reviewed(unit.id)?,
+        some(eq(SinceReviewed::Whole(Reopened::Flagged)))
     );
     Ok(())
 }
