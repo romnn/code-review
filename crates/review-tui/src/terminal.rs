@@ -35,6 +35,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use review_ui::model::{Loaded, QuitKind, Settings};
+use review_ui::worker;
 
 use crate::app::{App, Message, Outgoing, next_batch};
 use crate::clipboard;
@@ -204,19 +205,32 @@ pub fn run(
         give_back().ok();
         return Err(err);
     }
-    let shown = show(settings, loaded, colors, log, checks);
+    let clipboard_worker = clipboard::start();
+    let shown = show(
+        settings,
+        loaded,
+        colors,
+        log,
+        checks,
+        &clipboard_worker.sender(),
+    );
     let given_back = give_back();
+    // After the terminal is back, so a backlog of copies never holds it in raw mode; a copy
+    // made just before quitting still reaches its command, as far as the bound allows.
+    clipboard_worker.flush(clipboard::DRAIN_DEADLINE);
     shown.and(given_back)
 }
 
 /// The main loop: terminal input and signals on threads of their own, job completions and
-/// timers, and one frame after each batch.
+/// timers, and one frame after each batch; copies go to the clipboard commands through
+/// `copier`.
 fn show(
     settings: Settings,
     loaded: Loaded,
     colors: Colors,
     log: &Log,
     checks: Checks,
+    copier: &worker::Sender<clipboard::Clip>,
 ) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel();
     let input = sender.clone();
@@ -257,12 +271,14 @@ fn show(
             let outgoing = app.take_outgoing();
             for item in &outgoing {
                 match item {
-                    Outgoing::Copy(text) => {
-                        clipboard::copy_locally(text.clone(), clipboard::Board::Clipboard);
-                    }
-                    Outgoing::CopyPrimary(text) => {
-                        clipboard::copy_locally(text.clone(), clipboard::Board::Primary);
-                    }
+                    Outgoing::Copy(text) => copier.send(clipboard::Clip {
+                        text: text.clone(),
+                        board: clipboard::Board::Clipboard,
+                    }),
+                    Outgoing::CopyPrimary(text) => copier.send(clipboard::Clip {
+                        text: text.clone(),
+                        board: clipboard::Board::Primary,
+                    }),
                     Outgoing::Title(_) => {}
                 }
             }

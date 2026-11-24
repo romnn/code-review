@@ -1032,21 +1032,14 @@ impl Model {
         );
     }
 
-    /// Writes `remembered` to the configuration and says what was applied, or that it could
-    /// not be saved.
+    /// Says what was applied and writes `remembered` to the configuration in the background;
+    /// the status line says so once the write fails.
     fn remember(&mut self, remembered: &[Remembered], what: &str) {
-        let saved = self
-            .settings
-            .config_path
-            .as_deref()
-            .map(|path| crate::config::remember(path, remembered));
-        match saved {
-            Some(Err(err)) => self.fail(format!(
-                "{what} applied, could not save: {}",
-                error_chain(&err)
-            )),
-            _ => self.set_status(format!("{what}.")),
-        }
+        self.set_status(format!("{what}."));
+        self.save_config(
+            remembered.to_vec(),
+            format!("{what} applied, could not save"),
+        );
     }
 
     /// `|` in the files and the diff: side by side or unified.
@@ -1057,7 +1050,7 @@ impl Model {
 }
 
 /// An error and its causes, as one line.
-fn error_chain(err: &dyn std::error::Error) -> String {
+pub(super) fn error_chain(err: &dyn std::error::Error) -> String {
     std::iter::successors(Some(err), |err| err.source())
         .map(ToString::to_string)
         .collect::<Vec<_>>()

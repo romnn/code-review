@@ -511,12 +511,12 @@ impl Model {
         self.refreshing = true;
         self.sync.failed_at = None;
         self.set_status("Fetching the latest changes…");
-        let step = Arc::clone(&self.sync.step);
-        *step.lock() = Some(SyncStep::Refresh(review_core::RefreshStep::Fetching));
+        let step = self.sync.step.clone();
+        step.set(Some(SyncStep::Refresh(review_core::RefreshStep::Fetching)));
         self.spawn(Subject::Always(Because::Refresh), move || {
             let recorded =
-                review.refresh_reporting(&mut |done| *step.lock() = Some(SyncStep::Refresh(done)));
-            *step.lock() = Some(SyncStep::Carrying);
+                review.refresh_reporting(&mut |done| step.set(Some(SyncStep::Refresh(done))));
+            step.set(Some(SyncStep::Carrying));
             let history = review.history();
             let synced = review.synced();
             Outcome::Refreshed(Refreshed {

@@ -5,9 +5,9 @@
 //! one each minute while the review shows, and a quicker one only while a fetch runs.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
 use review_core::{RefreshStep, Synced};
 
 use super::effects::{Because, Outcome, Subject};
@@ -51,7 +51,7 @@ pub struct Sync {
     /// When the review last synced with its target, as the engine records it.
     pub synced: Option<Synced>,
     /// What the running fetch is doing; its job writes it from its own thread.
-    pub(super) step: Arc<Mutex<Option<SyncStep>>>,
+    pub(super) step: Progress,
     /// When the last fetch failed, which the bar says for [`FAILURE_SHOWS`].
     pub failed_at: Option<SystemTime>,
 }
@@ -60,7 +60,7 @@ impl Sync {
     /// What the running fetch is doing, or `None` when none runs.
     #[must_use]
     pub fn step(&self) -> Option<SyncStep> {
-        *self.step.lock()
+        self.step.get()
     }
 
     /// Whether the bar still says the last fetch failed at `now`.
@@ -70,6 +70,39 @@ impl Sync {
             now.duration_since(at)
                 .is_ok_and(|elapsed| elapsed < FAILURE_SHOWS)
         })
+    }
+}
+
+/// What a fetch is doing, shared between its job, which sets it, and the UI thread, which reads
+/// it every frame.
+///
+/// It is one atomic byte rather than a lock, so the UI thread never waits for the job.
+/// The step is a value of its own, read with nothing else, so relaxed ordering is enough.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Progress(Arc<AtomicU8>);
+
+impl Progress {
+    /// Sets what the fetch is doing, `None` once it ended.
+    pub(super) fn set(&self, step: Option<SyncStep>) {
+        let code = match step {
+            None => 0,
+            Some(SyncStep::Refresh(RefreshStep::Fetching)) => 1,
+            Some(SyncStep::Refresh(RefreshStep::Analyzing)) => 2,
+            Some(SyncStep::Refresh(RefreshStep::Describing)) => 3,
+            Some(SyncStep::Carrying) => 4,
+        };
+        self.0.store(code, Ordering::Relaxed);
+    }
+
+    /// What the fetch is doing, as last set.
+    fn get(&self) -> Option<SyncStep> {
+        match self.0.load(Ordering::Relaxed) {
+            1 => Some(SyncStep::Refresh(RefreshStep::Fetching)),
+            2 => Some(SyncStep::Refresh(RefreshStep::Analyzing)),
+            3 => Some(SyncStep::Refresh(RefreshStep::Describing)),
+            4 => Some(SyncStep::Carrying),
+            _ => None,
+        }
     }
 }
 

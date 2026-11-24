@@ -1,31 +1,80 @@
 //! The developer's diagnostics, which must never be written over the screen: while the
 //! terminal shows the review, they go to a log file and are kept to print on standard error
 //! once the terminal is back.
+//!
+//! The log file is appended to on a thread of its own, the [`LogFile`], so a slow disk never
+//! holds the main loop; only the code that runs after the main loop waits for it.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
+use review_ui::worker::{self, Worker};
+
+/// How long [`LogFile::flush`] waits for the log file's writes, so a stuck disk cannot hang
+/// exit.
+const FLUSH_DEADLINE: Duration = Duration::from_secs(1);
+
+/// The thread that appends a log's lines to the log file.
+#[derive(Debug)]
+pub struct LogFile {
+    worker: Worker<String>,
+    /// Why lines could not be appended, which the thread keeps apart from the lines the main
+    /// loop holds.
+    failed: Arc<Mutex<Vec<String>>>,
+}
+
+impl LogFile {
+    /// Starts the thread that appends lines to the file at `path`, creating it and its
+    /// directory.
+    #[must_use]
+    pub fn start(path: PathBuf) -> Self {
+        let failed: Arc<Mutex<Vec<String>>> = Arc::default();
+        let worker = Worker::start({
+            let failed = Arc::clone(&failed);
+            move |line: String| {
+                if let Err(err) = append(&path, &line) {
+                    failed.lock().push(format!(
+                        "cr: cannot write the log {}: {err}",
+                        path.display()
+                    ));
+                }
+            }
+        });
+        Self { worker, failed }
+    }
+
+    /// Waits until the lines written so far are in the file, for at most [`FLUSH_DEADLINE`].
+    pub fn flush(&self) {
+        self.worker.flush(FLUSH_DEADLINE);
+    }
+}
 
 /// Where diagnostics go.
 #[derive(Debug, Clone)]
 pub struct Log {
-    /// The log file, appended to; `None` when no state directory is known.
-    file: Option<PathBuf>,
+    /// Hands lines to the log file's thread; `None` when no state directory is known.
+    file: Option<worker::Sender<String>>,
     /// The lines kept to print once the terminal is restored, shared with the panic hook.
     held: Arc<Mutex<Vec<String>>>,
+    /// Why the log file's thread could not append lines, printed with the held lines.
+    failed: Arc<Mutex<Vec<String>>>,
     /// Whether lines go to standard error at once, as in QA mode, which draws off screen.
     direct: bool,
 }
 
 impl Log {
-    /// A log that keeps lines for later and appends them to `file`.
+    /// A log that keeps lines for later and has `file` append them to the log file.
     #[must_use]
-    pub fn held(file: Option<PathBuf>) -> Self {
+    pub fn held(file: Option<&LogFile>) -> Self {
         Self {
-            file,
+            file: file.map(|file| file.worker.sender()),
             held: Arc::default(),
+            failed: file
+                .map(|file| Arc::clone(&file.failed))
+                .unwrap_or_default(),
             direct: false,
         }
     }
@@ -36,6 +85,7 @@ impl Log {
         Self {
             file: None,
             held: Arc::default(),
+            failed: Arc::default(),
             direct: true,
         }
     }
@@ -47,20 +97,19 @@ impl Log {
             eprintln!("{line}");
             return;
         }
-        if let Some(path) = &self.file
-            && let Err(err) = append(path, &line)
-        {
-            self.held.lock().push(format!(
-                "cr: cannot write the log {}: {err}",
-                path.display()
-            ));
+        if let Some(file) = &self.file {
+            file.send(line.clone());
         }
         self.held.lock().push(line);
     }
 
-    /// Prints the lines kept so far on standard error, once.
+    /// Prints the lines kept so far on standard error, once, and why any could not be
+    /// appended to the log file.
     pub fn replay(&self) {
-        for line in std::mem::take(&mut *self.held.lock()) {
+        // Taken out first, so no lock is held while standard error blocks.
+        let held = std::mem::take(&mut *self.held.lock());
+        let failed = std::mem::take(&mut *self.failed.lock());
+        for line in held.into_iter().chain(failed) {
             eprintln!("{line}");
         }
     }
@@ -95,14 +144,16 @@ mod tests {
 
     use super::*;
 
-    /// Held lines go to the file at once and are printed only once.
+    /// Held lines reach the file in order once flushed, and are printed only once.
     #[test]
     fn held_lines_reach_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("state/review-tui.log");
-        let log = Log::held(Some(file.clone()));
+        let log_file = LogFile::start(file.clone());
+        let log = Log::held(Some(&log_file));
         log.write("first");
         log.write("second");
+        log_file.flush();
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             text,

@@ -22,7 +22,8 @@
 //!
 //! Both front ends start the same way ([`launch`]), tell the model what they can do
 //! ([`front_end`]), edit text fields with the same keys ([`line_edit`] in a terminal, gpui's
-//! input in a window) and answer QA mode's `state` alike ([`qa`]).
+//! input in a window), answer QA mode's `state` alike ([`qa`]) and hand work that may block
+//! to a [`worker::Worker`], off the UI thread.
 //!
 //! The rest is what the model is built from: the configuration file, themes and diff styles,
 //! the rows a diff is drawn from, syntax highlighting, the keymap and its keystroke grammar,
@@ -55,3 +56,4 @@ pub mod syntax;
 pub mod text;
 pub mod theme;
 pub mod watch;
+pub mod worker;

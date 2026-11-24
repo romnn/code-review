@@ -193,13 +193,19 @@ fn show(options: &Options) -> eyre::Result<()> {
     for problem in &settings.problems {
         eprintln!("cr: {problem}");
     }
+    let log_file = if options.qa {
+        None
+    } else {
+        log::path(
+            options.terminal.xdg_state_home.as_deref(),
+            options.review.home.as_deref(),
+        )
+        .map(log::LogFile::start)
+    };
     let log = if options.qa {
         log::Log::direct()
     } else {
-        log::Log::held(log::path(
-            options.terminal.xdg_state_home.as_deref(),
-            options.review.home.as_deref(),
-        ))
+        log::Log::held(log_file.as_ref())
     };
     terminal::install_panic_hook(log.clone());
 
@@ -235,6 +241,10 @@ fn show(options: &Options) -> eyre::Result<()> {
             panic_after_first_frame: options.panic_after_first_frame,
         },
     );
+    // The process ends soon after, which would cut the log file's last writes short.
+    if let Some(log_file) = &log_file {
+        log_file.flush();
+    }
     log.replay();
     Ok(shown?)
 }

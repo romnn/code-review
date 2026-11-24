@@ -2624,15 +2624,146 @@ fn a_dragged_width_and_fitting_again_are_remembered() {
         host.model().layout.sidebar,
         crate::panes::SidebarWidth::Set(420.0)
     );
+    host.settle();
     assert_eq!(remembered(), crate::panes::SidebarWidth::Set(420.0));
 
     host.update(Model::reset_sidebar_width);
     assert_eq!(host.model().layout.sidebar, crate::panes::SidebarWidth::Fit);
+    host.settle();
     assert_eq!(remembered(), crate::panes::SidebarWidth::Fit);
     assert!(
         std::fs::read_to_string(&config)
             .unwrap()
             .contains("sidebar = \"fit\"")
+    );
+}
+
+/// Settings changed in the app apply at once and are written to the configuration file in the
+/// background, one write at a time in the order made, so edits of different keys all land.
+#[test]
+fn settings_are_remembered_in_order_one_write_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.settings.config_path = Some(config.clone()));
+    let text = || std::fs::read_to_string(&config).unwrap_or_default();
+
+    // Two edits of different keys, one after the other: both apply at once, and only the first
+    // is being written.
+    host.update(|model| {
+        model.set_sidebar_width(420.0);
+        model.remember_layout();
+    });
+    host.update(|model| model.apply_wrap(true));
+    assert!(host.model().look().wrap, "the setting applies at once");
+    assert_eq!(host.jobs.len(), 1, "one write runs at a time");
+    assert_eq!(text(), "", "nothing is written on the UI thread");
+
+    // The first write lands the pane width alone, and starts the second.
+    let first = host.run_job();
+    assert!(text().contains("sidebar = 420"));
+    assert!(!text().contains("wrap"));
+    host.complete(first);
+    assert_eq!(host.jobs.len(), 1, "the next write starts");
+
+    // The second adds the wrap, keeping the width.
+    host.settle();
+    let remembered = crate::config::parse(&text()).unwrap();
+    assert_eq!(
+        remembered.layout.sidebar,
+        crate::panes::SidebarWidth::Set(420.0)
+    );
+    assert!(remembered.wrap);
+    assert!(!host.model().busy());
+}
+
+/// A write of the configuration that fails says so on the status line once it ends, and the
+/// log keeps it.
+#[test]
+fn a_failed_write_of_the_configuration_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    // Not TOML, which a write would lose.
+    std::fs::write(&config, "not = [toml").unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.settings.config_path = Some(config.clone()));
+
+    host.update(|model| model.apply_wrap(true));
+    assert_eq!(host.model().status, "Long lines wrap.");
+    host.settle();
+    assert!(
+        host.model()
+            .status
+            .starts_with("Long lines wrap applied, could not save: cannot edit"),
+        "{}",
+        host.model().status
+    );
+    assert!(
+        host.logged
+            .iter()
+            .any(|line| line.starts_with("could not save the configuration")),
+        "{:?}",
+        host.logged
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "not = [toml");
+}
+
+/// Once quitting is authorized the model takes no more input: a key right after the quit, as
+/// a key sequence hands on after replaying it, a divider's release and a folded folder change
+/// nothing and save nothing.
+#[test]
+fn no_input_lands_once_quitting_is_authorized() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    // A first session saves the place, so the next quit has nothing left to save.
+    let mut host = Host::open(demo(dir.path()));
+    host.dispatch(Action::Quit);
+    host.settle();
+    let review = prepare(
+        &DemoPaths::under(dir.path()),
+        &fixture_dir(),
+        DemoRequest::UpTo(RevisionNumber::new(1).unwrap()),
+    )
+    .unwrap();
+    let mut host = Host::open(review);
+    host.update(|model| model.settings.config_path = Some(config.clone()));
+    host.dispatch(Action::Quit);
+    assert_eq!(host.quits, 1, "the quit is authorized at once");
+
+    host.key(Action::ToggleWrap, false);
+    host.key(Action::ToggleApprove, false);
+    host.update(|model| {
+        model.set_sidebar_width(300.0);
+        model.remember_layout();
+    });
+    host.update(|model| model.tree_fold_all(true));
+    assert!(!host.model().tree_collapsed.is_empty(), "the folders fold");
+
+    assert!(!host.model().look().wrap, "no key acts");
+    assert!(host.model().pending.is_empty(), "nothing is marked");
+    assert!(host.jobs.is_empty(), "nothing is saved");
+    assert!(!config.exists());
+}
+
+/// Quitting waits for the settings still being written to the configuration file.
+#[test]
+fn quitting_waits_for_the_configuration_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.settings.config_path = Some(config.clone()));
+
+    host.update(|model| model.apply_wrap(true));
+    host.update(|model| model.quit(QuitKind::Interactive));
+    assert_eq!(host.quits, 0, "nothing quits while a write waits");
+    assert_eq!(host.model().status, "Saving your settings before quitting…");
+
+    host.settle();
+    assert_eq!(host.quits, 1);
+    assert!(
+        crate::config::parse(&std::fs::read_to_string(&config).unwrap())
+            .unwrap()
+            .wrap
     );
 }
 

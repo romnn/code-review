@@ -1030,6 +1030,35 @@ mod tests {
         assert_ne!(app.model().totals(), before, "a typed space approves");
     }
 
+    /// Once the model asked to quit, a key after it in the same batch does nothing, as the
+    /// model takes no input once quitting is authorized.
+    #[test]
+    fn nothing_is_handled_once_quitting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, receiver) = demo(dir.path());
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        settle(&mut app, &receiver, &mut terminal);
+        let w = || {
+            Message::Input(Event::Key(KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::NONE,
+            )))
+        };
+        app.handle(w());
+        assert!(app.model().look().wrap, "w wraps long lines");
+
+        // The saves quitting waits for land, the last of them asking to quit.
+        app.update(|model| model.quit(QuitKind::Interactive));
+        while !app.quitting() {
+            let message = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+            app.handle(message);
+        }
+
+        // The key after it in the batch changes nothing.
+        app.handle(w());
+        assert!(app.model().look().wrap);
+    }
+
     /// The screen's rows as text, wide symbols once.
     fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
         let buffer = terminal.backend().buffer();
