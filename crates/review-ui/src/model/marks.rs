@@ -130,9 +130,6 @@ impl Model {
                 return;
             }
         };
-        if self.refuses_changed(&units, &what) {
-            return;
-        }
         // One change of a unit that shows what changed since it was reviewed is approved on
         // its own, and Space never approves such a unit whole; flags and resets act on the
         // whole unit.
@@ -281,7 +278,7 @@ impl Model {
         // The approved hunk may have folded under the view; it stays in sight.
         self.reveal_hunk();
         let next = self.next_open_file();
-        self.set_status(match next {
+        self.set_view_status(match next {
             Some(path) if self.look().cross_files => {
                 format!("This file is done; ] goes on to {path}.")
             }

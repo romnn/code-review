@@ -209,7 +209,8 @@ impl Host {
         self.complete(completion);
     }
 
-    /// Runs every job and fires every timer, and what they start in turn, until none waits.
+    /// Runs every job and fires every timer, and what they start in turn, drawing a frame,
+    /// which shows a capture that waits for one, whenever none is left, until none waits.
     fn settle(&mut self) {
         loop {
             if let Some(job) = self.jobs.pop_front() {
@@ -217,10 +218,17 @@ impl Host {
                 self.complete(completion);
             } else if !self.timers.is_empty() {
                 self.fire(0);
+            } else if self.model().publishes() {
+                self.draw();
             } else {
                 break;
             }
         }
+    }
+
+    /// Does what drawing a frame does to the model: shows the capture that waits for it.
+    fn draw(&mut self) {
+        self.update(Model::publish);
     }
 }
 
@@ -3408,6 +3416,7 @@ fn a_highlight_landing_after_a_capture_keeps_what_the_capture_still_has() {
         host.update(|model| model.capture(false));
         let captured = host.run_job();
         host.complete(captured);
+        host.draw();
     };
 
     // b.rs changes: its new head's highlight starts and is held back.
@@ -3583,23 +3592,71 @@ fn a_live_review_shows_an_edit_and_keeps_the_place() {
         model.hunk_units().into_iter().collect(),
         "the folded hunk stays folded"
     );
-    assert!(model.status.starts_with("The working tree changed."));
 }
 
-/// A review key on a hunk that just changed under it is refused, and accepted once the change
-/// has been on screen for a moment; marking records the capture it was made on.
+/// A capture that only brings the working tree's edits leaves the status line alone, so the
+/// outcome of the reviewer's last action stays readable.
 #[test]
-fn a_review_key_on_a_hunk_that_just_changed_is_refused() {
+fn a_capture_keeps_the_outcome_of_the_last_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.update(|model| model.fail("Could not record the approval."));
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert!(
+        selected_text(host.model()).contains("uno"),
+        "the capture shows"
+    );
+    assert_eq!(host.model().status, "Could not record the approval.");
+}
+
+/// What the status line said about how the snapshot on screen stood, such as that every file
+/// is done, clears once another capture shows, so it never stays under a hunk an edit reopened.
+#[test]
+fn a_capture_clears_what_the_status_said_about_the_last_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.dispatch(Action::ToggleApprove);
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert_eq!(host.model().totals(), (2, 2));
+    assert!(host.model().status.starts_with("This file is done"));
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert_eq!(host.model().totals(), (1, 2));
+    assert_eq!(host.model().status, "");
+}
+
+/// A refresh the reviewer asked for answers only while its request still shows: an outcome
+/// the reviewer caused meanwhile stays.
+#[test]
+fn a_refresh_never_answers_over_a_newer_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    host.update(Model::recapture);
+    host.update(|model| model.set_status("Approved a.rs:1."));
+    host.settle();
+    assert_eq!(host.model().status, "Approved a.rs:1.");
+
+    host.update(Model::recapture);
+    host.settle();
+    assert!(
+        host.model().status.starts_with("Up to date."),
+        "{}",
+        host.model().status
+    );
+    // Its progress is about the snapshot it answered on, so it clears with the next capture.
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    assert_eq!(host.model().status, "");
+}
+
+/// A review key on a hunk that just changed marks it at once, as the last frame showed it;
+/// marking records the capture it was made on.
+#[test]
+fn a_review_key_on_a_hunk_that_just_changed_marks_it() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
     edit_and_capture(&mut host, &repo, "uno", "two");
     assert!(selected_text(host.model()).contains("uno"));
 
-    host.dispatch(Action::ToggleApprove);
-    assert!(host.model().status.starts_with("Not marked"));
-    assert!(host.model().pending.is_empty() && host.model().marks.is_empty());
-
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
     host.dispatch(Action::ToggleApprove);
     assert!(!host.model().pending.is_empty(), "the mark is queued");
     host.settle();
@@ -3609,6 +3666,71 @@ fn a_review_key_on_a_hunk_that_just_changed_is_refused() {
     assert!(!host.model().view().unwrap().is_provisional());
 }
 
+/// A capture that lands after the last frame shows with the next one: a key pressed before
+/// that acts on what the last frame showed, and the capture taken again once that mark saved
+/// shows the code that changed since as still to review.
+#[test]
+fn a_key_before_the_next_frame_acts_on_what_the_last_frame_showed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    edit_and_capture(&mut host, &repo, "uno", "two");
+    let shown = host.model().shown;
+
+    std::fs::write(repo.join("a.rs"), two_hunks("tres", "two")).unwrap();
+    host.update(|model| model.capture(false));
+    while let Some(job) = host.jobs.pop_front() {
+        let completion = job();
+        host.complete(completion);
+    }
+    assert!(
+        host.model().publishes(),
+        "the capture waits for the next frame"
+    );
+    assert_eq!(host.model().shown, shown);
+    assert!(selected_text(host.model()).contains("uno"));
+
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    let review = host.model().review.clone().unwrap();
+    let history = review.history().unwrap();
+    let recorded = history.current_view().unwrap();
+    assert!(
+        recorded.unit_ids().into_iter().any(|unit| {
+            recorded
+                .unit(unit)
+                .ok()
+                .and_then(|unit| unit.chunk().cloned())
+                .is_some_and(|chunk| chunk.added.contains("uno"))
+                && matches!(
+                    recorded.state(unit),
+                    Ok(review_core::UnitState::Reviewed {
+                        verdict: review_core::Verdict::Accepted,
+                        ..
+                    })
+                )
+        }),
+        "the mark is on the code the last frame showed"
+    );
+    let view = host.model().view().unwrap();
+    let tres = view
+        .unit_ids()
+        .into_iter()
+        .find(|&unit| {
+            view.unit(unit)
+                .ok()
+                .and_then(|unit| unit.chunk().cloned())
+                .is_some_and(|chunk| chunk.added.contains("tres"))
+        })
+        .expect("the capture shows");
+    assert!(
+        !matches!(
+            view.state(tres),
+            Ok(review_core::UnitState::Reviewed { .. })
+        ),
+        "the code that changed since is still to review"
+    );
+}
+
 /// A key held down since before a hunk changed never marks it, however long it repeats; a new
 /// press does.
 #[test]
@@ -3616,10 +3738,8 @@ fn a_key_held_across_a_change_never_marks_it() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
     edit_and_capture(&mut host, &repo, "uno", "two");
-    host.update(|model| {
-        model.live.as_mut().unwrap().age(Duration::from_secs(3));
-        model.hold_since(Duration::from_secs(5));
-    });
+    host.update(Model::hold);
+    edit_and_capture(&mut host, &repo, "tres", "two");
     host.key(Action::ToggleApprove, true);
     assert!(host.model().status.starts_with("Not marked"), "still held");
     assert!(host.model().marks.is_empty());
@@ -3687,11 +3807,11 @@ fn a_capture_of_another_snapshot_is_taken_again() {
     // A second capture is compared with the snapshot still on screen...
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "dos")).unwrap();
     host.update(|model| model.capture(false));
-    // ...which the first replaces once help closes.
+    // ...which the first replaces with the frame after help closes.
     host.dispatch(Action::CloseOverlay);
+    host.draw();
     assert_eq!(host.model().shown, shown + 1);
     assert!(selected_text(host.model()).contains("uno"));
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
 
     host.settle();
     let model = host.model();
@@ -3932,10 +4052,10 @@ fn a_review_buffer_keeps_its_hunk_under_the_cursor() {
     assert!(selected_text(model).contains("two"));
 }
 
-/// A folder the tree cursor lands on because the one under it went is new under the keys, so
-/// a review key on it is refused at first, however unchanged its files are.
+/// A folder the tree cursor lands on because the one under it went takes the review keys as
+/// soon as a frame shows the cursor there; before that frame, a key acts on what showed.
 #[test]
-fn a_folder_the_cursor_lands_on_refuses_review_keys_at_first() {
+fn a_folder_the_cursor_lands_on_takes_review_keys_once_shown() {
     let dir = tempfile::tempdir().unwrap();
     let (review, repo) = worktree_review_of(
         dir.path(),
@@ -3964,11 +4084,10 @@ fn a_folder_the_cursor_lands_on_refuses_review_keys_at_first() {
     assert_eq!(host.model().tree_node().unwrap().path, "y");
     host.dispatch(Action::ToggleApprove);
     assert!(
-        host.model().status.starts_with("Not marked"),
+        host.model().status.starts_with("Approved y"),
         "{}",
         host.model().status
     );
-    assert!(host.model().marks.is_empty());
 }
 
 /// A capture of the snapshot on screen with marks another window saved since shows them, and
@@ -4796,7 +4915,6 @@ fn a_capture_older_than_a_change_never_shows() {
     host.settle();
     host.update(|model| model.show_file("a.rs"));
     host.dispatch(Action::FocusDiff);
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
     let shown = host.model().shown;
 
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
@@ -4832,10 +4950,10 @@ fn a_capture_older_than_a_change_never_shows() {
     );
 }
 
-/// While git is busy in the checkout, the view stays and takes no marks; once git is done,
-/// the checkout is captured again.
+/// While git is busy in the checkout, the view stays and still takes marks, which mark what it
+/// shows; once git is done, the checkout is captured again.
 #[test]
-fn a_busy_checkout_keeps_the_view_and_refuses_marks() {
+fn a_busy_checkout_keeps_the_view_and_takes_marks() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = checkout_host(dir.path());
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
@@ -4843,7 +4961,6 @@ fn a_busy_checkout_keeps_the_view_and_refuses_marks() {
     host.settle();
     host.update(|model| model.show_file("a.rs"));
     host.dispatch(Action::FocusDiff);
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
     let shown = host.model().shown;
 
     let merge_head = repo.join(".git/MERGE_HEAD");
@@ -4853,20 +4970,17 @@ fn a_busy_checkout_keeps_the_view_and_refuses_marks() {
     host.settle();
     let model = host.model();
     assert_eq!(model.shown, shown, "the view stays");
-    assert_eq!(
-        model.status,
-        "Git is busy: merge in progress. What shows stays until it finishes."
-    );
     assert!(bar(model).contains("git: merging"), "{}", bar(model));
     host.dispatch(Action::ToggleApprove);
-    assert!(host.model().status.starts_with("Not marked: git is busy"));
-    assert!(host.model().marks.is_empty());
+    assert!(!host.model().pending.is_empty(), "the mark is queued");
+    host.settle();
+    assert!(host.model().pending.is_empty(), "and saved");
 
     std::fs::remove_file(&merge_head).unwrap();
     host.update(Model::changed);
     host.settle();
     let model = host.model();
-    assert_eq!(model.shown, shown + 1);
+    assert!(model.shown > shown);
     assert!(model.live.as_ref().unwrap().busy().is_none());
     assert!(bar(model).contains("live"));
 }
@@ -4982,7 +5096,7 @@ fn the_pull_request_follows_the_branch() {
 /// capture that lands while the burst is under way does not show, but a press on the one on
 /// screen is queued, not refused.
 #[test]
-fn a_change_under_way_refuses_marks_on_the_capture_it_overlapped() {
+fn a_change_under_way_still_takes_marks_on_the_capture_it_overlapped() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = checkout_host(dir.path());
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
@@ -4990,7 +5104,6 @@ fn a_change_under_way_refuses_marks_on_the_capture_it_overlapped() {
     host.settle();
     host.update(|model| model.show_file("a.rs"));
     host.dispatch(Action::FocusDiff);
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
     let shown = host.model().shown;
 
     // A capture completes and shows; the notice of a write it overlapped arrives after it.
@@ -4998,10 +5111,10 @@ fn a_change_under_way_refuses_marks_on_the_capture_it_overlapped() {
     host.update(Model::changed);
     let capture = host.run_newest_job();
     host.complete(capture);
+    host.draw();
     assert_eq!(host.model().shown, shown + 1);
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "dos")).unwrap();
     host.update(Model::stirred);
-    host.update(|model| model.live.as_mut().unwrap().age(Duration::from_secs(2)));
     host.dispatch(Action::ToggleApprove);
     assert!(
         !host.model().status.starts_with("Not marked"),
@@ -5076,6 +5189,7 @@ fn a_capture_takes_the_pull_request_of_the_branch_it_sees() {
     host.update(Model::changed);
     let capture = host.run_newest_job();
     host.complete(capture);
+    host.draw();
     let model = host.model();
     let subject = model.live_state().unwrap().subject.unwrap();
     assert_eq!(
@@ -5174,6 +5288,7 @@ fn an_unavailable_lookup_is_tried_again() {
     host.update(Model::changed);
     let capture = host.run_newest_job();
     host.complete(capture);
+    host.draw();
     let state = host.model().live_state().unwrap();
     assert!(state.looking_up);
     assert!(state.lookup.is_none());
@@ -5198,6 +5313,7 @@ fn trust_in_the_checkout_is_asked_for_and_scoped() {
     host.complete(capture);
     assert!(host.model().live.as_ref().unwrap().has_waiting());
     host.dispatch(Action::TrustSnapshot);
+    host.draw();
     assert!(!host.model().live.as_ref().unwrap().has_waiting());
     let model = host.model();
     assert_eq!(model.overlay, None);
@@ -5245,6 +5361,7 @@ fn a_waiting_capture_older_than_a_change_never_shows() {
     std::fs::write(repo.join("a.rs"), two_hunks("one", "two")).unwrap();
     host.update(Model::changed);
     host.dispatch(Action::CloseOverlay);
+    host.draw();
     let model = host.model();
     assert_eq!(
         model.shown, shown,
@@ -6396,7 +6513,7 @@ fn a_recapture_keeps_the_selected_change_as_itself() {
     host.dispatch(Action::NextHunk);
     let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
     assert_eq!(selected(&host), Some(41));
-    host.update(|model| model.hold_since(Duration::from_millis(100)));
+    host.update(Model::hold);
 
     // Twenty lines that change nothing reviewed come above the header.
     let above = "// new\n".repeat(20);

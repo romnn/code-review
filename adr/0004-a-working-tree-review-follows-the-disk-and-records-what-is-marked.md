@@ -1,6 +1,6 @@
 # 4. A working-tree review follows the disk, and records a capture only when it is marked
 
-**Status:** accepted, widened to the checkout review by [ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md) · **Date:** 2026-11-14
+**Status:** accepted, widened to the checkout review by [ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md), its refusal of review keys on a changed hunk superseded by [ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md) · **Date:** 2026-11-14
 
 ## Context
 

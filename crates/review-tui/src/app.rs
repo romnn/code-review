@@ -837,10 +837,14 @@ impl App {
         }
     }
 
-    /// When the main loop must wake by itself: a timer, the key matcher's deadline, or the
-    /// next step of something animating on screen; `None` waits for input.
+    /// When the main loop must wake by itself: at once for a capture that waits to show with
+    /// the next frame while it `draws`, else a timer, the key matcher's deadline, or the next
+    /// step of something animating on screen; `None` waits for input.
     #[must_use]
-    pub fn wake_at(&self, now: Instant) -> Option<Instant> {
+    pub fn wake_at(&self, now: Instant, draws: bool) -> Option<Instant> {
+        if draws && self.model().publishes() {
+            return Some(now);
+        }
         let animation = if matches!(self.model().phase, Phase::Loading(_)) {
             Some(now + LOADING_FRAME)
         } else if bars::flashing(self.model(), now) {
@@ -856,14 +860,26 @@ impl App {
             .min()
     }
 
-    /// Lays out and draws one frame on `terminal`: the panes at its size, the model's layout
-    /// phase against them, then every pane.
+    /// Shows the capture that waits for the next frame, if nothing holds it back; the frame
+    /// drawn next shows it, and its outgoing items, such as the title, go with that frame.
+    pub fn publish(&mut self) {
+        if self.model().publishes() {
+            self.update(Model::publish);
+        }
+    }
+
+    /// Lays out and draws one frame on `terminal`: the capture waiting to show, the panes at
+    /// its size, the model's layout phase against them, then every pane.
+    ///
+    /// A capture shows only here, after the input handled since the last frame, so every key
+    /// acts on what the last frame showed.
     ///
     /// # Errors
     ///
     /// Returns the terminal's error when it cannot be measured or drawn to.
     #[tracing::instrument(skip_all)]
     pub fn render<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+        self.publish();
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         self.follow_field();

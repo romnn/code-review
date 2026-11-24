@@ -1463,6 +1463,8 @@ impl ReviewApp {
             effects,
         } = self.driver.update(|model| model.layout(geometry, now));
         self.run(effects, window, cx);
+        // Layout can end what held a capture back, such as a selection a resize cancelled.
+        self.publish_with_next_frame(window, cx);
         self.lists_code_size = self.code_size;
         self.laid_out = Some(LaidOut::of(self.grid(), &geometry));
         // The model worked out the side-by-side text's extent at this code cell.

@@ -310,9 +310,9 @@ impl Model {
         self.look_up_later(wait, again);
     }
 
-    /// Captures again when the pull requests found differ from those the capture on screen or
-    /// the running one resolved its base with: the base may follow them, so what shows waits
-    /// for a capture that knows them.
+    /// Captures again when the pull requests found differ from those the capture on screen, the
+    /// one waiting to show or the running one resolved its base with: the base may follow them,
+    /// so what shows waits for a capture that knows them.
     fn recapture_for_pull_requests(&mut self) {
         let Some(live) = &self.live else {
             return;
@@ -322,18 +322,19 @@ impl Model {
             given.len() == found.len() && given.iter().all(|given| found.contains(given))
         };
         let running = live.given().is_some_and(|given| !same(given));
-        let shown = live
-            .subject()
-            .and_then(|subject| Some((subject.branch.as_ref()?, subject)))
-            .is_some_and(|(branch, subject)| {
+        let outdated = |subject: &review_core::Subject| {
+            subject.branch.as_ref().is_some_and(|branch| {
                 let cached = live
                     .pulls
                     .found
                     .get(branch)
                     .and_then(|found| found.pull_request.as_ref());
                 cached != subject.pull_request.as_ref()
-            });
-        if running || shown {
+            })
+        };
+        let shown = live.subject().is_some_and(outdated);
+        let waiting = live.waiting_subject().is_some_and(outdated);
+        if running || shown || waiting {
             self.recapture_for_subject();
         }
     }

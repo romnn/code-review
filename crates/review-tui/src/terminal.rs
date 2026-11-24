@@ -252,6 +252,8 @@ fn show(
     let mut drawn = false;
     loop {
         if lost.is_none() {
+            // Before taking what goes out, so the title a capture brings goes with its frame.
+            app.publish();
             let outgoing = app.take_outgoing();
             for item in &outgoing {
                 match item {
@@ -280,7 +282,8 @@ fn show(
             panic_on_purpose();
         }
         drawn = true;
-        let Some(batch) = next_batch(&receiver, app.wake_at(Instant::now())) else {
+        // A loop that can no longer draw only drains the saves, so no frame wakes it.
+        let Some(batch) = next_batch(&receiver, app.wake_at(Instant::now(), lost.is_none())) else {
             break;
         };
         for message in batch {
