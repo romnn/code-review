@@ -102,8 +102,9 @@ and the front ends paint it.
   the old side, and leaving out what it deleted the new), while every whitespace change shows
   both versions.
 - **One view for every comparison of two versions,** in steps. Hunks in the unified layout come
-  first; a chunk that a move touches, and a formatting-only one, still show line for line. Then a move's edits and both sides of an interdiff take the same script, between the
-  move's source and target or the reviewed and the current version; they compare snippets, so
+  first; a chunk that a move touches, and a formatting-only one, still show line for line. Then a move's edits and what changed since a review
+  ([ADR 9](0009-a-hunk-changed-since-it-was-reviewed-shows-what-changed-on-top-of-it.md)) take the
+  same script, between the move's source and target or the reviewed and the current version; they compare snippets, so
   without both whole files their whitespace is never layout. review-ui's own line pairing and
   word diff for moves (`rows/moves.rs`) give way to it. `SideDiff` keeps its lines, which
   `cr show --json` prints.

@@ -14,6 +14,11 @@ pub enum Event {
     Revision(RevisionEvent),
     /// A unit was marked.
     Mark(MarkEvent),
+    /// One change of a unit that changed since it was reviewed was approved, leaving others.
+    ///
+    /// It has a tag of its own, never a mark's with an extra field, so a binary that predates
+    /// it fails to read the log rather than reading it as the whole unit accepted.
+    PartialApproval(PartialApprovalEvent),
     /// A note was attached to a unit.
     Note(NoteEvent),
     /// A walkthrough was imported.
@@ -136,6 +141,25 @@ pub struct MarkEvent {
     pub verdict: MarkVerdict,
     /// Seconds since the Unix epoch.
     pub at: u64,
+}
+
+/// The approval of one change of a unit, recorded as the reviewed text it leaves.
+///
+/// The text is the unit's head lines as approved so far: what it was reviewed as, with the
+/// approved change's current lines in place of its reviewed ones.
+/// The unit's other changes compare against it until a whole mark replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialApprovalEvent {
+    /// The revision the approval was made on.
+    pub revision: RevisionNumber,
+    /// The unit within that revision.
+    pub unit: UnitIndex,
+    /// The digest of the unit's full evidence when it was approved.
+    pub evidence: String,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+    /// The unit's head lines as approved so far, each with its terminator.
+    pub text: String,
 }
 
 /// A note on one unit.

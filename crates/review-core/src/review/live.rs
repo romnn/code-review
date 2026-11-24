@@ -184,11 +184,7 @@ impl Review {
     /// Makes sure `view`'s revision is recorded before events that refer to it are appended to
     /// `log`, under its lock; with `tip`, it must also be the last revision recorded.
     ///
-    /// A recorded revision is left as it is.
-    /// A provisional one is recorded now when the log still ends at the revision before it,
-    /// exactly as `view`'s history has it, and is found when the log already ends at it, as
-    /// when an earlier mark recorded it; anything else means the review moved on since `view`
-    /// was read.
+    /// See [`Self::unsettled`] for what it records.
     ///
     /// # Errors
     ///
@@ -200,6 +196,33 @@ impl Review {
         view: &RevisionView<'_>,
         tip: bool,
     ) -> Result<(), Error> {
+        let Some(revision) = self.unsettled(log, view, tip)? else {
+            return Ok(());
+        };
+        let analysis = view
+            .analysis()
+            .ok_or(Error::UnknownRevision(view.number()))?;
+        self.append_revision(log, revision, analysis)
+    }
+
+    /// Returns the revision event [`Self::settle`] would record for `view` in `log`, under its
+    /// lock, without recording it; with `tip`, `view`'s revision must be the last one.
+    ///
+    /// A recorded revision needs no event.
+    /// A provisional one needs one when the log still ends at the revision before it, exactly
+    /// as `view`'s history has it, and none when the log already ends at it, as when an
+    /// earlier mark recorded it; anything else means the review moved on since `view` was
+    /// read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotCurrentRevision`] when the log moved on.
+    pub(super) fn unsettled(
+        &self,
+        log: &LogWriter<'_>,
+        view: &RevisionView<'_>,
+        tip: bool,
+    ) -> Result<Option<RevisionEvent>, Error> {
         let revisions = revision_events(&self.dir.events(), log.events())?;
         let last = revisions.last();
         let moved_on = || Error::NotCurrentRevision {
@@ -210,11 +233,11 @@ impl Review {
             if tip && last.map(|revision| revision.number) != Some(view.number()) {
                 return Err(moved_on());
             }
-            return Ok(());
+            return Ok(None);
         }
         let record = view.record().ok_or(Error::UnknownRevision(view.number()))?;
         if last.is_some_and(|last| same(last, record)) {
-            return Ok(());
+            return Ok(None);
         }
         let predecessor = view
             .number()
@@ -229,24 +252,17 @@ impl Review {
         if !follows {
             return Err(moved_on());
         }
-        let analysis = view
-            .analysis()
-            .ok_or(Error::UnknownRevision(view.number()))?;
-        self.append_revision(
-            log,
-            RevisionEvent {
-                number: record.number,
-                base: record.base.clone(),
-                head: record.head.clone(),
-                target: record.target.clone(),
-                merge_bases: record.merge_bases.clone(),
-                recorded_at: store::now_seconds(),
-                branch: record.branch.clone(),
-                head_commit: record.head_commit.clone(),
-                pull_request: record.pull_request,
-            },
-            analysis,
-        )
+        Ok(Some(RevisionEvent {
+            number: record.number,
+            base: record.base.clone(),
+            head: record.head.clone(),
+            target: record.target.clone(),
+            merge_bases: record.merge_bases.clone(),
+            recorded_at: store::now_seconds(),
+            branch: record.branch.clone(),
+            head_commit: record.head_commit.clone(),
+            pull_request: record.pull_request,
+        }))
     }
 }
 

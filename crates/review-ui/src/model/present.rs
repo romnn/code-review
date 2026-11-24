@@ -86,12 +86,14 @@ impl DiffAnchor {
 }
 
 /// A diff row by what it shows rather than where it is, to find it again in rows laid out
-/// with other folds: its unit, and the head or base line of its code.
+/// with other folds: its unit, and the head or base line of its code, or the reviewed unit and
+/// the line of the head it was reviewed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RowKey {
     unit: review_core::UnitId,
     head: Option<usize>,
     base: Option<usize>,
+    reviewed: Option<(review_core::UnitId, usize)>,
     /// Whether the line belongs to a nested diff, whose lines may be another file's.
     nested: bool,
     /// Whether the row is a file's header in a diff of several files.
@@ -108,6 +110,11 @@ impl RowKey {
                 .cells()
                 .find_map(|cell| cell.head.as_ref().map(|head| head.line)),
             base: row.cells().find_map(|cell| cell.base),
+            reviewed: row.cells().find_map(|cell| {
+                cell.reviewed
+                    .as_ref()
+                    .map(|reviewed| (reviewed.unit, reviewed.line))
+            }),
             nested: row.cells().any(|cell| {
                 matches!(
                     cell.kind,
@@ -123,7 +130,8 @@ impl RowKey {
         let other = Self::of(row);
         other.nested == self.nested
             && ((self.head.is_some() && other.head == self.head)
-                || (self.base.is_some() && other.base == self.base))
+                || (self.base.is_some() && other.base == self.base)
+                || (self.reviewed.is_some() && other.reviewed == self.reviewed))
     }
 
     /// The unit the row belongs to.
@@ -327,14 +335,17 @@ pub(crate) fn same_start(
         .get(side)
         .copied()
         .flatten()
-        .filter(|cell| cell.head.is_some() || cell.base.is_some())?;
+        .filter(|cell| cell.head.is_some() || cell.base.is_some() || cell.reviewed.is_some())?;
     let same_text = after
         .sides()
         .get(side)
         .copied()
         .flatten()
         .is_some_and(|cell| {
-            cell.text == text.text && cell.head == text.head && cell.base == text.base
+            cell.text == text.text
+                && cell.head == text.head
+                && cell.base == text.base
+                && cell.reviewed == text.reviewed
         });
     let path = old.files.get(before.file).map(|file| &file.path);
     let same_file = path.is_some() && path == new.files.get(after.file).map(|file| &file.path);
@@ -561,7 +572,7 @@ mod tests {
         let shown = lay_out(Approved::Shown);
         let folded = lay_out(Approved::Folded);
 
-        let unit = folded.hunks[1][0];
+        let unit = folded.hunks[1].unit;
         let header = RowKey::of(&folded.rows[folded.unit_rows[&unit]]);
         assert_eq!(header.find(&shown), Some(shown.unit_rows[&unit]));
 

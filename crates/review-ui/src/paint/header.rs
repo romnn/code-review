@@ -110,11 +110,13 @@ pub fn file_header(
     let section = model.rows.files.first()?;
     let (dir, name) = split_path(&section.path);
     let change = section.change.as_ref();
-    let units: Vec<_> = model.rows.hunks.concat();
+    // The meter counts units, so neither approving one change of a unit nor folding a unit
+    // changes what it counts.
+    let units = &section.units;
     let approved = model
         .view()
         .map(|view| {
-            state::badges(&view, &units, &model.pending)
+            state::badges(&view, units, &model.pending)
                 .into_iter()
                 .filter(|&badge| state::is_approved(badge))
                 .count()

@@ -303,6 +303,18 @@ impl ReviewApp {
         self.update_model(window, cx, |model| model.dispatch(action));
     }
 
+    /// Runs `action` on the model as a key press resolved to it, `held` saying whether the key
+    /// repeats one held down.
+    fn key(
+        &mut self,
+        action: Action,
+        held: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_model(window, cx, |model| model.key(action, held));
+    }
+
     /// Runs what the model asked for: jobs on gpui's background executor, and jobs that wait
     /// for long on threads of their own, with their completions handed back to the model on the
     /// UI thread, timers, the clipboard, the title, the sheets' scrolling and quitting.

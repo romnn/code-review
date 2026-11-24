@@ -110,12 +110,7 @@ pub fn frame(model: &Model, index: usize) -> Frame {
 /// The tone of hunk `hunk`, from its units' review states and the marks still saving.
 #[must_use]
 pub fn hunk_tone(model: &Model, hunk: usize) -> HunkTone {
-    let units = model.rows.hunks.get(hunk).map_or(&[][..], Vec::as_slice);
-    let badges = model
-        .view()
-        .map(|view| crate::state::badges(&view, units, &model.pending))
-        .unwrap_or_default();
-    HunkTone::of(&badges)
+    HunkTone::of(model.hunk_badge(hunk).as_slice())
 }
 
 /// The hunk that diff row `index` belongs to for its band and bar: from the hunk's first row
@@ -338,7 +333,7 @@ fn within(layer: Layer, shown: &Range<usize>) -> Layer {
         .collect()
 }
 
-/// Whether `cell` is a line of a nested diff: an interdiff's or a move's edits.
+/// Whether `cell` is a line of a nested diff: a move's edits.
 fn is_nested(cell: &Cell) -> bool {
     matches!(
         cell.kind,
@@ -512,11 +507,18 @@ fn syntax_layer(
         return Vec::new();
     };
     // A nested line's old side comes from another file or version than this file's base,
-    // whose colors it never takes.
-    let spans = match (&cell.head, cell.base) {
-        (Some(head), _) => syntax.head.as_ref().map(|side| side.line(head.line)),
-        (None, Some(base)) if !is_nested(cell) => syntax.base.as_ref().map(|side| side.line(base)),
-        (None, _) => None,
+    // whose colors it never takes; a line as it was reviewed takes those of the head it was
+    // reviewed in.
+    let spans = match (&cell.head, &cell.reviewed, cell.base) {
+        (Some(head), ..) => syntax.head.as_ref().map(|side| side.line(head.line)),
+        (None, Some(reviewed), _) => syntax
+            .reviewed
+            .get(&reviewed.side)
+            .map(|side| side.line(reviewed.line)),
+        (None, None, Some(base)) if !is_nested(cell) => {
+            syntax.base.as_ref().map(|side| side.line(base))
+        }
+        (None, None, _) => None,
     };
     // An edited line's own bytes follow the deleted text spliced into it; only the spans that
     // reach into what the screen row shows are moved there.

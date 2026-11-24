@@ -96,6 +96,7 @@ mod tests {
             base: None,
             quiet: false,
             moved: false,
+            reviewed: None,
         }
     }
 

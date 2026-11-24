@@ -4,7 +4,8 @@
 use serde::Serialize;
 
 use crate::analysis::{
-    Analysis, EntrySide, FileChange, FileUnit, Move, MoveKind, NoiseCategory, Unit, UnitKind,
+    Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Move, MoveKind, NoiseCategory,
+    Unit, UnitKind,
 };
 use crate::correspond::{LinkKind, same_entry};
 use crate::error::Error;
@@ -122,6 +123,192 @@ pub struct Interdiff {
     /// Whether the file's base entry (path, mode or content) differs from the reviewed one's:
     /// the code around the unit changed in the base, even where both sides of the change did not.
     pub base_file_changed: bool,
+}
+
+/// What a chunk that changed since it was reviewed shows: only what changed on top of the
+/// reviewed change, or, where that cannot show everything the change does now, the whole
+/// current change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinceReviewed<'h> {
+    /// The reviewed lines against the current head's; see [`Delta`].
+    Delta(Delta<'h>),
+    /// The whole current change, for this reason.
+    Whole(Reopened),
+}
+
+/// What changed on top of a reviewed change whose base lines stayed the same, so that the
+/// reviewed change and the [runs](Self::runs) together are the whole current change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delta<'h> {
+    /// The unit whose change this is.
+    pub unit: UnitId,
+    /// The unit the reviewed text was approved on: the unit a whole mark was made on, or the
+    /// one the last partial approval was.
+    pub reviewed: UnitId,
+    /// The reviewed text: the head lines a whole mark approved, or those partial approvals
+    /// left, each with its terminator.
+    pub before: &'h str,
+    /// Where `before` comes from.
+    pub baseline: ReviewedBaseline<'h>,
+    /// The change now.
+    pub after: &'h Chunk,
+}
+
+/// Where the reviewed text of a [`Delta`] comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewedBaseline<'h> {
+    /// The head lines a whole mark approved, in the head file it was reviewed in, for their
+    /// syntax.
+    Head(ReviewedHead<'h>),
+    /// The text partial approvals left, which is in no file.
+    Partial,
+}
+
+/// Where a reviewed text is in a head file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewedHead<'h> {
+    /// The head file.
+    pub entry: &'h EntrySide,
+    /// The zero-based line of the text's first line there.
+    pub start: usize,
+}
+
+impl<'h> Delta<'h> {
+    /// The runs of lines that differ, in order; the lines between them are the same in both.
+    #[must_use]
+    pub fn runs(&self) -> Vec<LineRun<'h>> {
+        let (before, after): (&'h str, &'h str) = (self.before, &self.after.added);
+        let old = split_lines(before);
+        let new = split_lines(after);
+        let (old_starts, new_starts) = (line_starts(&old), line_starts(&new));
+        diff_lines(&old, &new)
+            .into_iter()
+            .map(|run| LineRun {
+                unit: self.unit,
+                old: LineRange {
+                    start: run.before.start,
+                    len: run.before.len(),
+                },
+                new: LineRange {
+                    start: self.after.new.start + run.after.start,
+                    len: run.after.len(),
+                },
+                removed: lines_of(before, &old_starts, &run.before),
+                added: lines_of(after, &new_starts, &run.after),
+            })
+            .collect()
+    }
+
+    /// The reviewed text with `run`, one of [`Self::runs`], approved: its reviewed lines
+    /// replaced by its current ones, byte for byte, so line terminators and a missing final
+    /// newline stay as they are on each side.
+    pub(crate) fn approving(&self, run: &LineRun<'_>) -> String {
+        let lines = split_lines(self.before);
+        let starts = line_starts(&lines);
+        let kept = |range: std::ops::Range<usize>| lines_of(self.before, &starts, &range);
+        [
+            kept(0..run.old.start),
+            run.added,
+            kept(run.old.end()..lines.len()),
+        ]
+        .concat()
+    }
+}
+
+/// Where each of `lines` starts in their text, and where the text ends.
+fn line_starts(lines: &[&str]) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(lines.iter().scan(0, |end, line| {
+            *end += line.len();
+            Some(*end)
+        }))
+        .collect()
+}
+
+/// The lines `range` of `text`, whose lines start at `starts`, as one slice of it.
+fn lines_of<'t>(text: &'t str, starts: &[usize], range: &std::ops::Range<usize>) -> &'t str {
+    let at = |line: usize| starts.get(line).copied().unwrap_or_default();
+    text.get(at(range.start)..at(range.end)).unwrap_or_default()
+}
+
+/// A run of lines that differ between a reviewed change and the current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRun<'h> {
+    /// The unit whose change it is, which only its delta knows.
+    unit: UnitId,
+    /// The lines of the reviewed text, counted from its first line.
+    pub old: LineRange,
+    /// The lines in the current head.
+    pub new: LineRange,
+    /// The reviewed lines, each with its terminator.
+    pub removed: &'h str,
+    /// The current lines, each with its terminator.
+    pub added: &'h str,
+}
+
+/// A change since review of one unit as a view showed it, for
+/// [`Review::approve_run`](crate::Review::approve_run) to approve once the log still has it.
+///
+/// Two are equal when they are the same change: the same unit, current lines at the same
+/// place, and reviewed lines replaced, which is what the engine compares a run with.
+/// Where the reviewed lines are in the reviewed text is no part of it: approving another
+/// change of the unit before them moves them without changing what the change does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownRun {
+    /// The unit.
+    pub unit: UnitId,
+    /// Its lines in the current head.
+    pub new: LineRange,
+    /// The reviewed lines, each with its terminator.
+    pub removed: String,
+    /// The current lines, each with its terminator.
+    pub added: String,
+}
+
+impl LineRun<'_> {
+    /// The run as it is shown, to approve later.
+    #[must_use]
+    pub fn shown(&self) -> ShownRun {
+        ShownRun {
+            unit: self.unit,
+            new: self.new,
+            removed: self.removed.to_owned(),
+            added: self.added.to_owned(),
+        }
+    }
+
+    /// Whether the run is the change `shown` is, as [`ShownRun`]'s equality has it.
+    pub(crate) fn is(&self, shown: &ShownRun) -> bool {
+        self.shown() == *shown
+    }
+
+    /// The run as a chunk with its edit script, to show it as a change; its old lines count
+    /// from the reviewed text's first line, as [`Self::old`] does.
+    #[must_use]
+    pub fn to_chunk(&self) -> Chunk {
+        Chunk::of_lines(
+            self.old,
+            self.new,
+            self.removed.to_owned(),
+            self.added.to_owned(),
+        )
+    }
+}
+
+/// Why a chunk that changed since it was reviewed shows its whole current change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reopened {
+    /// The file's base entry changed: the target branch moved.
+    TargetMoved,
+    /// The change now affects other base lines than the reviewed one did.
+    OtherBaseLines,
+    /// The chain back to the reviewed unit is not one-to-one with trusted links, or the head
+    /// file is not the same file, so the reviewed lines may be another change's.
+    Uncertain,
+    /// The change is the same as the reviewed one, but it was reopened in between.
+    SameCode,
+    /// The reviewer flagged the change as it was, so all of it still needs them.
+    Flagged,
 }
 
 /// Where a note is attached in the viewed revision.
@@ -833,7 +1020,8 @@ impl<'h> RevisionView<'h> {
     }
 
     /// Returns the interdiff of unit `id` against its last reviewed predecessor, if it is
-    /// changed since reviewed.
+    /// changed since reviewed; the added side compares with the text partial approvals left,
+    /// when they were the last review.
     ///
     /// # Errors
     ///
@@ -850,7 +1038,12 @@ impl<'h> RevisionView<'h> {
         let (base, head) = match (&reviewed_unit.kind, &current_unit.kind) {
             (UnitKind::Chunk(before), UnitKind::Chunk(after)) => (
                 side_diff(&before.removed, &after.removed),
-                side_diff(&before.added, &after.added),
+                side_diff(
+                    self.history
+                        .approved_text(reviewed)
+                        .unwrap_or(&before.added),
+                    &after.added,
+                ),
             ),
             _ => (
                 side_diff(
@@ -869,6 +1062,93 @@ impl<'h> RevisionView<'h> {
             head,
             base_file_changed: !same_entry(reviewed_file.old.as_ref(), current_file.old.as_ref()),
         }))
+    }
+
+    /// Returns what chunk unit `id` shows when it changed since it was reviewed: only what
+    /// changed on top of the reviewed change when its base lines and file stayed the same and
+    /// every link back to the reviewed unit is one-to-one and trusted, and else the whole
+    /// current change; `None` for any other unit.
+    ///
+    /// The reviewed change is the text partial approvals left when one was the last review,
+    /// and else the reviewed unit's head lines.
+    /// A current change equal to it after a changed link shows whole as
+    /// [`Reopened::SameCode`]: only a mark approves it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::unit`].
+    pub fn since_reviewed(&self, id: UnitId) -> Result<Option<SinceReviewed<'h>>, Error> {
+        let UnitState::ChangedSinceReviewed { reviewed, verdict } = self.state(id)? else {
+            return Ok(None);
+        };
+        let current_file = self.file(id)?;
+        let reviewed_view = self.history.view(reviewed.revision())?;
+        let reviewed_file = reviewed_view.file(reviewed)?;
+        let (UnitKind::Chunk(before), UnitKind::Chunk(after)) =
+            (&reviewed_view.unit(reviewed)?.kind, &self.unit(id)?.kind)
+        else {
+            return Ok(None);
+        };
+        let approved = self.history.approved_text(reviewed);
+        let reviewed_text = approved.unwrap_or(&before.added);
+        let reviewed_head = match (&reviewed_file.new, &current_file.new) {
+            (Some(older), Some(newer)) if older.path == newer.path && older.mode == newer.mode => {
+                Some(older)
+            }
+            _ => None,
+        };
+        let reopened = if verdict == Verdict::Flagged {
+            Some(Reopened::Flagged)
+        } else if !same_entry(reviewed_file.old.as_ref(), current_file.old.as_ref()) {
+            Some(Reopened::TargetMoved)
+        } else if before.old != after.old {
+            Some(Reopened::OtherBaseLines)
+        } else if reviewed_head.is_none() || !self.trusted_chain(id, reviewed) {
+            Some(Reopened::Uncertain)
+        } else if reviewed_text == after.added {
+            Some(Reopened::SameCode)
+        } else {
+            None
+        };
+        Ok(Some(match (reopened, reviewed_head) {
+            (None, Some(entry)) => SinceReviewed::Delta(Delta {
+                unit: id,
+                reviewed,
+                before: reviewed_text,
+                baseline: match approved {
+                    Some(_) => ReviewedBaseline::Partial,
+                    None => ReviewedBaseline::Head(ReviewedHead {
+                        entry,
+                        start: before.new.start,
+                    }),
+                },
+                after,
+            }),
+            (reopened, _) => SinceReviewed::Whole(reopened.unwrap_or(Reopened::Uncertain)),
+        }))
+    }
+
+    /// Whether every link from unit `id` back to unit `reviewed` is the only link of both its
+    /// ends and says the change is unchanged or changed, never untrusted or ambiguous.
+    fn trusted_chain(&self, id: UnitId, reviewed: UnitId) -> bool {
+        let mut current = id;
+        while current != reviewed {
+            let [link] = self.history.predecessors(current) else {
+                return false;
+            };
+            let Some(revision) = current.revision().previous() else {
+                return false;
+            };
+            let older = UnitId::new(revision, link.older);
+            if !matches!(link.kind, LinkKind::Unchanged | LinkKind::Changed)
+                || self.history.successors(older).len() != 1
+                || revision < reviewed.revision()
+            {
+                return false;
+            }
+            current = older;
+        }
+        true
     }
 
     /// Returns every note written on this revision or earlier, resolved for this revision.

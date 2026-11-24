@@ -1,8 +1,9 @@
 //! Lays a step's units out as single-line rows for the virtualized list, in file sections.
 //!
-//! Every decision about what a unit shows (collapse, moves, interdiffs, descriptions, notes) comes
-//! from review-core; this module only lays those answers out as lines, and applies the view's
-//! folds: collapsed files and hunks, expanded moves, and files shown in full.
+//! Every decision about what a unit shows (collapse, moves, what changed since a review,
+//! descriptions, notes) comes from review-core; this module only lays those answers out as
+//! lines, and applies the view's folds: collapsed files and hunks, expanded moves, and files
+//! shown in full.
 //!
 //! [`build`] lays out the unified rows; [`present`](fn@present) then projects them for the
 //! layout and density the reviewer chose, pairing lines side by side and adding air, without
@@ -19,8 +20,9 @@ use crate::syntax::FileSyntax;
 use review_core::analysis::{Chunk, FileUnit, UnitKind};
 use review_core::scope::breadcrumb;
 use review_core::{
-    Collapse, DiffLineKind, LineEnding, MoveView, NoteAttachment, RevisionView, Side, SideDiff,
-    Standing, UnitId, UnitState, Verdict, split_line_ending,
+    Collapse, Delta, LineEnding, LineRun, MoveView, NoteAttachment, Reopened, ReviewedBaseline,
+    RevisionView, ShownRun, Side, SideDiff, SinceReviewed, Standing, UnitId, UnitState, Verdict,
+    split_line_ending,
 };
 
 mod moves;
@@ -49,11 +51,11 @@ pub enum RowKind {
     /// A line of the head that a hunk changed in place, shown once: the tokens it inserted
     /// marked, and the ones it deleted struck out where they stood.
     Edited,
-    /// An old line of an interdiff or of a move's inner diff.
+    /// An old line of a move's inner diff.
     NestedOld,
-    /// A new line of an interdiff or of a move's inner diff.
+    /// A new line of a move's inner diff.
     NestedNew,
-    /// An unchanged line of an interdiff or of a move's inner diff.
+    /// An unchanged line of a move's inner diff.
     NestedSame,
     /// A one-line summary: a file unit's description or a hint.
     Info,
@@ -61,8 +63,6 @@ pub enum RowKind {
     Moved,
     /// A collapsed formatting-only or noise unit.
     Collapsed,
-    /// A section title of a "changed since reviewed" interdiff.
-    Interdiff,
     /// A note.
     Note,
     /// Unchanged lines left out between hunks, which expand on request.
@@ -121,6 +121,20 @@ pub struct Cell {
     /// Whether the line is moved code: a moved line at either end of a move, or a line a move
     /// with edits keeps, which draw in the move's color rather than as removed or added.
     pub moved: bool,
+    /// For a line of a change as it was reviewed, where it is in the head reviewed then, for
+    /// its syntax: it has no line of the current files.
+    pub reviewed: Option<ReviewedLine>,
+}
+
+/// A line of a head file as it was reviewed at an earlier revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewedLine {
+    /// The unit that was reviewed, on a recorded revision, so its ID never names another.
+    pub unit: UnitId,
+    /// That head file.
+    pub side: crate::state::SideKey,
+    /// The zero-based line there.
+    pub line: usize,
 }
 
 impl Cell {
@@ -523,14 +537,40 @@ impl Default for Folds {
     }
 }
 
+/// A display hunk: what one stop of `j` and `k` selects and one press of Space marks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    /// The unit it marks.
+    pub unit: UnitId,
+    /// For one change of a unit that shows what changed since it was reviewed, that change as
+    /// the engine made it, which Space approves alone; the unit's other changes are hunks of
+    /// their own.
+    pub change: Option<ShownRun>,
+}
+
+impl Hunk {
+    /// The head lines of its change, for one change of a unit; `None` for a whole unit. The
+    /// range is empty for a change that only removes lines, at the line after them.
+    #[must_use]
+    pub fn lines(&self) -> Option<Range<usize>> {
+        self.change.as_ref().map(|change| change.new.range())
+    }
+
+    /// The head line its change starts at, for one change of a unit; `None` for a whole unit.
+    #[must_use]
+    pub fn at(&self) -> Option<usize> {
+        self.change.as_ref().map(|change| change.new.start)
+    }
+}
+
 /// The rows of one or more steps.
 #[derive(Debug, Clone, Default)]
 pub struct Layout {
     /// The rows in display order.
     pub rows: Vec<Row>,
-    /// The display hunks, each a list of units marked together.
-    pub hunks: Vec<Vec<UnitId>>,
-    /// The header row of each unit.
+    /// The display hunks, in row order.
+    pub hunks: Vec<Hunk>,
+    /// The header row of each unit: the first row of its first hunk.
     pub unit_rows: HashMap<UnitId, usize>,
     /// The file sections in display order.
     pub files: Vec<FileSection>,
@@ -563,6 +603,40 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The hunk that is exactly `hunk`, the same unit and the same change, or else where the
+    /// reviewer was: [`Self::hunk_of`] its unit at its change's line.
+    ///
+    /// Only the first is the same review target; the second is a place to read on from.
+    #[must_use]
+    pub fn hunk_like(&self, hunk: &Hunk) -> Option<usize> {
+        self.hunks
+            .iter()
+            .position(|own| own == hunk)
+            .or_else(|| self.hunk_of(hunk.unit, hunk.at()))
+    }
+
+    /// The hunk of `unit`: its first, or with `at`, its change at that head line, else its
+    /// first change after it, else its last hunk, as when that change was approved or folded.
+    #[must_use]
+    pub fn hunk_of(&self, unit: UnitId, at: Option<usize>) -> Option<usize> {
+        let mut own = self
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, hunk)| hunk.unit == unit);
+        let Some(line) = at else {
+            return own.next().map(|(index, _)| index);
+        };
+        let mut last = None;
+        for (index, hunk) in own {
+            if hunk.at().is_some_and(|start| start >= line) {
+                return Some(index);
+            }
+            last = Some(index);
+        }
+        last
+    }
+
     /// The row screen row `screen` shows a piece of.
     #[must_use]
     pub fn row_on_screen(&self, screen: usize) -> Option<&Row> {
@@ -711,19 +785,6 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
             &notes,
         );
     }
-    layout.hunk_notes = layout
-        .hunks
-        .iter()
-        .map(|units| {
-            // Every unit has a header row, which knows its file section.
-            let file = units
-                .first()
-                .and_then(|unit| layout.unit_rows.get(unit))
-                .and_then(|&row| layout.rows.get(row))
-                .map_or(0, |row| row.file);
-            hunk_note(&layout, view, file, units, folds)
-        })
-        .collect();
     layout
 }
 
@@ -861,6 +922,7 @@ fn plain_cell(kind: RowKind, text: String) -> Cell {
         base: None,
         quiet: false,
         moved: false,
+        reviewed: None,
     }
 }
 
@@ -1004,9 +1066,9 @@ impl Pusher<'_> {
 
     /// Pushes the lines of `chunk` as its edit script shows them: each new line once where the
     /// layout allows it and nothing that changed would hide, and otherwise its old lines above
-    /// its new ones, the words that changed marked.
-    fn edited_chunk(&mut self, chunk: &Chunk, head_path: Option<&str>) {
-        let old: Vec<&str> = chunk.removed.split_inclusive('\n').collect();
+    /// its new ones, the words that changed marked. `old` says where its old lines are.
+    fn edited_chunk(&mut self, chunk: &Chunk, head_path: Option<&str>, old: &OldLines) {
+        let old_lines: Vec<&str> = chunk.removed.split_inclusive('\n').collect();
         let new: Vec<&str> = chunk.added.split_inclusive('\n').collect();
         let head = |line: usize| {
             head_path.map(|path| HeadLine {
@@ -1017,11 +1079,19 @@ impl Pusher<'_> {
         for shown in once::lines(chunk, self.once) {
             let cell = match shown {
                 once::Shown::Removed { line, words } => {
-                    let split = split_line_ending(old.get(line).copied().unwrap_or_default());
+                    let split = split_line_ending(old_lines.get(line).copied().unwrap_or_default());
+                    let at = chunk.old.start + line;
                     Cell {
                         content_len: split.content.len(),
                         highlights: words,
-                        base: Some(chunk.old.start + line),
+                        base: matches!(old, OldLines::Base).then_some(at),
+                        reviewed: match old {
+                            OldLines::Reviewed(first) => Some(ReviewedLine {
+                                line: first.line + at,
+                                ..first.clone()
+                            }),
+                            OldLines::Base | OldLines::Nowhere => None,
+                        },
                         ..self.cell(RowKind::Removed, with_ending(split.content, split.ending))
                     }
                 }
@@ -1050,39 +1120,6 @@ impl Pusher<'_> {
                     }
                 }
             };
-            self.add_cell(cell);
-        }
-    }
-
-    /// Pushes a nested diff. With `head`, the head line its new side starts at, its new and
-    /// unchanged lines know their head lines, for line numbers and syntax. With `old`, the
-    /// zero-based line its old side starts at in the file that side comes from (a move's
-    /// source), its old and unchanged lines know their lines there, as `base`, for the line
-    /// numbers of the side-by-side diff's left half.
-    fn diff(&mut self, diff: &SideDiff, head: Option<&HeadLine>, old: Option<usize>) {
-        let mut new_line = 0;
-        let mut old_line = 0;
-        for line in &diff.lines {
-            let kind = match line.kind {
-                DiffLineKind::Same => RowKind::NestedSame,
-                DiffLineKind::Old => RowKind::NestedOld,
-                DiffLineKind::New => RowKind::NestedNew,
-            };
-            let mut cell = Cell {
-                content_len: line.text.len(),
-                ..self.cell(kind, with_ending(&line.text, line.ending))
-            };
-            if line.kind != DiffLineKind::Old {
-                cell.head = head.map(|head| HeadLine {
-                    path: head.path.clone(),
-                    line: head.line + new_line,
-                });
-                new_line += 1;
-            }
-            if line.kind != DiffLineKind::New {
-                cell.base = old.map(|start| start + old_line);
-                old_line += 1;
-            }
             self.add_cell(cell);
         }
     }
@@ -1136,7 +1173,7 @@ impl Pusher<'_> {
     ) {
         // Moved and formatting-only code shows its own way, line for line.
         if removed.is_none() && added.is_none() && !self.moved && !self.quiet {
-            self.edited_chunk(chunk, head_path);
+            self.edited_chunk(chunk, head_path, &OldLines::Base);
             return;
         }
         self.side(
@@ -1162,49 +1199,47 @@ impl Pusher<'_> {
     }
 }
 
-/// Pushes the one header row of display hunk `hunk`, made of `units`: where it is, what kind of
-/// change it is, and the scopes around it. Every unit's header row is this row.
-fn hunk_header(
-    layout: &mut Layout,
-    view: &RevisionView<'_>,
-    file: usize,
-    hunk: usize,
-    units: &[UnitId],
-    folds: &Folds,
-) {
-    let Some(&first) = units.first() else {
+/// Pushes the one header row of display hunk `hunk`: where it is, what kind of change it is,
+/// and the scopes around it. It is the header row of its unit when the unit has none yet.
+fn hunk_header(layout: &mut Layout, file: usize, hunk: usize) {
+    let (Some(unit), Some(note)) = (
+        layout.hunks.get(hunk).map(|hunk| hunk.unit),
+        layout.hunk_notes.get(hunk).cloned(),
+    ) else {
         return;
     };
-    for &unit in units {
-        layout.unit_rows.insert(unit, layout.rows.len());
-    }
-    let note = hunk_note(layout, view, file, units, folds);
-    layout.rows.push(note_row(file, first, Some(hunk), note));
+    layout.unit_rows.entry(unit).or_insert(layout.rows.len());
+    layout.rows.push(note_row(file, unit, Some(hunk), note));
 }
 
-/// What the header of the display hunk made of `units` says: where it is, what kind of change
-/// it is, and the scopes around it.
+/// What the header of display hunk `hunk` says: where it is, what kind of change it is, and
+/// the scopes around it.
 fn hunk_note(
     layout: &Layout,
     view: &RevisionView<'_>,
     file: usize,
-    units: &[UnitId],
+    hunk: &Hunk,
     folds: &Folds,
 ) -> Note {
-    let first = units.first().copied();
-    let text = units
-        .iter()
-        .map(|&unit| header(view, unit))
-        .reduce(|first, last| join_lines(&first, &last))
-        .unwrap_or_default();
-    let path = layout.files.get(file).map(|section| section.path.clone());
+    let unit = hunk.unit;
+    let scope = layout.files.get(file).and_then(|section| match hunk.at() {
+        Some(line) => head_scope(&section.path, line, folds),
+        None => unit_scope(view, &section.path, unit, folds),
+    });
     Note {
-        badge: first.and_then(|first| view.standing(first).ok().map(Badge::of)),
-        tag: hunk_tag(units.iter().map(|&unit| header_tag(view, unit)).collect()),
-        scope: first.and_then(|first| unit_scope(view, path.as_deref()?, first, folds)),
-        folded: units.iter().all(|&unit| folds.is_folded(view, unit)),
-        ..Note::plain(RowKind::Header, text)
+        badge: view.standing(unit).ok().map(Badge::of),
+        tag: header_tag(view, unit),
+        scope,
+        folded: folds.is_folded(view, unit),
+        ..Note::plain(RowKind::Header, header(view, unit, hunk.lines().as_ref()))
     }
+}
+
+/// The scopes around head line `line` of the file at `path`, once its syntax is known.
+fn head_scope(path: &str, line: usize, folds: &Folds) -> Option<String> {
+    let side = folds.syntax.get(path)?.head.as_ref()?;
+    let enclosing = side.scopes.enclosing(line);
+    (!enclosing.is_empty()).then(|| breadcrumb(&enclosing))
 }
 
 /// The scopes around `unit` of the file at `path`, such as `impl Ledger › fn apply`, once its
@@ -1232,61 +1267,18 @@ const REFORMATTED: &str = "reformatted only";
 /// The label of a proven formatting-only unit that no mark decides, approved automatically.
 const AUTO_APPROVED: &str = "reformatted only · auto-approved";
 
-/// The label of a hunk from its units' labels. A label the units share speaks for the hunk; when
-/// they differ, each says only that the hunk includes it, so one proven reflow never labels a
-/// real edit beside it "reformatted only".
-fn hunk_tag(tags: Vec<Option<String>>) -> Option<String> {
-    let first = tags.first()?.clone();
-    if tags.iter().all(|tag| *tag == first) {
-        return first;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    for tag in tags.into_iter().flatten() {
-        let part = match tag.as_str() {
-            REFORMATTED | AUTO_APPROVED => "includes reformatting".to_owned(),
-            "whitespace changed · not proven equivalent" => {
-                "includes unproven whitespace changes".to_owned()
-            }
-            other if other.starts_with("changed since") => format!("partly {other}"),
-            other => format!("includes {other}"),
-        };
-        if !parts.contains(&part) {
-            parts.push(part);
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// Joins two units' line descriptions into the span of a display hunk: "L3–9".
-fn join_lines(first: &str, last: &str) -> String {
-    let start = first
-        .rsplit(' ')
-        .next()
-        .and_then(|range| range.trim_start_matches('L').split('–').next());
-    let end = last
-        .rsplit(' ')
-        .next()
-        .and_then(|range| range.trim_start_matches('L').rsplit('–').next());
-    match (start, end) {
-        (Some(start), Some(end))
-            if start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok() =>
-        {
-            format!("L{start}–{end}")
-        }
-        _ => format!("{first} · {last}"),
-    }
-}
-
-/// Pushes a unit's body and notes, unless the unit is folded.
-fn unit_rows(
+/// Pushes the rows of display hunk `index`, `hunk`, unless its unit is folded: the unit's
+/// body, or the one change of it the hunk is, and after the unit's last rows its notes.
+fn hunk_rows(
     layout: &mut Layout,
     view: &RevisionView<'_>,
     file: usize,
-    hunk: usize,
-    unit: UnitId,
+    index: usize,
+    hunk: &Hunk,
     folds: &Folds,
-    notes: &[review_core::ResolvedNote],
+    extras: &Extras<'_, '_>,
 ) {
+    let unit = hunk.unit;
     if folds.is_folded(view, unit) {
         return;
     }
@@ -1295,13 +1287,26 @@ fn unit_rows(
         layout,
         file,
         unit,
-        hunk,
+        hunk: index,
         quiet,
         moved: false,
         once: folds.layout == DiffLayout::Unified,
     };
-    unit_body(&mut pusher, view, unit, folds);
-    for note in notes {
+    let shown = hunk
+        .at()
+        .and_then(|at| Some((at, extras.deltas.get(&unit)?)));
+    if let Some((at, shown)) = shown {
+        // What changed since the review is no reformatting, even where the whole change is.
+        pusher.quiet = false;
+        shown.push_run(&mut pusher, view, at);
+        if shown.runs.last().is_some_and(|last| last.new.start != at) {
+            return;
+        }
+        move_notes(&mut pusher, &view.moves_touching(unit), &[]);
+    } else {
+        unit_body(&mut pusher, view, unit, folds);
+    }
+    for note in extras.notes {
         if note.attached == (NoteAttachment::Unit { unit }) {
             // Rows have one height, so each line of a note is a row of its own; the first says
             // where the note comes from.
@@ -1325,7 +1330,29 @@ fn unit_rows(
 /// The header's label for a change that is not an ordinary edit.
 fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
     if let Ok(UnitState::ChangedSinceReviewed { reviewed, .. }) = view.state(unit) {
-        return Some(format!("changed since revision {}", reviewed.revision()));
+        let since = reviewed.revision();
+        return Some(match view.since_reviewed(unit) {
+            Ok(Some(SinceReviewed::Delta(Delta {
+                baseline: ReviewedBaseline::Partial,
+                ..
+            }))) => format!("partly approved in revision {since}"),
+            Ok(Some(SinceReviewed::Whole(Reopened::TargetMoved))) => {
+                format!("target branch moved since revision {since} · shown whole")
+            }
+            Ok(Some(SinceReviewed::Whole(Reopened::OtherBaseLines))) => {
+                format!("changes other lines since revision {since} · shown whole")
+            }
+            Ok(Some(SinceReviewed::Whole(Reopened::Uncertain))) => {
+                format!("changed since revision {since} · shown whole")
+            }
+            Ok(Some(SinceReviewed::Whole(Reopened::Flagged))) => {
+                format!("changed since flagged in revision {since} · shown whole")
+            }
+            Ok(Some(SinceReviewed::Whole(Reopened::SameCode))) => {
+                format!("same as revision {since}, reopened in between")
+            }
+            _ => format!("changed since revision {since}"),
+        });
     }
     match view.collapse(unit) {
         Ok(Some(Collapse::FormattingOnly)) => {
@@ -1341,8 +1368,16 @@ fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
         .then(|| "whitespace changed · not proven equivalent".to_owned())
 }
 
-/// A unit's header line: where it is, such as "L27–29", or what a file unit changes.
-fn header(view: &RevisionView<'_>, unit: UnitId) -> String {
+/// A unit's header line: where it is, such as "L27–29", or what a file unit changes; for one
+/// change of a unit that shows what changed since it was reviewed, where that change is.
+fn header(view: &RevisionView<'_>, unit: UnitId, run: Option<&Range<usize>>) -> String {
+    if let Some(lines) = run {
+        return match lines.len() {
+            0 => format!("removed at L{}", lines.start + 1),
+            1 => format!("L{}", lines.start + 1),
+            _ => format!("L{}–{}", lines.start + 1, lines.end),
+        };
+    }
     match view.unit(unit).ok().and_then(|record| record.chunk()) {
         Some(chunk) if chunk.added.is_empty() => format!("removed at L{}", chunk.new.start + 1),
         Some(chunk) if chunk.new.end() > chunk.new.start + 1 => {
@@ -1471,7 +1506,22 @@ fn unit_body(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId, fol
     };
     let head_path = file.new.as_ref().map(|side| side.path.as_str());
     let expanded = folds.expanded.contains(&unit);
-    match view.collapse(unit) {
+    // A chunk that changed since it was reviewed shows here when it shows its whole change,
+    // never folded into a move or shown quietly; its changes since the review show as hunks of
+    // their own (`Shown::push_run`). Noise stays folded.
+    let collapse = view.collapse(unit);
+    let since = match collapse {
+        Ok(Some(Collapse::Noise(_))) => None,
+        _ => view.since_reviewed(unit).ok().flatten(),
+    };
+    if let (Some(_), Some(chunk)) = (since, record.chunk()) {
+        // What changed since the review is no reformatting, even where the whole change is.
+        pusher.quiet = false;
+        pusher.chunk(chunk, head_path);
+        move_notes(pusher, &view.moves_touching(unit), &[]);
+        return;
+    }
+    match collapse {
         // Reformatting shows its code, without emphasis; the header says what it is.
         Ok(Some(Collapse::FormattingOnly)) => {
             if let Some(chunk) = record.chunk() {
@@ -1549,49 +1599,27 @@ fn unit_body(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId, fol
             }
         }
     }
+    move_notes(pusher, &moves, &described);
+}
+
+/// Pushes a linked note for each of `moves` not among `described`.
+fn move_notes(pusher: &mut Pusher<'_>, moves: &[MoveView], described: &[review_core::MoveId]) {
+    let unit = pusher.unit;
     for found in moves.iter().filter(|found| !described.contains(&found.id)) {
         pusher.add_note(Note {
             link: Some(other_end(found, unit)),
             ..Note::plain(RowKind::Moved, move_text(found, found.target.unit != unit))
         });
     }
-    interdiff_rows(pusher, view, unit);
-}
-
-/// Pushes the interdiff of a unit that changed since it was reviewed.
-fn interdiff_rows(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId) {
-    let Ok(Some(interdiff)) = view.interdiff(unit) else {
-        return;
-    };
-    let since = interdiff.reviewed.revision();
-    if !interdiff.base.changed && !interdiff.head.changed {
-        let why = if interdiff.base_file_changed {
-            "the code around it changed in the base"
-        } else {
-            "it changed in between"
-        };
-        pusher.push(
-            RowKind::Interdiff,
-            format!("same as reviewed in revision {since}, but {why}"),
-        );
-    }
-    for (title, side) in [
-        ("the target branch moved", &interdiff.base),
-        ("the change itself changed", &interdiff.head),
-    ] {
-        if side.changed {
-            pusher.push(
-                RowKind::Interdiff,
-                format!("since revision {since}: {title}"),
-            );
-            pusher.diff(side, None, None);
-        }
-    }
 }
 
 /// Lays out a file section: file units first, then each chunk with `context` unchanged lines
 /// around it from `text`, and gap rows for the unchanged lines left out. Without `text`, chunks
 /// show without context. With `context` at `usize::MAX`, the whole file shows.
+///
+/// A chunk that shows what changed since it was reviewed is a hunk for each of those changes,
+/// and its lines the same as reviewed around and between them are context like any unchanged
+/// line.
 ///
 /// `all_units` are every unit of the file, those of other groups too, whose lines never show
 /// as unchanged context.
@@ -1620,46 +1648,69 @@ fn section_rows(
         .get(file)
         .map(|section| section.path.clone())
         .unwrap_or_default();
-    let mut chunks: Vec<(UnitId, usize, usize)> = Vec::new();
+    let mut hunks: Vec<Hunk> = Vec::new();
     let mut file_units = Vec::new();
+    // What changed since review, aligned once for each unit that shows it, and the lines such
+    // units have the same as reviewed.
+    let mut deltas = Deltas::new();
+    let mut reviewed = Vec::new();
     for &unit in group {
-        match view.unit(unit).ok().and_then(|record| record.chunk()) {
-            Some(chunk) => {
-                chunks.push((unit, chunk.new.start, chunk.new.end().max(chunk.new.start)));
-            }
-            None => file_units.push(unit),
+        if view
+            .unit(unit)
+            .ok()
+            .and_then(|record| record.chunk())
+            .is_none()
+        {
+            file_units.push(unit);
+            continue;
         }
+        // A unit the reviewer folded is one hunk, its header alone.
+        let shown = shown_delta(view, unit)
+            .filter(|_| !folds.is_folded(view, unit))
+            .map(|delta| Shown {
+                runs: delta.runs(),
+                delta,
+            })
+            .filter(|shown| !shown.runs.is_empty());
+        let Some(shown) = shown else {
+            hunks.push(Hunk { unit, change: None });
+            continue;
+        };
+        hunks.extend(shown.runs.iter().map(|run| Hunk {
+            unit,
+            change: Some(run.shown()),
+        }));
+        reviewed.extend(shown.reviewed_spans());
+        deltas.insert(unit, shown);
     }
+    let extras = Extras {
+        notes,
+        deltas: &deltas,
+    };
     // Changes without lines, such as a rename and a mode change, are a hunk each, as every
     // change is.
-    let file_hunks: Vec<Vec<UnitId>> = file_units.into_iter().map(|unit| vec![unit]).collect();
-    for units in file_hunks {
-        let hunk = layout.hunks.len();
-        layout.hunks.push(units.clone());
-        hunk_header(layout, view, file, hunk, &units, folds);
-        for unit in units {
-            unit_rows(layout, view, file, hunk, unit, folds, notes);
-        }
+    for unit in file_units {
+        let hunk = Hunk { unit, change: None };
+        let index = push_hunk(layout, view, file, hunk.clone(), folds);
+        hunk_header(layout, file, index);
+        hunk_rows(layout, view, file, index, &hunk, folds, &extras);
     }
     let Some(text) = text else {
-        let ids: Vec<UnitId> = chunks.iter().map(|&(unit, ..)| unit).collect();
-        for hunk in display_hunks(&ids) {
-            let hunk_index = layout.hunks.len();
-            hunk_header(layout, view, file, hunk_index, &hunk, folds);
-            for &unit in &hunk {
-                unit_rows(layout, view, file, hunk_index, unit, folds, notes);
-            }
-            layout.hunks.push(hunk);
+        for hunk in hunks {
+            let index = push_hunk(layout, view, file, hunk.clone(), folds);
+            hunk_header(layout, file, index);
+            hunk_rows(layout, view, file, index, &hunk, folds, &extras);
         }
         return;
     };
-    chunks.sort_by_key(|&(_, start, _)| start);
+    hunks.sort_by_key(|hunk| head_span(view, hunk).start);
+    reviewed.sort_by_key(|span| span.head.start);
     // Changes of this file in other steps are never shown as unchanged context.
-    let shown: HashSet<UnitId> = group.iter().copied().collect();
+    let in_group: HashSet<UnitId> = group.iter().copied().collect();
     let others: Vec<(usize, usize, UnitId)> = all_units
         .iter()
         .copied()
-        .filter(|unit| !shown.contains(unit))
+        .filter(|unit| !in_group.contains(unit))
         .filter_map(|unit| {
             let chunk = view.unit(unit).ok()?.chunk()?;
             Some((
@@ -1676,41 +1727,27 @@ fn section_rows(
         text,
         others: &others,
         bases: BaseLines::of(view, all_units),
+        reviewed,
     };
-    // Display hunks come from the engine's grouping of the units alone, never from whether the
-    // text has arrived, so a hunk approves the same units before and after.
-    let sorted: Vec<UnitId> = chunks.iter().map(|&(unit, ..)| unit).collect();
-    let sizes: Vec<usize> = display_hunks(&sorted).iter().map(Vec::len).collect();
     if folds.view == DiffView::File {
-        whole_file_rows(layout, view, &mut emitter, &chunks, &sizes, folds, notes);
+        whole_file_rows(layout, view, &mut emitter, &hunks, folds, &extras);
         return;
     }
     let mut line = 0;
-    let mut index = 0;
     // Whether the unchanged lines from `line` on follow the file's start or a folded hunk.
     // With a folded hunk or the file's end after them as well, they are context without a
     // change, and show nothing: no lines, no gap.
     let mut bare = true;
-    for size in sizes {
-        let Some(&(first, first_start, _)) = chunks.get(index) else {
-            break;
-        };
-        let last = index + size.max(1) - 1;
+    for (position, hunk) in hunks.iter().enumerate() {
+        let unit = hunk.unit;
+        let Range { start, end } = head_span(view, hunk);
         // Context after the hunk stops where the next hunk's changes start.
-        let next_start = chunks.get(last + 1).map_or(lines, |&(_, start, _)| start);
-        let revealed = folds
-            .gaps
-            .get(&(path.clone(), first_start))
-            .copied()
-            .unwrap_or(0);
-        let hunk_units: Vec<UnitId> = chunks
-            .get(index..=last)
-            .unwrap_or_default()
-            .iter()
-            .map(|&(unit, ..)| unit)
-            .collect();
+        let next_start = hunks
+            .get(position + 1)
+            .map_or(lines, |next| head_span(view, next).start);
+        let revealed = folds.gaps.get(&(path.clone(), start)).copied().unwrap_or(0);
         // A folded hunk is its header alone; its lines count toward the gaps around it.
-        let folded = hunk_units.iter().all(|&unit| folds.is_folded(view, unit));
+        let folded = folds.is_folded(view, unit);
         let hidden = folded && bare;
         bare = folded;
         let context_before = if folded {
@@ -1719,9 +1756,9 @@ fn section_rows(
             context.saturating_add(revealed)
         };
         let from = if hidden {
-            first_start
+            start
         } else {
-            first_start.saturating_sub(context_before)
+            start.saturating_sub(context_before)
         }
         .max(line);
         // A gap that would hide only a few lines shows them instead.
@@ -1733,55 +1770,42 @@ fn section_rows(
         if from > line && !hidden {
             // The gap already breaks the code's flow, so it names the scopes of the hunk after
             // it, where a header row would break it once more.
-            let scope = unit_scope(view, &path, first, folds);
-            emitter.gap(layout, first, line..from, first_start, scope);
+            let scope = match hunk.at() {
+                Some(at) => head_scope(&path, at, folds),
+                None => unit_scope(view, &path, unit, folds),
+            };
+            emitter.gap(layout, unit, line..from, start, scope);
         }
-        let hunk_index = layout.hunks.len();
         // A header only where the hunk's code cannot say it: what kind of change it is, or the
         // hunk itself while it is folded; else its code reads on from the code around it, as
-        // in the file view, and the file's header names the selected hunk's scopes.
-        let headed = folded
-            || hunk_units
-                .iter()
-                .any(|&unit| header_tag(view, unit).is_some());
+        // in the file view, and the file's header names the selected hunk's scopes. One
+        // change since review reads on from the lines the same as reviewed around it, as the
+        // unit's other changes do, so its bar runs along that change alone.
+        let headed = folded || (hunk.change.is_none() && header_tag(view, unit).is_some());
+        let index = push_hunk(layout, view, file, hunk.clone(), folds);
         if headed {
-            hunk_header(layout, view, file, hunk_index, &hunk_units, folds);
+            hunk_header(layout, file, index);
         }
-        layout.hunks.push(hunk_units);
-        emitter.lines(layout, first, from..first_start);
+        emitter.lines(layout, unit, from..start);
         if folded {
-            line = chunks
-                .get(last)
-                .map_or(first_start, |&(_, _, end)| end.max(first_start));
-            index = last + 1;
+            line = end.max(start);
             continue;
         }
-        for position in index..=last {
-            let Some(&(unit, start, end)) = chunks.get(position) else {
-                continue;
-            };
-            if !headed {
-                layout.unit_rows.insert(unit, layout.rows.len());
-            }
-            unit_rows(layout, view, file, hunk_index, unit, folds, notes);
-            let until = match chunks.get(position + 1).filter(|_| position < last) {
-                Some(&(_, next, _)) => next,
-                None => end
-                    .saturating_add(context)
-                    .min(lines)
-                    .min(next_start.max(end)),
-            };
-            emitter.lines(layout, unit, end..until.max(end));
-            line = until.max(end).max(start);
-        }
-        index = last + 1;
+        layout.unit_rows.entry(unit).or_insert(layout.rows.len());
+        hunk_rows(layout, view, file, index, hunk, folds, &extras);
+        let until = end
+            .saturating_add(context)
+            .min(lines)
+            .min(next_start.max(end));
+        emitter.lines(layout, unit, end..until.max(end));
+        line = until.max(end).max(start);
     }
     // After a folded last hunk, the rest of the file is context without a change too.
-    let after_folded = bare && !chunks.is_empty();
+    let after_folded = bare && !hunks.is_empty();
     if line < lines && !after_folded {
-        let owner = chunks
+        let owner = hunks
             .last()
-            .map_or_else(|| group.first().copied(), |&(unit, ..)| Some(unit));
+            .map_or_else(|| group.first().copied(), |hunk| Some(hunk.unit));
         if let Some(owner) = owner {
             let revealed = folds.gaps.get(&(path.clone(), lines)).copied().unwrap_or(0);
             let until = line.saturating_add(revealed).min(lines);
@@ -1799,17 +1823,146 @@ fn section_rows(
     }
 }
 
+/// The head lines a chunk's display hunk stands at: its change's, or its unit's.
+fn head_span(view: &RevisionView<'_>, hunk: &Hunk) -> Range<usize> {
+    if let Some(lines) = hunk.lines() {
+        return lines;
+    }
+    view.unit(hunk.unit)
+        .ok()
+        .and_then(|record| record.chunk())
+        .map_or(0..0, |chunk| {
+            chunk.new.start..chunk.new.end().max(chunk.new.start)
+        })
+}
+
+/// Head lines the same as reviewed, and where the first is in the head it was reviewed in,
+/// unless partial approvals left them, in no file.
+struct ReviewedSpan {
+    head: Range<usize>,
+    first: Option<ReviewedLine>,
+}
+
+/// What a unit that shows what changed since it was reviewed shows.
+struct Shown<'h> {
+    delta: Delta<'h>,
+    /// The delta's runs, aligned once.
+    runs: Vec<LineRun<'h>>,
+}
+
+impl Shown<'_> {
+    /// Where a line of the reviewed text is, counting from its first line; `None` when that
+    /// text is in no file.
+    fn reviewed_line(&self, line: usize) -> Option<ReviewedLine> {
+        let ReviewedBaseline::Head(head) = self.delta.baseline else {
+            return None;
+        };
+        Some(ReviewedLine {
+            unit: self.delta.reviewed,
+            side: crate::state::SideKey {
+                oid: head.entry.oid.clone(),
+                path: head.entry.path.clone(),
+            },
+            line: head.start + line,
+        })
+    }
+
+    /// The unit's head lines the same as reviewed: those before, between and after its runs.
+    fn reviewed_spans(&self) -> Vec<ReviewedSpan> {
+        let current = self.delta.after.new;
+        let mut spans = Vec::new();
+        let (mut head, mut old) = (current.start, 0);
+        for run in &self.runs {
+            spans.push(ReviewedSpan {
+                head: head..run.new.start,
+                first: self.reviewed_line(old),
+            });
+            (head, old) = (run.new.end(), run.old.end());
+        }
+        spans.push(ReviewedSpan {
+            head: head..current.end(),
+            first: self.reviewed_line(old),
+        });
+        spans.retain(|span| !span.head.is_empty());
+        spans
+    }
+
+    /// Pushes the run at head line `at` as a chunk's lines show, its old lines the reviewed
+    /// ones.
+    fn push_run(&self, pusher: &mut Pusher<'_>, view: &RevisionView<'_>, at: usize) {
+        let Some(run) = self.runs.iter().find(|run| run.new.start == at) else {
+            return;
+        };
+        let head_path = view
+            .file(pusher.unit)
+            .ok()
+            .and_then(|file| file.new.as_ref())
+            .map(|side| side.path.as_str());
+        let old = self
+            .reviewed_line(0)
+            .map_or(OldLines::Nowhere, OldLines::Reviewed);
+        pusher.edited_chunk(&run.to_chunk(), head_path, &old);
+    }
+}
+
+/// Where the old lines of a chunk are, for their numbers and syntax.
+enum OldLines {
+    /// In the base file, at the chunk's old lines.
+    Base,
+    /// In the head a change was reviewed in, its lines counted from this one.
+    Reviewed(ReviewedLine),
+    /// In no file: the text partial approvals left.
+    Nowhere,
+}
+
+/// What changed since review, by unit, of the units of a file section that show only that.
+type Deltas<'h> = HashMap<UnitId, Shown<'h>>;
+
+/// What the rows of a file section's units show besides their code.
+struct Extras<'a, 'h> {
+    /// Every note, which shows under the unit it is attached to.
+    notes: &'a [review_core::ResolvedNote],
+    /// What changed since review; see [`Deltas`].
+    deltas: &'a Deltas<'h>,
+}
+
+/// Registers display hunk `hunk`, with what its header says, and returns its index.
+fn push_hunk(
+    layout: &mut Layout,
+    view: &RevisionView<'_>,
+    file: usize,
+    hunk: Hunk,
+    folds: &Folds,
+) -> usize {
+    let note = hunk_note(layout, view, file, &hunk, folds);
+    layout.hunk_notes.push(note);
+    layout.hunks.push(hunk);
+    layout.hunks.len() - 1
+}
+
+/// Whether `unit` shows its changes since it was reviewed as hunks of their own, as it does
+/// unless the reviewer folds it.
+#[must_use]
+pub fn shows_changes_apart(view: &RevisionView<'_>, unit: UnitId) -> bool {
+    shown_delta(view, unit).is_some_and(|delta| !delta.runs().is_empty())
+}
+
+/// What changed since `unit` was reviewed, when it shows only that: a noise unit stays folded
+/// as noise, so it shows whole.
+fn shown_delta<'h>(view: &RevisionView<'h>, unit: UnitId) -> Option<Delta<'h>> {
+    if let Ok(Some(Collapse::Noise(_))) = view.collapse(unit) {
+        return None;
+    }
+    match view.since_reviewed(unit) {
+        Ok(Some(SinceReviewed::Delta(delta))) => Some(delta),
+        _ => None,
+    }
+}
+
 /// The fewest unchanged lines the hunks view folds into a gap row, between two hunks' context or
 /// between one and the file's start or end; fewer show whole, since a gap row would hide hardly
 /// more than it takes.
 const SHOWN_UNCHANGED: usize = 10;
-
-/// The display hunks of `units`, each a list of units marked together: each unit alone in
-/// either view, so every change is a stop and a mark of its own, and switching the view keeps
-/// every hunk.
-fn display_hunks(units: &[UnitId]) -> Vec<Vec<UnitId>> {
-    units.iter().map(|&unit| vec![unit]).collect()
-}
 
 /// Lays out the chunks of a file section in the file view: every head line of the file in
 /// order, each display hunk's changes in place, without a header row unless nothing of the hunk
@@ -1821,55 +1974,37 @@ fn whole_file_rows(
     layout: &mut Layout,
     view: &RevisionView<'_>,
     emitter: &mut Context<'_>,
-    chunks: &[(UnitId, usize, usize)],
-    sizes: &[usize],
+    hunks: &[Hunk],
     folds: &Folds,
-    notes: &[review_core::ResolvedNote],
+    extras: &Extras<'_, '_>,
 ) {
     let file = emitter.file;
     let lines = emitter.text.lines.len();
     let mut line = 0;
-    let mut index = 0;
-    for &size in sizes {
-        let last = index + size.max(1) - 1;
-        let Some(group) = chunks.get(index..=last) else {
-            break;
-        };
-        let Some(&(first, first_start, _)) = group.first() else {
-            break;
-        };
-        emitter.lines(layout, first, line..first_start.max(line));
-        let hunk = layout.hunks.len();
-        let units: Vec<UnitId> = group.iter().map(|&(unit, ..)| unit).collect();
-        layout.hunks.push(units.clone());
-        let start = layout.rows.len();
-        for (position, &(unit, unit_start, end)) in group.iter().enumerate() {
-            layout.unit_rows.insert(unit, layout.rows.len());
-            unit_rows(layout, view, file, hunk, unit, folds, notes);
-            // Unchanged lines between the units of one hunk belong to its stretch of rows.
-            if let Some(&(_, next, _)) = group.get(position + 1) {
-                emitter.lines(layout, unit, end..next.max(end));
-            }
-            line = end.max(unit_start).max(line);
-        }
+    for hunk in hunks {
+        let unit = hunk.unit;
+        let Range { start, end } = head_span(view, hunk);
+        emitter.lines(layout, unit, line..start.max(line));
+        let index = push_hunk(layout, view, file, hunk.clone(), folds);
+        let first = layout.rows.len();
+        layout.unit_rows.entry(unit).or_insert(first);
+        hunk_rows(layout, view, file, index, hunk, folds, extras);
+        line = end.max(start).max(line);
         // A hunk that shows nothing of its own, folded by the reviewer, keeps its header so it
         // can still be selected, marked and unfolded.
         let shows = layout
             .rows
-            .get(start..)
-            .is_some_and(|rows| rows.iter().any(|row| row.hunk == Some(hunk)));
+            .get(first..)
+            .is_some_and(|rows| rows.iter().any(|row| row.hunk == Some(index)));
         if !shows {
-            let note = hunk_note(layout, view, file, &units, folds);
+            let note = hunk_note(layout, view, file, hunk, folds);
             layout
                 .rows
-                .insert(start, note_row(file, first, Some(hunk), note));
-            for &unit in &units {
-                layout.unit_rows.insert(unit, start);
-            }
+                .insert(first, note_row(file, unit, Some(index), note));
+            layout.unit_rows.insert(unit, first);
         }
-        index = last + 1;
     }
-    let owner = chunks.last().map(|&(unit, ..)| unit);
+    let owner = hunks.last().map(|hunk| hunk.unit);
     if let Some(owner) = owner.or_else(|| layout.files.get(file)?.units.first().copied()) {
         emitter.lines(layout, owner, line..lines);
     }
@@ -1924,6 +2059,9 @@ struct Context<'a> {
     text: &'a FullText,
     others: &'a [(usize, usize, UnitId)],
     bases: BaseLines,
+    /// Head lines a unit changed that are the same as when it was reviewed, which have no base
+    /// line but may have one in the head they were reviewed in; disjoint, in order.
+    reviewed: Vec<ReviewedSpan>,
 }
 
 impl Context<'_> {
@@ -1951,12 +2089,24 @@ impl Context<'_> {
                 continue;
             }
             let content = self.text.lines.get(index).cloned().unwrap_or_default();
+            let span = self
+                .reviewed
+                .get(self.reviewed.partition_point(|span| span.head.end <= index))
+                .filter(|span| span.head.contains(&index));
+            let reviewed = span.and_then(|span| {
+                let first = span.first.as_ref()?;
+                Some(ReviewedLine {
+                    line: first.line + (index - span.head.start),
+                    ..first.clone()
+                })
+            });
             let cell = Cell {
                 head: Some(HeadLine {
                     path: self.path.clone(),
                     line: index,
                 }),
-                base: Some(self.bases.base_of(index)),
+                base: span.is_none().then(|| self.bases.base_of(index)),
+                reviewed,
                 ..plain_cell(RowKind::Context, content)
             };
             layout.rows.push(code_row(self.file, owner, hunk, cell));
@@ -2247,36 +2397,6 @@ mod tests {
         assert!(info.contains(&"after   docs/current symlink (120000) to \"v2.md\""));
     }
 
-    /// A hunk is "reformatted only" only when every unit is; otherwise it says what it
-    /// includes, whether or not its reformatting was approved automatically.
-    #[test]
-    fn hunk_labels_need_every_unit() {
-        let reflow = Some(REFORMATTED.to_owned());
-        assert_eq!(
-            hunk_tag(vec![reflow.clone(), reflow.clone()]),
-            reflow,
-            "shared by every unit"
-        );
-        assert_eq!(
-            hunk_tag(vec![reflow.clone(), None]).as_deref(),
-            Some("includes reformatting")
-        );
-        assert_eq!(
-            hunk_tag(vec![
-                None,
-                Some("changed since revision 1".to_owned()),
-                reflow
-            ])
-            .as_deref(),
-            Some("partly changed since revision 1 · includes reformatting")
-        );
-        assert_eq!(
-            hunk_tag(vec![Some(AUTO_APPROVED.to_owned()), None]).as_deref(),
-            Some("includes reformatting")
-        );
-        assert_eq!(hunk_tag(vec![None, None]), None);
-    }
-
     /// A move with edits shows one linked row at each end, and its edits where the code
     /// arrives, which the reviewer can fold away.
     #[test]
@@ -2378,17 +2498,17 @@ mod tests {
                 row.text()
             );
             if let Some(hunk) = row.hunk {
-                // The row's unit is one of its hunk's units.
-                assert!(layout.hunks[hunk].contains(&row.unit), "{row:?}");
+                // The row's unit is its hunk's unit.
+                assert_eq!(layout.hunks[hunk].unit, row.unit, "{row:?}");
             }
         }
         // Each hunk's rows start where its unit's place is: its header, when it has one, or
         // else its first changed line.
-        for (hunk, units) in layout.hunks.iter().enumerate() {
+        for (hunk, Hunk { unit, .. }) in layout.hunks.iter().enumerate() {
             let rows: Vec<usize> = (0..layout.rows.len())
                 .filter(|&index| layout.rows[index].hunk == Some(hunk))
                 .collect();
-            assert_eq!(layout.unit_rows[&units[0]], rows[0]);
+            assert_eq!(layout.unit_rows[unit], rows[0]);
         }
     }
 
@@ -2486,18 +2606,15 @@ mod tests {
             .filter_map(|cell| cell.head.as_ref().map(|head| head.line))
             .collect();
         assert_eq!(head, (0..text.lines.len()).collect::<Vec<_>>());
-        for (hunk, units) in layout.hunks.iter().enumerate() {
-            if !units
-                .iter()
-                .all(|unit| rows.iter().any(|row| row.unit == *unit))
-            {
+        for (hunk, Hunk { unit, .. }) in layout.hunks.iter().enumerate() {
+            if !rows.iter().any(|row| row.unit == *unit) {
                 continue;
             }
             let owned: Vec<usize> = (0..layout.rows.len())
                 .filter(|&row| layout.rows[row].hunk == Some(hunk))
                 .collect();
             let first = owned[0];
-            assert_eq!(layout.unit_rows[&units[0]], first);
+            assert_eq!(layout.unit_rows[unit], first);
             assert!(layout.rows[first].is_code() || layout.rows[first].note().is_some());
             assert_eq!(owned.len(), owned.last().unwrap() - first + 1, "contiguous");
             assert_eq!(layout.hunk_notes[hunk].kind, RowKind::Header);
@@ -2509,20 +2626,25 @@ mod tests {
     /// changes a few lines apart, as the demo's `scripts/install.sh` has.
     #[test]
     fn each_change_is_a_hunk() {
-        let joined = |layout: &Layout| layout.hunks.iter().filter(|units| units.len() > 1).count();
         // Reviewed files open, so both views lay out every unit.
         let (_dir, hunks) = demo_layout(&Folds {
             approved: Approved::Shown,
             ..Folds::default()
         });
-        assert_eq!(joined(&hunks), 0);
         let (_dir, file) = demo_layout(&Folds {
             view: DiffView::File,
             ..Folds::default()
         });
-        assert_eq!(joined(&file), 0);
-        let units = |layout: &Layout| layout.hunks.iter().map(Vec::len).sum::<usize>();
-        assert_eq!(units(&file), units(&hunks), "the same units, one per hunk");
+        let units = |layout: &Layout| {
+            layout
+                .hunks
+                .iter()
+                .map(|hunk| hunk.unit)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(units(&file), units(&hunks), "the same hunks in either view");
+        let distinct: HashSet<UnitId> = units(&hunks).into_iter().collect();
+        assert_eq!(distinct.len(), hunks.hunks.len(), "a hunk for each unit");
     }
 
     /// The file view shows approved hunks' code, and a hunk the reviewer folded keeps its
@@ -2546,7 +2668,7 @@ mod tests {
         assert!(!layout.files[0].collapsed, "a reviewed file stays open");
         assert!(layout.rows.iter().all(|row| row.kind() != RowKind::Header));
 
-        let folded = layout.hunks[0][0];
+        let folded = layout.hunks[0].unit;
         let (_dir, layout) = view_file(Folds {
             units: HashSet::from([folded]),
             ..Folds::default()
@@ -2628,8 +2750,8 @@ mod tests {
                 .skip(1)
                 .all(|row| row.note().is_some_and(|note| note.folded))
         );
-        for (hunk, units) in layout.hunks.iter().enumerate() {
-            assert_eq!(layout.unit_rows[&units[0]], hunk + 1);
+        for (hunk, Hunk { unit, .. }) in layout.hunks.iter().enumerate() {
+            assert_eq!(layout.unit_rows[unit], hunk + 1);
             assert_eq!(layout.rows[hunk + 1].hunk, Some(hunk));
         }
     }
@@ -2642,7 +2764,7 @@ mod tests {
             single_file: true,
             ..Folds::default()
         });
-        let middle = folded.hunks[1].clone();
+        let middle = [folded.hunks[1].unit];
         let (_dir, layout) = approved_engine(Folds {
             single_file: true,
             opened: middle.iter().copied().collect(),
@@ -2706,7 +2828,7 @@ mod tests {
         });
         assert!(!sections.files[0].collapsed);
 
-        let first = shown.hunks[0].clone();
+        let first = [shown.hunks[0].unit];
         let (_dir, refolded) = approved_engine(Folds {
             single_file: true,
             approved: Approved::Shown,

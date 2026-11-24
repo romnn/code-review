@@ -174,6 +174,42 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    /// The change from lines `removed` at `old` of one text to lines `added` at `new` of
+    /// another, each line with its terminator, with an edit script over plain words and
+    /// punctuation: no language proves a whitespace change means nothing, so every one shows.
+    #[must_use]
+    pub(crate) fn of_lines(old: LineRange, new: LineRange, removed: String, added: String) -> Self {
+        let removed_tokens = crate::text::generic_tokens(&removed);
+        let added_tokens = crate::text::generic_tokens(&added);
+        let whitespace_only = !removed.is_empty()
+            && !added.is_empty()
+            && removed_tokens
+                .iter()
+                .map(|range| removed.get(range.clone()))
+                .eq(added_tokens.iter().map(|range| added.get(range.clone())));
+        let edits = edits::edit_script(
+            &edits::ScriptSide {
+                text: &removed,
+                tokens: &removed_tokens,
+                keys: &vec![None; removed_tokens.len()],
+            },
+            &edits::ScriptSide {
+                text: &added,
+                tokens: &added_tokens,
+                keys: &vec![None; added_tokens.len()],
+            },
+        );
+        Self {
+            old,
+            new,
+            removed,
+            added,
+            edits,
+            whitespace_only,
+            context: String::new(),
+        }
+    }
+
     /// The stretches of `removed` that changed, each within one line and without the whitespace
     /// around it: the words a removed line marks. None when nothing was added in their place.
     #[must_use]

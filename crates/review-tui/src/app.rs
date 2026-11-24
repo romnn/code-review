@@ -339,7 +339,8 @@ impl App {
         let Resolution { replays, outcome } = self.matcher.key_down(key, &target, now);
         self.replay(replays);
         match outcome {
-            Outcome::Dispatch(action) => self.dispatch(action),
+            // A terminal sends a held key as presses, so the model tells repeats by time.
+            Outcome::Dispatch(action) => self.update(|model| model.key(action, None)),
             Outcome::Pending => {}
             Outcome::Unclaimed => self.type_key(&key.keystroke),
         }

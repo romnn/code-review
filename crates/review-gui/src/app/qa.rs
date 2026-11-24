@@ -28,7 +28,9 @@
 //! - `latency` prints input-to-frame latency percentiles as JSON.
 //! - `repeat <count> <milliseconds> <keystroke>` types a keystroke `count` times, one every
 //!   `milliseconds`, as a held key repeats, and prints how long each keystroke's handling took
-//!   and the input-to-frame latency over the burst as JSON.
+//!   and the input-to-frame latency over the burst as JSON. The keystrokes after the first come
+//!   as gpui reports a held key's repeats, which the window's key bindings take but a text
+//!   field does not type.
 //! - `sample` prints the hunk list's scroll offset at once, without waiting for animations,
 //!   to observe a scroll animation in flight.
 //! - `state` prints the observable UI state as one line of JSON.
@@ -566,8 +568,19 @@ async fn repeat(
         // The input-to-frame clock starts at the keystroke, as a real key press starts it.
         this.update(cx, |this, _| this.latency.pending = Some(begun))
             .map_err(|err| err.to_string())?;
-        cx.update(|window, cx| window.dispatch_keystroke(keystroke, cx))
-            .map_err(|err| err.to_string())?;
+        if index == 0 {
+            cx.update(|window, cx| window.dispatch_keystroke(keystroke, cx))
+                .map_err(|err| err.to_string())?;
+        } else {
+            dispatch(
+                cx,
+                PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke: keystroke.with_simulated_ime(),
+                    is_held: true,
+                    prefer_character_input: false,
+                }),
+            )?;
+        }
         handling.push(begun.elapsed());
     }
     let typed = started.elapsed();

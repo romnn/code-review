@@ -48,6 +48,7 @@ mod diff;
 mod effects;
 mod fields;
 mod folders;
+mod guard;
 mod highlights;
 mod layout;
 mod live;
@@ -217,10 +218,10 @@ pub enum Phase {
 
 /// Where the reviewer was in a file, kept while other files show: the selected hunk, and the
 /// unified row at the top, which survives any change of layout, density or font.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Place {
-    /// The selected hunk's first unit: a hunk's index depends on the view, its units do not.
-    unit: Option<UnitId>,
+    /// The selected hunk: its index depends on the view, the hunk does not.
+    hunk: Option<crate::rows::Hunk>,
     top: present::Anchor,
     /// What the top row showed, to find it again in rows laid out in another view.
     key: Option<present::RowKey>,
@@ -318,6 +319,26 @@ impl Blobs {
         self.resolved.retain(|side, _| sides.contains(side));
     }
 
+    /// The highlights of `file`'s versions that are made by now: its base and head, and the
+    /// heads its chunks that changed since they were reviewed show their reviewed lines from.
+    fn file_syntax(
+        &self,
+        view: &review_core::RevisionView<'_>,
+        file: &review_core::analysis::FileChange,
+    ) -> crate::syntax::FileSyntax {
+        let side = |side: Option<&review_core::analysis::EntrySide>| {
+            side.and_then(|side| self.side_syntax(side))
+        };
+        crate::syntax::FileSyntax {
+            head: side(file.new.as_ref()),
+            base: side(file.old.as_ref()),
+            reviewed: reviewed_heads(view, file)
+                .into_iter()
+                .filter_map(|head| Some((head.clone(), self.syntax_of(&head)?)))
+                .collect(),
+        }
+    }
+
     /// The highlights of the file version `side`, once its syntax is resolved and highlighted.
     fn side_syntax(&self, side: &review_core::analysis::EntrySide) -> Option<Arc<SideSyntax>> {
         self.syntax_of(&state::SideKey {
@@ -361,19 +382,48 @@ impl Blobs {
     }
 }
 
-/// Every file version `view` shows, by blob and path.
+/// Every file version `view` shows, by blob and path, reviewed heads included.
 fn shown_sides<'a>(
     view: &'a review_core::RevisionView<'_>,
 ) -> impl Iterator<Item = state::SideKey> + 'a {
     view.analysis()
         .into_iter()
         .flat_map(|analysis| &analysis.files)
-        .flat_map(|file| [file.old.as_ref(), file.new.as_ref()])
-        .flatten()
-        .map(|side| state::SideKey {
-            oid: side.oid.clone(),
-            path: side.path.clone(),
+        .flat_map(|file| {
+            [file.old.as_ref(), file.new.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(side_key)
+                .chain(reviewed_heads(view, file))
         })
+}
+
+fn side_key(side: &review_core::analysis::EntrySide) -> state::SideKey {
+    state::SideKey {
+        oid: side.oid.clone(),
+        path: side.path.clone(),
+    }
+}
+
+/// The heads that `file`'s chunks that changed since they were reviewed show their reviewed
+/// lines from.
+fn reviewed_heads(
+    view: &review_core::RevisionView<'_>,
+    file: &review_core::analysis::FileChange,
+) -> Vec<state::SideKey> {
+    let mut heads: Vec<state::SideKey> = Vec::new();
+    for &index in &file.units {
+        if let Ok(Some(review_core::SinceReviewed::Delta(delta))) =
+            view.since_reviewed(view.id(index))
+            && let review_core::ReviewedBaseline::Head(reviewed) = delta.baseline
+        {
+            let head = side_key(reviewed.entry);
+            if !heads.contains(&head) {
+                heads.push(head);
+            }
+        }
+    }
+    heads
 }
 
 /// The review window's state and behavior; see the module documentation.
@@ -479,6 +529,14 @@ pub struct Model {
     pub marks: VecDeque<MarkJob>,
     /// Whether a mark is being saved.
     pub marking: bool,
+    /// The change whose approval is saving now: with those queued, it shows approved until
+    /// saved, and a press on it waits for it rather than asking for it again, which the engine
+    /// would refuse.
+    approving: Option<review_core::ShownRun>,
+    /// The key in hand.
+    input: Option<guard::KeyInput>,
+    /// The review key pressed last, while it may still repeat.
+    press: Option<guard::Press>,
     /// Verdicts asked for but not yet recorded, shown at once.
     pub pending: HashMap<UnitId, MarkVerdict>,
     /// Whether a fetch of the latest changes runs.
@@ -497,7 +555,7 @@ pub struct Model {
     /// Whether the diff is in scroll mode, where the hunk keys scroll a line.
     pub scroll_mode: bool,
     /// The first unit of the hunk selected when scroll mode began, which Esc goes back to.
-    scrolled_from: Option<UnitId>,
+    scrolled_from: Option<rows::Hunk>,
     /// When the status line last reported a failure, for tinting it.
     pub failed_at: Option<Instant>,
     /// Whether a definition lookup runs.
@@ -593,6 +651,9 @@ impl Model {
             live: None,
             marks: VecDeque::new(),
             marking: false,
+            approving: None,
+            input: None,
+            press: None,
             pending: HashMap::new(),
             refreshing: false,
             sync: Sync::default(),
@@ -1013,12 +1074,8 @@ impl Model {
         let Some(view) = snapshot.view() else {
             return;
         };
-        // The selection is the selected hunk's units; its index follows them into the new rows.
-        let selected = self
-            .rows
-            .hunks
-            .get(self.hunk)
-            .and_then(|hunk| hunk.first().copied());
+        // The selection is the selected hunk; its index follows it into the new rows.
+        let selected = self.rows.hunks.get(self.hunk).cloned();
         let layout = match self.folder.as_ref().map(|folder| folder.path.clone()) {
             Some(folder) => self.lay_out_folder(&view, &folder),
             None => self.selected.clone().map(|path| self.lay_out(&view, &path)),
@@ -1032,12 +1089,11 @@ impl Model {
         rows::project(&mut layout, self.wrap_room());
         self.rows = Arc::new(layout);
         self.hunk_rows = hunk_rows(&self.rows);
-        if let Some(found) =
-            selected.and_then(|unit| self.rows.hunks.iter().position(|hunk| hunk.contains(&unit)))
-        {
+        if let Some(found) = selected.and_then(|hunk| self.rows.hunk_like(&hunk)) {
             self.hunk = found;
         }
         self.hunk = self.hunk.min(self.hunk_rows.len().saturating_sub(1));
+        self.remark_buffer();
         self.refresh_find(Mode::Diff);
     }
 
@@ -1063,16 +1119,7 @@ impl Model {
             {
                 self.folds.texts.insert(path.clone(), Arc::clone(text));
             }
-            let syntax = crate::syntax::FileSyntax {
-                head: file
-                    .new
-                    .as_ref()
-                    .and_then(|side| self.blobs.side_syntax(side)),
-                base: file
-                    .old
-                    .as_ref()
-                    .and_then(|side| self.blobs.side_syntax(side)),
-            };
+            let syntax = self.blobs.file_syntax(view, file);
             self.folds.syntax.insert(path.clone(), Arc::new(syntax));
         }
         rows::present(rows::build(view, &units, &self.folds), self.presented)
@@ -1081,7 +1128,11 @@ impl Model {
     /// The units of the selected hunk.
     #[must_use]
     pub fn hunk_units(&self) -> Vec<UnitId> {
-        self.rows.hunks.get(self.hunk).cloned().unwrap_or_default()
+        self.rows
+            .hunks
+            .get(self.hunk)
+            .map(|hunk| vec![hunk.unit])
+            .unwrap_or_default()
     }
 
     /// The row the diff's keyboard target starts at: the selected hunk's header.
@@ -1344,16 +1395,21 @@ impl Model {
 
 /// The versions of `view`'s files that can be highlighted, in review order.
 fn highlight_files(view: &review_core::RevisionView<'_>) -> Vec<highlights::FileSides> {
-    let key = |side: &review_core::analysis::EntrySide| state::SideKey {
-        oid: side.oid.clone(),
-        path: side.path.clone(),
-    };
     view.analysis()
         .into_iter()
         .flat_map(|analysis| &analysis.files)
         .map(|file| highlights::FileSides {
-            old: file.old.as_ref().filter(|side| is_regular(side)).map(key),
-            new: file.new.as_ref().filter(|side| is_regular(side)).map(key),
+            old: file
+                .old
+                .as_ref()
+                .filter(|side| is_regular(side))
+                .map(side_key),
+            new: file
+                .new
+                .as_ref()
+                .filter(|side| is_regular(side))
+                .map(side_key),
+            reviewed: reviewed_heads(view, file),
         })
         .collect()
 }
@@ -1430,7 +1486,7 @@ pub struct LiveState<'a> {
     pub lookup_failed: Option<&'a str>,
     /// The paths the capture kept at their staged version, under a filter driver.
     pub filtered: &'a [String],
-    /// Whether the view may miss a change and takes no marks until it is captured again.
+    /// Whether the view may miss a change, until it is captured again.
     pub updating: bool,
     /// What git is busy with in the checkout, which keeps the view on screen.
     pub busy: Option<review_core::Busy>,

@@ -32,10 +32,12 @@ use crate::error::Error;
 use crate::git::Repo;
 use crate::history::{History, HistoryInput};
 use crate::ids::{MoveId, ObjectId, ReviewKey, RevisionNumber, UnitId};
-use crate::store::events::{Event, MarkEvent, MarkVerdict, NoteEvent, RevisionEvent};
+use crate::store::events::{
+    Event, MarkEvent, MarkVerdict, NoteEvent, PartialApprovalEvent, RevisionEvent,
+};
 use crate::store::log::{LockGuard, LogTail, LogWriter};
 use crate::store::{self, ReviewDir};
-use crate::view::RevisionView;
+use crate::view::{RevisionView, ShownRun, SinceReviewed};
 use crate::walkthrough;
 
 /// What a review covers.
@@ -998,6 +1000,77 @@ impl Review {
             log.append(event)?;
         }
         Ok(())
+    }
+
+    /// Approves `shown`, a change since review of one unit as `view` showed it.
+    ///
+    /// The approval records the reviewed text with that change's current lines in place of its
+    /// reviewed ones, so the unit's other changes still show; when that text is the whole
+    /// current change, it records the unit accepted instead.
+    ///
+    /// Under the lock, the unit's comparison is derived again from the log as it is then, with
+    /// `view`'s capture when it is a provisional one the log does not have yet, and the change
+    /// is approved only when that comparison still has it: the same current lines at the same
+    /// place, replacing the same reviewed lines.
+    /// Only then is the capture recorded, as for [`Self::mark`], so a refused approval records
+    /// nothing.
+    /// An approval of another change of the unit since the view was read leaves it as it was,
+    /// apart from where its reviewed lines are in the reviewed text, so it is still approved;
+    /// one already approved, or changed since, is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ChangedSinceShown`] when the log's comparison no longer has the change,
+    /// the errors of [`Self::mark`] for a revision that is not current, and an error when the
+    /// append fails.
+    pub fn approve_run(&self, view: &RevisionView<'_>, shown: &ShownRun) -> Result<(), Error> {
+        let unit = shown.unit;
+        let changed = || Error::ChangedSinceShown { unit };
+        let evidence = view.evidence_digest(unit)?;
+        let lock = LockGuard::acquire(&self.dir.lock())?;
+        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
+        // The comparison is derived from the log and, for a capture not recorded yet, the
+        // capture itself, so a refused approval records nothing, not even the capture.
+        let capture = self.unsettled(&log, view, true)?;
+        let history = self.history_of(log.events().to_vec(), log.length(), capture.clone())?;
+        let now = history.view(view.number())?;
+        if now.evidence_digest(unit)? != evidence {
+            return Err(changed());
+        }
+        let Some(SinceReviewed::Delta(delta)) = now.since_reviewed(unit)? else {
+            return Err(changed());
+        };
+        let run = delta
+            .runs()
+            .into_iter()
+            .find(|run| run.is(shown))
+            .ok_or_else(changed)?;
+        let approved = delta.approving(&run);
+        if let Some(capture) = capture {
+            let analysis = view
+                .analysis()
+                .ok_or(Error::UnknownRevision(view.number()))?;
+            self.append_revision(&mut log, capture, analysis)?;
+        }
+        let at = store::now_seconds();
+        let event = if approved == delta.after.added {
+            Event::Mark(MarkEvent {
+                revision: view.number(),
+                unit: unit.index(),
+                evidence,
+                verdict: MarkVerdict::Accepted,
+                at,
+            })
+        } else {
+            Event::PartialApproval(PartialApprovalEvent {
+                revision: view.number(),
+                unit: unit.index(),
+                evidence,
+                at,
+                text: approved,
+            })
+        };
+        log.append(event)
     }
 
     /// Marks every unit of the files at `paths` (or below them, for directories) in `view`'s

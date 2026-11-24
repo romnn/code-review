@@ -90,17 +90,12 @@ pub fn state(model: &Model, screen: &dyn Screen) -> Value {
 
 /// Where the review is, the file shown and its selected hunk, and the marks under way.
 fn put_review(answer: &mut Map<String, Value>, model: &Model) {
-    let view = model.view();
     let hunk_units = model.hunk_units();
-    let hunk_badges: Vec<String> = view
-        .as_ref()
-        .map(|view| {
-            state::badges(view, &hunk_units, &model.pending)
-                .into_iter()
-                .map(|badge| format!("{badge:?}"))
-                .collect()
-        })
-        .unwrap_or_default();
+    let hunk_badges: Vec<String> = model
+        .hunk_badge(model.hunk)
+        .into_iter()
+        .map(|badge| format!("{badge:?}"))
+        .collect();
     let snapshot = model.snapshot.as_ref();
     let shown = model.rows.files.first();
     let entries = [

@@ -1,8 +1,10 @@
 //! The file tree: moving through it shows each file's diff, folders fold, and files and folders
 //! are approved as a whole.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use review_core::UnitId;
 use review_core::tree::{NodeKind, TreeNode};
 
 use super::{Mode, Model, Place, file_paths};
@@ -151,12 +153,12 @@ impl Model {
         let Some(path) = self.selected.clone() else {
             return;
         };
-        let place = self.places.get(&path).copied();
+        let place = self.places.get(&path).cloned();
         self.hunk = 0;
         self.build_selected();
         if let Some(hunk) = place
-            .and_then(|place| place.unit)
-            .and_then(|unit| self.hunk_of(unit))
+            .as_ref()
+            .and_then(|place| self.rows.hunk_like(place.hunk.as_ref()?))
         {
             self.hunk = hunk;
         }
@@ -168,12 +170,14 @@ impl Model {
         // A place taken in the other view names a row of other rows: it is found again by
         // what it showed.
         // A remembered place is its row alone: a wrapped line shows from its start.
-        let top = place.map_or_else(super::present::Anchor::default, |place| match place.key {
-            Some(key) if place.view != self.presented.view => key
-                .find(&self.rows)
-                .map_or(place.top, |row| super::present::Anchor { row, ..place.top }),
-            _ => place.top,
-        });
+        let top = place
+            .as_ref()
+            .map_or_else(super::present::Anchor::default, |place| match place.key {
+                Some(key) if place.view != self.presented.view => key
+                    .find(&self.rows)
+                    .map_or(place.top, |row| super::present::Anchor { row, ..place.top }),
+                _ => place.top,
+            });
         // A file seen for the first time shows from its first change that needs the reviewer,
         // not from its first line.
         let offset = match place {
@@ -204,7 +208,7 @@ impl Model {
             self.places.insert(
                 path,
                 Place {
-                    unit: self.hunk_units().first().copied(),
+                    hunk: self.rows.hunks.get(self.hunk).cloned(),
                     top,
                     key,
                     view: self.presented.view,
@@ -457,7 +461,8 @@ impl Model {
     }
 
     /// The file after (`forward`) or before the shown one in tree order, wrapping around, that
-    /// still needs the reviewer; folded folders' files count too.
+    /// still needs the reviewer; folded folders' files count too, and a file whose open units
+    /// only wait for the approvals of their changes on the way does not.
     #[must_use]
     pub fn open_file_toward(&self, forward: bool) -> Option<String> {
         let paths = file_paths(&self.tree);
@@ -488,7 +493,42 @@ impl Model {
                         .iter()
                         .find(|node| node.path == **path)
                         .is_some_and(|node| Progress::of(&node.counts).needs_attention())
+                    && self.file_has_open_stop(path)
             })
             .map(|path| (*path).to_owned())
+    }
+
+    /// Whether `path` has a unit the reviewer can still act on: one not approved, counting
+    /// the marks still saving, and not only waiting for the approvals of all its changes.
+    fn file_has_open_stop(&self, path: &str) -> bool {
+        let runs: HashSet<UnitId> = self
+            .approving
+            .iter()
+            .chain(self.marks.iter().filter_map(|job| match &job.mark {
+                crate::state::Mark::Run(run) => Some(run),
+                crate::state::Mark::Units { .. } => None,
+            }))
+            .map(|run| run.unit)
+            .collect();
+        if runs.is_empty() {
+            return true;
+        }
+        let Some(view) = self.view() else {
+            return true;
+        };
+        view.units_of_file(path).into_iter().any(|unit| {
+            if state::is_approved(state::badge(&view, unit, &self.pending)) {
+                return false;
+            }
+            // Only a unit with a change on its way needs its comparison.
+            if !runs.contains(&unit) || self.pending.contains_key(&unit) {
+                return true;
+            }
+            !matches!(
+                view.since_reviewed(unit),
+                Ok(Some(review_core::SinceReviewed::Delta(delta)))
+                    if delta.runs().iter().all(|run| self.approving_change(&run.shown()))
+            )
+        })
     }
 }
