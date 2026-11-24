@@ -58,9 +58,9 @@ pub(super) struct Keys {
     /// Whether the keystroke interceptor resolved the key in hand, so the capture listener
     /// leaves it alone.
     intercepted: bool,
-    /// Whether the key press in hand repeats a key held down, as gpui reports it; `None` for
+    /// Whether the key press in hand repeats a key held down, as gpui reports it; never for
     /// keys that are no key press of their own, such as those the matcher replays.
-    held: Option<bool>,
+    held: bool,
     /// Hands lone modifier taps to the matcher while the window lives.
     #[expect(
         dead_code,
@@ -86,7 +86,7 @@ impl Keys {
             timer: None,
             resending: false,
             intercepted: false,
-            held: None,
+            held: false,
             taps,
         }
     }
@@ -137,9 +137,9 @@ impl ReviewApp {
             keystroke: keystroke(&event.keystroke),
             prefer_character_input: event.prefer_character_input,
         };
-        self.keys.held = Some(event.is_held);
+        self.keys.held = event.is_held;
         let claimed = self.resolve_key(&key, Some(&event.keystroke), window, cx);
-        self.keys.held = None;
+        self.keys.held = false;
         if claimed {
             cx.stop_propagation();
         }

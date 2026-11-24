@@ -1,6 +1,7 @@
 # 11. A held review key acts only on what its press began on
 
-**Status:** accepted · **Date:** 2026-11-24
+**Status:** accepted, its terminal timing superseded by
+[ADR 12](0012-every-key-a-terminal-sends-is-a-press.md) · **Date:** 2026-11-24
 
 ## Context
 

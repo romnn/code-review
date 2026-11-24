@@ -181,7 +181,7 @@ impl Host {
     }
 
     /// Delivers a key bound to `action` as a front end does, `held` saying whether it repeats.
-    fn key(&mut self, action: Action, held: Option<bool>) {
+    fn key(&mut self, action: Action, held: bool) {
         self.update(|model| model.key(action, held));
     }
 
@@ -3620,7 +3620,7 @@ fn a_key_held_across_a_change_never_marks_it() {
         model.live.as_mut().unwrap().age(Duration::from_secs(3));
         model.hold_since(Duration::from_secs(5));
     });
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, true);
     assert!(host.model().status.starts_with("Not marked"), "still held");
     assert!(host.model().marks.is_empty());
 
@@ -6074,9 +6074,9 @@ fn an_approval_of_a_change_approved_meanwhile_is_refused() {
         .unwrap();
 
     // The keys come as a front end delivers them; Space moves on to the second change at once.
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     assert_eq!(host.model().rows.hunks[host.model().hunk].at(), Some(41));
-    host.key(Action::Quit, None);
+    host.key(Action::Quit, false);
     host.settle();
     assert_eq!(host.quits, 0, "the refusal keeps the app open");
     assert_eq!(host.model().quitting, Quitting::Stopped);
@@ -6268,8 +6268,8 @@ fn space_on_a_folded_unit_shows_its_changes() {
 
 /// The selected change is kept as itself, not by its place among the unit's changes: when
 /// another window approves the change before it, the same change stays selected, and when it
-/// approves the selected one, the next is selected, which a held Space never acts on and a new
-/// press does.
+/// approves the selected one, the next is selected, which a held Space never acts on and a
+/// press does, as a terminal's every key is.
 #[test]
 fn the_selected_change_is_kept_by_where_it_is() {
     let dir = tempfile::tempdir().unwrap();
@@ -6297,47 +6297,62 @@ fn the_selected_change_is_kept_by_where_it_is() {
     assert_eq!(selected(&host), Some(31), "the same change");
 
     approve_elsewhere(0);
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     // The other window's approval shows as a change on disk would, with no key between.
     host.update(Model::refresh);
     host.settle();
     assert_eq!(selected(&host), Some(51), "the next change");
     // The press that was saving is refused; the key still held never acts on the change now
-    // selected. Only a repeat the front end reports is checked, since how long the refresh
-    // above takes decides whether a terminal's key comes within the repeat window.
-    host.key(Action::ToggleApprove, Some(true));
+    // selected.
+    host.key(Action::ToggleApprove, true);
     assert!(host.model().marks.is_empty() && !host.model().marking);
     assert!(
         host.model().status.contains("held down"),
         "{}",
         host.model().status
     );
-    host.update(|model| model.pause_keys(super::guard::REPEAT));
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     host.settle();
     assert_eq!(run_lines(host.model()), Vec::<usize>::new(), "a new press");
 }
 
-/// A key held down across the approval of a change approves that change alone: the repeats
-/// that come while it saves wait, and once the diff moved on to the next change, never act on
-/// it, whether the front end tells repeats or, as in tmux, only time does.
+/// A key held down across the approval of a change approves that change alone, where the
+/// front end tells repeats: the repeats that come while it saves wait, and once the diff moved
+/// on to the next change, never act on it.
 #[test]
 fn held_repeats_across_an_approval_approve_only_the_first_change() {
-    for held in [Some(true), None] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
-        host.dispatch(Action::FocusDiff);
-        host.key(Action::ToggleApprove, held.map(|_| false));
-        for _ in 0..5 {
-            host.key(Action::ToggleApprove, held);
-        }
-        host.settle();
-        let model = host.model();
-        assert_eq!(run_lines(model), [41], "{held:?}");
-        assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
-        assert!(model.marks.is_empty() && !model.marking);
-        assert!(model.status.contains("held down"), "{}", model.status);
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
+    host.dispatch(Action::FocusDiff);
+    host.key(Action::ToggleApprove, false);
+    for _ in 0..5 {
+        host.key(Action::ToggleApprove, true);
     }
+    host.settle();
+    let model = host.model();
+    assert_eq!(run_lines(model), [41]);
+    assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
+    assert!(model.marks.is_empty() && !model.marking);
+    assert!(model.status.contains("held down"), "{}", model.status);
+}
+
+/// Quick taps of Space, as a terminal delivers every key, approve one change each, as many
+/// as there are taps, before any of the approvals saves.
+#[test]
+fn quick_taps_approve_a_change_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 30, 50, 70]);
+    host.dispatch(Action::FocusDiff);
+    for _ in 0..4 {
+        host.key(Action::ToggleApprove, false);
+    }
+    host.settle();
+    assert_eq!(run_lines(host.model()), Vec::<usize>::new());
+    assert!(
+        !host.model().status.starts_with("Not marked"),
+        "{}",
+        host.model().status
+    );
 }
 
 /// Space, `j` and Space typed before the first approval saves act on what each sees: the first
@@ -6350,11 +6365,11 @@ fn space_j_space_before_a_save_approve_the_changes_each_sees() {
     host.dispatch(Action::FocusDiff);
     let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
     assert_eq!(selected(&host), Some(11));
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     assert_eq!(selected(&host), Some(31));
-    host.key(Action::NextHunk, None);
+    host.key(Action::NextHunk, false);
     assert_eq!(selected(&host), Some(51));
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     assert!(host.model().marking && host.model().marks.len() == 1);
     host.settle();
     assert_eq!(run_lines(host.model()), [31]);
@@ -6396,14 +6411,14 @@ fn a_recapture_keeps_the_selected_change_as_itself() {
     assert_eq!(run_lines(host.model()), [41, 61, 81]);
     assert_eq!(selected(&host), Some(61), "the same change, moved");
 
-    host.key(Action::ToggleApprove, Some(true));
+    host.key(Action::ToggleApprove, true);
     host.settle();
     assert_eq!(
         run_lines(host.model()),
         [41, 81],
         "the held key approved it"
     );
-    host.key(Action::ToggleApprove, Some(true));
+    host.key(Action::ToggleApprove, true);
     host.settle();
     assert_eq!(run_lines(host.model()), [41, 81], "and nothing after it");
 }
@@ -6417,9 +6432,9 @@ fn repeats_after_a_reveal_approve_nothing() {
     let mut host = accepted_then_edited(dir.path(), "a.rs", &[10, 40]);
     host.dispatch(Action::FocusDiff);
     host.dispatch(Action::ToggleFold);
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     assert!(host.model().status.starts_with("Unfolded"));
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, true);
     assert!(
         host.model().marks.is_empty() && !host.model().marking,
         "unfolded"
@@ -6434,13 +6449,13 @@ fn repeats_after_a_reveal_approve_nothing() {
         model.drag_list_to(List::Diff, 1e6);
         model.hunk = 0;
     });
-    host.key(Action::ToggleApprove, Some(false));
+    host.key(Action::ToggleApprove, false);
     assert!(
         host.model().status.contains("off screen"),
         "{}",
         host.model().status
     );
-    host.key(Action::ToggleApprove, Some(true));
+    host.key(Action::ToggleApprove, true);
     assert!(
         host.model().marks.is_empty() && !host.model().marking,
         "scrolled to"
@@ -6452,9 +6467,9 @@ fn repeats_after_a_reveal_approve_nothing() {
     host.dispatch(Action::NextHunk);
     host.dispatch(Action::NextHunk);
     host.dispatch(Action::ToggleBuffer);
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, false);
     assert_eq!(host.model().mode, Mode::Diff);
-    host.key(Action::ToggleApprove, None);
+    host.key(Action::ToggleApprove, true);
     assert!(
         host.model().marks.is_empty() && !host.model().marking,
         "left the buffer"

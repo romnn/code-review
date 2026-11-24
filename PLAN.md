@@ -790,8 +790,10 @@ file, the hunk, the top row and the folds through the correspondence between the
 capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
 way, and one compared with a snapshot no longer on screen is taken again. A hunk that changed
 refuses review keys for a second; a capture under way does not, since a mark marks the capture
-on screen. A held review key acts only on what its press began on, whatever moved the selection
-([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md)). A capture
+on screen. A held review key acts only on what its press began on, whatever moved the selection,
+where the front end tells a repeat; in a terminal every key is a press
+([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md),
+[ADR 12](adr/0012-every-key-a-terminal-sends-is-a-press.md)). A capture
 every 30 seconds catches what a watch cannot see, walking the tree again every 5 minutes;
 `[review] live = false` turns it off.
 
@@ -1055,10 +1057,12 @@ it, muted, so it never reads as code.
     the file that needs the reviewer, as lazygit moves on after staging a hunk, coming around
     from the file's start; once the file has nothing left to review, it stays and the status
     line names the next file to review. It never leaves the file by itself, so a held Space
-    never approves code of a file the reviewer has not seen, and a held Space never acts on the
-    hunk it moved on to: a repeat acts only on what its press began on, told by gpui, and in a
-    terminal by time
-    ([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md)). `!` flags, `za` folds, Tab, Esc or `h` goes back
+    never approves code of a file the reviewer has not seen. In review-gui a held Space never
+    acts on the hunk it moved on to: a repeat, told by gpui, acts only on what its press began
+    on. A terminal sends repeats as taps, so there every key is a press, as in lazygit, and
+    quick taps approve one change each
+    ([ADR 11](adr/0011-a-held-review-key-acts-only-on-what-its-press-began-on.md),
+    [ADR 12](adr/0012-every-key-a-terminal-sends-is-a-press.md)). `!` flags, `za` folds, Tab, Esc or `h` goes back
     to the files.
     `n`/`N` show the next and previous file in the tree's visible order, at its first hunk that
     needs the reviewer, as the tree's cursor moves: folders are no stops, a folded folder's
