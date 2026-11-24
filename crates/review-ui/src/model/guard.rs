@@ -4,27 +4,22 @@
 //! never on a change the selection moved to meanwhile, after an approval moved it on, a
 //! refresh landed it elsewhere or the press revealed what it now shows.
 //! A front end that can tell a repeat from a press says so, as review-gui does from gpui.
-//! Where nothing tells, as in a terminal, keys of one review action closer together than
-//! [`REPEAT`] are one key held down.
+//! Where nothing tells, as in a terminal, every key is a press and acts, as in lazygit: quick
+//! taps are never mistaken for a held key.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use review_core::{ShownRun, UnitId};
 
 use super::{Action, Model};
-
-/// Keys of one review action closer together than this are one key held down, where the
-/// front end cannot tell.
-pub(super) const REPEAT: Duration = Duration::from_millis(500);
 
 /// A key the front end delivered, with when it came.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KeyInput {
     /// The action it is bound to.
     pub(super) action: Action,
-    /// Whether it repeats a key held down: `Some(true)` for a repeat, `Some(false)` for a
-    /// press, `None` where the front end cannot tell.
-    pub(super) held: Option<bool>,
+    /// Whether the front end reports it as a repeat of a key held down.
+    pub(super) held: bool,
     /// When it came.
     pub(super) at: Instant,
 }
@@ -34,7 +29,7 @@ impl KeyInput {
     pub(super) fn pressed(action: Action) -> Self {
         Self {
             action,
-            held: Some(false),
+            held: false,
             at: Instant::now(),
         }
     }
@@ -46,7 +41,6 @@ pub(super) struct Press {
     action: Action,
     /// When the press began.
     pub(super) started: Instant,
-    last: Instant,
     /// What the press began on; `None` once it revealed something, which no repeat acts on.
     pub(super) target: Option<Aim>,
 }
@@ -60,9 +54,9 @@ pub(super) enum Aim {
 }
 
 impl Model {
-    /// Does what `action` does, as a key the front end delivered: `held` says whether the key
-    /// repeats one held down, `None` where the front end cannot tell.
-    pub fn key(&mut self, action: Action, held: Option<bool>) {
+    /// Does what `action` does, as a key the front end delivered: `held` says whether the front
+    /// end reports it as a repeat of a key held down, which a terminal never does.
+    pub fn key(&mut self, action: Action, held: bool) {
         self.act(KeyInput {
             action,
             held,
@@ -88,30 +82,23 @@ impl Model {
     pub(super) fn held_refusal(&mut self) -> Option<String> {
         let KeyInput { action, held, at } = self.input?;
         let target = self.aim();
-        let repeat = held.unwrap_or_else(|| {
-            self.press.as_ref().is_some_and(|press| {
-                press.action == action && at.saturating_duration_since(press.last) < REPEAT
-            })
-        });
         let refusal = || {
             Some(
                 "Not marked: the key is held down from before this showed; press it again."
                     .to_owned(),
             )
         };
-        match self.press.as_mut().filter(|_| repeat) {
+        match self.press.as_mut().filter(|_| held) {
             Some(press) => {
-                press.last = at;
                 if press.target.is_none() || press.target != target {
                     return refusal();
                 }
             }
             // A repeat of a press made before anything showed acts on nothing.
-            None if repeat => {
+            None if held => {
                 self.press = Some(Press {
                     action,
                     started: at,
-                    last: at,
                     target: None,
                 });
                 return refusal();
@@ -120,7 +107,6 @@ impl Model {
                 self.press = Some(Press {
                     action,
                     started: at,
-                    last: at,
                     target,
                 });
             }
@@ -152,21 +138,12 @@ impl Model {
 
 #[cfg(test)]
 impl Model {
-    /// Moves the press in hand `by` into the past, as if the key was let go that long ago.
-    pub(super) fn pause_keys(&mut self, by: Duration) {
-        if let Some(press) = &mut self.press {
-            press.last = press.last.checked_sub(by).unwrap_or(press.last);
-            press.started = press.started.checked_sub(by).unwrap_or(press.started);
-        }
-    }
-
-    /// Holds a review key down since `ago`, on what the keys act on now, repeating until now.
-    pub(super) fn hold_since(&mut self, ago: Duration) {
+    /// Holds a review key down since `ago`, on what the keys act on now.
+    pub(super) fn hold_since(&mut self, ago: std::time::Duration) {
         let now = Instant::now();
         self.press = Some(Press {
             action: Action::ToggleApprove,
             started: now.checked_sub(ago).unwrap_or(now),
-            last: now,
             target: self.aim(),
         });
     }

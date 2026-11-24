@@ -305,13 +305,7 @@ impl ReviewApp {
 
     /// Runs `action` on the model as a key press resolved to it, `held` saying whether the key
     /// repeats one held down.
-    fn key(
-        &mut self,
-        action: Action,
-        held: Option<bool>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn key(&mut self, action: Action, held: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.update_model(window, cx, |model| model.key(action, held));
     }
 
