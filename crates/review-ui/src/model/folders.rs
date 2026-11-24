@@ -103,9 +103,10 @@ impl Model {
 
     /// Saves the view state in the background when it differs from what was last saved: the
     /// folded folders whenever they change, the place when the reviewer quits. Runs after every
-    /// update, however it changed.
+    /// update, however it changed, until quitting is authorized, after which the process
+    /// would exit without the save.
     pub(super) fn save_view_state(&mut self) {
-        if !self.folders.active || self.folders.saving {
+        if !self.folders.active || self.folders.saving || self.quitting == super::Quitting::Done {
             return;
         }
         let mut collapsed: Vec<String> = self.tree_collapsed.iter().cloned().collect();

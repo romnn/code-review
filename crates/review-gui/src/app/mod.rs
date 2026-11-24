@@ -30,6 +30,7 @@ use review_ui::model::{
     SheetStep, Updated, file_paths,
 };
 use review_ui::text::{self, Pane};
+use review_ui::worker;
 
 mod chrome;
 mod ink;
@@ -154,6 +155,8 @@ enum Focus {
 /// The review window.
 pub struct ReviewApp {
     driver: Driver,
+    /// Writes the model's diagnostics to standard error, in order, off the UI thread.
+    log: worker::Sender<String>,
     tree_focus: FocusHandle,
     diff_focus: FocusHandle,
     buffer_focus: FocusHandle,
@@ -221,6 +224,7 @@ impl ReviewApp {
         fonts: Fonts,
         settings: Settings,
         startup: Startup,
+        log: worker::Sender<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -239,6 +243,7 @@ impl ReviewApp {
             focused: Focus::Area(model.area()),
             keys: keys::Keys::new(&model.settings.keymap, cx),
             driver: Driver::new(model),
+            log,
             tree_focus,
             diff_focus: cx.focus_handle(),
             buffer_focus: cx.focus_handle(),
@@ -388,7 +393,7 @@ impl ReviewApp {
                 // QA mode quits once it has answered the command that made the app quit.
                 Effect::Quit if self.answering => {}
                 Effect::Quit => cx.quit(),
-                Effect::Log(message) => eprintln!("review-gui: {message}"),
+                Effect::Log(message) => self.log.send(message),
             }
         }
     }

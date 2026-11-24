@@ -22,6 +22,7 @@ use super::live::{Captured, Missed, Started, WaitedFor};
 use super::marks::{Marked, Refreshed};
 use super::picker::{Found, PreviewText, Query, Unchanged};
 use super::pulls::Looked;
+use super::remember::ConfigSaved;
 use super::sync::Tick;
 use super::{Model, Opened};
 use crate::rows::FullText;
@@ -66,8 +67,8 @@ pub(super) enum Subject {
 pub(super) enum Because {
     /// It opens the review, before which nothing showed.
     Opening,
-    /// It reports a save, of a mark or of the folded folders, which is always recorded: a
-    /// failure must reach the reviewer, and quitting waits for it.
+    /// It reports a save, of a mark, of the folded folders or of a setting, which is always
+    /// recorded: a failure must reach the reviewer, and quitting waits for it.
     Save,
     /// It brings the review's history up to date, which only adds what is newer.
     Refresh,
@@ -96,6 +97,8 @@ pub(super) enum Outcome {
     Refreshed(Refreshed),
     /// The folded folders saved, or why not.
     FoldersSaved(Result<(), review_core::Error>),
+    /// An edit of the configuration file saved, or why not.
+    ConfigSaved(ConfigSaved),
     /// Where a definition is, or why the lookup failed.
     Definition(Result<Definition, String>),
     /// What a picker's search found.
@@ -300,9 +303,10 @@ impl Model {
             Outcome::Marked(_) => self.marking = false,
             Outcome::Refreshed(_) => {
                 self.refreshing = false;
-                *self.sync.step.lock() = None;
+                self.sync.step.set(None);
             }
             Outcome::FoldersSaved(_) => self.folders.saving = false,
+            Outcome::ConfigSaved(_) => self.config_saving = false,
             Outcome::Definition(_) => {
                 self.looking_up = false;
                 // Trust was revoked while the lookup held the servers, so they stop now.
@@ -363,6 +367,7 @@ impl Model {
             Outcome::Marked(marked) => self.marked(marked),
             Outcome::Refreshed(refreshed) => self.refreshed(refreshed),
             Outcome::FoldersSaved(saved) => self.folders_saved(saved),
+            Outcome::ConfigSaved(saved) => self.config_saved(saved),
             Outcome::Definition(found) => self.definition_found(found),
             Outcome::Found(found) => self.picker_found(found),
             Outcome::PreviewText(text) => self.preview_read(text),

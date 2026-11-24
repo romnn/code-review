@@ -4,9 +4,21 @@
 //! terminals ignore that request, such as macOS Terminal and the VTE-based ones like GNOME
 //! Terminal, or have it turned off, so on a local session the text also goes to the platform's
 //! clipboard command, as micromux does.
+//!
+//! The commands run on a thread of their own, one copy at a time in the order made, so the
+//! main loop never waits for one and a later copy normally wins.
+//! That holds only as far as the commands keep it: `xsel`'s daemon may take the selection
+//! after its parent exits, so with `xsel` the order is best effort.
 
 use std::io::Write as _;
 use std::process::Stdio;
+use std::time::Duration;
+
+use review_ui::worker::Worker;
+
+/// How long the app waits at exit, once the terminal is back, for the copies made last to
+/// reach their commands.
+pub const DRAIN_DEADLINE: Duration = Duration::from_millis(500);
 
 /// Which clipboard a copy goes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +27,21 @@ pub enum Board {
     Clipboard,
     /// Linux's primary selection, which the middle button pastes.
     Primary,
+}
+
+/// Text to put on a clipboard.
+#[derive(Debug)]
+pub struct Clip {
+    /// The text.
+    pub text: String,
+    /// The clipboard it goes to.
+    pub board: Board,
+}
+
+/// Starts the thread that puts each [`Clip`] it is handed on its clipboard, in order.
+#[must_use]
+pub fn start() -> Worker<Clip> {
+    Worker::start(copy_locally)
 }
 
 /// A clipboard command and its arguments, which takes the text on standard input.
@@ -93,10 +120,15 @@ fn over_ssh() -> bool {
         .any(|name| std::env::var_os(name).is_some())
 }
 
-/// Hands `text` to the first clipboard command for `board` that runs, without waiting for it,
-/// unless the app runs over ssh; a missing or failing command is skipped silently, since the
-/// terminal may have copied the text already.
-pub fn copy_locally(text: String, board: Board) {
+/// Hands the clip's text to the first clipboard command for its board that runs and waits for
+/// the command to exit, unless the app runs over ssh; a missing or failing command is skipped
+/// silently, since the terminal may have copied the text already.
+///
+/// The command is never stopped.
+/// One that hangs only delays the copies after it, while one stopped early can leave the text
+/// behind, as `wl-copy` does with the temporary file it reads the text into.
+fn copy_locally(clip: Clip) {
+    let Clip { text, board } = clip;
     if over_ssh() {
         return;
     }
@@ -114,14 +146,13 @@ pub fn copy_locally(text: String, board: Board) {
         let Ok(mut child) = command.spawn() else {
             continue;
         };
-        std::thread::spawn(move || {
-            if let Some(mut stdin) = child.stdin.take() {
-                // A command that stopped reading copied nothing more that could be saved.
-                stdin.write_all(text.as_bytes()).ok();
-            }
-            // Reap the command once it exits, so it does not linger as a zombie.
-            child.wait().ok();
-        });
+        if let Some(mut stdin) = child.stdin.take() {
+            // A command that stopped reading copied nothing more that could be saved.
+            stdin.write_all(text.as_bytes()).ok();
+        }
+        // Waiting for the command keeps the next copy from landing before this one, and reaps
+        // the command, so it does not linger as a zombie.
+        child.wait().ok();
         return;
     }
 }

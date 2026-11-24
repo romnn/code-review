@@ -54,7 +54,14 @@ impl Model {
     }
 
     /// Does what the key `input` does; a key of another action ends a review key's press.
+    ///
+    /// Once quitting is authorized no key does anything: the app is going away, and a key then,
+    /// such as one a key sequence hands on right after replaying the quit, would start work the
+    /// process exits without.
     pub(super) fn act(&mut self, input: KeyInput) {
+        if self.quitting == super::Quitting::Done {
+            return;
+        }
         if self
             .press
             .as_ref()

@@ -1,7 +1,7 @@
 //! Quitting, once what the reviewer did is saved.
 //!
-//! The app quits only once the marks queued and in flight and the folded folders are saved,
-//! and the status line says what it waits for meanwhile.
+//! The app quits only once the marks queued and in flight, the folded folders and the settings
+//! changed in the app are saved, and the status line says what it waits for meanwhile.
 //! While it waits it takes no new marks, so what it waits for can only shrink.
 //! Nothing the reviewer marked is ever dropped, however often they ask.
 //!
@@ -35,8 +35,8 @@ pub enum Quitting {
     /// Nobody asked to quit.
     #[default]
     No,
-    /// Asked to quit; the marks queued and in flight, the folded folders and the place are
-    /// saved first.
+    /// Asked to quit; the marks queued and in flight, the folded folders, the place and the
+    /// settings changed in the app are saved first.
     ///
     /// A failure stops only a [`QuitKind::Interactive`] wait. A reviewer who quits again after
     /// a failure stopped the quitting has seen it, so their quit waits as an unattended one
@@ -59,8 +59,8 @@ impl Quitting {
 }
 
 impl Model {
-    /// Quits once the marks queued and in flight and the folded folders are saved, as `kind`
-    /// asks; see the module documentation.
+    /// Quits once the marks queued and in flight, the folded folders and the settings are
+    /// saved, as `kind` asks; see the module documentation.
     ///
     /// The update that saves the last of them queues [`Effect::Quit`], and the status line
     /// says what the app waits for meanwhile.
@@ -86,7 +86,7 @@ impl Model {
         if !self.quitting.waits() {
             return;
         }
-        if !self.marking && self.marks.is_empty() && !self.folders.busy() {
+        if !self.marking && self.marks.is_empty() && !self.folders.busy() && !self.saving_config() {
             self.quitting = Quitting::Done;
             self.effect(Effect::Quit);
             return;
@@ -103,6 +103,8 @@ impl Model {
         let saving = self.marks.len() + usize::from(self.marking);
         if saving > 0 {
             format!("Saving {} before quitting…", plural(saving, "mark"))
+        } else if self.saving_config() {
+            "Saving your settings before quitting…".to_owned()
         } else {
             "Saving the folded folders and your place before quitting…".to_owned()
         }

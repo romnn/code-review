@@ -8,7 +8,7 @@
 mod app;
 mod color;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use color_eyre::eyre;
@@ -18,6 +18,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, TitleBar};
 use review_ui::front_end::FrontEnd;
+use review_ui::worker::Worker;
 use review_ui::{config, launch, model};
 
 /// Review a pull request, a range or the working tree.
@@ -131,6 +132,10 @@ fn main() -> eyre::Result<()> {
         (None, Some(_), _) => "Review of the working tree".to_owned(),
         (None, None, false) => "Review".to_owned(),
     };
+    // The model's diagnostics go to standard error from a thread of their own, which a
+    // terminal that stopped reading cannot block the window with.
+    let log = Worker::start(|message: String| eprintln!("review-gui: {message}"));
+    let app_log = log.sender();
     gpui_platform::application()
         .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
@@ -159,7 +164,9 @@ fn main() -> eyre::Result<()> {
                     ..TitleBar::window_options()
                 },
                 |window, cx| {
-                    cx.new(|cx| app::ReviewApp::new(opener, fonts, settings, startup, window, cx))
+                    cx.new(|cx| {
+                        app::ReviewApp::new(opener, fonts, settings, startup, app_log, window, cx)
+                    })
                 },
             );
             if let Err(err) = window {
@@ -168,5 +175,8 @@ fn main() -> eyre::Result<()> {
             }
             cx.activate(true);
         });
+    // The process ends once the app quits, which would cut the last diagnostics short; a
+    // standard error nobody reads may block, so the wait is bounded.
+    log.flush(Duration::from_secs(1));
     Ok(())
 }

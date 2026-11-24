@@ -60,6 +60,7 @@ pub mod present;
 mod preview;
 mod pulls;
 mod quit;
+mod remember;
 mod search;
 mod select;
 pub mod settings;
@@ -530,6 +531,10 @@ pub struct Model {
     pub marks: VecDeque<MarkJob>,
     /// Whether a mark is being saved.
     pub marking: bool,
+    /// Edits of the configuration file waiting to be saved, one at a time in order.
+    config_edits: VecDeque<remember::ConfigEdit>,
+    /// Whether an edit of the configuration file is being saved.
+    config_saving: bool,
     /// The change whose approval is saving now: with those queued, it shows approved until
     /// saved, and a press on it waits for it rather than asking for it again, which the engine
     /// would refuse.
@@ -655,6 +660,8 @@ impl Model {
             live: None,
             marks: VecDeque::new(),
             marking: false,
+            config_edits: VecDeque::new(),
+            config_saving: false,
             approving: None,
             input: None,
             press: None,
@@ -765,6 +772,7 @@ impl Model {
         self.publishes()
             || self.marking
             || !self.marks.is_empty()
+            || self.saving_config()
             || self.looking_up
             || self.highlighting > 0
             || self.highlights.running()
@@ -1212,12 +1220,9 @@ impl Model {
         self.tree_cells
     }
 
-    /// Writes the pane width to the configuration file, for the next launch: the front end's
-    /// own width, or `"fit"`, and whether the files show.
+    /// Writes the pane width to the configuration file in the background, for the next
+    /// launch: the front end's own width, or `"fit"`, and whether the files show.
     pub fn remember_layout(&mut self) {
-        let Some(path) = self.settings.config_path.clone() else {
-            return;
-        };
         let layout = self.layout;
         let sidebar = match layout.sidebar {
             crate::panes::SidebarWidth::Fit => "fit".into(),
@@ -1230,7 +1235,7 @@ impl Model {
                 width.into()
             }
         };
-        let values = [
+        let values = vec![
             crate::config::Remembered {
                 table: "layout",
                 key: self.settings.front_end.sidebar_key(),
@@ -1242,9 +1247,7 @@ impl Model {
                 value: layout.sidebar_visible.into(),
             },
         ];
-        if let Err(err) = crate::config::remember(&path, &values) {
-            self.fail(format!("Could not remember the pane width: {err}"));
-        }
+        self.save_config(values, "Could not remember the pane width".to_owned());
     }
 
     /// Reads, in the background, the head text of the shown revision's files that are not
