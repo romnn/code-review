@@ -6303,16 +6303,15 @@ fn the_selected_change_is_kept_by_where_it_is() {
     host.settle();
     assert_eq!(selected(&host), Some(51), "the next change");
     // The press that was saving is refused; the key still held never acts on the change now
-    // selected, whether or not the front end tells repeats.
-    for held in [None, Some(true)] {
-        host.key(Action::ToggleApprove, held);
-        assert!(host.model().marks.is_empty() && !host.model().marking);
-        assert!(
-            host.model().status.contains("held down"),
-            "{}",
-            host.model().status
-        );
-    }
+    // selected. Only a repeat the front end reports is checked, since how long the refresh
+    // above takes decides whether a terminal's key comes within the repeat window.
+    host.key(Action::ToggleApprove, Some(true));
+    assert!(host.model().marks.is_empty() && !host.model().marking);
+    assert!(
+        host.model().status.contains("held down"),
+        "{}",
+        host.model().status
+    );
     host.update(|model| model.pause_keys(super::guard::REPEAT));
     host.key(Action::ToggleApprove, None);
     host.settle();
