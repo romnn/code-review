@@ -6,8 +6,6 @@
 //! - `synced.json`: when the review last read its target's state, written atomically.
 //! - `analysis/<base>-<head>.json`: content-addressed analyses, written atomically.
 //! - `analysis/<base>-<head>--<base>-<head>.json`: content-addressed correspondences.
-//! - `worktrees/<tree>`: read-only copies of a snapshot's files, for browsing it and for the
-//!   tools that read it.
 //! - `view/<front-end>.json`: each front end's own view state, such as folded folders, written
 //!   atomically and never part of the review's state.
 
@@ -26,6 +24,8 @@ use crate::ids::{ObjectId, ReviewKey};
 /// The paths of one review's directory.
 #[derive(Debug, Clone)]
 pub struct ReviewDir {
+    /// The data directory it is in.
+    data: PathBuf,
     root: PathBuf,
 }
 
@@ -34,8 +34,15 @@ impl ReviewDir {
     #[must_use]
     pub fn new(data_dir: &Path, key: &ReviewKey) -> Self {
         Self {
+            data: data_dir.to_path_buf(),
             root: data_dir.join("reviews").join(key.encoded()),
         }
+    }
+
+    /// Returns the data directory the review is in, which holds other reviews too.
+    #[must_use]
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data
     }
 
     /// Returns the review's directory.
@@ -107,12 +114,6 @@ impl ReviewDir {
             return Err(Error::InvalidFrontEnd(front_end.to_owned()));
         }
         Ok(self.root.join("view").join(format!("{front_end}.json")))
-    }
-
-    /// Returns the path of the read-only copy of the files of `tree`.
-    #[must_use]
-    pub fn worktree(&self, tree: &ObjectId) -> PathBuf {
-        self.root.join("worktrees").join(tree.as_str())
     }
 }
 
@@ -200,69 +201,62 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     result
 }
 
-/// Takes the write permission away from every file and directory at or below `path`, without
-/// following symbolic links, directories last.
-pub(crate) fn make_read_only(path: &Path) -> Result<(), Error> {
+/// Removes the directory at `path` and everything below it, giving the owner the write
+/// permission first wherever it lacks it; a missing directory is no error.
+///
+/// Older versions wrote read-only copies of the reviewed files into a review's data, which a
+/// plain removal cannot remove: on Unix their directories refuse to lose entries, and on Windows
+/// a read-only file refuses to be deleted.
+pub(crate) fn remove_read_only(path: &Path) -> Result<(), Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(Error::io("read", path, source)),
+    }
+    make_writable(path)?;
+    std::fs::remove_dir_all(path).map_err(|source| Error::io("remove", path, source))
+}
+
+/// Gives the owner the write permission on `path` and everything below it, without following
+/// symbolic links.
+fn make_writable(path: &Path) -> Result<(), Error> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|source| Error::io("read", path, source))?;
     if metadata.is_symlink() {
         return Ok(());
     }
+    if metadata.permissions().readonly() {
+        set_writable(path, &metadata)?;
+    }
     if metadata.is_dir() {
         for entry in std::fs::read_dir(path).map_err(|source| Error::io("read", path, source))? {
             let entry = entry.map_err(|source| Error::io("read", path, source))?;
-            make_read_only(&entry.path())?;
+            make_writable(&entry.path())?;
         }
     }
-    set_writable(path, &metadata, false)
+    Ok(())
 }
 
-/// Removes the directory at `path` and everything below it, giving back the write permission
-/// [`make_read_only`] took first; a missing directory is no error.
-pub(crate) fn remove_read_only(path: &Path) -> Result<(), Error> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => return Err(Error::io("read", path, source)),
-    };
-    if metadata.is_dir() && !metadata.is_symlink() {
-        set_writable(path, &metadata, true)?;
-        for entry in std::fs::read_dir(path).map_err(|source| Error::io("read", path, source))? {
-            let entry = entry.map_err(|source| Error::io("read", path, source))?;
-            let child = entry.path();
-            let kind = entry
-                .file_type()
-                .map_err(|source| Error::io("read", &child, source))?;
-            if kind.is_dir() {
-                remove_read_only(&child)?;
-            }
-        }
-        std::fs::remove_dir_all(path).map_err(|source| Error::io("remove", path, source))
-    } else {
-        std::fs::remove_file(path).map_err(|source| Error::io("remove", path, source))
-    }
-}
-
-/// Gives the owner of `path` the write permission, or takes it away from everyone.
+/// Gives the owner of `path`, whose metadata is `metadata`, the write permission.
 #[cfg(unix)]
-fn set_writable(path: &Path, metadata: &std::fs::Metadata, writable: bool) -> Result<(), Error> {
+fn set_writable(path: &Path, metadata: &std::fs::Metadata) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let mode = metadata.permissions().mode();
-    let mode = if writable {
-        mode | 0o200
-    } else {
-        mode & !0o222
-    };
+    let mode = metadata.permissions().mode() | 0o200;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .map_err(|source| Error::io("change permissions of", path, source))
 }
 
-/// Sets or clears the read-only attribute of `path`.
+/// Clears the read-only attribute of `path`, whose metadata is `metadata`.
 #[cfg(not(unix))]
-fn set_writable(path: &Path, metadata: &std::fs::Metadata, writable: bool) -> Result<(), Error> {
+fn set_writable(path: &Path, metadata: &std::fs::Metadata) -> Result<(), Error> {
     let mut permissions = metadata.permissions();
-    permissions.set_readonly(!writable);
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows has no mode bits to make world-writable: clearing the attribute only \
+                  lets the file be deleted"
+    )]
+    permissions.set_readonly(false);
     std::fs::set_permissions(path, permissions)
         .map_err(|source| Error::io("change permissions of", path, source))
 }

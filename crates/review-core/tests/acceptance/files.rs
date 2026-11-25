@@ -346,13 +346,12 @@ fn capture_reads_a_read_only_index() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A configured filter driver never runs while a capture reads the working tree or a revision
-/// is checked out for browsing, nor does a hook, and a file the driver would filter keeps its
-/// staged entry.
+/// A configured filter driver never runs while a capture reads the working tree, nor does the
+/// hook git runs whenever it writes an index, which a capture does, and a file the driver would
+/// filter keeps its staged entry.
 ///
 /// While the working tree is captured, the `.gitattributes` that selects the driver is deleted
-/// on disk, so only the index's and `HEAD`'s attributes still name it; the revision checked out
-/// has it again, so the checkout would select the driver.
+/// on disk, so only the index's and `HEAD`'s attributes still name it.
 #[cfg(unix)]
 #[test]
 fn filters_never_run_and_filtered_files_keep_their_staged_entry() -> eyre::Result<()> {
@@ -370,6 +369,18 @@ fn filters_never_run_and_filtered_files_keep_their_staged_entry() -> eyre::Resul
     repo.git(&["config", "filter.marker.clean", &command])?;
     repo.git(&["config", "filter.marker.smudge", &command])?;
     repo.git(&["config", "filter.marker.required", "true"])?;
+
+    let hook_marker = repo.data_dir().join("hook-ran");
+    let hook = repo.path().join(".git/hooks/post-index-change");
+    std::fs::create_dir_all(repo.path().join(".git/hooks"))?;
+    std::fs::write(
+        &hook,
+        indoc::formatdoc! {"
+            #!/bin/sh
+            touch '{}'
+        ", hook_marker.display()},
+    )?;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
 
     std::fs::remove_file(repo.path().join(".gitattributes"))?;
     repo.write("data.dat", "edited\n")?;
@@ -400,45 +411,7 @@ fn filters_never_run_and_filtered_files_keep_their_staged_entry() -> eyre::Resul
         eq("two")
     );
     assert!(!marker.exists(), "a capture ran the filter");
-
-    // Checking out a revision whose attributes select the driver, for browsing, runs no smudge
-    // filter either, nor the hook git runs whenever it writes an index, which checking out
-    // does.
-    repo.write(".gitattributes", "*.dat filter=marker\n")?;
-    let hook_marker = repo.data_dir().join("hook-ran");
-    let hook = repo.path().join(".git/hooks/post-index-change");
-    std::fs::create_dir_all(repo.path().join(".git/hooks"))?;
-    std::fs::write(
-        &hook,
-        indoc::formatdoc! {"
-            #!/bin/sh
-            touch '{}'
-        ", hook_marker.display()},
-    )?;
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
-    let review = Review::open(
-        repo.data_dir(),
-        git,
-        ReviewTarget::Worktree {
-            base: "HEAD".to_owned(),
-        },
-    )?;
-    review.refresh()?;
-    let history = review.history()?;
-    let revisions = history.revisions();
-    let record = revisions.last().ok_or_else(|| eyre::eyre!("no revision"))?;
-    let browsing = review.worktree(record)?;
-    assert_that!(
-        std::fs::read_to_string(browsing.join(".gitattributes"))?,
-        eq("*.dat filter=marker\n")
-    );
-    assert_that!(
-        std::fs::read_to_string(browsing.join("data.dat"))?,
-        eq("staged\n")
-    );
-    review.remove_worktree(record)?;
-    assert!(!marker.exists(), "a checkout ran the filter");
-    assert!(!hook_marker.exists(), "a capture or a checkout ran a hook");
+    assert!(!hook_marker.exists(), "a capture ran a hook");
     Ok(())
 }
 

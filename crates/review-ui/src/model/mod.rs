@@ -82,7 +82,7 @@ pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
 pub use select::{Hit, TextPress, list_of};
 pub use sync::{Sync, SyncStep};
-pub use trust::{Grant, Trust};
+pub use trust::Trust;
 
 /// How many unchanged lines each expansion of a gap reveals.
 const GAP_STEP: usize = 20;
@@ -490,9 +490,6 @@ pub struct Model {
     /// work done for one snapshot never lands on another, even under the same revision number,
     /// as successive live captures of the working tree have.
     shown: u64,
-    /// The generation of the snapshot shown when its head became current, which names the
-    /// showing the language servers run for; see the `trust` module.
-    showing: u64,
     /// The version of the newest history installed; an older one knows less, such as a mark
     /// saved since, and is never installed over it.
     version: u64,
@@ -546,13 +543,13 @@ pub struct Model {
     pub(crate) highlighting: usize,
     /// The shown revision's highlighting in the background.
     highlights: highlights::Highlights,
-    /// Whether language servers may run on the snapshot on screen; see the `trust` module.
+    /// Whether language servers may run in the checkout; see the `trust` module.
     pub trust: Trust,
     /// The trust epoch, which lookups check as they start a server; see the `trust` module.
     trust_epoch: Arc<AtomicU64>,
-    /// The head of the snapshot a confirming second press would trust, while trusting awaits
-    /// one; another snapshot showing meanwhile drops it.
-    trust_pending: Option<ObjectId>,
+    /// Whether the watch on the grant is due, while a language server may run; see the `trust`
+    /// module.
+    guarding: bool,
     /// The definition lookup that waits for the trust it asked for, which goes on once granted
     /// while its buffer and snapshot still show and no other key came.
     trust_resumes: Option<buffer::Lookup>,
@@ -627,7 +624,6 @@ impl Model {
             picker_runs: 0,
             field_ids: 0,
             shown: 0,
-            showing: 0,
             version: 0,
             live: None,
             replaced: None,
@@ -654,7 +650,7 @@ impl Model {
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
             trust: Trust::Denied,
             trust_epoch: Arc::default(),
-            trust_pending: None,
+            guarding: false,
             trust_resumes: None,
             selection: None,
             dragging: None,
@@ -1469,7 +1465,7 @@ pub(super) struct Opened {
     /// Why the saved view state was ignored, for the developer's log.
     ignored: Option<String>,
     found: Option<String>,
-    /// Whether tools may run on the snapshot shown first.
+    /// Whether tools may run in the checkout.
     trust: Trust,
     /// Whether the review follows the working tree, under a session the engine holds, or why
     /// it cannot.
@@ -1496,14 +1492,8 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
         following,
     } = opener()?;
     let revision = history.current().ok_or("the review has no revision yet")?;
-    let trust = tracing::info_span!("read_trust").in_scope(|| {
-        history
-            .view(revision)
-            .ok()
-            .and_then(|view| view.record().map(|record| record.head.clone()))
-            .and_then(|head| review.repo().tree_of(&head).ok())
-            .map_or(Trust::Denied, |tree| trust::trust_of(&review, &tree))
-    });
+    let checkout = review.checkout_review().map_err(|err| live::causes(&err))?;
+    let trust = tracing::info_span!("read_trust").in_scope(|| trust::trust_of(checkout.as_ref()));
     let (session, following) = match following {
         Some(following) => {
             let opening = live::Opening::read(&review, &history, &following);
@@ -1546,7 +1536,7 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
     };
     let follows = session.as_ref().map(Option::is_some).map_err(String::clone);
     Ok(Opened {
-        engine: engine::Engine::new(review, session.ok().flatten()),
+        engine: engine::Engine::new(review, checkout, session.ok().flatten()),
         meta,
         view_state,
         ignored,

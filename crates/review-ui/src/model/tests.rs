@@ -172,6 +172,7 @@ impl Host {
                             super::sync::Tick::Minute
                                 | super::sync::Tick::Reconcile
                                 | super::sync::Tick::PullRequest
+                                | super::sync::Tick::Guard
                         )
                     ) =>
                 {
@@ -652,12 +653,12 @@ fn a_preview_read_for_a_closed_picker_is_dropped_centrally() {
 }
 
 /// With language servers turned off, go to definition says so and starts nothing, even in a
-/// trusted review.
+/// trusted checkout.
 #[test]
 fn go_to_definition_is_off_without_language_servers() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open_with(
-        demo(dir.path()),
+    let (mut host, _repo) = live_host_with(
+        dir.path(),
         Settings {
             language_servers: false,
             ..settings()
@@ -682,7 +683,7 @@ fn go_to_definition_is_off_without_language_servers() {
 #[test]
 fn an_untrusted_lookup_is_dropped_centrally() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
@@ -733,11 +734,12 @@ fn a_file_read_for_another_revision_is_dropped_centrally() {
     assert_eq!(host.model().buffer.as_ref().unwrap().title(), "README.md");
 }
 
-/// Trusts the review on screen, which no review is until the reviewer decides, as `Ctrl+T`
-/// pressed twice does, and waits for the grant to be recorded.
+/// Trusts the checkout, which no checkout is until the reviewer decides, as `Ctrl+T` and the
+/// trust question's `c` do, and waits for the grant to be recorded.
 fn trust(host: &mut Host) {
     host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::ToggleTrust);
+    assert_eq!(host.model().overlay, Some(Overlay::Trust));
+    host.dispatch(Action::TrustCheckout);
     host.settle();
     assert!(host.model().trust.granted(), "{}", host.model().status);
 }
@@ -759,9 +761,9 @@ fn serve(
     )
 }
 
-/// Opens the selected file in the buffer with the cursor on a name, ready for a lookup.
+/// Opens `a.rs` in the buffer with the cursor on a name, ready for a lookup.
 fn buffer_on_a_name(host: &mut Host) {
-    host.update(|model| model.show_file("src/engine.rs"));
+    host.update(|model| model.show_file("a.rs"));
     host.dispatch(Action::FocusDiff);
     host.dispatch(Action::ToggleBuffer);
     host.dispatch(Action::NextWord);
@@ -811,7 +813,7 @@ fn definition() -> Definition {
 #[test]
 fn a_definition_after_trust_is_revoked_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
@@ -835,7 +837,7 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
     assert!(
         host.model()
             .status
-            .starts_with("Trust in this snapshot revoked"),
+            .starts_with("Trust in this checkout revoked"),
         "{}",
         host.model().status
     );
@@ -865,7 +867,7 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
 #[test]
 fn a_definition_lands_only_where_it_was_asked() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
     buffer_on_a_name(&mut host);
 
@@ -3705,12 +3707,17 @@ fn two_hunks(top: &str, bottom: &str) -> String {
 /// The window over a live review of `a.rs` changed at its top and bottom, with the diff of
 /// `a.rs` showing; returns it with the working tree.
 fn live_host(dir: &Path) -> (Host, std::path::PathBuf) {
+    live_host_with(dir, settings())
+}
+
+/// [`live_host`] with `settings`.
+fn live_host_with(dir: &Path, settings: Settings) -> (Host, std::path::PathBuf) {
     let (review, repo) = worktree_review_of(
         dir,
         &[("a.rs", &two_hunks("1", "2"))],
         &[("a.rs", &two_hunks("one", "two"))],
     );
-    let mut host = Host::open(review);
+    let mut host = Host::open_with(review, settings);
     assert!(host.model().following(), "a working-tree review follows it");
     assert_eq!(host.waits.len(), 1, "the watch waits for changes");
     host.update(|model| model.show_file("a.rs"));
@@ -4138,52 +4145,72 @@ fn only_a_working_tree_review_follows_it() {
     assert!(host.waits.is_empty());
 }
 
-/// A review of the working tree is trusted one snapshot at a time: `Ctrl+T` grants the
-/// snapshot on screen, never the whole review, and a capture of other code is untrusted again.
+/// A review of the working tree against a fixed ref shares the checkout's one grant, which
+/// covers the code the checkout holds after later edits.
 #[test]
-fn a_working_tree_review_is_trusted_one_snapshot_at_a_time() {
+fn a_working_tree_review_shares_the_checkouts_trust() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
     trust(&mut host);
     assert!(
-        host.model().status.starts_with("Trusted this snapshot"),
+        host.model().status.starts_with("Trusted this checkout"),
         "{}",
         host.model().status
     );
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
-    assert!(
-        !host.review.trust().unwrap().trusted,
-        "no grant for the whole review"
-    );
+    assert!(checkout_review(&host).trusted().unwrap());
 
     edit_and_capture(&mut host, &repo, "uno", "two");
-    assert_eq!(
-        host.model().trust,
-        Trust::Denied,
-        "the grant was for the old code"
-    );
+    assert_eq!(host.model().trust, Trust::Granted, "the grant covers edits");
 }
 
-/// A confirmation of trust asked for on one snapshot does not trust another that shows before
-/// the second press: that press asks again, for the snapshot on screen.
-#[test]
-fn a_trust_confirmation_holds_only_for_its_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut host, repo) = live_host(dir.path());
-    host.dispatch(Action::ToggleTrust);
-    assert!(host.model().status.contains("Press Ctrl+T again"));
+/// The review of the working tree's checkout, which holds the trust in it.
+fn checkout_review(host: &Host) -> Review {
+    host.review
+        .checkout_review()
+        .unwrap()
+        .expect("the review has a checkout")
+}
 
-    edit_and_capture(&mut host, &repo, "uno", "two");
-    host.dispatch(Action::ToggleTrust);
-    assert_eq!(
-        host.model().trust,
-        Trust::Denied,
-        "the other snapshot is not trusted"
+/// A review of a range has no code on disk: go to definition says so before it asks for trust,
+/// and `Ctrl+T` says why there is nothing to trust; nothing runs.
+#[test]
+fn a_review_without_code_on_disk_asks_for_no_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleBuffer);
+    host.dispatch(Action::NextWord);
+    assert!(!crate::paint::bars::hint_available(
+        host.model(),
+        "GoToDefinition"
+    ));
+
+    host.dispatch(Action::GoToDefinition);
+    let model = host.model();
+    assert_eq!(model.overlay, None);
+    assert!(!model.looking_up);
+    assert!(host.jobs.is_empty(), "a lookup runs");
+    assert!(
+        model
+            .status
+            .starts_with("Go to definition needs the code on disk. Language servers run only"),
+        "{}",
+        model.status
     );
-    assert!(host.model().status.contains("Press Ctrl+T again"));
+
     host.dispatch(Action::ToggleTrust);
-    host.settle();
-    assert!(host.model().trust.granted());
+    let model = host.model();
+    assert_eq!(model.overlay, None);
+    assert_eq!(model.trust, Trust::Denied);
+    assert!(host.jobs.is_empty(), "a decision is saved");
+    assert!(
+        model
+            .status
+            .starts_with("Language servers run only in a checkout"),
+        "{}",
+        model.status
+    );
 }
 
 /// Whether the process `id` has stopped: gone, or a zombie that only its owner's wait reaps.
@@ -4195,19 +4222,22 @@ fn stopped(id: u32) -> bool {
     })
 }
 
-/// A language server stops as it leaves the servers, here when another head shows, even while
-/// a lookup still holds it, so no server runs where a revocation cannot find it.
+/// A language server runs in the checkout across the captures that show, so it indexes once,
+/// and a lookup re-syncs the file it asks about instead.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_server_stops_as_it_leaves_the_servers() {
+fn a_server_outlives_the_captures_that_show() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
     let (held, process) = serve(&mut host, "rust", dir.path());
+    drop(held);
 
     edit_and_capture(&mut host, &repo, "uno", "two");
-    assert_eq!(host.model().parts().servers.len(), 0);
-    assert!(stopped(process), "the server held by a lookup still runs");
-    drop(held);
+    edit_and_capture(&mut host, &repo, "eins", "two");
+    assert_eq!(host.model().trust, Trust::Granted);
+    assert_eq!(host.model().parts().servers.len(), 1);
+    assert!(!stopped(process), "a capture stopped the server");
 }
 
 /// When a capture reads the trust again and finds it gone, as when another window revoked
@@ -4220,17 +4250,12 @@ fn trust_lost_elsewhere_stops_the_servers() {
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
+    trust(&mut host);
     let (held, process) = serve(&mut host, "rust", dir.path());
     drop(held);
 
     // Another window revokes the grant.
-    host.review
-        .set_trust(review_core::TrustScope::Checkout, false)
-        .unwrap();
+    host.review.set_trusted(false).unwrap();
     host.update(Model::changed);
     host.settle();
     assert_eq!(host.model().trust, Trust::Denied);
@@ -4244,7 +4269,7 @@ fn trust_lost_elsewhere_stops_the_servers() {
 #[test]
 fn a_revocation_stops_lookups_at_the_key_press() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
@@ -4253,12 +4278,8 @@ fn a_revocation_stops_lookups_at_the_key_press() {
     assert_eq!(host.model().trust, Trust::Checking);
 
     // The lookup reaches the launch before the revocation is recorded.
-    let head = host.model().shown_head().unwrap();
-    let tree = host.review.repo().tree_of(&head).unwrap();
-    assert!(
-        host.review.trust_for(&tree).unwrap().trusted,
-        "the grant is stored"
-    );
+    let checkout = checkout_review(&host);
+    assert!(checkout.trusted().unwrap(), "the grant is stored");
     let answered = lookup.run();
     assert!(
         matches!(
@@ -4278,7 +4299,7 @@ fn a_revocation_stops_lookups_at_the_key_press() {
 
     host.settle();
     assert_eq!(host.model().trust, Trust::Denied);
-    assert!(!host.review.trust_for(&tree).unwrap().trusted);
+    assert!(!checkout.trusted().unwrap());
 }
 
 /// A definition asked for before a revocation never lands, even once trust is granted again
@@ -4286,7 +4307,7 @@ fn a_revocation_stops_lookups_at_the_key_press() {
 #[test]
 fn a_definition_from_before_a_revocation_never_lands_after_a_regrant() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
     buffer_on_a_name(&mut host);
     host.dispatch(Action::GoToDefinition);
@@ -4308,46 +4329,6 @@ fn a_definition_from_before_a_revocation_never_lands_after_a_regrant() {
     );
 }
 
-/// A revocation stops every language server, whatever grant still applies after it: revoking
-/// the checkout's grant while the snapshot on screen has one of its own stops the server
-/// started under the checkout's.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_revocation_stops_every_server_whatever_grant_still_applies() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut host, repo) = checkout_host(dir.path());
-    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
-    host.update(Model::changed);
-    host.settle();
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
-    // The snapshot on screen has a grant of its own, as made in another window.
-    let shown = host.model().shown_head().unwrap();
-    let tree = host.review.repo().tree_of(&shown).unwrap();
-    host.review
-        .set_trust(review_core::TrustScope::Snapshot { tree }, true)
-        .unwrap();
-    let (held, process) = serve(&mut host, "rust", dir.path());
-    drop(held);
-
-    host.dispatch(Action::ToggleTrust);
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
-    assert!(
-        host.model()
-            .status
-            .starts_with("Trust in this checkout revoked; this snapshot stays trusted"),
-        "{}",
-        host.model().status
-    );
-    assert_eq!(host.model().parts().servers.len(), 0);
-    assert!(
-        stopped(process),
-        "the server started under the checkout's grant runs"
-    );
-}
-
 /// Trust found denied, as when another window revoked it, stops the language servers before
 /// the window shows the denial, so none from before it is there to use once trust is granted
 /// again on the same code, and nothing that runs late stops one started after.
@@ -4359,16 +4340,12 @@ fn a_denial_stops_the_servers_before_it_shows() {
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
+    trust(&mut host);
     let (held, before) = serve(&mut host, "rust", dir.path());
     drop(held);
 
     // Another window revokes the grant, and a capture of the same code shows.
-    host.review
-        .set_trust(review_core::TrustScope::Checkout, false)
-        .unwrap();
+    host.review.set_trusted(false).unwrap();
     host.update(Model::changed);
     let captured = host.run_newest_job();
     host.complete(captured);
@@ -4380,10 +4357,7 @@ fn a_denial_stops_the_servers_before_it_shows() {
     assert_eq!(host.model().trust, Trust::Denied);
 
     // Trust is granted again, and a lookup starts the same server anew.
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
+    trust(&mut host);
     let (held, after) = serve(&mut host, "rust", dir.path());
     drop(held);
     host.settle();
@@ -4399,16 +4373,12 @@ fn a_denial_stops_the_servers_before_it_shows() {
 #[test]
 fn a_lookup_that_finds_trust_denied_stops_the_servers_first() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open(demo(dir.path()));
+    let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
     buffer_on_a_name(&mut host);
     let (held, process) = serve(&mut host, "rust-analyzer", dir.path());
     drop(held);
-    let shown = host.model().shown_head().unwrap();
-    let tree = host.review.repo().tree_of(&shown).unwrap();
-    host.review
-        .set_trust(review_core::TrustScope::Snapshot { tree }, false)
-        .unwrap();
+    checkout_review(&host).set_trusted(false).unwrap();
 
     host.dispatch(Action::GoToDefinition);
     let answered = host.run_newest_job();
@@ -4542,8 +4512,8 @@ fn closing_ends_an_eased_scroll() {
 #[test]
 fn a_grant_with_no_definition_waiting_goes_to_none() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = Host::open_with(
-        demo(dir.path()),
+    let (mut host, _repo) = live_host_with(
+        dir.path(),
         Settings {
             language_servers: false,
             ..settings()
@@ -4552,7 +4522,7 @@ fn a_grant_with_no_definition_waiting_goes_to_none() {
     assert!(host.model().buffer.is_none());
     trust(&mut host);
     assert!(
-        host.model().status.starts_with("Trusted this snapshot"),
+        host.model().status.starts_with("Trusted this checkout"),
         "{}",
         host.model().status
     );
@@ -4567,10 +4537,7 @@ fn a_capture_that_read_trust_before_a_revocation_never_shows_it() {
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
+    trust(&mut host);
 
     // A capture reads the grant, and the reviewer revokes it before the capture shows.
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
@@ -4605,9 +4572,7 @@ fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
+    trust(&mut host);
     let (held, process) = serve(&mut host, "rust", dir.path());
     drop(held);
 
@@ -4623,10 +4588,7 @@ fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
     assert_eq!(model.trust, Trust::Denied);
     assert_eq!(model.parts().servers.len(), 0);
     assert!(stopped(process), "the server still runs");
-    assert!(
-        host.review.trust().unwrap().trusted,
-        "the grant is still stored"
-    );
+    assert!(host.review.trusted().unwrap(), "the grant is still stored");
     assert_eq!(host.quits, 0, "the failure keeps the app open");
     assert_eq!(model.quitting, Quitting::Stopped);
     assert!(
@@ -4660,50 +4622,7 @@ fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
     assert_eq!(host.model().trust, Trust::Denied);
 
     // A grant made again counts.
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustSnapshot);
-    host.settle();
-    assert!(host.model().trust.granted());
-}
-
-/// A head shown again is a showing of its own: from one snapshot to another and back, the
-/// language servers of the first showing stop, and the reading of trust in the snapshot between,
-/// running late, stops none started once back.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_head_shown_again_has_servers_of_its_own() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut host, repo) = live_host(dir.path());
     trust(&mut host);
-    let (held, first) = serve(&mut host, "rust", dir.path());
-    drop(held);
-    let show = |host: &mut Host, top: &str| {
-        std::fs::write(repo.join("a.rs"), two_hunks(top, "two")).unwrap();
-        host.update(|model| model.capture(false));
-        let captured = host.run_newest_job();
-        host.complete(captured);
-        host.draw();
-    };
-
-    // Other code shows, and what it started, the reading of its trust among it, waits to run.
-    show(&mut host, "uno");
-    let late: Vec<Job> = host.jobs.drain(..).collect();
-    // The trusted code shows again, and a lookup there starts a server.
-    show(&mut host, "one");
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
-    assert!(stopped(first), "the server of the first showing still runs");
-    let (held, again) = serve(&mut host, "rust", dir.path());
-    drop(held);
-
-    for job in late {
-        let completion = job.run();
-        host.complete(completion);
-    }
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
-    assert!(!stopped(again), "the server started once back is stopped");
-    assert_eq!(host.model().parts().servers.len(), 1);
 }
 
 /// The lock files of the sessions running in the clone at `repo`, each pinning what a window
@@ -4740,7 +4659,7 @@ fn quitting_waits_for_trust_and_the_engine() {
         host.model().status,
         "Trust is not changed while quitting. Saving 1 change to the review before quitting…"
     );
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
+    assert_eq!(host.model().trust, Trust::Granted);
 
     // Once everything is saved, the engine stops, and only then does the app quit.
     while host.model().quitting != Quitting::Closing {
@@ -4759,8 +4678,6 @@ fn quitting_waits_for_trust_and_the_engine() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, _repo) = live_host(dir.path());
     trust(&mut host);
-    let shown = host.model().shown_head().unwrap();
-    let tree = host.review.repo().tree_of(&shown).unwrap();
     host.dispatch(Action::ToggleTrust);
     host.dispatch(Action::Quit);
     assert_eq!(
@@ -4769,7 +4686,7 @@ fn quitting_waits_for_trust_and_the_engine() {
     );
     host.settle();
     assert_eq!(host.quits, 1);
-    assert!(!host.review.trust_for(&tree).unwrap().trusted);
+    assert!(!checkout_review(&host).trusted().unwrap());
 }
 
 /// Go to definition that asked for trust goes on once the grant is recorded, in the buffer it
@@ -4787,8 +4704,11 @@ fn a_definition_waiting_for_trust_goes_on_once_granted() {
     host.dispatch(Action::NextWord);
     let ask = |host: &mut Host| {
         host.dispatch(Action::GoToDefinition);
+        // The question comes once the disk is found to hold what shows.
+        let checked = host.run_newest_job();
+        host.complete(checked);
         assert_eq!(host.model().overlay, Some(Overlay::Trust));
-        host.dispatch(Action::TrustSnapshot);
+        host.dispatch(Action::TrustCheckout);
         assert_eq!(host.model().trust, Trust::Checking);
     };
 
@@ -6253,10 +6173,10 @@ fn an_unavailable_lookup_is_tried_again() {
     assert!(state.lookup.is_none());
 }
 
-/// The checkout is never trusted by default: the first tool asks, a grant for the snapshot
-/// ends when the code changes, and one for the checkout lasts until revoked.
+/// The checkout is never trusted by default: the first tool asks, and the grant covers the
+/// code the checkout holds after later edits, until it is revoked.
 #[test]
-fn trust_in_the_checkout_is_asked_for_and_scoped() {
+fn trust_in_the_checkout_is_asked_for_and_lasts() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = checkout_host(dir.path());
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
@@ -6272,37 +6192,20 @@ fn trust_in_the_checkout_is_asked_for_and_scoped() {
     let capture = host.run_newest_job();
     host.complete(capture);
     assert!(host.model().live.as_ref().unwrap().has_waiting());
-    host.dispatch(Action::TrustSnapshot);
+    host.dispatch(Action::TrustCheckout);
     assert_eq!(host.model().trust, Trust::Checking);
     assert!(bar(host.model()).ends_with("checking trust"));
     host.settle();
     assert!(!host.model().live.as_ref().unwrap().has_waiting());
     let model = host.model();
     assert_eq!(model.overlay, None);
-    assert_eq!(model.trust, Trust::Granted(Grant::Snapshot));
-    assert!(bar(model).ends_with("trusted: this snapshot"));
+    assert_eq!(model.trust, Trust::Granted);
+    assert!(bar(model).ends_with(" · trusted"), "{}", bar(model));
 
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    assert_eq!(
-        host.model().trust,
-        Trust::Denied,
-        "the grant was for the old code"
-    );
-
-    host.dispatch(Action::ToggleTrust);
-    host.dispatch(Action::TrustCheckout);
-    host.settle();
-    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
-    std::fs::write(repo.join("a.rs"), two_hunks("eins", "2")).unwrap();
-    host.update(Model::changed);
-    host.settle();
-    assert_eq!(
-        host.model().trust,
-        Trust::Granted(Grant::Checkout),
-        "it lasts"
-    );
+    assert_eq!(host.model().trust, Trust::Granted, "it lasts");
 
     host.dispatch(Action::ToggleTrust);
     assert_eq!(host.model().status, "Revoking trust…");
@@ -6313,6 +6216,564 @@ fn trust_in_the_checkout_is_asked_for_and_scoped() {
             .status
             .starts_with("Trust in this checkout revoked")
     );
+}
+
+/// A lookup on a view the disk has moved past, as before the capture of an edit shows, is
+/// refused before any language server is asked or started.
+#[test]
+fn a_lookup_on_a_view_the_disk_moved_past_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
+    buffer_on_a_name(&mut host);
+    std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+
+    host.dispatch(Action::GoToDefinition);
+    host.settle();
+    assert_eq!(
+        host.model().status,
+        "Go to definition needs the code on disk, which no longer matches what shows; press r, \
+         then g d again."
+    );
+    assert_eq!(host.model().parts().servers.len(), 0);
+}
+
+/// A revision older than the code on disk, as a review that does not follow the working tree
+/// shows once `R` recorded a newer one, stops the language servers and refuses go to
+/// definition, until `R` shows the newest; the grant stays.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_older_revision_stops_the_servers_and_refuses_lookups() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", &two_hunks("1", "2"))],
+        &[("a.rs", &two_hunks("one", "two"))],
+    );
+    let mut host = Host::open_with(
+        review,
+        Settings {
+            live: false,
+            ..settings()
+        },
+    );
+    trust(&mut host);
+    let (held, process) = serve(&mut host, "rust-analyzer", dir.path());
+    drop(held);
+
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
+    host.dispatch(Action::Refresh);
+    host.settle();
+    assert_eq!(
+        host.model().status,
+        "Revision 2 recorded; press R to switch to it."
+    );
+    assert_eq!(host.model().parts().servers.len(), 0);
+    assert!(stopped(process), "the server runs for an older revision");
+    assert_eq!(host.model().trust, Trust::Granted);
+
+    buffer_on_a_name(&mut host);
+    host.dispatch(Action::GoToDefinition);
+    assert_eq!(
+        host.model().status,
+        "Go to definition needs the code on disk, which revision 2 holds; press R to switch to \
+         it."
+    );
+    assert!(!host.model().looking_up, "a lookup runs");
+
+    host.dispatch(Action::Refresh);
+    host.settle();
+    buffer_on_a_name(&mut host);
+    host.dispatch(Action::GoToDefinition);
+    assert!(host.model().looking_up, "{}", host.model().status);
+}
+
+/// A checkout replaced by another clone stops the language servers in the capture that finds
+/// it, no grant applies to the new clone's code, and go to definition says to reopen the review.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replaced_clone_stops_the_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    trust(&mut host);
+    let (held, process) = serve(&mut host, "rust-analyzer", dir.path());
+    drop(held);
+
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "again"]);
+    host.update(Model::changed);
+    let captured = host.run_newest_job();
+    assert_eq!(host.model().parts().servers.len(), 0);
+    assert!(stopped(process), "the server runs in another clone");
+    host.complete(captured);
+    assert_eq!(host.model().replaced(), Some(Replaced::Clone));
+    assert_eq!(host.model().trust, Trust::Denied);
+
+    buffer_on_a_name(&mut host);
+    host.dispatch(Action::GoToDefinition);
+    assert!(
+        host.model().status.starts_with(
+            "Go to definition needs the code on disk. This checkout was replaced by another clone"
+        ),
+        "{}",
+        host.model().status
+    );
+    assert!(!host.model().looking_up, "a lookup runs");
+}
+
+/// `src/main.rs` of [`rust_checkout_host`]'s crate, calling `function` of `src/util.rs` at the
+/// same place whatever its name.
+fn calling(function: &str) -> String {
+    formatdoc! {"
+        mod util;
+
+        fn main() {{
+            let _ = util::{function}();
+        }}
+    "}
+}
+
+/// The window over the review of a checkout under `dir` of a Rust crate whose `src/util.rs`
+/// defines `helper` on its first line and `other` on its fifth, and whose `src/main.rs` calls
+/// `helper`, uncommitted; returns it with the working tree.
+fn rust_checkout_host(dir: &Path) -> (Host, std::path::PathBuf) {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    // A workspace of its own, which the project's around `target/` does not claim, whose build
+    // output git ignores, as in any Rust checkout.
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        indoc! {r#"
+            [package]
+            name = "probe"
+            version = "0.1.0"
+            edition = "2024"
+
+            [workspace]
+        "#},
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".gitignore"),
+        indoc! {"
+            /target
+            /Cargo.lock
+        "},
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/util.rs"),
+        indoc! {"
+            pub fn helper() -> u32 {
+                7
+            }
+
+            pub fn other() -> u32 {
+                8
+            }
+        "},
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/main.rs"),
+        indoc! {"
+            mod util;
+
+            fn main() {}
+        "},
+    )
+    .unwrap();
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "base"]);
+    git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    std::fs::write(repo.join("src/main.rs"), calling("helper")).unwrap();
+    let loaded = crate::launch::open_checkout(
+        &dir.join("data"),
+        review_core::Repo::discover(&repo).unwrap(),
+    )
+    .unwrap();
+    (Host::open_loaded(loaded, settings()), repo)
+}
+
+/// Opens `src/main.rs` of [`rust_checkout_host`]'s crate in the buffer with the cursor on the
+/// function it calls.
+fn buffer_on_the_call(host: &mut Host) {
+    host.update(|model| model.show_file("src/main.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleBuffer);
+    host.update(|model| model.set_buffer_cursor(3, "    let _ = util::".len()));
+    assert_eq!(host.model().mode, Mode::Buffer);
+}
+
+/// Go to definition runs a language server in the checkout and follows a call into another
+/// file; after an edit moves the call to another function, the same server answers about the
+/// edited text; skipped where rust-analyzer is not installed.
+#[test]
+fn go_to_definition_runs_in_the_checkout() {
+    if !crate::lsp::rust_analyzer_installed() {
+        eprintln!("skipped: rust-analyzer is not installed");
+        return;
+    }
+    let dir = crate::lsp::scratch_dir();
+    let (mut host, repo) = rust_checkout_host(dir.path());
+    trust(&mut host);
+    let look_up = |host: &mut Host, row: usize| {
+        buffer_on_the_call(host);
+        host.dispatch(Action::GoToDefinition);
+        host.settle();
+        let model = host.model();
+        let buffer = model.buffer.as_ref().unwrap();
+        assert_eq!(buffer.title(), "src/util.rs", "{}", model.status);
+        assert_eq!(buffer.cursor.row, row, "{}", model.status);
+    };
+    look_up(&mut host, 0);
+
+    // The call names `other` now, and a capture shows it.
+    std::fs::write(repo.join("src/main.rs"), calling("other")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::ToggleBuffer);
+    look_up(&mut host, 4);
+    assert_eq!(host.model().parts().servers.len(), 1, "the server was kept");
+    host.model().parts().servers.stop();
+}
+
+/// A shell script standing in for a language server, speaking just enough of the protocol: it
+/// answers the handshake and the request to exit, and answers every definition request with
+/// line `$2` of the file `$1`, but only once the directory `$3` holds `go`, after it put
+/// `asked` there.
+#[cfg(target_os = "linux")]
+const CUED_SERVER: &str = indoc! {r#"
+    target=$1 line=$2 markers=$3
+    reply() {
+        printf 'Content-Length: %s\r\n\r\n%s' "$(printf %s "$1" | wc -c | tr -d ' ')" "$1"
+    }
+    while :; do
+        length=
+        while IFS= read -r header; do
+            header=$(printf %s "$header" | tr -d '\r')
+            [ -z "$header" ] && break
+            case $header in Content-Length:*) length=${header#Content-Length: } ;; esac
+        done
+        [ -n "$length" ] || exit 0
+        body=$(dd bs=1 count="$length" 2>/dev/null)
+        id=$(printf %s "$body" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),.*/\1/p')
+        case $body in
+            *'"method":"initialize"'*)
+                reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"capabilities\":{}}}" ;;
+            *'"method":"textDocument/definition"'*)
+                : > "$markers/asked"
+                waited=0
+                while [ ! -e "$markers/go" ] && [ "$waited" -lt 6000 ]; do
+                    sleep 0.01
+                    waited=$((waited + 1))
+                done
+                at="{\"line\":$line,\"character\":0}"
+                reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"uri\":\"file://$target\",\"range\":{\"start\":$at,\"end\":$at}}}" ;;
+            *'"method":"shutdown"'*)
+                reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":null}" ;;
+            *'"method":"exit"'*) exit 0 ;;
+        esac
+    done
+"#};
+
+/// Puts [`CUED_SERVER`] in the window's servers as the language server for Rust in `root`,
+/// answering with line `line` of the file `target` once `markers` holds `go`.
+#[cfg(target_os = "linux")]
+fn cued_server(host: &mut Host, root: &Path, target: &Path, line: usize, markers: &Path) {
+    let line = line.to_string();
+    let args = [
+        "-c",
+        CUED_SERVER,
+        "cued-server",
+        target.to_str().unwrap(),
+        &line,
+        markers.to_str().unwrap(),
+    ];
+    let server = crate::lsp::LanguageServer::stand_in("sh", &args, root).unwrap();
+    drop(host.model().parts().servers.insert("rust-analyzer", server));
+}
+
+/// Waits until `path` exists, ten seconds at most.
+#[cfg(target_os = "linux")]
+fn wait_for(path: &Path) {
+    let waited = Instant::now();
+    while !path.exists() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(10),
+            "{} never appears",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// An answer that arrives once the code on disk moved past what shows is dropped, though that
+/// code showed when the lookup began: the server answers only once a new file landed.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_answer_is_dropped_once_the_disk_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    let markers = dir.path().join("markers");
+    std::fs::create_dir(&markers).unwrap();
+    trust(&mut host);
+    buffer_on_a_name(&mut host);
+    let target = repo.canonicalize().unwrap().join("a.rs");
+    cued_server(&mut host, &repo, &target, 2, &markers);
+
+    // With the disk as it shows, the answer lands.
+    let asked_at = host.model().buffer.as_ref().unwrap().cursor;
+    std::fs::write(markers.join("go"), "").unwrap();
+    host.dispatch(Action::GoToDefinition);
+    host.settle();
+    assert_eq!(host.model().status, "a.rs:3");
+    std::fs::remove_file(markers.join("go")).unwrap();
+    std::fs::remove_file(markers.join("asked")).unwrap();
+    host.update(|model| model.set_buffer_cursor(asked_at.row, asked_at.col));
+
+    // A file lands while the server works on the question.
+    host.dispatch(Action::GoToDefinition);
+    let lookup = host.jobs.pop_back().expect("the lookup waits");
+    let running = std::thread::spawn(move || lookup.run());
+    wait_for(&markers.join("asked"));
+    std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+    std::fs::write(markers.join("go"), "").unwrap();
+    let answered = running.join().unwrap();
+    assert!(
+        matches!(
+            &*answered.outcome,
+            Outcome::Definition(Err(super::buffer::Unanswered::Moved))
+        ),
+        "the answer stands"
+    );
+    host.complete(answered);
+    assert!(
+        host.model().status.contains("no longer matches what shows"),
+        "{}",
+        host.model().status
+    );
+}
+
+/// A definition in a file whose text on disk is not the snapshot's, as a file git keeps at its
+/// staged version under a filter driver, is refused, though the tree on disk is the
+/// snapshot's.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_definition_in_a_file_unlike_the_snapshot_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, repo) = worktree_review_of(
+        dir.path(),
+        &[
+            ("a.rs", &two_hunks("1", "2")),
+            (".gitattributes", "util.rs filter=crypt\n"),
+            ("util.rs", "fn helper() {}\n"),
+        ],
+        &[
+            ("a.rs", &two_hunks("one", "two")),
+            (
+                "util.rs",
+                indoc! {"
+                    // edited, and kept at its staged version
+                    fn helper() {}
+                "},
+            ),
+        ],
+    );
+    let mut host = Host::open(review);
+    let markers = dir.path().join("markers");
+    std::fs::create_dir(&markers).unwrap();
+    std::fs::write(markers.join("go"), "").unwrap();
+    trust(&mut host);
+    buffer_on_a_name(&mut host);
+    let target = repo.canonicalize().unwrap().join("util.rs");
+    cued_server(&mut host, &repo, &target, 0, &markers);
+
+    host.dispatch(Action::GoToDefinition);
+    host.settle();
+    let model = host.model();
+    assert_eq!(
+        model.status,
+        "Go to definition: util.rs on disk is not what shows"
+    );
+    assert_eq!(model.buffer.as_ref().unwrap().title(), "a.rs");
+}
+
+/// An untrusted lookup asks for trust only once the disk is found to hold what shows: on a
+/// view the disk moved past, it says why it cannot run and asks nothing.
+#[test]
+fn an_untrusted_lookup_asks_for_trust_only_for_code_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    buffer_on_a_name(&mut host);
+    std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+    host.dispatch(Action::GoToDefinition);
+    assert_eq!(host.model().overlay, None);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.overlay, None);
+    assert_eq!(model.trust, Trust::Denied);
+    assert!(
+        model.status.contains("no longer matches what shows"),
+        "{}",
+        model.status
+    );
+
+    std::fs::remove_file(repo.join("b.rs")).unwrap();
+    host.dispatch(Action::GoToDefinition);
+    host.settle();
+    assert_eq!(host.model().overlay, Some(Overlay::Trust));
+}
+
+/// Fires the watch on the grant, as its time comes, and lands the reading it starts.
+#[cfg(target_os = "linux")]
+fn fire_guard(host: &mut Host) {
+    let position = host
+        .clocks
+        .iter()
+        .position(|clock| matches!(*clock.outcome, Outcome::Tick(super::sync::Tick::Guard)))
+        .expect("the watch on the grant is due");
+    let tick = host.clocks.remove(position);
+    host.complete(tick);
+    host.settle();
+}
+
+/// Starts a lookup, which arms the watch on the grant, without running it, as a language
+/// server would start; returns the stand-in for that server, held by nothing, and its process.
+#[cfg(target_os = "linux")]
+fn looked_up(host: &mut Host, root: &Path) -> u32 {
+    buffer_on_a_name(host);
+    host.dispatch(Action::GoToDefinition);
+    drop(host.jobs.pop_back());
+    host.update(|model| model.looking_up = false);
+    let (held, process) = serve(host, "rust-analyzer", root);
+    drop(held);
+    process
+}
+
+/// A revocation in another window stops this window's language servers within the watch's
+/// period, though no capture shows to read the grant again: the window follows nothing and an
+/// overlay is open.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_revocation_elsewhere_stops_the_servers_whatever_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, _repo) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", &two_hunks("1", "2"))],
+        &[("a.rs", &two_hunks("one", "two"))],
+    );
+    let mut host = Host::open_with(
+        review,
+        Settings {
+            live: false,
+            ..settings()
+        },
+    );
+    trust(&mut host);
+    let process = looked_up(&mut host, dir.path());
+    host.dispatch(Action::ToggleBuffer);
+    host.dispatch(Action::ToggleHelp);
+    assert_eq!(host.model().overlay, Some(Overlay::Help));
+
+    checkout_review(&host).set_trusted(false).unwrap();
+    fire_guard(&mut host);
+    assert_eq!(host.model().parts().servers.len(), 0);
+    assert!(stopped(process), "the server still runs");
+    assert_eq!(host.model().trust, Trust::Denied);
+    assert!(
+        host.model()
+            .status
+            .starts_with("Trust in this checkout no longer applies"),
+        "{}",
+        host.model().status
+    );
+    assert!(
+        !host
+            .clocks
+            .iter()
+            .any(|clock| matches!(*clock.outcome, Outcome::Tick(super::sync::Tick::Guard))),
+        "the watch goes on without a server"
+    );
+}
+
+/// While git is busy in the checkout, no capture shows, and the watch on the grant still stops
+/// the language servers once another window revoked it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_revocation_elsewhere_stops_the_servers_while_git_is_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    trust(&mut host);
+    let process = looked_up(&mut host, dir.path());
+
+    std::fs::write(repo.join(".git/index.lock"), "").unwrap();
+    host.review.set_trusted(false).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    assert!(host.model().live_state().unwrap().busy.is_some());
+    assert!(!stopped(process), "the busy capture read the grant");
+
+    fire_guard(&mut host);
+    assert!(stopped(process), "the server still runs");
+    assert_eq!(host.model().trust, Trust::Denied);
+}
+
+/// The checkout of a review of the working tree replaced by another clone stops its language
+/// servers at the watch's next reading, through the checkout's review bound as the window
+/// opened, though the review's own key names no clone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replaced_clone_stops_the_servers_of_a_working_tree_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
+    let process = looked_up(&mut host, dir.path());
+
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "again"]);
+    fire_guard(&mut host);
+    assert_eq!(host.model().parts().servers.len(), 0);
+    assert!(stopped(process), "the server runs in another clone");
+    assert_eq!(host.model().trust, Trust::Denied);
+}
+
+/// A review of a range that learns of a newer revision reads no trust, as it has no checkout.
+#[test]
+fn a_range_with_a_newer_revision_reads_no_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    prepare(
+        &DemoPaths::under(dir.path()),
+        &fixture_dir(),
+        DemoRequest::UpTo(review_core::RevisionNumber::new(2).unwrap()),
+    )
+    .unwrap();
+    host.dispatch(Action::Refresh);
+    let refreshed = host.run_newest_job();
+    host.complete(refreshed);
+    assert_eq!(
+        host.model()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .newer()
+            .map(review_core::RevisionNumber::get),
+        Some(2)
+    );
+    assert_eq!(host.model().trust, Trust::Denied, "trust is read");
+    assert!(host.jobs.is_empty(), "a job runs");
 }
 
 /// A capture that waits behind an overlay never shows once the watch saw a change after it:

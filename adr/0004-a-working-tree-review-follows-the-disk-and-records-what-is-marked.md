@@ -102,9 +102,10 @@ real monorepo, and every write a build makes there.
   the lock, besides reading the whole log as it did.
 - A log replaced in place by one as long, ending in the same 64 bytes, on a platform that does
   not tell files apart, still shows until a mark is attempted on it.
-- Go to definition on a capture checks out a worktree of that capture and starts its language
-  servers there, as on any revision; a new capture stops the servers of the old one, so each
-  capture used for browsing indexes again.
+- Go to definition runs a language server in the checkout itself, which outlives the captures
+  and indexes once: before each question it is told the file's text, and a lookup runs only
+  while the capture on screen is the code on disk
+  ([ADR 14](0014-only-background-work-reaches-the-engine.md)).
 - Changes the watch cannot see show within 30 seconds: a ref moving without the index changing,
   a submodule's commit, `info/exclude` and `core.excludesFile`.
 - Captures keep the copied index's modification time.

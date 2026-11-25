@@ -174,18 +174,24 @@ state
 expect "mode":"Diff"
 expect "hunk":1,"hunks"
 
-# Trust is recorded in the background: Ctrl+T says what trusting runs, a second press trusts
-# the snapshot on screen once the grant is recorded, and Ctrl+T revokes it once the language
-# servers stopped.
-key ctrl-t
-key ctrl-t
-state
-expect "trusted":true
-expect "status":"Trusted this snapshot: tools may run on it
+# The demo reviews a range, whose code is not on disk: language servers run only in a checkout,
+# so Ctrl+T has nothing to trust and go to definition says why it cannot run, asking for no
+# trust.
 key ctrl-t
 state
+expect "overlay":null
 expect "trusted":false
-expect "status":"Trust in this snapshot revoked\.
+expect "status":"Language servers run only in a checkout
+key =
+key g d
+state
+expect "mode":"Buffer"
+expect "overlay":null
+expect "status":"Go to definition needs the code on disk\.
+key =
+state
+expect "mode":"Diff"
+expect "hunk":1,"hunks"
 
 # Overlays own the keyboard: review keys under them do nothing.
 key ?

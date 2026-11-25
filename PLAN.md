@@ -729,8 +729,6 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   concurrent refreshes wins, either being a true sync time. Writing it is best-effort: a
   refresh that recorded its revision succeeds even when the record cannot be stored, and
   `Recorded::sync_error` says why.
-- `worktrees/<tree>`: a read-only copy of a snapshot's files, by its tree (see "Code browsing at
-  a revision").
 - `view/<front-end>.json`: each front end's own view state, through `Review::view_state` and
   `Review::save_view_state`, such as the folded folders. review-gui and review-tui share theirs
   under the name `review-lite`, review-gui's name when it first stored them, so folds made in
@@ -891,23 +889,31 @@ last found for the branch, shown as stale in the overview; a repository without 
 minutes, when the branch or its upstream moves, or on `r`, and the overview says why meanwhile. A changed pull request captures again, since the base may follow it.
 
 The checkout's code is never trusted by default. The first tool that needs trust, go to
-definition, asks once: trust this snapshot, which ends when the code changes, or always trust this
-checkout until `Ctrl+T` revokes it. The bottom bar says which grant applies (`untrusted`,
-`trusted: this snapshot`, `trusted: checkout`, or `checking trust` while it is read or decided),
-and it is read again for every snapshot that shows. One owner, the engine's `Servers`, decides
+definition, asks once whether to trust this checkout, saying that its language server builds in
+the checkout, so build scripts, proc macros and the workspace's configuration can run any program
+and write there; the grant covers later edits and branch switches in this clone until `Ctrl+T`
+revokes it; on `g d` it is asked only once the disk is found to hold what shows. The bottom bar
+says whether it applies (`untrusted`, `trusted`, or `checking trust` while it is read or decided),
+and it is read again for every snapshot that shows, and every 30 seconds while a language server
+may run, whatever shows, so a revocation in another window or another clone at the checkout's
+path stops this window's servers within that time. One owner, the engine's `Servers`, decides
 whether a language server may run: under one lock it reads trust, records decisions and admits
-lookups, and it holds the servers of the current showing of a head, which another showing
-replaces, a head shown again included. The worker checks trust on the tree it is about to run
-on (`Review::tool_worktree`), and again in the owner right before it starts or uses a server:
-the lookup's ticket, its showing and trust epoch, before the stored grant is read, then the
-grant, then the epoch once more, and the grant again once the server answered. The `initialize` handshake and the request run after that lock
-is released, with the server already in the set. Wherever trust is found denied in the owner,
-by a reading, a lookup or a revocation, recorded or not and whatever grant still applies,
-every server stops in that same operation, one in its handshake or answering included, whose
-wait then fails, and their processes exit before the window hears of it. A decision on trust
-is saved in the background, with the marks. A revocation also moves the window's trust epoch on
-at the key press, as every denial the window takes in does, and an answer lands only in the
-epoch it was asked in, so none from before a revocation lands
+lookups, and it holds the servers running in the checkout, which outlive the captures that show.
+A lookup runs only on the newest capture, and checks in the background that the tree it shows is
+the tree on disk, before the question and again once it is answered (`Review::tree_on_disk`), so
+an answer about code the disk has moved past never lands; the file asked about is opened with
+its text for the question alone and closed once answered, so the server reads every other file
+from disk, and a definition in a file of the snapshot opens only when the file holds on disk the
+snapshot's text. The owner checks the lookup's trust epoch before the stored grant is
+read, then the grant and the clone, then the epoch once more, and the grant again once the server
+answered. The `initialize` handshake and the request run after that lock is released, with the
+server already in the set. Wherever trust is found denied in the owner, by a reading, a lookup or
+a revocation, recorded or not, every server stops in that same operation, one in its handshake or
+answering included, whose wait then fails, and they are asked to exit and then their process
+groups killed before the window hears of it; so they do once the checkout is another clone, in
+the capture, lookup or watch that finds it. A decision on trust is saved in the background, with the marks. A revocation also moves the
+window's trust epoch on at the key press, as every denial the window takes in does, and an answer
+lands only in the epoch it was asked in, so none from before a revocation lands
 ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 
 A capture is a synthetic commit no branch reaches, so whoever shows it pins it. Each running app
@@ -930,22 +936,33 @@ units" and applies it on request, keeping the cursor on the current unit.
 
 ### Code browsing at a revision
 
-A revision being browsed gets a read-only copy of its head's files, by tree, written lazily under
-the review's data directory with every filter driver and hook off, and shared by every client
-viewing that tree (`Review::worktree`). It is written in full into a fresh directory, made
-read-only and only then renamed into place, and one found writable again is written afresh
-rather than reused, so an editor save cannot change what is being reviewed.
+Every revision is browsed from git objects: the buffer, the pickers and searches read blobs and
+trees of the revision's head (`git cat-file`, `git ls-tree`), never a checkout of it, so a pull
+request, a range and an older revision browse as the newest capture does.
 
-Tools that execute code from the reviewed tree, such as language servers, run only in such a
-copy and only with a trust grant for that tree (`Review::tool_worktree`, `Review::trust_for`).
-No review is trusted by default, whatever it is of: a working tree, a local branch or a pull
-request may hold code from anywhere. For the review of a checkout, a grant covers either exactly
-one captured snapshot, by its tree, or the whole checkout while it is the same clone, and a
-revocation revokes the latest grant of its own scope. A review of a range or of the working tree
-against a fixed ref is keyed by the repository's path, which another clone made there later
-shares, so a grant covers exactly the snapshot on screen (`TrustScope::Snapshot`), never the
-whole review (`Review::trusted_per_snapshot`). A trust decision without a scope, as in logs
-written before scopes, is the whole review's, which only a pull request review heeds.
+Tools that execute code from the reviewed tree, such as language servers, run only in the
+checkout itself, on the code on disk, and only with the checkout's grant (`Review::trusted`).
+No checkout is trusted by default: a working tree or a local branch may hold code from anywhere,
+for example a branch made by `gh pr checkout`. The checkout's review holds one grant per working
+tree and clone, which covers whatever the checkout holds after later edits and branch switches
+until it is revoked; a review of the working tree against a fixed ref shares it, binding the
+checkout's review of the clone there when it opens (`Review::checkout_review`). A server runs with
+the checkout as its current directory and workspace root, with rust-analyzer's builds on and the
+project's own target directory, so it shares the build state the reviewer's own Cargo runs use.
+Go to definition runs only where what shows is the code on disk, which the lookup checks against
+a capture of the working tree's tree, recording nothing; a review of a pull request that is not
+checked out, of a range, or an older revision, says it needs the code on disk: check out the
+branch and review it there. A trust decision recorded by versions that ran tools in copies, of
+a whole review, one snapshot or the checkout's copies, stays readable in the log and grants
+nothing.
+
+Rejected: running language servers for any review in a read-only copy of the reviewed snapshot's
+files under the review's data directory. Each copy kept the sources of a snapshot forever,
+read-only copies broke plain deletion, rust-analyzer had to run with builds off and index every
+copy from scratch, and a grant per snapshot or per pull request promised a boundary a server,
+which reads build inputs outside the tree, cannot keep. The reviews only copies could serve, pull
+requests that are not checked out, are the ones not reviewed in practice
+([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 
 ## Workspace layout
 
@@ -988,7 +1005,7 @@ refused, and a bare ID or revision is taken only when `--review` names the revie
 copied from one review never marks a unit of another, such as the checkout's after `cr open 128`.
 
 Commands that show the review of the checkout at its current revision (`cr show`, `status`,
-`export`, `worktree` and `walkthrough prompt` and `show`) record what the checkout holds first,
+`export` and `walkthrough prompt` and `show`) record what the checkout holds first,
 since what they print is what a later mark refers to (ADR 4). Without a watcher to say the
 working tree changed while it was read, a capture is recorded only once a second capture
 observed the same clone, subject (branch, `HEAD`, pull request and the commit the base resolved
@@ -1017,7 +1034,7 @@ either becomes a full product:
   change.
 - Keyboard: next and previous unit, next and previous step, mark seen and advance, accept, flag.
 - Scroll a 50,000-line diff smoothly.
-- Go to definition from a hunk into the revision's worktree.
+- Go to definition from a hunk, in the checkout.
 
 Notes, the new-push banner, find-references and the rest of the feature set follow once one front
 end is chosen.
@@ -1405,28 +1422,35 @@ it, muted, so it never reads as code.
   stays smooth at 50,000 lines. Walkthrough steps stay in the engine and the CLI; the apps order
   by files.
 - **Go to definition.** A minimal synchronous stdio JSON-RPC client (`review_ui::lsp`) speaks
-  `initialize`, `didOpen` and `textDocument/definition` to rust-analyzer (and, if installed,
-  gopls, pyright and typescript-language-server) rooted at the revision's worktree, as a
+  `initialize`, `didOpen`, `textDocument/definition` and `didClose` to rust-analyzer (and, if
+  installed, gopls, pyright and typescript-language-server) running in the checkout, as a
   background job of the model; a reader thread lets every request time out. Zed's `lsp` crate was
   the alternative, but it is async on Zed's executor and pulls in its settings, fs and http
-  layers; one request type does not justify that. Build scripts, proc macros and `cargo check` stay off in
-  rust-analyzer, but `cargo metadata` and `rustc` still run under the reviewed tree's Cargo
-  configuration, which can name any program as a `rustc` wrapper. Running a language server on a
-  reviewed head is therefore arbitrary code execution, and it is gated on trust (below). The
+  layers; one request type does not justify that. The server keeps running across captures, and
+  each question opens the file with its text and closes it once answered, so the server holds no
+  text of the client's and reads every file from disk, never answering about text a file no
+  longer has.
+  rust-analyzer runs with its builds on, so build scripts, proc macros and `cargo check` run, and
+  `cargo metadata` and `rustc` run under the checkout's Cargo configuration, which can name any
+  program as a `rustc` wrapper. Running a language server in the checkout is therefore arbitrary
+  code execution, and it is gated on trust (below). Stopping a server asks it to exit, so it stops
+  what it started itself, and after two seconds at most kills its process group, which it leads,
+  so the Cargo and build processes it started there stop with it. The
   definition opens in the file buffer; `Ctrl+O` goes back. `[lsp] enabled = false` keeps every
   language server from starting, trusted or not, for reviewers who would rather not give
   rust-analyzer the memory; `g d` then says it is off.
-- **Trust.** No tool that can execute reviewed code starts unless the review is trusted.
-  `Review::trust` and `Review::set_trusted` in `review-core` store the decision as a `trust` event
-  in the review's log, so every front end shares it. Without a decision, no review is trusted:
-  a working tree or a local branch can hold someone else's code as well as a pull request, for
-  example one made by `gh pr checkout`. In both apps, `gd` on an untrusted review shows a one-line
-  hint, and `Ctrl+T` explains what will run and trusts on a second press, or revokes trust and
-  stops the language servers. A review of a range or of the working tree trusts only the
-  snapshot on screen. Trust is read and decided in the background and shows as checking
-  meanwhile, when nothing starts; a revocation that cannot be recorded stops the servers all
-  the same and keeps the window untrusted, saying the stored grant may still apply when the
-  review opens again ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
+- **Trust.** No tool that can execute the reviewed code starts unless the checkout is trusted.
+  `Review::trusted` and `Review::set_trusted` in `review-core` store the decision as a `trust`
+  event in the log of the checkout's review, so every front end shares it. Without a decision,
+  no checkout is trusted: a working tree or a local branch can hold someone else's code as well
+  as a pull request, for example one made by `gh pr checkout`. In both apps, `g d` on an
+  untrusted checkout asks the trust question, as `Ctrl+T` does, which says what will run and
+  trusts on `c`, or revokes trust and stops the language servers. A review of a range or a pull
+  request has no code on disk to trust, and both keys say so. Trust is read and decided in the
+  background and shows as checking meanwhile, when nothing starts; a revocation that cannot be
+  recorded stops the servers all the same and keeps the window untrusted, saying the stored grant
+  may still apply when the review opens again
+  ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 - **Window chrome.** gpui asks for server-side decorations; GNOME has no `xdg-decoration`, so
   the window falls back to client decorations and review-gui draws its own square title bar
   (`app/chrome.rs`): the title, a drag area, minimize, maximize and close. As in Zed's

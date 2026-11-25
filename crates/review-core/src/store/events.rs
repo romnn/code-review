@@ -23,35 +23,44 @@ pub enum Event {
     Note(NoteEvent),
     /// A walkthrough was imported.
     Walkthrough(WalkthroughEvent),
-    /// The reviewer decided whether tools may execute code from the reviewed revisions.
+    /// The reviewer decided whether tools may run the code in the checkout.
     Trust(TrustEvent),
 }
 
-/// A reviewer's trust decision; the latest one of its scope applies.
+/// A reviewer's trust decision; in the review of a checkout, the latest one of scope
+/// [`TrustScope::InCheckout`] applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustEvent {
-    /// Whether tools that can execute code from the reviewed revisions, such as language servers
-    /// running Cargo, may run: a grant, or a revocation of the latest grant of the same scope.
+    /// Whether tools that run the code, such as language servers building it, may run: a grant,
+    /// or a revocation of the grant of the same scope.
     pub trusted: bool,
     /// Seconds since the Unix epoch.
     pub at: u64,
-    /// What the decision covers; `None`, as in logs written before scopes, is the whole review,
-    /// which a review of a checkout never takes from such a decision.
+    /// What the decision covers; `None` is a whole review's, as logs written before scopes
+    /// hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<TrustScope>,
 }
 
 /// What a trust decision covers.
+///
+/// Only [`Self::InCheckout`] grants anything.
+/// The other scopes are read from logs whose grants were confirmed for tools running in
+/// read-only copies of the code, with builds off, which no grant to run in the checkout itself
+/// may stand in for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TrustScope {
-    /// Exactly one captured snapshot, by its tree.
+    /// Exactly one captured snapshot, by its tree, in a copy of its files.
     Snapshot {
         /// The snapshot's tree.
         tree: ObjectId,
     },
-    /// Whatever the checkout holds, for as long as it is the same clone.
+    /// Whatever the checkout holds, in copies of its files, for as long as it is the same clone.
     Checkout,
+    /// Tools running in the checkout itself, with builds on, whatever it holds after later edits
+    /// and branch switches, for as long as it is the same clone.
+    InCheckout,
 }
 
 /// A newly observed revision.

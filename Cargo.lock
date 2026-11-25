@@ -6448,6 +6448,7 @@ dependencies = [
  "review-core",
  "review-languages",
  "ropey 1.6.1",
+ "rustix",
  "serde",
  "serde_json",
  "syntect",

@@ -18,7 +18,6 @@ pub use info::{Commit, PullRequest, ReviewInfo};
 pub(crate) use info::{LOG_FORMAT, parse_log};
 pub use live::{Capture, LiveCapture};
 pub use session::Session;
-pub use trust::Trust;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -27,7 +27,7 @@ use super::picker::{Found, PreviewText, Query, Unchanged};
 use super::pulls::Looked;
 use super::remember::ConfigSaved;
 use super::sync::Tick;
-use super::trust::{Decided, Trust};
+use super::trust::{Decided, Guarded, Trust};
 use super::{Model, Opened};
 use crate::rows::FullText;
 use crate::state::{SideKey, SyntaxKey};
@@ -135,6 +135,8 @@ pub(super) enum Because {
     Live,
     /// It stops the engine as the app quits, which quitting waits for.
     Stop,
+    /// It watches the grant while language servers run, which stops them whatever shows.
+    Guard,
 }
 
 /// What a job or a timer produced.
@@ -151,12 +153,16 @@ pub(super) enum Outcome {
     Decided(Decided),
     /// Whether tools may run on the snapshot on screen, read in the background.
     TrustRead(Trust),
+    /// The grant read while language servers may run, whatever shows.
+    Guarded(Guarded),
     /// A fetch of the latest changes.
     Refreshed(Refreshed),
     /// The folded folders saved, or why not.
     FoldersSaved(Result<(), review_core::Error>),
     /// An edit of the configuration file saved, or why not.
     ConfigSaved(ConfigSaved),
+    /// Whether the disk holds what shows, as an untrusted lookup asks before the trust question.
+    OnDisk(Result<(), Unanswered>),
     /// Where a definition is, or why the lookup found none.
     Definition(Result<Definition, Unanswered>),
     /// What a picker's search found.
@@ -387,7 +393,13 @@ impl Model {
             }
             Outcome::FoldersSaved(_) => self.folders.saving = false,
             Outcome::ConfigSaved(_) => self.config_saving = false,
-            Outcome::Definition(_) => self.looking_up = false,
+            Outcome::OnDisk(_) => self.looking_up = false,
+            Outcome::Definition(_) => {
+                self.looking_up = false;
+                // The lookup may have started a server, whatever its answer, which runs on
+                // until the grant is gone.
+                self.guard_servers();
+            }
             // The opening ends when the review shows; a picker searches until its newest search
             // lands, and reads a preview until that picker takes the text in; every highlight job
             // lands, and its landing retires it; a reading of trust that no longer counts leaves
@@ -395,6 +407,7 @@ impl Model {
             Outcome::Opened(_)
             | Outcome::Highlighted(_)
             | Outcome::TrustRead(_)
+            | Outcome::Guarded(_)
             | Outcome::Found(_)
             | Outcome::PreviewText(_)
             | Outcome::Paused(_)
@@ -444,9 +457,11 @@ impl Model {
             Outcome::Marked(marked) => self.marked(marked),
             Outcome::Decided(decided) => self.decided(decided),
             Outcome::TrustRead(trust) => self.take_trust(trust),
+            Outcome::Guarded(guarded) => self.guarded(guarded),
             Outcome::Refreshed(refreshed) => self.refreshed(refreshed),
             Outcome::FoldersSaved(saved) => self.folders_saved(saved),
             Outcome::ConfigSaved(saved) => self.config_saved(saved),
+            Outcome::OnDisk(checked) => self.checked_on_disk(checked),
             Outcome::Definition(found) => self.definition_found(found),
             Outcome::Found(found) => self.picker_found(found),
             Outcome::PreviewText(text) => self.preview_read(text),

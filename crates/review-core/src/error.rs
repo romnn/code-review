@@ -184,9 +184,6 @@ pub enum Error {
     /// does not belong to.
     #[error("this checkout was replaced by another clone; reopen the review")]
     CloneReplaced,
-    /// Tools that can execute code were asked to run on a tree no trust grant covers.
-    #[error("tree {0} is not trusted to run tools on")]
-    Untrusted(ObjectId),
     /// A walkthrough failed validation.
     #[error(transparent)]
     Walkthrough(#[from] WalkthroughError),

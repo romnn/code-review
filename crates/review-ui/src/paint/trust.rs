@@ -1,4 +1,4 @@
-//! The question whether to trust the checkout's code, asked before a tool runs it.
+//! The question whether to trust the checkout, asked before a tool runs its code in it.
 
 use super::{Palette, Piece, Weight};
 use crate::model::{Model, Overlay};
@@ -34,21 +34,22 @@ pub fn trust_prompt(model: &Model, palette: &Palette) -> Option<TrustPrompt> {
         label: Piece::new(label, palette.text),
     };
     Some(TrustPrompt {
-        title: Piece::new("Trust this code?", palette.text).weighted(Weight::Semibold),
+        title: Piece::new("Trust this checkout?", palette.text).weighted(Weight::Semibold),
         body: vec![
             Piece::new(
-                "Go to definition starts a language server on a copy of the code, and the \
-                 server runs the code's own build configuration, which can run any program.",
+                "Go to definition starts a language server in this checkout with its builds \
+                 on: build scripts, proc macros and the workspace's configuration can run any \
+                 program and write in the checkout.",
                 palette.dim,
             ),
             Piece::new(
-                "Trust only code you would build and run yourself.",
+                "The grant covers later edits and branch switches in this clone, until Ctrl+T \
+                 revokes it. Trust only code you would build and run yourself.",
                 palette.dim,
             ),
         ],
         choices: vec![
-            choice("s", "trust this snapshot, until the code changes"),
-            choice("c", "always trust this checkout, until Ctrl+T revokes it"),
+            choice("c", "trust this checkout, until Ctrl+T revokes it"),
             choice("Esc", "not now"),
         ],
     })

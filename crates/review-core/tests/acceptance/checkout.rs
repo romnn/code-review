@@ -10,7 +10,7 @@ use indoc::formatdoc;
 use review_core::github::{BranchPullRequest, CheckoutPullRequest, PullRequestState, Repository};
 use review_core::{
     BaseRef, Busy, Capture, Error, LiveCapture, MarkVerdict, ObjectId, Repo, Review, Session,
-    TrustScope, UnitState,
+    UnitState,
 };
 
 use crate::common::{GIT_ENV, TestRepo, find, summaries};
@@ -373,69 +373,76 @@ fn another_clone_at_the_same_path_is_another_review() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The checkout is never trusted by default; a grant covers exactly one snapshot or the whole
-/// checkout, a revocation revokes the latest grant of its own scope, and a decision without a
-/// scope, as in logs written before scopes, does not apply.
+/// The checkout is never trusted by default; one grant covers whatever it holds after later
+/// edits and commits, until it is revoked, and only while it is the same clone; decisions older
+/// versions recorded, for tools running in copies of the code, grant nothing.
 #[gtest]
-fn trust_in_a_checkout_is_an_explicit_grant() -> eyre::Result<()> {
-    let (test, _forge) = with_remote()?;
+fn trust_in_a_checkout_is_one_grant_for_its_clone() -> eyre::Result<()> {
+    let test = TestRepo::new()?;
+    test.write("lib.rs", "fn first() {}\n")?;
+    test.commit("first")?;
     let review = open(&test)?;
-    let repo = review.repo().clone();
-    let first = repo.tree_of(&repo.resolve_commit("HEAD")?)?;
-    test.write("lib.rs", &three_functions("one();", "", ""))?;
-    test.commit("one")?;
-    let second = repo.tree_of(&repo.resolve_commit("HEAD")?)?;
+    expect_false!(review.trusted()?);
 
-    expect_false!(review.trust()?.trusted);
-    expect_false!(review.trust_for(&first)?.trusted);
-    expect_that!(
-        review.tool_worktree(&first),
-        err(matches_pattern!(Error::Untrusted(_)))
-    );
-
-    // A decision without a scope is not for the checkout.
+    // Grants of the whole review, of one snapshot and of the checkout's copies, as older logs
+    // hold them, still decode and apply to nothing.
+    let tree = review
+        .repo()
+        .tree_of(&review.repo().resolve_commit("HEAD")?)?;
     std::fs::write(
         review.dir().events(),
-        "{\"event\":\"trust\",\"trusted\":true,\"at\":0}\n",
+        formatdoc! {r#"
+            {{"event":"trust","trusted":true,"at":0}}
+            {{"event":"trust","trusted":true,"at":0,"scope":{{"kind":"snapshot","tree":"{tree}"}}}}
+            {{"event":"trust","trusted":true,"at":0,"scope":{{"kind":"checkout"}}}}
+        "#},
     )?;
-    expect_false!(review.trust()?.trusted);
-    expect_false!(review.trust_for(&first)?.trusted);
+    expect_false!(review.trusted()?);
+    expect_that!(review.history()?.revisions().len(), eq(0));
 
-    // A snapshot's grant covers that snapshot alone.
-    review.set_trust(
-        TrustScope::Snapshot {
-            tree: first.clone(),
-        },
-        true,
-    )?;
-    expect_true!(review.trust_for(&first)?.trusted);
-    expect_false!(review.trust_for(&second)?.trusted);
-    expect_false!(review.trust()?.trusted);
-    let tools = review.tool_worktree(&first)?;
-    expect_true!(tools.join("lib.rs").exists());
-    expect_true!(std::fs::metadata(&tools)?.permissions().readonly());
-    expect_true!(
-        std::fs::metadata(tools.join("lib.rs"))?
-            .permissions()
-            .readonly()
-    );
-    expect_that!(review.tool_worktree(&first)?, eq(&tools));
-
-    // The checkout's grant covers every snapshot, until it is revoked.
+    // A grant covers later edits and commits, read back by a fresh handle, until it is revoked.
     review.set_trusted(true)?;
-    expect_true!(review.trust()?.trusted);
-    expect_true!(review.trust_for(&second)?.trusted);
-    review.set_trust(TrustScope::Checkout, false)?;
-    expect_false!(review.trust_for(&second)?.trusted);
-    expect_true!(review.trust_for(&first)?.trusted);
-    review.set_trust(
-        TrustScope::Snapshot {
-            tree: first.clone(),
-        },
-        false,
-    )?;
-    expect_false!(review.trust_for(&first)?.trusted);
-    expect_true!(review.trust_for(&first)?.decided);
+    test.write("lib.rs", "fn second() {}\n")?;
+    test.commit("second")?;
+    test.write("lib.rs", "fn third() {}\n")?;
+    expect_true!(open(&test)?.trusted()?);
+    review.set_trusted(false)?;
+    expect_false!(review.trusted()?);
+
+    // Another clone at the same path is another review, and the grant stays with the first.
+    review.set_trusted(true)?;
+    std::fs::remove_dir_all(test.path().join(".git"))?;
+    test.git(&["init", "--quiet", "--initial-branch=main"])?;
+    test.commit("again")?;
+    expect_false!(review.trusted()?);
+    expect_that!(
+        review.tree_on_disk(),
+        err(matches_pattern!(Error::CloneReplaced))
+    );
+    expect_false!(open(&test)?.trusted()?);
+    Ok(())
+}
+
+/// The tree on disk is the one a capture records, read only while git is idle, and recording
+/// nothing.
+#[gtest]
+fn the_tree_on_disk_is_what_a_capture_records() -> eyre::Result<()> {
+    let (test, _forge) = with_remote()?;
+    test.write("lib.rs", &three_functions("one();", "", ""))?;
+    test.write("new.rs", "fn new() {}\n")?;
+    let review = open(&test)?;
+    let captured = review.repo().capture_worktree()?;
+    expect_that!(
+        review.tree_on_disk()?,
+        eq(&review.repo().tree_of(&captured.commit)?)
+    );
+
+    std::fs::write(test.path().join(".git/MERGE_HEAD"), "")?;
+    expect_that!(
+        review.tree_on_disk(),
+        err(matches_pattern!(Error::GitBusy(eq(&Busy::Merge))))
+    );
+    expect_that!(review.history()?.revisions().len(), eq(0));
     Ok(())
 }
 

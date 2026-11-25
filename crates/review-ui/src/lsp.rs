@@ -1,11 +1,10 @@
-//! A minimal, synchronous language server client over stdio: `initialize`, `didOpen` and
-//! `textDocument/definition`, which is all go-to-definition needs.
+//! A minimal, synchronous language server client over stdio: `initialize`, `didOpen`,
+//! `textDocument/definition` and `didClose`, which is all go-to-definition needs.
 //!
 //! It is written for this app rather than copied from Zed's `lsp` crate, which is asynchronous,
 //! tied to Zed's executor and handles far more of the protocol than the slice uses.
 //! Calls block, so front ends run them off the UI thread.
 
-use std::collections::HashSet;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -56,30 +55,123 @@ pub enum LspError {
 /// How often a wait for the server looks whether it was stopped meanwhile.
 const STOP_POLL: Duration = Duration::from_millis(50);
 
-/// Stops a [`LanguageServer`] from another thread, without the lock of whoever uses it: its
-/// process is killed and reaped, and a wait for it, such as the `initialize` handshake, fails
-/// at once.
+/// How long a server asked to exit may take before it is killed.
+pub(crate) const EXIT_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The id of the `shutdown` request that asks a server to exit, which no other request takes:
+/// theirs start at 1.
+const SHUTDOWN_ID: i64 = 0;
+
+/// Stops a [`LanguageServer`] from another thread, without the lock of whoever uses it, as
+/// [`end`] does, and fails a wait for it, such as the `initialize` handshake, at once.
 #[derive(Clone)]
 pub struct Stopper {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     stopped: Arc<AtomicBool>,
+    outgoing: mpsc::Sender<Outgoing>,
 }
 
 impl Stopper {
-    /// Kills the server's process, waits for it to exit and fails any wait for it, so once
-    /// this returns the process is gone, whoever still holds the server.
+    /// Stops the server and fails any wait for it, so once this returns the server is gone,
+    /// whoever still holds it; see [`end`].
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        let mut child = self.child.lock();
-        if let Err(err) = child.kill() {
-            // The process is gone already.
-            drop(err);
+        end(&mut self.child.lock(), &self.outgoing);
+    }
+}
+
+/// What the writing thread sends the server.
+enum Outgoing {
+    /// A framed message.
+    Message(Vec<u8>),
+    /// The end of the server's input, which tells it to exit.
+    Close,
+}
+
+/// Stops the server and what it started, and reaps the server; the system reaps the others,
+/// which are not this process's children.
+///
+/// It first asks the server to exit, with a `shutdown` request, an `exit` notification and the
+/// end of its input, and waits up to [`EXIT_DEADLINE`] for it to exit, so it stops the
+/// processes it started outside its process group itself, as rust-analyzer stops the commands
+/// it runs in process groups of their own.
+/// Then it kills the server's process group, whatever is left of it, such as Cargo, build
+/// scripts and proc macros a server that ignored the request left running, or that it started
+/// and did not stop.
+/// A process the server started outside its group and left running is out of reach.
+///
+/// The server leaves `child` only as it is reaped, after its group is killed, so the group's id
+/// stays the server's until then and no other group is ever signalled.
+fn end(child: &mut Option<Child>, outgoing: &mpsc::Sender<Outgoing>) {
+    let Some(mut child) = child.take() else {
+        return;
+    };
+    let asked = [
+        json!({ "jsonrpc": "2.0", "id": SHUTDOWN_ID, "method": "shutdown" }),
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    ]
+    .iter()
+    .map(|message| Outgoing::Message(frame(message)))
+    .chain([Outgoing::Close])
+    .all(|message| outgoing.send(message).is_ok());
+    if asked {
+        let deadline = Instant::now() + EXIT_DEADLINE;
+        while !exited(&mut child) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
         }
-        if let Err(err) = child.wait() {
-            // It was reaped already.
+    }
+    #[cfg(unix)]
+    {
+        // The server leads a process group of its own, whose id is the server's.
+        let group = rustix::process::Pid::from_child(&child);
+        if let Err(err) = rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
+        {
+            tracing::debug!(%err, "the language server's process group is gone already");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let killed = Command::new("taskkill")
+            .args(["/F", "/T", "/PID"])
+            .arg(child.id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Err(err) = killed {
+            // Killing the server below still stops it.
             drop(err);
         }
     }
+    if let Err(err) = child.kill() {
+        // The process is gone already.
+        drop(err);
+    }
+    if let Err(err) = child.wait() {
+        // It was reaped already.
+        drop(err);
+    }
+}
+
+/// Whether the server's process exited, without reaping it, so its process group's id stays
+/// its own.
+#[cfg(unix)]
+fn exited(child: &mut Child) -> bool {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    // An error says there is no such child to wait for, which has exited too.
+    !matches!(
+        waitid(WaitId::Pid(Pid::from_child(child)), options),
+        Ok(None)
+    )
+}
+
+/// Whether the server's process exited, reaping it if it did; nothing on Windows signals a
+/// process tree by an id that could be handed out again.
+#[cfg(not(unix))]
+fn exited(child: &mut Child) -> bool {
+    !matches!(child.try_wait(), Ok(None))
 }
 
 /// How long a server may take to answer the `initialize` handshake.
@@ -97,8 +189,6 @@ pub struct ServerCommand {
     pub args: &'static [&'static str],
     /// The LSP language identifier for `didOpen`.
     pub language_id: &'static str,
-    /// Server-specific initialization options.
-    pub initialization_options: fn() -> Value,
 }
 
 /// Returns the server for a file, by its extension.
@@ -110,19 +200,16 @@ pub fn server_for(path: &Path) -> Option<ServerCommand> {
             program: "rust-analyzer",
             args: &[],
             language_id: "rust",
-            initialization_options: rust_analyzer_options,
         },
         "go" => ServerCommand {
             program: "gopls",
             args: &[],
             language_id: "go",
-            initialization_options: no_options,
         },
         "py" => ServerCommand {
             program: "pyright-langserver",
             args: &["--stdio"],
             language_id: "python",
-            initialization_options: no_options,
         },
         "ts" | "tsx" | "js" | "jsx" => ServerCommand {
             program: "typescript-language-server",
@@ -132,25 +219,8 @@ pub fn server_for(path: &Path) -> Option<ServerCommand> {
             } else {
                 "javascript"
             },
-            initialization_options: no_options,
         },
         _ => return None,
-    })
-}
-
-fn no_options() -> Value {
-    Value::Null
-}
-
-/// Keeps rust-analyzer from building anything in the read-only worktree: no build scripts, proc
-/// macros, check-on-save or cache priming.
-/// Name resolution still works for definitions.
-fn rust_analyzer_options() -> Value {
-    json!({
-        "cargo": { "buildScripts": { "enable": false } },
-        "procMacro": { "enable": false },
-        "checkOnSave": false,
-        "cachePriming": { "enable": false },
     })
 }
 
@@ -174,19 +244,19 @@ pub struct Definition {
 
 /// A running language server for one workspace root.
 pub struct LanguageServer {
-    child: Arc<Mutex<Child>>,
+    /// The server's process until it is reaped, which leads a process group of its own on Unix.
+    child: Arc<Mutex<Option<Child>>>,
     /// Set once the server was stopped through a [`Stopper`].
     stopped: Arc<AtomicBool>,
     /// Whether the `initialize` handshake is done.
     initialized: bool,
     /// Messages to the server, written on a thread of their own, so a server that stops
     /// reading never blocks a request past its deadline, nor dropping the server.
-    outgoing: mpsc::Sender<Vec<u8>>,
+    outgoing: mpsc::Sender<Outgoing>,
     /// Messages from the server, read on a thread of their own so every wait is bounded.
     messages: mpsc::Receiver<Result<Value, LspError>>,
     next_id: i64,
     language_id: &'static str,
-    opened: HashSet<PathBuf>,
 }
 
 impl LanguageServer {
@@ -206,16 +276,17 @@ impl LanguageServer {
         Stopper {
             child: Arc::clone(&self.child),
             stopped: Arc::clone(&self.stopped),
+            outgoing: self.outgoing.clone(),
         }
     }
 
-    /// Completes the `initialize` handshake for `command` in `root`, unless it is done.
+    /// Completes the `initialize` handshake in `root`, unless it is done.
     ///
     /// # Errors
     ///
     /// Returns [`LspError::Stopped`] when the server is stopped meanwhile, and an error when
     /// the handshake fails.
-    pub fn initialize(&mut self, command: &ServerCommand, root: &Path) -> Result<(), LspError> {
+    pub fn initialize(&mut self, root: &Path) -> Result<(), LspError> {
         if self.initialized {
             return Ok(());
         }
@@ -227,7 +298,6 @@ impl LanguageServer {
                 "processId": std::process::id(),
                 "rootUri": root_uri,
                 "workspaceFolders": [{ "uri": root_uri, "name": "review" }],
-                "initializationOptions": (command.initialization_options)(),
                 "capabilities": {
                     "textDocument": {
                         "definition": { "linkSupport": true },
@@ -250,17 +320,20 @@ impl LanguageServer {
         root: &Path,
         language_id: &'static str,
     ) -> Result<Self, LspError> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| LspError::Spawn {
-                command: program.to_owned(),
-                source,
-            })?;
+            .stderr(Stdio::null());
+        // The server leads a process group of its own, so stopping it stops what it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|source| LspError::Spawn {
+            command: program.to_owned(),
+            source,
+        })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(LspError::Protocol("server has no stdio pipes".to_owned()));
         };
@@ -269,19 +342,22 @@ impl LanguageServer {
         let (outgoing, to_write) = mpsc::channel();
         std::thread::spawn(move || write_messages(stdin, &to_write));
         Ok(Self {
-            child: Arc::new(Mutex::new(child)),
+            child: Arc::new(Mutex::new(Some(child))),
             stopped: Arc::new(AtomicBool::new(false)),
             initialized: false,
             outgoing,
             messages,
             next_id: 1,
             language_id,
-            opened: HashSet::new(),
         })
     }
 
     /// Finds the definition of the symbol at `position` in `path`, whose content is `text`,
     /// retrying while the server is still indexing, until `deadline` passes.
+    ///
+    /// The server is told the document holds `text` for the request only, and closed after,
+    /// so it never holds text of the client's that the file may no longer have: other requests
+    /// find every file as it is on disk.
     ///
     /// # Errors
     ///
@@ -295,14 +371,30 @@ impl LanguageServer {
         deadline: Duration,
     ) -> Result<Definition, LspError> {
         let uri = file_uri(path);
-        if self.opened.insert(path.to_path_buf()) {
-            self.notify(
-                "textDocument/didOpen",
-                &json!({
-                    "textDocument": { "uri": uri, "languageId": self.language_id, "version": 1, "text": text },
-                }),
-            )?;
-        }
+        self.notify(
+            "textDocument/didOpen",
+            &json!({
+                "textDocument": { "uri": uri, "languageId": self.language_id, "version": 1, "text": text },
+            }),
+        )?;
+        let found = self.ask_definition(&uri, position, deadline);
+        let closed = self.notify(
+            "textDocument/didClose",
+            &json!({ "textDocument": { "uri": uri } }),
+        );
+        let found = found?;
+        closed?;
+        Ok(found)
+    }
+
+    /// Asks for the definition of the symbol at `position` in the open document `uri`,
+    /// retrying while the server is still indexing, until `deadline` passes.
+    fn ask_definition(
+        &mut self,
+        uri: &str,
+        position: Position,
+        deadline: Duration,
+    ) -> Result<Definition, LspError> {
         let started = Instant::now();
         let until = started + deadline;
         loop {
@@ -333,10 +425,8 @@ impl LanguageServer {
 
     /// Queues a message for the writing thread; it never waits for the server.
     fn send(&self, message: &Value) -> Result<(), LspError> {
-        let body = message.to_string();
-        let frame = format!("Content-Length: {}\r\n\r\n{body}", body.len());
         self.outgoing
-            .send(frame.into_bytes())
+            .send(Outgoing::Message(frame(message)))
             .map_err(|_| LspError::Protocol("server closed its input".to_owned()))
     }
 
@@ -413,10 +503,20 @@ impl LanguageServer {
     }
 }
 
-/// Writes queued messages to the server until the queue closes, when the server is dropped, or
-/// a write fails, when the server is gone; killing the server ends a write it never reads.
-fn write_messages(mut stdin: ChildStdin, to_write: &mpsc::Receiver<Vec<u8>>) {
-    for bytes in to_write {
+/// `message` framed with its `Content-Length` header.
+fn frame(message: &Value) -> Vec<u8> {
+    let body = message.to_string();
+    format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+}
+
+/// Writes queued messages to the server until its input is closed, as stopping it does, the
+/// queue closes, when the server is dropped, or a write fails, when the server is gone; killing
+/// the server ends a write it never reads.
+fn write_messages(mut stdin: ChildStdin, to_write: &mpsc::Receiver<Outgoing>) {
+    for outgoing in to_write {
+        let Outgoing::Message(bytes) = outgoing else {
+            break;
+        };
         if stdin
             .write_all(&bytes)
             .and_then(|()| stdin.flush())
@@ -472,34 +572,16 @@ impl LanguageServer {
         Self::spawn(program, args, root, "rust")
     }
 
-    /// The process's identifier.
+    /// The process's identifier, or 0, which no process has, once it is reaped.
     pub(crate) fn process_id(&self) -> u32 {
-        self.child.lock().id()
+        self.child.lock().as_ref().map_or(0, Child::id)
     }
 }
 
 impl Drop for LanguageServer {
     fn drop(&mut self) {
-        // Ask politely, then make sure the process is gone and reaped. Queuing the messages
-        // never blocks, and killing the server ends any write it is not reading.
-        let shutdown = json!({ "jsonrpc": "2.0", "id": self.next_id, "method": "shutdown" });
-        let exit = json!({ "jsonrpc": "2.0", "method": "exit" });
-        if self
-            .send(&shutdown)
-            .and_then(|()| self.send(&exit))
-            .is_err()
-        {
-            // The server is already gone; killing it below is enough.
-        }
-        let mut child = self.child.lock();
-        // A server a `Stopper` stopped is reaped already, and waiting for it again returns at
-        // once.
-        if let Err(err) = child.kill() {
-            drop(err);
-        }
-        if let Err(err) = child.wait() {
-            drop(err);
-        }
+        // A server a `Stopper` stopped is gone already.
+        end(&mut self.child.lock(), &self.outgoing);
     }
 }
 
@@ -618,6 +700,16 @@ pub(crate) fn rust_analyzer_installed() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+/// A fresh directory under the project's own `target/tmp`, for a test crate that rust-analyzer
+/// builds in: its build output must never land in the system's temporary directory, which may
+/// be a small RAM disk.
+#[cfg(test)]
+pub(crate) fn scratch_dir() -> tempfile::TempDir {
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+    std::fs::create_dir_all(&parent).expect("the project's target directory is writable");
+    tempfile::tempdir_in(parent).expect("the project's target directory is writable")
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -677,15 +769,96 @@ mod tests {
         assert_eq!(utf16_column("aü𝄞b", "aü𝄞".len()), 4);
     }
 
-    /// Runs rust-analyzer against a two-file crate; skipped where rust-analyzer is not installed.
-    #[test]
-    fn rust_analyzer_finds_a_definition_in_another_file() {
-        if !rust_analyzer_installed() {
-            eprintln!("skipped: rust-analyzer is not installed");
-            return;
+    /// The process `child` writes its id to `pid_file` in, once it does.
+    #[cfg(target_os = "linux")]
+    fn started(pid_file: &Path) -> u32 {
+        let started = Instant::now();
+        loop {
+            if let Some(child) = std::fs::read_to_string(pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+            {
+                return child;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the server started no child"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Whether the process `id` is gone, or a zombie the system reaps, within ten seconds.
+    #[cfg(target_os = "linux")]
+    fn ends(id: u32) -> bool {
+        let stopping = Instant::now();
+        while stopping.elapsed() < Duration::from_secs(10) {
+            let stopped =
+                std::fs::read_to_string(format!("/proc/{id}/stat")).map_or(true, |stat| {
+                    stat.rsplit_once(')')
+                        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+                });
+            if stopped {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A server asked to exit stops what it started outside its process group itself, as
+    /// rust-analyzer stops the commands it runs in groups of their own, and stopping it waits
+    /// only as long as it takes to exit.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_server_that_exits_on_request_stops_what_it_started_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        // A child in a session of its own, which the server kills once its input ends.
+        let server = LanguageServer::stand_in(
+            "sh",
+            &[
+                "-c",
+                "setsid sh -c 'echo $$ > child.pid; exec sleep 300' & cat > /dev/null; \
+                 kill \"$(cat child.pid)\"",
+            ],
+            dir.path(),
+        )
+        .unwrap();
+        let child = started(&dir.path().join("child.pid"));
+
+        let stopping = Instant::now();
+        server.stopper().stop();
+        assert!(
+            stopping.elapsed() < EXIT_DEADLINE,
+            "the stop waited for the deadline"
+        );
+        assert!(ends(child), "the server's child {child} still runs");
+    }
+
+    /// A server that ignores the request to exit is killed with its process group once the
+    /// deadline passes, the children it started there, as Cargo and the build scripts a
+    /// language server runs, included.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_server_that_ignores_the_request_to_exit_is_killed_with_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = LanguageServer::stand_in(
+            "sh",
+            &["-c", "sleep 300 & echo $! > child.pid; wait"],
+            dir.path(),
+        )
+        .unwrap();
+        let child = started(&dir.path().join("child.pid"));
+
+        server.stopper().stop();
+        assert!(ends(child), "the server's child {child} still runs");
+        drop(server);
+    }
+
+    /// Writes a crate to `root` whose `src/main.rs`, which it returns, calls `helper` of
+    /// `src/util.rs`, defined on its first line, beside `other` on its fifth; a workspace of its
+    /// own, which the project's workspace around `target/` does not claim.
+    fn probe_crate(root: &Path) -> &'static str {
         std::fs::write(
             root.join("Cargo.toml"),
             indoc! {"
@@ -693,6 +866,8 @@ mod tests {
                 name = \"probe\"
                 version = \"0.1.0\"
                 edition = \"2024\"
+
+                [workspace]
             "},
         )
         .unwrap();
@@ -702,6 +877,10 @@ mod tests {
             indoc! {"
                 pub fn helper() -> u32 {
                     7
+                }
+
+                pub fn other() -> u32 {
+                    8
                 }
             "},
         )
@@ -713,27 +892,37 @@ mod tests {
                 let _ = util::helper();
             }
         "};
+        std::fs::write(root.join("src/main.rs"), main).unwrap();
+        main
+    }
+
+    /// Runs rust-analyzer against a two-file crate, and again once the file asked about changed,
+    /// and once a file asked about before changed, which the server must answer about as it is
+    /// on disk rather than as it was first told; skipped where rust-analyzer is not installed.
+    #[test]
+    fn rust_analyzer_answers_about_the_files_as_edited() {
+        if !rust_analyzer_installed() {
+            eprintln!("skipped: rust-analyzer is not installed");
+            return;
+        }
+        let dir = scratch_dir();
+        let root = dir.path();
+        let main = probe_crate(root);
         let main_path = root.join("src/main.rs");
-        std::fs::write(&main_path, main).unwrap();
 
         let command = server_for(&main_path).unwrap();
         let mut server = LanguageServer::launch(&command, root).unwrap();
-        server.initialize(&command, root).unwrap();
+        server.initialize(root).unwrap();
         let line = "    let _ = util::helper();";
-        let column = utf16_column(line, line.find("helper").unwrap());
+        let position = Position {
+            line: 3,
+            character: utf16_column(line, line.find("helper").unwrap()),
+        };
         let found = server
-            .definition(
-                &main_path,
-                main,
-                Position {
-                    line: 3,
-                    character: column,
-                },
-                Duration::from_secs(120),
-            )
+            .definition(&main_path, main, position, Duration::from_secs(120))
             .unwrap();
-        // Canonical on both sides: macOS's temporary directory is under `/var`, a symlink to
-        // `/private/var`, and Windows canonical paths carry a `\\?\` prefix.
+        // Canonical on both sides, as the server answers with canonical paths, which on
+        // Windows carry a `\\?\` prefix.
         assert_eq!(
             found.path.canonicalize().unwrap(),
             root.join("src/util.rs").canonicalize().unwrap()
@@ -745,5 +934,58 @@ mod tests {
                 character: 7
             }
         );
+
+        // The call now names `other`, which starts where `helper` did.
+        let edited = main.replace("helper", "other");
+        std::fs::write(&main_path, &edited).unwrap();
+        let found = server
+            .definition(&main_path, &edited, position, Duration::from_secs(120))
+            .unwrap();
+        assert_eq!(
+            found.position,
+            Position {
+                line: 4,
+                character: 7
+            },
+            "the answer is about the text before the edit"
+        );
+
+        // A question about `util.rs` itself, which the server then reads from disk again, so
+        // two lines added above `other` there move the answer about its caller to them.
+        let util_path = root.join("src/util.rs");
+        let util = std::fs::read_to_string(&util_path).unwrap();
+        let other = Position {
+            line: 4,
+            character: 7,
+        };
+        server
+            .definition(&util_path, &util, other, Duration::from_secs(120))
+            .unwrap();
+        let above = indoc! {"
+            // one
+            // two
+            pub fn other"};
+        std::fs::write(&util_path, util.replace("pub fn other", above)).unwrap();
+        // The server reads the edit through its own watch on the files, so it may answer about
+        // the old text a moment longer; a file it still held open would keep it for good.
+        let asked = Instant::now();
+        let moved = Position {
+            line: 6,
+            character: 7,
+        };
+        loop {
+            let found = server
+                .definition(&main_path, &edited, position, Duration::from_secs(120))
+                .unwrap();
+            if found.position == moved {
+                break;
+            }
+            assert!(
+                asked.elapsed() < Duration::from_secs(60),
+                "the answer stays at {:?}, before the edit of util.rs",
+                found.position
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }

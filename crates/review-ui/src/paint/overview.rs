@@ -9,7 +9,7 @@ use super::{Palette, Piece, Run, Style, Styled, Weight};
 use crate::color::Hsla;
 use crate::markdown::{self, Block, Inline, Span};
 use crate::model::overview::RevisionSummary;
-use crate::model::{Grant, Model, Trust};
+use crate::model::{Model, Trust};
 
 /// How many characters of a commit ID show.
 const COMMIT_ID_CHARS: usize = 10;
@@ -307,12 +307,12 @@ fn checkout_details(model: &Model, palette: &Palette, no_commits: bool) -> Vec<P
     }
     lines.push(plain(
         match model.trust {
-            Trust::Granted(Grant::Snapshot) => {
-                "Trusted: this snapshot, until the code changes; Ctrl+T revokes it"
+            Trust::Granted => {
+                "Trusted: language servers may run in this checkout, until Ctrl+T \
+                               revokes it"
             }
-            Trust::Granted(_) => "Trusted: this whole checkout, until Ctrl+T revokes it",
-            Trust::Checking => "Checking whether tools may run on the code…",
-            Trust::Denied => "Untrusted: tools that run the code ask first",
+            Trust::Checking => "Checking whether language servers may run in this checkout…",
+            Trust::Denied => "Untrusted: go to definition asks first",
         }
         .to_owned(),
     ));

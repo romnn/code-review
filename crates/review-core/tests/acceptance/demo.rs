@@ -202,3 +202,28 @@ fn demo_covers_every_feature() -> eyre::Result<()> {
     assert_that!(view.number().get(), eq(2));
     Ok(())
 }
+
+/// A demo whose data holds the read-only copies of its files that older versions made for a
+/// language server rebuilds from scratch, copies and all.
+#[test]
+fn a_demo_with_read_only_copies_rebuilds() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let paths = DemoPaths::under(root.path());
+    let review = prepare(&paths, &fixture_dir(), DemoRequest::Fresh)?;
+
+    // A copy as older versions left it: every file and directory read-only, the deepest first.
+    let copies = review.dir().root().join("worktrees");
+    let copy = copies.join("f235e2cabe1aa9c8e9eb96eb1063099bfd85f78f");
+    std::fs::create_dir_all(copy.join("src"))?;
+    std::fs::write(copy.join("src/engine.rs"), "fn balance() {}\n")?;
+    for path in [copy.join("src/engine.rs"), copy.join("src"), copy.clone()] {
+        let mut permissions = std::fs::metadata(&path)?.permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions)?;
+    }
+
+    let review = prepare(&paths, &fixture_dir(), DemoRequest::Fresh)?;
+    assert!(!copies.exists(), "the copies stay");
+    assert_that!(review.history()?.revisions().len(), eq(1));
+    Ok(())
+}
