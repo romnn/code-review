@@ -1,7 +1,8 @@
 //! The bottom bars, the `/` bar and the `?` cheat sheet.
 //!
 //! The lower bottom bar shows which revision shows and how fresh it is at the left and the
-//! current mode's keys at the right, in rank order with `? keys` last at the edge.
+//! current mode's keys at the right, in rank order with `? keys` last at the edge; before the
+//! review shows, only the key that quits, unless an overlay that takes the keys is open.
 //! Keys that cannot act now are dimmed, not removed, and a narrow window drops whole hints
 //! from the highest rank down, so the bar never shifts as the selection changes.
 
@@ -196,6 +197,23 @@ pub fn hint_available(model: &Model, action: &str) -> bool {
     }
 }
 
+/// The hint of the first key that quits in `area`, else in the whole window.
+fn quit_hint(model: &Model, palette: &Palette, area: Area) -> Option<BarHint> {
+    let key = [area, Area::Window].into_iter().find_map(|area| {
+        model
+            .settings
+            .keymap
+            .iter()
+            .find(|binding| binding.action == "Quit" && binding.area == area)?
+            .keys
+            .first()
+    })?;
+    Some(BarHint {
+        keys: Piece::new(keymap::display(key), palette.accent),
+        label: Piece::new("quit", palette.dim),
+    })
+}
+
 /// A hint of the bottom bar: its keys and what they do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarHint {
@@ -228,6 +246,16 @@ pub fn bar_hints(
     width: impl Fn(&str) -> f32,
 ) -> Vec<BarHint> {
     let area = model.area();
+    // Before the review shows, only quitting works, except in an overlay opened meanwhile, such
+    // as the settings, which takes the keys.
+    if !matches!(model.phase, Phase::Ready) && model.overlay.is_none() {
+        return quit_hint(model, palette, area)
+            .filter(|hint| {
+                width(&hint.keys.text) + room.inner_gap + width(&hint.label.text) <= room.budget
+            })
+            .into_iter()
+            .collect();
+    }
     let mut hints = keymap::hints(&model.settings.keymap, area, |action| {
         hint_available(model, action)
     });

@@ -3,10 +3,10 @@
 //!
 //! The model knows no UI toolkit.
 //! A front end draws it, turns its input into [`Model::dispatch`] and typed calls through
-//! [`Driver::update`], shows the capture that waits for a frame ([`Model::publish`]) in the
-//! turn that draws one, hands each frame's [`Geometry`] to the layout phase
-//! ([`Model::layout`]), and runs the [`Effect`]s the model queues: background jobs, timers,
-//! the clipboard, the window title.
+//! [`Driver::update`], shows the opened review or the capture that waits for a frame
+//! ([`Model::publish`]) in the turn that draws one, hands each frame's [`Geometry`] to the
+//! layout phase ([`Model::layout`]), and runs the [`Effect`]s the model queues: background
+//! jobs, timers, the clipboard, the window title.
 //!
 //! The model keeps three kinds of state apart:
 //!
@@ -397,6 +397,9 @@ pub struct Model {
     pub phase: Phase,
     /// The open review, which only background work reaches; see the `engine` module.
     engine: Option<engine::Engine>,
+    /// The opened review, or why it could not be opened, which shows with the next frame, as a
+    /// capture does; see [`Self::publish`].
+    opened: Option<Result<Box<Opened>, String>>,
     /// What the open review is of: its key, repository and target.
     pub meta: Option<ReviewMeta>,
     /// The revision on screen.
@@ -574,6 +577,7 @@ impl Model {
         Self {
             phase: Phase::Loading(Instant::now()),
             engine: None,
+            opened: None,
             meta: None,
             snapshot: None,
             blobs: Blobs::default(),
@@ -658,17 +662,29 @@ impl Model {
         }
     }
 
-    /// Opens the review with `opener` in the background and shows it when it is ready.
+    /// Opens the review with `opener` in the background and shows it with the first frame after
+    /// it is ready.
     pub fn open(&mut self, opener: Opener) {
         let live = self.settings.live;
         self.spawn(Subject::Always(Because::Opening), move || {
             Outcome::Opened(open(opener, live).map(Box::new))
         });
-        self.spin();
+    }
+
+    /// Keeps the opened review, or why it could not be opened, to show with the next frame, so
+    /// no key acts on rows before a frame showed them.
+    ///
+    /// Once the app closes, it is dropped instead, and the engine it brings stops on a thread of
+    /// its own as it goes.
+    fn offer_opened(&mut self, opened: Result<Box<Opened>, String>) {
+        if !self.quitting.over() {
+            self.opened = Some(opened);
+        }
     }
 
     /// Shows the opened review, or why it could not be opened.
-    fn opened(&mut self, opened: Result<Box<Opened>, String>) {
+    #[tracing::instrument(skip_all)]
+    fn show_opened(&mut self, opened: Result<Box<Opened>, String>) {
         match opened {
             Ok(opened) => {
                 let opened = *opened;
@@ -728,8 +744,8 @@ impl Model {
         std::mem::take(&mut self.effects)
     }
 
-    /// Whether background work the model started, or an eased scroll, is still running, or a
-    /// capture waits to show with the next frame.
+    /// Whether background work the model started, or an eased scroll, is still running, or the
+    /// opened review or a capture waits to show with the next frame.
     #[must_use]
     pub fn busy(&self) -> bool {
         self.publishes()
@@ -1121,10 +1137,13 @@ impl Model {
         self.remember_layout();
     }
 
-    /// Whether the files show beside the diff.
+    /// Whether the files show beside the diff: as the layout says once the review shows, and
+    /// never before, while there are no files.
     #[must_use]
     pub fn sidebar_shown(&self) -> bool {
-        self.screen == Screen::Split && self.layout.sidebar_visible
+        self.screen == Screen::Split
+            && self.layout.sidebar_visible
+            && matches!(self.phase, Phase::Ready)
     }
 
     /// Sets the files pane's width, in the front end's units, as its divider is dragged; see
@@ -1470,12 +1489,14 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
         following,
     } = opener()?;
     let revision = history.current().ok_or("the review has no revision yet")?;
-    let trust = history
-        .view(revision)
-        .ok()
-        .and_then(|view| view.record().map(|record| record.head.clone()))
-        .and_then(|head| review.repo().tree_of(&head).ok())
-        .map_or(Trust::Denied, |tree| trust::trust_of(&review, &tree));
+    let trust = tracing::info_span!("read_trust").in_scope(|| {
+        history
+            .view(revision)
+            .ok()
+            .and_then(|view| view.record().map(|record| record.head.clone()))
+            .and_then(|head| review.repo().tree_of(&head).ok())
+            .map_or(Trust::Denied, |tree| trust::trust_of(&review, &tree))
+    });
     let (session, following) = match following {
         Some(following) => {
             let opening = live::Opening::read(&review, &history, &following);
@@ -1559,6 +1580,7 @@ fn opening_status(summary: &str, found: Option<&str>, problems: &[String]) -> (S
 }
 
 /// Reads the head text of every changed text file of `revision`, by blob, for context lines.
+#[tracing::instrument(skip_all)]
 fn read_texts(
     review: &Review,
     history: &History,

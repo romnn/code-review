@@ -234,6 +234,7 @@ impl Review {
     /// Returns [`Error::InvalidTarget`] for a bare repository, which has no working tree, and
     /// an error when the clone's identity cannot be read or made or the storage cannot be
     /// created.
+    #[tracing::instrument(skip_all)]
     pub fn open_checkout(data_dir: &Path, repo: Repo) -> Result<Self, Error> {
         if repo.work_tree().is_none() {
             return Err(Error::InvalidTarget(
@@ -383,6 +384,7 @@ impl Review {
 
     /// Captures the working tree and the revision it makes against its subject's base, unless
     /// git is busy in it or something the capture depends on moved while it was taken.
+    #[tracing::instrument(skip_all)]
     pub(super) fn capture(&self, pull_requests: &[CheckoutPullRequest]) -> Result<Observed, Error> {
         let before = match self.observe(pull_requests)? {
             Ok(before) => before,

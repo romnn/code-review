@@ -96,6 +96,7 @@ impl Review {
 
     /// See [`Self::live_history`]; `captured` runs between the capture and its checks, where a
     /// test makes something happen meanwhile.
+    #[tracing::instrument(name = "live_history", skip_all, fields(?looks))]
     fn live_history_with(
         &self,
         session: &Session,

@@ -204,7 +204,7 @@ pub struct ReviewApp {
     first_hunk: Option<Duration>,
     /// Whether QA mode is answering a command, so the app quits only once it has answered.
     answering: bool,
-    /// Whether the next frame shows the capture waiting for it.
+    /// Whether the next frame shows the opened review or the capture waiting for it.
     publishing: bool,
 }
 
@@ -232,11 +232,8 @@ impl ReviewApp {
         let tree_focus = cx.focus_handle();
         window.focus(&tree_focus, cx);
         let lists = Lists::new();
-        let diff_width = measure::opening_width(
-            &settings,
-            fonts.advance,
-            f32::from(window.viewport_size().width),
-        );
+        // The first frame shows the review opening, across the window without the sidebar.
+        let diff_width = f32::from(window.viewport_size().width);
         let lists_code_size = settings.code_size;
         let geometry = measure::measure(&lists.handles, lists_code_size, diff_width);
         let model = Model::new(settings, measure::scale(fonts.advance), geometry);
@@ -321,9 +318,9 @@ impl ReviewApp {
         cx.notify();
     }
 
-    /// Shows the capture that waits in the turn of the next frame, before gpui draws it, so a
-    /// key always acts on what the last frame showed: a key can make gpui render to dispatch it
-    /// without presenting that render, so the capture never shows from `render`.
+    /// Shows the opened review or the capture that waits in the turn of the next frame, before
+    /// gpui draws it, so a key always acts on what the last frame showed: a key can make gpui
+    /// render to dispatch it without presenting that render, so neither shows from `render`.
     fn publish_with_next_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.publishing || !self.publishes() {
             return;
@@ -535,24 +532,26 @@ impl ReviewApp {
         }
     }
 
-    /// The review opened, or failed to: notes when its first hunk shows, and starts the scroll
+    /// The review opened, or failed to: notes that its first hunk shows, and starts the scroll
     /// benchmark or quits when asked to.
+    ///
+    /// The review shows in the next-frame callback that publishes it
+    /// ([`Self::publish_with_next_frame`]), which runs right before gpui draws the frame that
+    /// shows its rows, so that frame is the one measured.
     fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let process_started = self.startup.process_started;
-        cx.on_next_frame(window, move |this, window, cx| {
-            this.first_hunk = Some(process_started.elapsed());
-            if let Some(mode) = this.startup.bench_scroll {
-                this.start_bench(mode, window, cx);
-            } else if this.startup.exit_after_first_frame {
-                println!(
-                    "first hunk visible after {:.1?}: {} files, {} rows",
-                    process_started.elapsed(),
-                    this.tree.len(),
-                    this.rows.screen.len()
-                );
-                cx.quit();
-            }
-        });
+        self.first_hunk = Some(process_started.elapsed());
+        if let Some(mode) = self.startup.bench_scroll {
+            self.start_bench(mode, window, cx);
+        } else if self.startup.exit_after_first_frame {
+            println!(
+                "first hunk visible after {:.1?}: {} files, {} rows",
+                process_started.elapsed(),
+                self.tree.len(),
+                self.rows.screen.len()
+            );
+            cx.quit();
+        }
     }
 
     /// Scrolls the cheat sheet or the overview, as the model's sheet keys ask: by rows of the

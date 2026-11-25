@@ -20,8 +20,8 @@
 //! Backspace, `ctrl-i` as Tab, `ctrl-m` as Enter and `ctrl-[` as Escape, and shift with
 //! control letters not at all.
 //! Keys typed in such terminals arrive as what they send.
-//! With the protocol's disambiguation, which review-tui asks for where the terminal supports
-//! it, each arrives as itself.
+//! With the protocol's disambiguation, which review-tui asks every terminal for, each arrives
+//! as itself where the terminal supports it.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use review_ui::keymap::Area;

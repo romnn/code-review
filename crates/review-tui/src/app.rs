@@ -29,7 +29,7 @@ use review_ui::frame::{List, Scale, Wheel};
 use review_ui::keys::{KeyDown, Keystroke, Matcher, Outcome, Replay, Resolution, Target};
 use review_ui::line_edit::{Edited, LineEdit};
 use review_ui::model::{
-    Action, Completion, Driver, Effect, Field, Hit, Loaded, Mode, Model, Overlay, Phase, QuitKind,
+    Action, Completion, Driver, Effect, Field, Hit, Mode, Model, Opener, Overlay, Phase, QuitKind,
     Settings, TextPress, Updated, list_of,
 };
 use review_ui::paint::display::DisplayLine;
@@ -157,26 +157,19 @@ pub struct App {
 }
 
 impl App {
-    /// The window over `loaded` with `settings`, on a screen `area` large, sending job
-    /// completions to `sender`.
+    /// The window over the review `opener` opens in the background, with `settings`, on a
+    /// screen `area` large, sending job completions to `sender`.
     #[must_use]
     pub fn new(
         settings: Settings,
-        loaded: Loaded,
+        opener: Opener,
         area: Rect,
         sender: Sender<Message>,
         colors: Colors,
         log: Log,
     ) -> Self {
-        // The tree is not built yet, so a fitted files pane opens at its narrowest and the
-        // first frame fits it.
-        let opening = Panes::lay_out(
-            area,
-            settings.layout,
-            0,
-            settings.layout.sidebar_visible,
-            false,
-        );
+        // The first frame shows the review opening, without the files pane.
+        let opening = Panes::lay_out(area, settings.layout, 0, false, false);
         let geometry = measure::opening(&opening, settings.code_size);
         let model = Model::new(settings, Scale::fixed(measure::sizes()), geometry);
         let matcher = Matcher::new(&model.settings.keymap);
@@ -196,7 +189,7 @@ impl App {
             sheet_of: None,
             resizing: false,
         };
-        app.update(|model| model.open(Box::new(move || Ok(loaded))));
+        app.update(|model| model.open(opener));
         app
     }
 
@@ -851,9 +844,9 @@ impl App {
         }
     }
 
-    /// When the main loop must wake by itself: at once for a capture that waits to show with
-    /// the next frame while it `draws`, else a timer, the key matcher's deadline, or the next
-    /// step of something animating on screen; `None` waits for input.
+    /// When the main loop must wake by itself: at once for the opened review or a capture that
+    /// waits to show with the next frame while it `draws`, else a timer, the key matcher's
+    /// deadline, or the next step of something animating on screen; `None` waits for input.
     #[must_use]
     pub fn wake_at(&self, now: Instant, draws: bool) -> Option<Instant> {
         if draws && self.model().publishes() {
@@ -874,19 +867,20 @@ impl App {
             .min()
     }
 
-    /// Shows the capture that waits for the next frame, if nothing holds it back; the frame
-    /// drawn next shows it, and its outgoing items, such as the title, go with that frame.
+    /// Shows the opened review or the capture that waits for the next frame, if nothing holds
+    /// it back; the frame drawn next shows it, and its outgoing items, such as the title, go
+    /// with that frame.
     pub fn publish(&mut self) {
         if self.model().publishes() {
             self.update(Model::publish);
         }
     }
 
-    /// Lays out and draws one frame on `terminal`: the capture waiting to show, the panes at
-    /// its size, the model's layout phase against them, then every pane.
+    /// Lays out and draws one frame on `terminal`: the opened review or the capture waiting to
+    /// show, the panes at its size, the model's layout phase against them, then every pane.
     ///
-    /// A capture shows only here, after the input handled since the last frame, so every key
-    /// acts on what the last frame showed.
+    /// The review and its captures show only here, after the input handled since the last
+    /// frame, so every key acts on what the last frame showed.
     ///
     /// # Errors
     ///
@@ -964,6 +958,7 @@ mod tests {
     use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
     use review_ui::front_end::FrontEnd;
     use review_ui::launch::{self, Configured};
+    use review_ui::model::Loaded;
 
     use super::*;
 
@@ -984,12 +979,14 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let app = App::new(
             settings,
-            Loaded {
-                review,
-                history,
-                found: None,
-                following: None,
-            },
+            Box::new(move || {
+                Ok(Loaded {
+                    review,
+                    history,
+                    found: None,
+                    following: None,
+                })
+            }),
             Rect::new(0, 0, 160, 50),
             sender,
             Colors::TrueColor,
@@ -1078,6 +1075,47 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// While the review opens, the screen shows only that it opens and the key that quits: no
+    /// files pane, no file header and no review keys, none of which does anything yet.
+    #[test]
+    fn the_loading_view_shows_only_what_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _receiver) = demo(dir.path());
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        app.render(&mut terminal).unwrap();
+        assert!(matches!(app.model().phase, Phase::Loading(_)));
+        let screen = screen(&terminal).join("\n");
+        assert!(screen.contains("Opening the review"), "{screen}");
+        assert!(screen.contains("q quit"), "{screen}");
+        for chrome in [
+            "No file selected",
+            "files",
+            "hunks",
+            "0/0",
+            "approve",
+            "? keys",
+        ] {
+            assert!(!screen.contains(chrome), "{chrome:?} shows: {screen}");
+        }
+    }
+
+    /// The settings, which open while the review does, keep their keys in the bottom bar.
+    #[test]
+    fn settings_opened_while_loading_show_their_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _receiver) = demo(dir.path());
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        app.render(&mut terminal).unwrap();
+        app.handle(Message::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char(','),
+            KeyModifiers::NONE,
+        ))));
+        app.render(&mut terminal).unwrap();
+        assert!(matches!(app.model().phase, Phase::Loading(_)));
+        let bar = screen(&terminal).pop().unwrap_or_default();
+        assert!(bar.contains("j/k move"), "{bar}");
     }
 
     /// A note wider than the diff ends in the clip marker, and once the code pans as far as it

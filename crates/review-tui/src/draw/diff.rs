@@ -596,12 +596,8 @@ fn file_header(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area
     if area.height == 0 {
         return;
     }
-    let surface = opaque(palette.surface);
-    painter.fill(area, surface);
     let budget = area.width.saturating_sub(2);
-    let x = area.x + 1;
-    let y = area.y;
-    let Some(file) = header::file_header(
+    let file = header::file_header(
         model,
         palette,
         Room {
@@ -610,16 +606,24 @@ fn file_header(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area
             gap: f32::from(HEADER_GAP),
         },
         1.0,
-    ) else {
-        painter.text(
-            x,
-            y,
-            budget,
-            header::NO_FILE,
-            Brush::new(palette.faint, surface),
-        );
-        return;
+    );
+    let surface = opaque(palette.surface);
+    let x = area.x + 1;
+    let y = area.y;
+    let file = match (file, header::no_file(model)) {
+        (Some(file), _) => file,
+        (None, Some(no_file)) => {
+            painter.fill(area, surface);
+            painter.text(x, y, budget, no_file, Brush::new(palette.faint, surface));
+            return;
+        }
+        // Nothing of the header shows before the review does.
+        (None, None) => {
+            painter.fill(area, opaque(palette.background));
+            return;
+        }
     };
+    painter.fill(area, surface);
     let FileHeader {
         kind,
         dir,

@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use review_core::{RefreshStep, Synced};
 
+use super::Model;
 use super::effects::{Because, Outcome, Subject};
-use super::{Model, Phase};
 
 /// How often the spinner turns while a fetch runs.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -148,8 +148,10 @@ impl Model {
         Duration::from_secs(60 - into_minute)
     }
 
-    /// Turns the spinner while the review opens or a fetch runs; it stops by itself once they
-    /// end.
+    /// Turns the spinner while a fetch runs; it stops by itself once the fetch ends.
+    ///
+    /// The loading view needs no ticks: both front ends draw frames for as long as the review
+    /// opens.
     pub(super) fn spin(&mut self) {
         self.after(
             SPIN,
@@ -162,9 +164,7 @@ impl Model {
     /// tick that keeps going asks for the next.
     pub(super) fn ticked(&mut self, tick: Tick) {
         match tick {
-            Tick::Spin if self.refreshing || matches!(self.phase, Phase::Loading(_)) => {
-                self.spin();
-            }
+            Tick::Spin if self.refreshing => self.spin(),
             Tick::Minute => self.start_clock(),
             Tick::Reconcile => self.reconcile(),
             Tick::PullRequest => self.pull_request_due(),

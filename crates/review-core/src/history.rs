@@ -181,6 +181,7 @@ pub(crate) struct HistoryInput {
 
 impl History {
     /// Builds the history and derives every unit's state.
+    #[tracing::instrument(name = "standings", skip_all)]
     pub(crate) fn new(input: HistoryInput) -> Self {
         let HistoryInput {
             events,

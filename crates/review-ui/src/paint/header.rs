@@ -92,7 +92,7 @@ pub struct FileHeader {
 }
 
 /// The selected file's header, with the parts that fit `room`, or `None` with no file
-/// selected; [`NO_FILE`] says so in [`Palette::faint`].
+/// selected; [`no_file`] says so in [`Palette::faint`].
 ///
 /// When the room is narrow, the file's length makes way first, then the line counts, then the
 /// meter; the path keeps some room and truncates from its start.
@@ -289,8 +289,12 @@ fn hunk_scope(model: &Model) -> (Vec<String>, Option<String>) {
     (scopes, note.tag.clone())
 }
 
-/// What the file header says with no file selected.
-pub const NO_FILE: &str = "No file selected";
+/// What the file header says with no file selected: that no file is, once the review shows;
+/// `None` before, when the header shows nothing, not even its bar.
+#[must_use]
+pub fn no_file(model: &Model) -> Option<&'static str> {
+    matches!(model.phase, Phase::Ready).then_some("No file selected")
+}
 
 /// What the file header says about `section` after its path: a rename, entry changes, what
 /// kind of change it is, and why side by side shows unified.

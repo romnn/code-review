@@ -291,6 +291,18 @@ fn run_gh(repo: &Repo, args: &[&str], timeout: Duration) -> Result<Vec<u8>, Erro
     let mut command = Command::new("gh");
     command.current_dir(repo.work_tree().unwrap_or_else(|| repo.git_dir()));
     repo.apply_env(&mut command);
+    repo.prepare_remote(&mut command);
+    // Detached from the console, gh would start the git it runs on a console window of its own
+    // each time; on a console without a window, they share that one, and gh asks nothing on it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        /// The process creation flag that starts a console program on a console of its own
+        /// that shows no window, replacing the detachment `prepare_remote` asks for.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")

@@ -776,14 +776,17 @@ impl ReviewApp {
             gap,
         };
         let Some(file) = header::file_header(self, &colors, room, GRID * 2.0) else {
-            return h_flex()
-                .h(px(self.sizes().bar()))
-                .flex_none()
+            let bar = h_flex().h(px(self.sizes().bar())).flex_none();
+            // Nothing of the header shows before the review does, only the room it takes.
+            let Some(no_file) = header::no_file(self) else {
+                return bar;
+            };
+            return bar
                 .px(px(GRID * 3.0))
                 .border_b_1()
                 .border_color(to_gpui(colors.hairline))
                 .text_color(to_gpui(colors.faint))
-                .child(header::NO_FILE);
+                .child(no_file);
         };
         h_flex()
             .h(px(self.sizes().bar()))

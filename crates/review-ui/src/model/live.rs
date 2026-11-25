@@ -204,6 +204,7 @@ impl Opening {
     /// Reads what the window needs about `following`'s capture, which `history` ends in: the
     /// tree the trust names, the branch and upstream, and the commits; its session goes to the
     /// engine.
+    #[tracing::instrument(name = "read_opening", skip_all)]
     pub(super) fn read(
         review: &review_core::Review,
         history: &History,
@@ -639,14 +640,20 @@ impl Model {
         }
     }
 
-    /// Shows the waiting capture, unless the reviewer is in the middle of something it would
-    /// pull the rows from under.
+    /// Shows the opened review, or else the waiting capture, unless the reviewer is in the
+    /// middle of something it would pull the rows from under.
     ///
     /// The front end calls it in the turn that draws the next frame, and nowhere else, so a key
-    /// always acts on what the last frame showed: never on a capture that landed after it.
+    /// always acts on what the last frame showed: never on a review or a capture that landed
+    /// after it.
     /// One taken before a change seen since it waited never shows: the capture of that change
     /// is running or follows, and the view on screen is updating until it lands.
     pub fn publish(&mut self) {
+        // Before the review opened, no rows showed that it could pull from under the reviewer.
+        if let Some(opened) = self.opened.take() {
+            self.show_opened(opened);
+            return;
+        }
         if self.live_waits() {
             return;
         }
@@ -667,14 +674,17 @@ impl Model {
         self.show_capture(*waiting);
     }
 
-    /// Whether a capture waits to show with the next frame and nothing holds it back, so the
-    /// front end must draw one.
+    /// Whether the opened review or a capture waits to show with the next frame and nothing
+    /// holds it back, so the front end must draw one.
     #[must_use]
     pub fn publishes(&self) -> bool {
-        self.live
+        let opened = self.opened.is_some() && !self.quitting.over();
+        let captured = self
+            .live
             .as_ref()
             .is_some_and(|live| live.waiting.is_some())
-            && !self.live_waits()
+            && !self.live_waits();
+        opened || captured
     }
 
     /// Whether the reviewer is in the middle of something a new snapshot would pull the rows

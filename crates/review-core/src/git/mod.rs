@@ -40,12 +40,20 @@ pub(crate) const COMMAND_CONFIG: [&str; 4] = [
 ///
 /// Replace refs would make an object ID stand for other content than its own, so the engine
 /// reads objects as they are.
-/// Git never prompts for credentials, and messages stay parseable.
-pub(crate) const COMMAND_ENV: [(&str, &str); 3] = [
+/// Git tries to fetch none of the objects a partial clone lacks, so reading one fails at once.
+/// Git never asks for credentials on the terminal itself, and messages stay parseable.
+pub(crate) const COMMAND_ENV: [(&str, &str); 4] = [
+    ("GIT_NO_LAZY_FETCH", "1"),
     ("GIT_NO_REPLACE_OBJECTS", "1"),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("LC_ALL", "C"),
 ];
+
+/// Environment of every command that reaches a remote for a repository whose commands may not
+/// prompt: an empty `GIT_ASKPASS`, which git asks for credentials before `core.askPass` and
+/// `SSH_ASKPASS` and which stands in for both, and no askpass helper for ssh, which asks one
+/// when it has no terminal.
+const NO_PROMPT_ENV: [(&str, &str); 2] = [("GIT_ASKPASS", ""), ("SSH_ASKPASS_REQUIRE", "never")];
 
 /// A file of a commit's tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +85,8 @@ pub struct Repo {
     /// Variables added to the environment of every command run for the repository; see
     /// [`Self::set_command_env`].
     env: Vec<(OsString, OsString)>,
+    /// Whether those commands may not prompt; see [`Self::forbid_prompts`].
+    no_prompts: bool,
 }
 
 /// A ref and the object it points to.
@@ -102,18 +112,57 @@ struct Output {
     stdout: Vec<u8>,
 }
 
+/// Runs `command` in a session of its own, which has no controlling terminal: opening
+/// `/dev/tty` fails in it and in everything it runs.
+#[cfg(unix)]
+fn without_terminal(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    // SAFETY: between fork and exec, the child only calls `setsid`, which is async-signal-safe,
+    // and builds its error without allocating.
+    #[expect(
+        unsafe_code,
+        reason = "std has no stable way to start a process in a session of its own"
+    )]
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid()
+                .map(drop)
+                .map_err(std::io::Error::from)
+        });
+    }
+}
+
+/// Starts `command` without a console, so that neither it nor what it runs can prompt on the
+/// app's.
+///
+/// `DETACHED_PROCESS` rather than `CREATE_NO_WINDOW`, which gives the child a console of its
+/// own, only hidden, that ssh would prompt on and wait for unseen.
+/// Git for Windows starts its own children, ssh among them, detached in turn when it has no
+/// console (`compat/mingw.c`), so none opens a console window either.
+#[cfg(windows)]
+fn without_terminal(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+
+    /// The process creation flag that starts a console program without its parent's console.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    command.creation_flags(DETACHED_PROCESS);
+}
+
 impl Repo {
     /// Opens the repository containing `path`.
     ///
     /// # Errors
     ///
     /// Returns an error when `path` is not inside a git repository or `git` cannot run.
+    #[tracing::instrument(skip_all)]
     pub fn discover(path: &Path) -> Result<Self, Error> {
         let probe = Self {
             work_tree: Some(path.to_path_buf()),
             git_dir: PathBuf::new(),
             common_dir: PathBuf::new(),
             env: Vec::new(),
+            no_prompts: false,
         };
         let git_dir = probe.run_text(["rev-parse", "--absolute-git-dir"])?;
         let common_dir =
@@ -131,6 +180,7 @@ impl Repo {
             git_dir: PathBuf::from(git_dir),
             common_dir: PathBuf::from(common_dir),
             env: Vec::new(),
+            no_prompts: false,
         })
     }
 
@@ -156,9 +206,6 @@ impl Repo {
     /// Sets `vars` in the environment of every `git` and `gh` command run for the repository
     /// from now on, replacing the variables set before, on top of the process's own
     /// environment.
-    ///
-    /// A front end that draws on the terminal sets the variables that keep `ssh` and credential
-    /// helpers from prompting on it, once the review is open.
     pub fn set_command_env<K, V>(&mut self, vars: impl IntoIterator<Item = (K, V)>)
     where
         K: Into<OsString>,
@@ -175,9 +222,40 @@ impl Repo {
         command.envs(self.env.iter().map(|(key, value)| (key, value)));
     }
 
+    /// Runs every command for the repository that reaches a remote from now on, its fetches and
+    /// `gh`, so that nothing it runs can prompt.
+    ///
+    /// On Unix each runs in a session of its own, without the controlling terminal that git, ssh
+    /// and credential helpers prompt on, whatever command the user set to run ssh.
+    /// None asks an askpass helper either, which would prompt in a window.
+    /// A command that would have to ask, such as a fetch that needs a passphrase, fails instead.
+    /// No other command can prompt, since none reaches a remote (see [`Self::fetch`]).
+    pub fn forbid_prompts(&mut self) {
+        self.no_prompts = true;
+    }
+
+    /// Prepares `command`, which reaches a remote, as [`Self::forbid_prompts`] has it.
+    pub(crate) fn prepare_remote(&self, command: &mut Command) {
+        if self.no_prompts {
+            command.envs(NO_PROMPT_ENV);
+            without_terminal(command);
+        }
+    }
+
     /// Returns a `git` command bound to this repository, with [`COMMAND_CONFIG`] and
-    /// [`COMMAND_ENV`] applied.
+    /// [`COMMAND_ENV`] applied, that may use no transport.
+    ///
+    /// It reaches no remote whatever git's version and configuration, not even for an object a
+    /// partial clone lacks, which some versions and paths fetch despite `GIT_NO_LAZY_FETCH`.
     pub(crate) fn command(&self) -> Command {
+        let mut command = self.git();
+        command.env("GIT_ALLOW_PROTOCOL", "");
+        command
+    }
+
+    /// Returns a `git` command bound to this repository, with [`COMMAND_CONFIG`] and
+    /// [`COMMAND_ENV`] applied, that may use the transports the user allows.
+    fn git(&self) -> Command {
         let mut command = Command::new("git");
         match &self.work_tree {
             Some(work_tree) => command.arg("-C").arg(work_tree),
@@ -750,6 +828,9 @@ impl Repo {
     /// Fetches `refspecs` from `remote`, updating no ref outside the refspecs' destinations and
     /// not touching `FETCH_HEAD`.
     ///
+    /// Fetches are the only git commands that reach a remote, over the transports the user
+    /// allows, and run as [`Self::forbid_prompts`] has it.
+    ///
     /// # Errors
     ///
     /// Returns an error when the fetch fails.
@@ -774,7 +855,9 @@ impl Repo {
         .collect();
         args.push(remote.to_owned());
         args.extend(refspecs.iter().cloned());
-        self.run(args)?;
+        let mut command = self.git();
+        self.prepare_remote(&mut command);
+        Self::run_command(command, args)?;
         Ok(())
     }
 
@@ -964,4 +1047,57 @@ fn grep_line(line: &[u8], prefix: &str) -> Option<GrepLine> {
             .trim_end_matches('\r')
             .to_owned(),
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use color_eyre::eyre;
+
+    use super::*;
+    use crate::testing;
+
+    /// A command that reaches a remote, for a repository whose commands may not prompt, has git
+    /// ask no askpass helper for credentials, not even one `core.askPass` names, which git asks
+    /// with its own prompt off, and fail instead.
+    #[test]
+    fn forbidden_prompts_ask_no_helper() -> eyre::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = testing::committed(&[("a.rs", "fn a() {}\n")])?;
+        let asked = repo.path().join("asked");
+        let helper = repo.path().join("askpass");
+        let script = indoc::formatdoc! {"
+            #!/bin/sh
+            touch '{asked}'
+            echo secret
+        ", asked = asked.display()};
+        std::fs::write(&helper, script)?;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))?;
+        let helper = helper.display().to_string();
+        testing::git(repo.path(), &["config", "core.askPass", &helper])?;
+        let mut git = Repo::discover(repo.path())?;
+        git.set_command_env([
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ]);
+        git.forbid_prompts();
+
+        let mut fill = git.command();
+        git.prepare_remote(&mut fill);
+        let mut fill = fill
+            .args(["credential", "fill"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        fill.stdin
+            .take()
+            .ok_or_else(|| eyre::eyre!("no stdin"))?
+            .write_all(b"protocol=https\nhost=example.invalid\n\n")?;
+        let output = fill.wait_with_output()?;
+        assert!(!output.status.success(), "{output:?}");
+        assert!(!asked.exists(), "the helper was asked");
+        Ok(())
+    }
 }

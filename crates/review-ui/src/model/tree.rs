@@ -384,7 +384,8 @@ impl Model {
             self.leave_scroll_mode();
             return;
         }
-        if !self.sidebar_shown() {
+        // By the layout, which the files follow once the review shows.
+        if self.screen != super::Screen::Split || !self.layout.sidebar_visible {
             self.screen = super::Screen::Split;
             self.layout.sidebar_visible = true;
         }

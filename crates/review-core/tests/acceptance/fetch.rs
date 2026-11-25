@@ -1,11 +1,12 @@
 //! Fetch isolation: the engine never updates refs outside `refs/code-review/*` or `FETCH_HEAD`.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 
 use color_eyre::eyre;
 use googletest::prelude::*;
-use review_core::{ObjectId, Repo, Review, ReviewTarget};
+use review_core::{Error, ObjectId, Repo, Review, ReviewTarget};
 
 use crate::common::{GIT_ENV, TestRepo};
 
@@ -182,6 +183,62 @@ fn shallow_review_with_unpublished_head_finds_merge_base() -> eyre::Result<()> {
             Ok(())
         },
     )
+}
+
+/// Only an explicit fetch reaches a remote, even for a git that would fetch what a partial clone
+/// lacks: reading a missing blob and detecting a rename across missing blobs fail, and fetch
+/// nothing, while a fetch still fetches, over the transports the user allows.
+#[test]
+fn a_partial_clone_reaches_its_remote_only_to_fetch() -> eyre::Result<()> {
+    let origin = TestRepo::new()?;
+    let mut lines = String::new();
+    for line in 1..=40 {
+        writeln!(lines, "line {line}")?;
+    }
+    origin.write("a.txt", &lines)?;
+    let base = ObjectId::parse(&origin.commit("base")?)?;
+    origin.git(&["mv", "a.txt", "b.txt"])?;
+    origin.write("b.txt", &format!("{lines}line 41\n"))?;
+    let head = ObjectId::parse(&origin.commit("rename")?)?;
+    origin.git(&["config", "uploadpack.allowFilter", "true"])?;
+    let blob = ObjectId::parse(&origin.git(&["rev-parse", "HEAD:b.txt"])?)?;
+    let local = clone(&origin, &["--filter=blob:none", "--no-checkout"])?;
+    let clone = local.path();
+    // `rev-list --missing=print` lists the objects the clone lacks without fetching them.
+    let missing = || -> eyre::Result<usize> {
+        let listed = git(
+            clone,
+            &["rev-list", "--objects", "--missing=print", "--all"],
+        )?;
+        Ok(listed.lines().filter(|line| line.starts_with('?')).count())
+    };
+    assert_that!(missing()?, eq(2));
+
+    // As a git without `GIT_NO_LAZY_FETCH` would, with `git config` reading another file.
+    let elsewhere = local.path().join("elsewhere.gitconfig");
+    std::fs::write(&elsewhere, "")?;
+    let mut repo = Repo::discover(clone)?;
+    repo.set_command_env([
+        ("GIT_NO_LAZY_FETCH", "0".into()),
+        ("GIT_CONFIG", elsewhere.into_os_string()),
+    ]);
+    let read = repo.blob_reader()?.read(&blob);
+    assert_that!(read, err(matches_pattern!(Error::MissingObject(_))));
+    assert!(
+        repo.diff_tree(&base, &head).is_err(),
+        "the rename was found"
+    );
+    assert_that!(missing()?, eq(2));
+
+    // A fetch reaches the remote, unless the user's configuration forbids its transport.
+    let refspec = "+refs/heads/main:refs/code-review/test/main".to_owned();
+    repo.fetch("origin", std::slice::from_ref(&refspec))?;
+    git(clone, &["config", "protocol.file.allow", "never"])?;
+    assert!(
+        repo.fetch("origin", &[refspec]).is_err(),
+        "file:// was used"
+    );
+    Ok(())
 }
 
 /// Variables set for the repository's commands reach every git it runs, such as the fetch's

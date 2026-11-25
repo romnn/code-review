@@ -194,6 +194,7 @@ impl LogTail {
     /// Returns [`Error::CorruptLog`] for a corrupt complete record, and [`Error::LogShrank`] when
     /// the log is shorter than a complete-record boundary already read.
     /// Blocks while a writer holds the lock.
+    #[tracing::instrument(name = "read_log", skip_all)]
     pub fn poll(&mut self) -> Result<Vec<Event>, Error> {
         let Some(lock) = LockGuard::acquire_shared(&self.lock)? else {
             return Ok(Vec::new());
