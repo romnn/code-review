@@ -15,6 +15,25 @@ key v
 state
 expect "view":"hunks","effective_view":"hunks"
 
+# A binary file that is no image keeps its binary line, with no image comparison above it.
+file assets/logo.bin
+state
+expect "selected":"assets/logo.bin"
+expect "comparison":null
+
+# A changed image compares its versions side by side, counts the pixels that changed, and
+# tints them over the head with o; a second o shows the head as it is.
+file web/images/chart.png
+state
+expect "comparison":\{"base":\{"detail":"PNG · 96 × 64","note":null,"size":
+expect "status":"672 of 6144 pixels changed \(10.9%\) · o tints them"
+action ToggleChangedPixels
+state
+expect "tinted":true
+action ToggleChangedPixels
+state
+expect "tinted":false
+
 # Moving through the files previews each one's diff.
 file src/engine.rs
 state

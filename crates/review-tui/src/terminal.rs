@@ -27,8 +27,9 @@ use std::time::Instant;
 
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
@@ -44,6 +45,8 @@ use review_ui::worker;
 use crate::app::{App, Message, Outgoing, next_batch};
 use crate::clipboard;
 use crate::color::Colors;
+use crate::graphics::{Environment, Uploads};
+use crate::images::CellSize;
 use crate::log::Log;
 
 /// Whether raw mode is on, so the terminal's own mode comes back.
@@ -80,10 +83,12 @@ fn take_over(stdout: &mut Stdout) -> io::Result<()> {
     }
     enable_raw_mode()?;
     SCREEN.store(true, Ordering::SeqCst);
+    // Focus reports tell the app when another tmux client may have attached.
     execute!(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
+        EnableFocusChange,
         cursor::Hide
     )?;
     if MOUSE.load(Ordering::SeqCst) {
@@ -119,6 +124,11 @@ pub fn give_back() -> io::Result<()> {
     if screen {
         // A frame cut short, by a panic or a second signal, leaves synchronized output on.
         step(execute!(stdout, EndSynchronizedUpdate));
+        // The images a quit that could not wait left, which the terminal would keep.
+        let drops = Uploads::drops_now();
+        if !drops.is_empty() {
+            step(write!(stdout, "{drops}").and_then(|()| stdout.flush()));
+        }
     }
     if ENHANCED.swap(false, Ordering::SeqCst) {
         step(execute!(stdout, PopKeyboardEnhancementFlags));
@@ -127,6 +137,7 @@ pub fn give_back() -> io::Result<()> {
         step(execute!(
             stdout,
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen,
             cursor::Show
@@ -174,6 +185,7 @@ fn send(stdout: &mut impl io::Write, outgoing: Vec<Outgoing>) -> io::Result<()> 
                 queue!(stdout, CopyToClipboard::to_primary_from(text))?;
             }
             Outgoing::Title(title) => queue!(stdout, SetTitle(clean_title(&title)))?,
+            Outgoing::Escape(sequence) => write!(stdout, "{sequence}")?,
         }
     }
     stdout.flush()
@@ -202,6 +214,7 @@ pub fn run(
     colors: Colors,
     log: &Log,
     checks: Checks,
+    environment: &Environment,
 ) -> io::Result<Phase> {
     let mut stdout = io::stdout();
     MOUSE.store(settings.mouse.any(), Ordering::SeqCst);
@@ -217,6 +230,7 @@ pub fn run(
         colors,
         log,
         checks,
+        environment,
         &clipboard_worker.sender(),
     );
     let given_back = give_back();
@@ -226,6 +240,24 @@ pub fn run(
     let phase = shown?;
     given_back?;
     Ok(phase)
+}
+
+/// Inside tmux, starts reading whether its client's terminal shows images, which takes calls
+/// of tmux, as the app starts and on each ask, when focus or a resize says another client may
+/// have attached; each change goes to the main loop through `sender`, and until the first
+/// reading none show. Returns where to ask, which nothing reads outside tmux.
+fn read_tmux(environment: &Environment, sender: &mpsc::Sender<Message>) -> mpsc::Sender<()> {
+    let (ask, asks) = mpsc::channel();
+    if environment.tmux_pane.is_some() {
+        let environment = environment.clone();
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            environment.follow_tmux(&asks, |graphics| {
+                sender.send(Message::Graphics(graphics)).is_ok()
+            });
+        });
+    }
+    ask
 }
 
 /// The main loop: terminal input and signals on threads of their own, job completions and
@@ -238,6 +270,7 @@ fn show(
     colors: Colors,
     log: &Log,
     checks: Checks,
+    environment: &Environment,
     copier: &worker::Sender<clipboard::Clip>,
 ) -> io::Result<Phase> {
     let (sender, receiver) = mpsc::channel();
@@ -261,6 +294,7 @@ fn show(
     let signals = signals::watch(sender.clone(), log.clone())?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let size = terminal.size()?;
+    let ask_tmux = read_tmux(environment, &sender);
     let mut app = App::new(
         settings,
         opener,
@@ -269,6 +303,7 @@ fn show(
         colors,
         log.clone(),
     );
+    app.set_graphics(environment.graphics());
     // The first failure to reach the terminal; once one fails, it gets no more frames.
     let mut lost: Option<io::Error> = None;
     let mut drawn = false;
@@ -288,7 +323,7 @@ fn show(
                         text: text.clone(),
                         board: clipboard::Board::Primary,
                     }),
-                    Outgoing::Title(_) => {}
+                    Outgoing::Title(_) | Outgoing::Escape(_) => {}
                 }
             }
             let reached =
@@ -318,13 +353,26 @@ fn show(
                     let drawing = lost.is_none();
                     signals::handle(signal, &mut app, &mut terminal, drawing, log);
                 }
-                other => app.handle(other),
+                other => {
+                    if let Message::Input(Event::FocusGained | Event::Resize(..)) = other {
+                        // Nothing reads the asks outside tmux.
+                        ask_tmux.send(()).ok();
+                    }
+                    app.handle(other);
+                }
             }
         }
         app.tick(Instant::now());
     }
     #[cfg(unix)]
     signals.stop();
+    // The terminal drops the images' data, which outlives the screen they were on.
+    if lost.is_none() {
+        app.drop_images(true);
+        if let Err(err) = send(terminal.backend_mut(), app.take_outgoing()) {
+            log.write(&format!("the terminal cannot be drawn to: {err}"));
+        }
+    }
     lost.map_or_else(|| Ok(app.model().phase.clone()), Err)
 }
 
@@ -332,10 +380,22 @@ fn show(
 /// from those drawn while it opens.
 #[tracing::instrument(skip_all, fields(opening = matches!(app.model().phase, Phase::Loading(_))))]
 fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
+    app.set_cell(cell_size());
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     let rendered = app.render(terminal);
     execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
     rendered
+}
+
+/// The size of the terminal's cells in pixels, as the system reports the window's size, which
+/// asks the terminal nothing; `None` where it reports no pixels.
+fn cell_size() -> Option<CellSize> {
+    let window = crossterm::terminal::window_size().ok()?;
+    let cells = |pixels: u16, cells: u16| pixels.checked_div(cells).filter(|&cell| cell > 0);
+    Some(CellSize {
+        width: cells(window.width, window.columns)?,
+        height: cells(window.height, window.rows)?,
+    })
 }
 
 /// Signals from outside the terminal, which only a Unix terminal has.

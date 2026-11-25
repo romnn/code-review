@@ -147,6 +147,8 @@ pub(super) enum Outcome {
     TextsRead(TextsRead),
     /// One file's highlights, made in the background.
     Highlighted(Highlighted),
+    /// A changed file's versions, compared as images.
+    Compared(Box<super::compare::Compared>),
     /// A mark saved or refused.
     Marked(Marked),
     /// A decision on trust recorded, or why it could not be.
@@ -386,6 +388,7 @@ impl Model {
                 self.requested.finish(&read.asked);
             }
             Outcome::Unchanged(_) => self.highlighting = self.highlighting.saturating_sub(1),
+            Outcome::Compared(_) => self.images.ended(),
             Outcome::Marked(_) | Outcome::Decided(_) => self.saving = false,
             Outcome::Refreshed(_) => {
                 self.refreshing = false;
@@ -454,6 +457,7 @@ impl Model {
             Outcome::Opened(opened) => self.offer_opened(opened),
             Outcome::TextsRead(read) => self.texts_read(read),
             Outcome::Highlighted(highlighted) => self.highlighted(highlighted),
+            Outcome::Compared(compared) => self.compared(*compared),
             Outcome::Marked(marked) => self.marked(marked),
             Outcome::Decided(decided) => self.decided(decided),
             Outcome::TrustRead(trust) => self.take_trust(trust),

@@ -38,6 +38,7 @@ pub mod find;
 pub mod folders;
 pub mod frame;
 pub mod front_end;
+pub mod images;
 pub mod keymap;
 pub mod keys;
 pub mod launch;

@@ -16,7 +16,7 @@ expect "revision":"1"
 expect "mode":"Tree"
 expect "theme":"carbonfox"
 expect "token_emphasis":true,"diff_style":"bold"
-expect "progress":\{"files":\[6,54\],"hunks":\[15,292\],"auto_approved":6\}
+expect "progress":\{"files":\[6,58\],"hunks":\[15,296\],"auto_approved":6\}
 expect "layout":\{"sidebar":31,"fit":true\}
 expect "viewport":\[32,1,128,47\]
 shot 01-open
@@ -452,11 +452,11 @@ expect "row_count":4,
 # The mouse in the files: a click on a tree row shows that file, a double click opens its
 # diff, and the wheel scrolls the list under it, a row an event, on a screen too short for
 # all of it.
-click 10 21
+click 10 16
 state
 expect "selected":"src/format.rs"
 expect "mode":"Tree"
-click 10 21 2
+click 10 16 2
 state
 expect "selected":"src/format.rs"
 expect "mode":"Diff"
@@ -470,7 +470,7 @@ state
 expect "scroll_offset":1\.0,
 wheel 1 10 6
 state
-expect "tree":\[\{"path":".github/workflows","kind":"Directory","change":null,"progress":"Open","y":-26\}
+expect "tree":\[\{"path":".github/workflows","kind":"Directory","change":null,"progress":"Open","y":-31\}
 resize 160x50
 
 # The divider between the files and the diff drags, which the next launch remembers, and a

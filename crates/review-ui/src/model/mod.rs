@@ -47,6 +47,7 @@ use crate::{find, keymap};
 
 mod actions;
 pub mod buffer;
+pub mod compare;
 mod diff;
 mod effects;
 mod engine;
@@ -543,6 +544,8 @@ pub struct Model {
     pub(crate) highlighting: usize,
     /// The shown revision's highlighting in the background.
     highlights: highlights::Highlights,
+    /// The selected file's comparison, when its versions are images.
+    images: compare::Images,
     /// Whether language servers may run in the checkout; see the `trust` module.
     pub trust: Trust,
     /// The trust epoch, which lookups check as they start a server; see the `trust` module.
@@ -648,6 +651,8 @@ impl Model {
             looking_up: false,
             highlighting: 0,
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
+            // A window shows images; a terminal says when it does.
+            images: compare::Images::new(settings.front_end == FrontEnd::Window),
             trust: Trust::Denied,
             trust_epoch: Arc::default(),
             guarding: false,
@@ -756,6 +761,7 @@ impl Model {
             || self.looking_up
             || self.highlighting > 0
             || self.highlights.running()
+            || self.images.busy()
             || self.picker.as_ref().is_some_and(picker::Picker::busy)
             || self.refreshing
             || self.live.as_ref().is_some_and(live::Live::capturing)
@@ -1041,6 +1047,7 @@ impl Model {
         let Some(view) = snapshot.view() else {
             return;
         };
+        self.follow_comparison(&view);
         // The selection is the selected hunk; its index follows it into the new rows.
         let selected = self.rows.hunks.get(self.hunk).cloned();
         let layout = match self.folder.as_ref().map(|folder| folder.path.clone()) {

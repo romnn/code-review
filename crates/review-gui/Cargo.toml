@@ -15,6 +15,7 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui-kit-assets.workspace = true
 gpui-platform = { workspace = true, features = ["wayland"] }
+image.workspace = true
 indoc.workspace = true
 review-ui.workspace = true
 serde_json.workspace = true

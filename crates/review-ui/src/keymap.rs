@@ -651,6 +651,15 @@ const DEFAULTS: &[Default] = &[
         None,
     ),
     (
+        "ToggleChangedPixels",
+        &["o"],
+        &[Area::Tree, Area::Diff],
+        "View",
+        "show or hide a changed image's changed pixels",
+        None,
+        None,
+    ),
+    (
         "OpenSettings",
         &["shift-t", ","],
         MODES,

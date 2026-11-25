@@ -16,6 +16,8 @@ mod app;
 mod clipboard;
 mod color;
 mod draw;
+mod graphics;
+mod images;
 mod keys;
 mod log;
 mod measure;
@@ -67,6 +69,15 @@ pub struct Terminal {
     /// The base of the log file's directory, `$XDG_STATE_HOME`.
     #[arg(long, env = "XDG_STATE_HOME", hide = true)]
     pub xdg_state_home: Option<PathBuf>,
+    /// The terminal's name, which says whether it shows images outside tmux.
+    #[arg(long, env = "TERM", hide = true)]
+    pub term: Option<String>,
+    /// The program the terminal is, which WezTerm says here rather than in `TERM`.
+    #[arg(long, env = "TERM_PROGRAM", hide = true)]
+    pub term_program: Option<String>,
+    /// The tmux pane the app runs in, inside tmux, whose client says whether it shows images.
+    #[arg(long, env = "TMUX_PANE", hide = true)]
+    pub tmux_pane: Option<String>,
 }
 
 /// Shows the review `options` name on the terminal until the reviewer quits, opening it behind
@@ -124,6 +135,23 @@ fn show(options: &Options) -> eyre::Result<()> {
         return qa::run(settings, opener);
     }
     let colors = color::Colors::from_colorterm(options.terminal.colorterm.as_deref());
+    let environment = graphics::Environment {
+        term: options
+            .terminal
+            .term
+            .clone()
+            .filter(|term| !term.is_empty()),
+        term_program: options
+            .terminal
+            .term_program
+            .clone()
+            .filter(|program| !program.is_empty()),
+        tmux_pane: options
+            .terminal
+            .tmux_pane
+            .clone()
+            .filter(|pane| !pane.is_empty()),
+    };
     let shown = terminal::run(
         settings,
         opener,
@@ -132,6 +160,7 @@ fn show(options: &Options) -> eyre::Result<()> {
         terminal::Checks {
             panic_after_first_frame: options.panic_after_first_frame,
         },
+        &environment,
     );
     // The process ends soon after, which would cut the log file's last writes short.
     if let Some(log_file) = &log_file {

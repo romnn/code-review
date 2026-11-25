@@ -46,6 +46,9 @@ pub(super) enum Tick {
     /// The time for the periodic reading of the grant while language servers may run; each
     /// reading that finds one running sets the next.
     Guard,
+    /// The end of the grace a comparison has before its place says it is decoding, for the
+    /// wait with this number; see the `compare` module.
+    Decoding(u64),
 }
 
 /// The review's freshness.
@@ -172,6 +175,7 @@ impl Model {
             Tick::Reconcile => self.reconcile(),
             Tick::PullRequest => self.pull_request_due(),
             Tick::Guard => self.guard_due(),
+            Tick::Decoding(waits) => self.waited_for_comparison(waits),
             Tick::Spin | Tick::Recovered => {}
         }
     }

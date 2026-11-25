@@ -23,6 +23,7 @@ pub mod display;
 pub mod files;
 pub mod flatten;
 pub mod header;
+pub mod images;
 pub mod overview;
 pub mod palette;
 pub mod picker;

@@ -552,6 +552,21 @@ impl Repo {
         BlobReader::spawn(self)
     }
 
+    /// Returns the size in bytes of the object `oid`, without reading its content, which a
+    /// [`BlobReader`] streams through its pipe even for a blob it does not keep.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the object does not exist or git prints no size.
+    pub fn blob_size(&self, oid: &ObjectId) -> Result<u64, Error> {
+        let text = self.run_text(["cat-file", "-s", oid.as_str()])?;
+        text.parse().map_err(|_| Error::UnexpectedOutput {
+            program: "git",
+            command: "cat-file -s".to_owned(),
+            detail: text,
+        })
+    }
+
     /// Lists every blob of the tree of `commit` (regular files and symlinks) with its object.
     /// Paths that are not valid UTF-8 are left out, since nothing could name them.
     ///
@@ -1098,6 +1113,18 @@ mod tests {
         let output = fill.wait_with_output()?;
         assert!(!output.status.success(), "{output:?}");
         assert!(!asked.exists(), "the helper was asked");
+        Ok(())
+    }
+
+    /// A blob's size comes without its content, and an object that does not exist has none.
+    #[test]
+    fn a_blob_size_needs_no_content() -> eyre::Result<()> {
+        let repo = testing::committed(&[("a.rs", "fn a() {}\n")])?;
+        let git = Repo::discover(repo.path())?;
+        let blob = ObjectId::parse(&testing::git(repo.path(), &["rev-parse", "HEAD:a.rs"])?)?;
+        assert_eq!(git.blob_size(&blob)?, 10);
+        let missing = ObjectId::parse(&"1".repeat(40))?;
+        assert!(git.blob_size(&missing).is_err());
         Ok(())
     }
 }
