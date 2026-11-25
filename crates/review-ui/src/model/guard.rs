@@ -53,21 +53,19 @@ impl Model {
         self.act(KeyInput { action, held });
     }
 
-    /// Does what the key `input` does; a key of another action ends a review key's press.
-    ///
-    /// Once quitting is authorized no key does anything: the app is going away, and a key then,
-    /// such as one a key sequence hands on right after replaying the quit, would start work the
-    /// process exits without.
+    /// Does what the key `input` does; a key of another action ends a review key's press, and a
+    /// key other than a grant of trust the wait of a definition for that grant.
     pub(super) fn act(&mut self, input: KeyInput) {
-        if self.quitting == super::Quitting::Done {
-            return;
-        }
         if self
             .press
             .as_ref()
             .is_some_and(|press| press.action != input.action)
         {
             self.press = None;
+        }
+        // A definition waiting for trust goes on only if the next key grants it.
+        if !matches!(input.action, Action::TrustSnapshot | Action::TrustCheckout) {
+            self.trust_resumes = None;
         }
         self.input = Some(input);
         self.perform(input.action);

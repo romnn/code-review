@@ -463,6 +463,7 @@ async fn run(
         Command::Find(text) => this
             .update_in(cx, |this, window, cx| {
                 this.update_model(window, cx, |model| model.select_hunk_containing(text))
+                    .unwrap_or_else(|| Err("the app is closing".to_owned()))
             })
             .map_err(|err| err.to_string())
             .flatten(),

@@ -47,16 +47,17 @@ use review_core::{
 };
 
 use super::buffer::Origin;
-use super::effects::{Because, Completion, Outcome, Subject};
+use super::effects::{Because, Outcome, Subject};
+use super::engine::{Parts, Waiting};
 use super::guard::Aim;
 use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::pulls::Pulls;
 use super::sync::Tick;
-use super::{Effect, Grant, Mode, Model, Phase, is_regular};
+use super::{Effect, Mode, Model, Phase, Quitting, is_regular};
 use crate::frame;
 use crate::rows::{FullText, Layout};
 use crate::state::{self, Snapshot};
-use crate::watch::{Waited, Waiter, Watch};
+use crate::watch::Waited;
 
 /// How often the working tree is captured whatever the watch saw, catching what it cannot see:
 /// a ref moving without the index changing, a submodule's commit, events the system dropped.
@@ -77,14 +78,12 @@ const MOVED_ATTEMPTS: u32 = 3;
 /// only while it still says so.
 const CAPTURING_AGAIN: &str = "Capturing the working tree again…";
 
-/// Following the working tree.
+/// Following the working tree, under the session the engine holds.
 #[derive(Default)]
 pub(crate) struct Live {
-    /// The session that pins the captures on screen until the window closes.
-    session: Option<Arc<Session>>,
-    /// The watch on the working tree, once it started; `None` while it starts or when the
-    /// working tree cannot be watched, which captures it every [`POLL`] instead.
-    watch: Option<Arc<Watch>>,
+    /// Whether the engine watches the working tree; not while the watch starts or when the
+    /// working tree cannot be watched, which is captured every [`POLL`] instead.
+    watched: bool,
     /// Whether a capture runs.
     capturing: bool,
     /// Whether another capture follows the running one, and whether it walks the working
@@ -128,13 +127,6 @@ pub(crate) struct Live {
 }
 
 impl Live {
-    /// Whether a capture looks at the working tree twice: without a watch, or with one that
-    /// could not watch every directory since it started, nothing says a capture overlapped a
-    /// change.
-    pub(crate) fn confirms(&self) -> bool {
-        self.watch.as_ref().is_none_or(|watch| !watch.covers_all())
-    }
-
     /// What was found of the pull requests when the running capture was taken, while one runs.
     pub(crate) fn given(&self) -> Option<&[review_core::github::CheckoutPullRequest]> {
         self.given.as_deref()
@@ -197,7 +189,12 @@ pub struct Following {
 
 /// What the background work of opening found out about a review that follows the checkout.
 pub(super) struct Opening {
-    following: Following,
+    /// What the opening capture was of, or `None` when git was busy.
+    subject: Option<review_core::Subject>,
+    /// The paths the opening capture kept at their staged version.
+    filtered: Vec<String>,
+    /// What git was busy with when the review opened, if it was.
+    busy: Option<Busy>,
     tree: Option<ObjectId>,
     association: Option<review_core::BranchIdentity>,
     commits: Option<Vec<Commit>>,
@@ -205,43 +202,40 @@ pub(super) struct Opening {
 
 impl Opening {
     /// Reads what the window needs about `following`'s capture, which `history` ends in: the
-    /// tree the trust names, the branch and upstream, and the commits.
+    /// tree the trust names, the branch and upstream, and the commits; its session goes to the
+    /// engine.
     pub(super) fn read(
         review: &review_core::Review,
         history: &History,
-        following: Following,
-    ) -> (Self, Option<Granted>) {
+        following: &Following,
+    ) -> Self {
         let tree = provisional_or_tip_tree(review, history);
         let checkout = matches!(review.target(), ReviewTarget::Checkout { .. });
-        let granted = (checkout && following.subject.is_some())
-            .then(|| tree.as_ref().map(|tree| granted(review, tree, 0)))
-            .flatten();
         let subject = following.subject.as_ref().filter(|_| checkout);
         let association = subject
             .and_then(|subject| subject.branch.as_deref())
             .and_then(|branch| review.repo().branch_identity(branch).ok());
         let commits = subject.and_then(|subject| review.subject_commits(subject).ok());
-        (
-            Self {
-                following,
-                tree,
-                association,
-                commits,
-            },
-            granted,
-        )
+        Self {
+            subject: following.subject.clone(),
+            filtered: following.filtered.clone(),
+            busy: following.busy,
+            tree,
+            association,
+            commits,
+        }
     }
 }
 
 impl Opening {
     /// How the review opened, for the status line: what it follows, or that git is busy.
     pub(super) fn describe(&self) -> Option<String> {
-        if let Some(busy) = self.following.busy {
+        if let Some(busy) = self.busy {
             return Some(format!(
                 "git is busy ({busy}); the last recorded revision shows until it finishes"
             ));
         }
-        let subject = self.following.subject.as_ref()?;
+        let subject = self.subject.as_ref()?;
         Some(format!("following {}", branch_and_base(subject)))
     }
 }
@@ -266,34 +260,6 @@ pub fn abbreviated(commit: &ObjectId) -> &str {
     commit.as_str().get(..7).unwrap_or(commit.as_str())
 }
 
-/// What a grant of trust lets run on a snapshot of the checkout, read in the background.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Granted {
-    /// The grant that applies, if any does.
-    pub(super) grant: Option<Grant>,
-    /// The window's decisions on trust counted when it was read; see
-    /// [`Model::trust_decisions`].
-    pub(super) decisions: u64,
-}
-
-/// Which grant lets tools run on the snapshot whose tree is `tree`, of a review of a checkout:
-/// the whole checkout's before the snapshot's own; none when the log cannot be read.
-/// `decisions` is the window's count of decisions on trust when it is read.
-pub(super) fn granted(review: &review_core::Review, tree: &ObjectId, decisions: u64) -> Granted {
-    let checkout = review.trust().is_ok_and(|trust| trust.trusted);
-    let snapshot = review.trust_for(tree).is_ok_and(|trust| trust.trusted);
-    Granted {
-        grant: if checkout {
-            Some(Grant::Checkout)
-        } else if snapshot {
-            Some(Grant::Snapshot)
-        } else {
-            None
-        },
-        decisions,
-    }
-}
-
 /// The tree of the head of `history`'s current revision.
 fn provisional_or_tip_tree(review: &review_core::Review, history: &History) -> Option<ObjectId> {
     let tip = history.current()?;
@@ -301,16 +267,12 @@ fn provisional_or_tip_tree(review: &review_core::Review, history: &History) -> O
     review.repo().tree_of(&head).ok()
 }
 
-/// A watch that started, with its waiter.
-pub(super) struct Started {
-    watch: Watch,
-    waiter: Waiter,
-}
-
-/// What a wait for the working tree saw, with the waiter for the next wait.
+/// What a wait for the working tree saw, with what waits on for the next wait.
 pub(super) struct WaitedFor {
-    waiter: Waiter,
-    waited: Waited,
+    pub(super) waited: Waited,
+    /// Why the watch may have missed changes since the last wait, if it may have.
+    pub(super) problem: Option<String>,
+    pub(super) waiting: Waiting,
 }
 
 /// A capture of the working tree, compared with the snapshot on screen when it was taken.
@@ -325,8 +287,6 @@ pub(super) struct Captured {
     filtered: Vec<String>,
     /// Its tree.
     tree: Option<ObjectId>,
-    /// The grant of trust that applies to it, for a review of a checkout.
-    granted: Option<Granted>,
     /// Its branch and upstream, for a review of a checkout on a branch.
     association: Option<review_core::BranchIdentity>,
     /// The commits between its base and head, when they are not the ones listed already.
@@ -353,57 +313,31 @@ pub(super) enum Missed {
 }
 
 impl Model {
-    /// Starts following the working tree, for a review of it with `[review] live` on, under
-    /// the session the review opened with, if it opened with one, or a new one.
-    pub(super) fn start_live(&mut self, opening: Option<Opening>) {
-        let Some(review) = self.review.clone() else {
-            return;
-        };
-        let follows = matches!(
-            review.target(),
-            ReviewTarget::Worktree { .. } | ReviewTarget::Checkout { .. }
-        );
-        // A checkout's review shows only captures, so it captures the working tree on `r`
-        // whatever the configuration says, and follows it as it changes with `[review] live`.
-        let checkout = matches!(review.target(), ReviewTarget::Checkout { .. });
-        if !follows || !(self.settings.live || checkout) {
-            return;
-        }
-        let (session, opening) = match opening {
-            Some(Opening {
-                following,
-                tree,
-                association,
-                commits,
-            }) => {
-                let Following {
-                    session,
-                    subject,
-                    filtered,
-                    busy,
-                } = following;
-                (
-                    session,
-                    Some((subject, filtered, busy, tree, association, commits)),
-                )
+    /// Starts following the working tree under the session the engine holds, when the review
+    /// `follows` it, saying why it cannot otherwise; `opening` is what the checkout's opening
+    /// capture saw.
+    pub(super) fn start_live(&mut self, follows: Result<bool, String>, opening: Option<Opening>) {
+        match follows {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                self.effect(Effect::Log(format!(
+                    "cannot follow the working tree: {err}"
+                )));
+                return;
             }
-            None => match review.start_session() {
-                Ok(session) => (session, None),
-                Err(err) => {
-                    self.effect(Effect::Log(format!(
-                        "cannot follow the working tree: {}",
-                        causes(&err)
-                    )));
-                    return;
-                }
-            },
-        };
-        let mut live = Live {
-            session: Some(Arc::new(session)),
-            ..Live::default()
-        };
+        }
+        let mut live = Live::default();
         let mut association = None;
-        if let Some((subject, filtered, busy, tree, found, commits)) = opening {
+        if let Some(Opening {
+            subject,
+            filtered,
+            busy,
+            tree,
+            association: found,
+            commits,
+        }) = opening
+        {
             live.listed = subject
                 .as_ref()
                 .map(|subject| (subject.base.commit().cloned(), subject.head.clone()));
@@ -423,13 +357,8 @@ impl Model {
         if !self.settings.live {
             return;
         }
-        let repo = review.repo().clone();
-        self.spawn(Subject::Always(Because::Live), move || {
-            Outcome::Watching(
-                Watch::start(repo)
-                    .map(|(watch, waiter)| Box::new(Started { watch, waiter }))
-                    .map_err(|err| causes(&err)),
-            )
+        self.spawn_with(Subject::Always(Because::Live), |parts| {
+            Outcome::Watching(parts.watch().map(Box::new).map_err(|err| causes(&err)))
         });
     }
 
@@ -441,16 +370,15 @@ impl Model {
 
     /// Takes in the watch that started, or why the working tree cannot be watched, and takes
     /// the first capture, which sees every change made before the watch started.
-    pub(super) fn watching(&mut self, started: Result<Box<Started>, String>) {
+    pub(super) fn watching(&mut self, started: Result<Box<Waiting>, String>) {
         let Some(live) = &mut self.live else {
             return;
         };
         let every = match started {
-            Ok(started) => {
-                let Started { watch, waiter } = *started;
-                live.watch = Some(Arc::new(watch));
+            Ok(waiting) => {
+                live.watched = true;
                 live.walked = Some(Instant::now());
-                self.wait_for_changes(waiter);
+                self.wait_for_changes(*waiting);
                 RECONCILE
             }
             Err(err) => {
@@ -469,30 +397,20 @@ impl Model {
         );
     }
 
-    /// Waits on a thread of its own for the working tree to change.
-    fn wait_for_changes(&mut self, mut waiter: Waiter) {
-        self.effect(Effect::Wait(Box::new(move || {
-            let seen = waiter.wait();
-            Completion {
-                subject: Subject::Always(Because::Live),
-                outcome: Box::new(Outcome::Waited(Box::new(WaitedFor {
-                    waiter,
-                    waited: seen,
-                }))),
-            }
-        })));
-    }
-
     /// Takes in a change of the working tree: captures it, and waits for the next.
     pub(super) fn waited(&mut self, waited: WaitedFor) {
-        let WaitedFor { mut waiter, waited } = waited;
+        let WaitedFor {
+            waited,
+            problem,
+            waiting,
+        } = waited;
         let Some(live) = &mut self.live else {
             return;
         };
         if waited == Waited::Closed {
             return;
         }
-        if let Some(trouble) = waiter.take_problem()
+        if let Some(trouble) = problem
             && !std::mem::replace(&mut live.troubled, true)
         {
             self.effect(Effect::Log(format!(
@@ -501,7 +419,7 @@ impl Model {
                 RECONCILE.as_secs()
             )));
         }
-        self.wait_for_changes(waiter);
+        self.wait_for_changes(waiting);
         match waited {
             Waited::Stirred => self.stirred(),
             Waited::Changed | Waited::Closed => self.changed(),
@@ -548,11 +466,7 @@ impl Model {
         if live.replaced {
             return;
         }
-        let every = if live.watch.is_some() {
-            RECONCILE
-        } else {
-            POLL
-        };
+        let every = if live.watched { RECONCILE } else { POLL };
         let rewalk = live.walked.is_none_or(|walked| walked.elapsed() >= REWALK);
         if rewalk {
             live.walked = Some(Instant::now());
@@ -571,9 +485,12 @@ impl Model {
     /// One capture runs at a time, which keeps the pins of the captures in use safe from the
     /// next; a capture asked for meanwhile follows it.
     pub(super) fn capture(&mut self, rewalk: bool) {
-        let (Some(review), Some(snapshot)) = (self.review.clone(), self.snapshot.clone()) else {
+        let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
+        if self.engine.is_none() {
+            return;
+        }
         let known: HashSet<ObjectId> = self.blobs.texts.keys().cloned().collect();
         let from = self.shown;
         let Some(live) = &mut self.live else {
@@ -586,12 +503,7 @@ impl Model {
             live.again = Some(live.again.unwrap_or(false) || rewalk);
             return;
         }
-        let Some(session) = live.session.clone() else {
-            return;
-        };
         live.capturing = true;
-        let watch = live.watch.clone().filter(|_| rewalk);
-        let confirm = live.confirms();
         let keep: Vec<RevisionRecord> = [
             Some(&snapshot.history),
             live.waiting.as_ref().map(|waiting| &waiting.history),
@@ -604,22 +516,20 @@ impl Model {
         let pull_requests = live.pulls.pull_requests();
         live.given = Some(pull_requests.clone());
         let listed = live.listed.clone();
-        let trust_decisions = self.trust_decisions;
-        self.spawn(Subject::Always(Because::Live), move || {
-            Outcome::Captured(capture(&CaptureInput {
-                review: &review,
-                session: &session,
-                watch: watch.as_deref(),
-                confirm,
-                shown: &snapshot,
-                from,
-                observed,
-                keep: &keep,
-                known: &known,
-                pull_requests: &pull_requests,
-                listed: listed.as_ref(),
-                trust_decisions,
-            }))
+        self.spawn_with(Subject::Always(Because::Live), move |parts| {
+            Outcome::Captured(capture(
+                parts,
+                &CaptureInput {
+                    rewalk,
+                    shown: &snapshot,
+                    from,
+                    observed,
+                    keep: &keep,
+                    known: &known,
+                    pull_requests: &pull_requests,
+                    listed: listed.as_ref(),
+                },
+            ))
         });
     }
 
@@ -699,7 +609,7 @@ impl Model {
             Err(Missed::Busy(busy)) => live.busy = Some(busy),
             Err(Missed::Replaced) => {
                 live.replaced = true;
-                live.watch = None;
+                live.watched = false;
                 live.waiting = None;
                 again = None;
                 self.fail("This checkout was replaced by another clone; reopen cr to review it.");
@@ -770,8 +680,9 @@ impl Model {
     /// Whether the reviewer is in the middle of something a new snapshot would pull the rows
     /// from under.
     fn live_waits(&self) -> bool {
-        self.marking
-            || !self.marks.is_empty()
+        self.saving
+            || !self.saves.is_empty()
+            || self.quitting.over()
             || self.overlay.is_some()
             || self.picker.is_some()
             || self.settings_panel.is_some()
@@ -792,7 +703,6 @@ impl Model {
             subject,
             filtered,
             tree,
-            granted,
             association,
             commits,
             ..
@@ -809,7 +719,6 @@ impl Model {
             subject,
             filtered,
             tree,
-            granted,
             commits,
         });
         self.associate(association);
@@ -818,8 +727,10 @@ impl Model {
             .as_mut()
             .is_some_and(|live| std::mem::take(&mut live.asked));
         if links.is_empty() && same_snapshot(&old.history, &history, old.revision, tip) {
-            // The same snapshot read again, such as after a mark recorded it, or with marks
-            // another window saved since: what shows is derived again.
+            // The same snapshot read again, such as after a mark recorded it, or with marks or
+            // trust another window saved since: what shows is derived again, and its trust is
+            // read again.
+            self.read_trust();
             if history.version() > self.version {
                 self.version = history.version();
                 self.revisions = super::overview::summarize(&history, old.policy);
@@ -830,6 +741,8 @@ impl Model {
                 self.rebuild();
             }
             match news {
+                // Nothing replaces a failure that stopped the quitting.
+                _ if self.quitting == Quitting::Stopped => {}
                 Some(news) => self.set_status(news),
                 None if asked && self.status == CAPTURING_AGAIN => {
                     self.set_view_status(format!("Up to date. {}", self.summary()));
@@ -869,15 +782,9 @@ impl Model {
         // The snapshot on screen was laid out from its view, so it has one.
         let old_view = old.view();
         self.keep_place(&was, old_view.as_ref(), &view, &moved);
-        // A grant of a review of the working tree covers the snapshot it was made for.
-        self.read_snapshot_trust();
-
-        // Language servers run on the worktree of the head no longer shown.
-        if view.record().map(|record| &record.head) != old_head.as_ref()
-            && let Some(mut servers) = self.servers.try_lock()
-        {
-            servers.clear();
-        }
+        // Another head is a showing of its own, and trust is read for the capture.
+        self.shown_anew(view.record().map(|record| &record.head) != old_head.as_ref());
+        self.read_trust();
         self.request_syntax();
         let changed = self.what_changed(&view, moved_to.filter(|_| same_code));
         self.announce_capture(news, changed, asked);
@@ -890,7 +797,11 @@ impl Model {
     /// the reviewer's last action; what it said about the snapshot before, such as that a file
     /// is done, clears, since the header's progress tells how this one stands. A refresh the
     /// reviewer `asked` for answers while its request still shows.
+    /// Nothing replaces a failure that stopped the quitting, which the reviewer must see.
     fn announce_capture(&mut self, news: Option<String>, changed: Option<String>, asked: bool) {
+        if self.quitting == Quitting::Stopped {
+            return;
+        }
         let status = match (news, changed) {
             (Some(news), Some(changed)) => Some(format!("{news} {changed}")),
             (news, changed) => news.or(changed),
@@ -931,28 +842,16 @@ impl Model {
     }
 
     /// Takes in what the capture about to show was of: the subject, which the header and the
-    /// title show, the filtered paths, the trust that applies and the commits; returns what
-    /// changed about the subject, for the status line.
+    /// title show, the filtered paths, the tree and the commits; returns what changed about the
+    /// subject, for the status line.
     fn observe(&mut self, observation: Observation) -> Option<String> {
         let Observation {
             subject,
             filtered,
             tree,
-            granted,
             commits,
         } = observation;
         let title_before = self.title();
-        if let Some(granted) = granted {
-            // A decision made since the grant was read, as while the capture waited behind
-            // the trust question, is read again.
-            let grant = match (&self.review, &tree) {
-                (Some(review), Some(tree)) if granted.decisions != self.trust_decisions => {
-                    self::granted(review, tree, self.trust_decisions).grant
-                }
-                _ => granted.grant,
-            };
-            self.set_grant(grant);
-        }
         if let Some(commits) = commits {
             self.info = Some(ReviewInfo::Commits { commits });
         }
@@ -1206,7 +1105,6 @@ struct Observation {
     subject: Option<review_core::Subject>,
     filtered: Vec<String>,
     tree: Option<ObjectId>,
-    granted: Option<Granted>,
     commits: Option<Vec<Commit>>,
 }
 
@@ -1245,13 +1143,10 @@ fn subject_news(before: &review_core::Subject, now: &review_core::Subject) -> Op
     None
 }
 
-/// What a capture job needs.
+/// What a capture job needs besides the engine.
 struct CaptureInput<'a> {
-    review: &'a review_core::Review,
-    session: &'a Session,
-    watch: Option<&'a Watch>,
-    /// Whether the capture looks twice, for want of a watch.
-    confirm: bool,
+    /// Whether the watched tree is walked again first.
+    rewalk: bool,
     shown: &'a Snapshot,
     from: u64,
     observed: u64,
@@ -1262,46 +1157,33 @@ struct CaptureInput<'a> {
     pull_requests: &'a [review_core::github::CheckoutPullRequest],
     /// The base and head the commits were last listed between.
     listed: Option<&'a (Option<ObjectId>, Option<ObjectId>)>,
-    /// The window's decisions on trust, counted; see [`Model::trust_decisions`].
-    trust_decisions: u64,
 }
 
-/// Captures the working tree and compares it with the snapshot shown; runs in the background.
-fn capture(input: &CaptureInput<'_>) -> Result<Box<Captured>, Missed> {
+/// Captures the working tree under the engine's session and compares it with the snapshot
+/// shown; runs in the background.
+fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Missed> {
+    let review = &parts.review;
     let failed = |err: &dyn std::error::Error| Missed::Failed(causes(err));
-    let trouble = input
-        .watch
+    // Without a watch, or with one that could not watch every directory since it started,
+    // nothing says a capture overlapped a change, so it looks twice.
+    let watch = parts.watch.lock().clone();
+    let trouble = watch
+        .as_ref()
+        .filter(|_| input.rewalk)
         .and_then(|watch| watch.rewalk().err())
         .map(|err| causes(&err));
-    let mut attempts = 0;
+    let confirm = watch.as_ref().is_none_or(|watch| !watch.covers_all());
+    drop(watch);
+    let captured = live_capture(parts, input, confirm);
+    if matches!(captured, Err(Missed::Replaced)) {
+        // Nothing is captured any more, so nothing is watched either.
+        drop(parts.watch.lock().take());
+    }
     let LiveCapture {
         history,
         subject,
         filtered,
-    } = loop {
-        attempts += 1;
-        let captured = if input.confirm {
-            input
-                .review
-                .confirmed_live_history(input.session, input.keep, input.pull_requests)
-        } else {
-            input
-                .review
-                .live_history(input.session, input.keep, input.pull_requests)
-        }
-        .map_err(|err| failed(&err))?;
-        match captured {
-            Capture::Captured(captured) => break *captured,
-            Capture::Moved if attempts < MOVED_ATTEMPTS => {}
-            Capture::Moved => {
-                return Err(Missed::Failed(
-                    "git kept changing while it was captured".to_owned(),
-                ));
-            }
-            Capture::Busy(busy) => return Err(Missed::Busy(busy)),
-            Capture::Replaced => return Err(Missed::Replaced),
-        }
-    };
+    } = captured?;
     let missing = |what: &str| Missed::Failed(what.to_owned());
     let tip = history
         .current()
@@ -1319,28 +1201,25 @@ fn capture(input: &CaptureInput<'_>) -> Result<Box<Captured>, Missed> {
             .ok()
             .and_then(|view| view.analysis())
             .ok_or_else(|| missing("the capture has no analysis"))?;
-        correspond(input.review.repo(), shown, captured)
+        correspond(review.repo(), shown, captured)
             .map_err(|err| failed(&err))?
             .links
     };
-    let texts = read_new_texts(input.review, &history, tip, input.known);
-    let tree = provisional_or_tip_tree(input.review, &history);
-    let checkout = matches!(input.review.target(), ReviewTarget::Checkout { .. });
-    let (granted, association, commits) = if checkout {
-        let granted = tree
-            .as_ref()
-            .map(|tree| granted(input.review, tree, input.trust_decisions));
+    let texts = read_new_texts(review, &history, tip, input.known);
+    let tree = provisional_or_tip_tree(review, &history);
+    let checkout = matches!(review.target(), ReviewTarget::Checkout { .. });
+    let (association, commits) = if checkout {
         let association = subject
             .branch
             .as_deref()
-            .and_then(|branch| input.review.repo().branch_identity(branch).ok());
+            .and_then(|branch| review.repo().branch_identity(branch).ok());
         let pair = (subject.base.commit().cloned(), subject.head.clone());
         let commits = (input.listed != Some(&pair))
-            .then(|| input.review.subject_commits(&subject).ok())
+            .then(|| review.subject_commits(&subject).ok())
             .flatten();
-        (granted, association, commits)
+        (association, commits)
     } else {
-        (None, None, None)
+        (None, None)
     };
     Ok(Box::new(Captured {
         from: input.from,
@@ -1348,7 +1227,6 @@ fn capture(input: &CaptureInput<'_>) -> Result<Box<Captured>, Missed> {
         subject: checkout.then_some(subject),
         filtered,
         tree,
-        granted,
         association,
         commits,
         history: Arc::new(history),
@@ -1356,6 +1234,44 @@ fn capture(input: &CaptureInput<'_>) -> Result<Box<Captured>, Missed> {
         texts,
         trouble,
     }))
+}
+
+/// Captures the working tree under the engine's session, looking twice with `confirm`, and
+/// again while git moves under it, a few times at most.
+fn live_capture(
+    parts: &Parts,
+    input: &CaptureInput<'_>,
+    confirm: bool,
+) -> Result<LiveCapture, Missed> {
+    let review = &parts.review;
+    // The capture holds the session until it ends, which keeps its pins should the engine stop
+    // meanwhile.
+    let session = parts
+        .session
+        .lock()
+        .clone()
+        .ok_or_else(|| Missed::Failed("the review follows no working tree".to_owned()))?;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let captured = if confirm {
+            review.confirmed_live_history(&session, input.keep, input.pull_requests)
+        } else {
+            review.live_history(&session, input.keep, input.pull_requests)
+        }
+        .map_err(|err| Missed::Failed(causes(&err)))?;
+        match captured {
+            Capture::Captured(captured) => return Ok(*captured),
+            Capture::Moved if attempts < MOVED_ATTEMPTS => {}
+            Capture::Moved => {
+                return Err(Missed::Failed(
+                    "git kept changing while it was captured".to_owned(),
+                ));
+            }
+            Capture::Busy(busy) => return Err(Missed::Busy(busy)),
+            Capture::Replaced => return Err(Missed::Replaced),
+        }
+    }
 }
 
 /// The text of revision `tip`'s head files that `known` does not hold, so the capture shows
@@ -1534,7 +1450,7 @@ impl Moved {
 }
 
 /// `err` and every cause under it, joined by `: `.
-fn causes(err: &dyn std::error::Error) -> String {
+pub(super) fn causes(err: &dyn std::error::Error) -> String {
     let mut text = err.to_string();
     let mut source = err.source();
     while let Some(cause) = source {

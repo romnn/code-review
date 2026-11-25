@@ -2,8 +2,6 @@
 //! are folded, and where the reviewer is; loading it and its stored form are
 //! [`crate::folders`].
 
-use std::sync::Arc;
-
 use crate::folders::{FRONT_END, Place, ViewState, restored};
 
 use super::effects::{Because, Outcome, Subject};
@@ -103,10 +101,9 @@ impl Model {
 
     /// Saves the view state in the background when it differs from what was last saved: the
     /// folded folders whenever they change, the place when the reviewer quits. Runs after every
-    /// update, however it changed, until quitting is authorized, after which the process
-    /// would exit without the save.
+    /// update, however it changed, while the engine runs.
     pub(super) fn save_view_state(&mut self) {
-        if !self.folders.active || self.folders.saving || self.quitting == super::Quitting::Done {
+        if !self.folders.active || self.folders.saving {
             return;
         }
         let mut collapsed: Vec<String> = self.tree_collapsed.iter().cloned().collect();
@@ -118,13 +115,13 @@ impl Model {
         if state == self.folders.saved {
             return;
         }
-        let Some(review) = self.review.as_ref().map(Arc::clone) else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         self.folders.saved = state.clone();
         self.folders.saving = true;
-        self.spawn(Subject::Always(Because::Save), move || {
-            Outcome::FoldersSaved(review.save_view_state(FRONT_END, &state))
+        self.spawn_with(Subject::Always(Because::Save), move |parts| {
+            Outcome::FoldersSaved(parts.review.save_view_state(FRONT_END, &state))
         });
     }
 

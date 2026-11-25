@@ -4,8 +4,9 @@
 //! behavior.
 //! The view draws it, reading it through [`ReviewApp`]'s [`Deref`] to [`Model`], and changes it
 //! only through [`ReviewApp::update_model`], which runs the model's after-update step, runs the
-//! [`Effect`]s the model queued (background jobs on gpui's executor, timers, the clipboard, the
-//! title) and brings the gpui side in line: the text fields' inputs and the focus.
+//! [`Effect`]s the model queued (background jobs, each on a thread of its own, timers, the
+//! clipboard, the title) and brings the gpui side in line: the text fields' inputs and the
+//! focus.
 //! Here live only what gpui needs: focus handles, the lists' scroll handles, the inputs of the
 //! text fields, the key matcher and its timer, the text layouts the last frame painted, the
 //! title bar's regions, the fonts and what the last frames measured, and the scroll benchmark
@@ -26,8 +27,8 @@ use indoc::formatdoc;
 use review_ui::frame::Grid;
 use review_ui::keymap::Area;
 use review_ui::model::{
-    Action, Driver, Effect, Field, FieldState, Model, Opener, Overlay, Phase, Quitting, Settings,
-    SheetStep, Updated, file_paths,
+    Action, Completion, Driver, Effect, Field, FieldState, Model, Opener, Overlay, Phase, Quitting,
+    Settings, SheetStep, Updated, file_paths,
 };
 use review_ui::text::{self, Pane};
 use review_ui::worker;
@@ -289,22 +290,35 @@ impl ReviewApp {
     }
 
     /// Changes the model with `change`, then runs the effects it queued and brings the gpui side
-    /// in line with it: the inputs of its text fields and the focus.
+    /// in line with it: the inputs of its text fields and the focus; returns what `change`
+    /// returned, or `None` once the app closes, when it did not run.
     ///
     /// Every change of the model from the view goes through here, apart from the layout phase
-    /// at the start of each frame.
+    /// at the start of each frame and what jobs and timers hand back ([`Self::complete`]).
     fn update_model<R>(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut Model) -> R,
-    ) -> R {
+    ) -> Option<R> {
         let Updated { value, effects } = self.driver.update(change);
+        self.changed(effects, window, cx);
+        value
+    }
+
+    /// Hands the model what a job or a timer handed back, as [`Self::update_model`] does a
+    /// change, even once the app closes.
+    fn complete(&mut self, completion: Completion, window: &mut Window, cx: &mut Context<Self>) {
+        let effects = self.driver.complete(completion);
+        self.changed(effects, window, cx);
+    }
+
+    /// Runs the `effects` a change of the model queued and brings the gpui side in line with it.
+    fn changed(&mut self, effects: Vec<Effect>, window: &mut Window, cx: &mut Context<Self>) {
         self.run(effects, window, cx);
         self.sync(window, cx);
         self.publish_with_next_frame(window, cx);
         cx.notify();
-        value
     }
 
     /// Shows the capture that waits in the turn of the next frame, before gpui draws it, so a
@@ -335,37 +349,24 @@ impl ReviewApp {
         self.update_model(window, cx, |model| model.key(action, held));
     }
 
-    /// Runs what the model asked for: jobs on gpui's background executor, and jobs that wait
-    /// for long on threads of their own, with their completions handed back to the model on the
-    /// UI thread, timers, the clipboard, the title, the sheets' scrolling and quitting.
+    /// Runs what the model asked for: jobs, each on a thread of its own, with their completions
+    /// handed back to the model on the UI thread, timers, the clipboard, the title, the sheets'
+    /// scrolling and quitting.
     fn run(&self, effects: Vec<Effect>, window: &mut Window, cx: &mut Context<Self>) {
         for effect in effects {
             match effect {
                 Effect::Spawn(job) => {
-                    let work = cx.background_executor().spawn(async move { job() });
-                    cx.spawn_in(window, async move |this, cx| {
-                        let completion = work.await;
-                        this.update_in(cx, |this, window, cx| {
-                            this.update_model(window, cx, |model| model.complete(completion));
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
-                // A job that may wait for as long as the app runs gets a thread of its own, so it
-                // never holds one of the executor's.
-                Effect::Wait(job) => {
                     let (sender, receiver) = futures_channel::oneshot::channel();
-                    std::thread::spawn(move || {
+                    job.start(move |completion| {
                         // The window is gone once the app quits; nothing waits for this.
-                        sender.send(job()).ok();
+                        sender.send(completion).ok();
                     });
                     cx.spawn_in(window, async move |this, cx| {
                         let Ok(completion) = receiver.await else {
                             return;
                         };
                         this.update_in(cx, |this, window, cx| {
-                            this.update_model(window, cx, |model| model.complete(completion));
+                            this.complete(completion, window, cx);
                         })
                         .ok();
                     })
@@ -375,7 +376,7 @@ impl ReviewApp {
                     cx.spawn_in(window, async move |this, cx| {
                         cx.background_executor().timer(delay).await;
                         this.update_in(cx, |this, window, cx| {
-                            this.update_model(window, cx, |model| model.complete(completion));
+                            this.complete(completion, window, cx);
                         })
                         .ok();
                     })

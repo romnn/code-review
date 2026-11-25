@@ -71,6 +71,8 @@ fn fixed_window() -> Geometry {
 /// runs a job or fires a timer.
 struct Host {
     driver: Driver,
+    /// The review the window opened, as another window would hold it.
+    review: Review,
     jobs: VecDeque<Job>,
     timers: Vec<Completion>,
     /// The minute clock's ticks, and a live review's periodic captures, which keep themselves
@@ -117,6 +119,7 @@ impl Host {
     fn open_loaded(loaded: Loaded, settings: Settings) -> Self {
         let mut host = Self {
             driver: Driver::new(Model::new(settings, Scale::fixed(cells()), fixed_window())),
+            review: loaded.review.clone(),
             jobs: VecDeque::new(),
             timers: Vec::new(),
             clocks: Vec::new(),
@@ -144,11 +147,24 @@ impl Host {
 
     /// Changes the model as a front end does, keeping the effects for the test to run.
     fn update<R>(&mut self, change: impl FnOnce(&mut Model) -> R) -> R {
+        self.try_update(change)
+            .expect("the model takes no change once the app closes")
+    }
+
+    /// Changes the model as a front end does, unless the app closes, and keeps the effects for
+    /// the test to run; returns what `change` returned, if it ran.
+    fn try_update<R>(&mut self, change: impl FnOnce(&mut Model) -> R) -> Option<R> {
         let Updated { value, effects } = self.driver.update(change);
+        self.keep(effects);
+        value
+    }
+
+    /// Keeps `effects` for the test to run.
+    fn keep(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
+                Effect::Spawn(job) if job.waits => self.waits.push(job),
                 Effect::Spawn(job) => self.jobs.push_back(job),
-                Effect::Wait(job) => self.waits.push(job),
                 // The minute clock and the periodic capture keep themselves going, so they
                 // wait apart from the timers that settle.
                 Effect::After(_, completion)
@@ -173,34 +189,34 @@ impl Host {
                 Effect::Log(message) => self.logged.push(message),
             }
         }
-        value
     }
 
     fn dispatch(&mut self, action: Action) {
-        self.update(|model| model.dispatch(action));
+        self.try_update(|model| model.dispatch(action));
     }
 
     /// Delivers a key bound to `action` as a front end does, `held` saying whether it repeats.
     fn key(&mut self, action: Action, held: bool) {
-        self.update(|model| model.key(action, held));
+        self.try_update(|model| model.key(action, held));
     }
 
     /// Runs the oldest waiting job and returns its completion, not yet applied.
     fn run_job(&mut self) -> Completion {
         let job = self.jobs.pop_front().expect("a job waits");
-        job()
+        job.run()
     }
 
     /// Runs the newest waiting job and returns its completion, not yet applied.
     fn run_newest_job(&mut self) -> Completion {
         let job = self.jobs.pop_back().expect("a job waits");
-        job()
+        job.run()
     }
 
     /// Hands a job's completion to the model on the UI thread, as the front end does when the
     /// job ends.
     fn complete(&mut self, completion: Completion) {
-        self.update(|model| model.complete(completion));
+        let effects = self.driver.complete(completion);
+        self.keep(effects);
     }
 
     /// Fires the `index`th waiting timer.
@@ -214,7 +230,7 @@ impl Host {
     fn settle(&mut self) {
         loop {
             if let Some(job) = self.jobs.pop_front() {
-                let completion = job();
+                let completion = job.run();
                 self.complete(completion);
             } else if !self.timers.is_empty() {
                 self.fire(0);
@@ -228,7 +244,7 @@ impl Host {
 
     /// Does what drawing a frame does to the model: shows the capture that waits for it.
     fn draw(&mut self) {
-        self.update(Model::publish);
+        self.try_update(Model::publish);
     }
 }
 
@@ -450,7 +466,7 @@ fn a_mark_landing_after_moving_on_keeps_the_next_file_in_place() {
     // The mark lands: the tree takes it in, and the engine stays at the hunk it opened at.
     let saved = host.run_job();
     host.complete(saved);
-    assert!(!host.model().marking);
+    assert!(!host.model().saving);
     let model = host.model();
     assert_eq!(model.rows.files[0].path, engine);
     assert_eq!(model.hunk, opened_at);
@@ -642,7 +658,7 @@ fn go_to_definition_is_off_without_language_servers() {
     let model = host.model();
     assert!(!model.looking_up);
     assert!(host.jobs.is_empty(), "no lookup runs");
-    assert!(model.servers.lock().is_empty());
+    assert_eq!(model.parts().servers.len(), 0);
     assert!(
         model.status.contains("[lsp] enabled = false"),
         "{}",
@@ -662,7 +678,11 @@ fn an_untrusted_lookup_is_dropped_centrally() {
     assert!(host.model().looking_up);
     let asked = lookup(host.model());
     host.dispatch(Action::ToggleTrust);
-    assert!(!host.model().trusted);
+    assert_eq!(
+        host.model().trust,
+        Trust::Checking,
+        "the revocation is under way"
+    );
     let status = host.model().status.clone();
 
     host.complete(found_for(asked));
@@ -702,15 +722,33 @@ fn a_file_read_for_another_revision_is_dropped_centrally() {
     assert_eq!(host.model().buffer.as_ref().unwrap().title(), "README.md");
 }
 
-/// Opens the selected file in the buffer with the cursor on a name, ready for a lookup.
 /// Trusts the review on screen, which no review is until the reviewer decides, as `Ctrl+T`
-/// pressed twice does.
+/// pressed twice does, and waits for the grant to be recorded.
 fn trust(host: &mut Host) {
     host.dispatch(Action::ToggleTrust);
     host.dispatch(Action::ToggleTrust);
-    assert!(host.model().trusted, "{}", host.model().status);
+    host.settle();
+    assert!(host.model().trust.granted(), "{}", host.model().status);
 }
 
+/// Stands a process in for the language server `program` that a lookup of the window started
+/// in `root` just now, which runs until it is stopped; returns the server as the lookup holds
+/// it, and its process.
+#[cfg(target_os = "linux")]
+fn serve(
+    host: &mut Host,
+    program: &'static str,
+    root: &Path,
+) -> (Arc<parking_lot::Mutex<crate::lsp::LanguageServer>>, u32) {
+    let server = crate::lsp::LanguageServer::stand_in("cat", &[], root).unwrap();
+    let process = server.process_id();
+    (
+        host.model().parts().servers.insert(program, server),
+        process,
+    )
+}
+
+/// Opens the selected file in the buffer with the cursor on a name, ready for a lookup.
 fn buffer_on_a_name(host: &mut Host) {
     host.update(|model| model.show_file("src/engine.rs"));
     host.dispatch(Action::FocusDiff);
@@ -724,6 +762,7 @@ fn lookup(model: &Model) -> Lookup {
     Lookup {
         buffer: model.buffer.as_ref().unwrap().id,
         shown: model.shown,
+        epoch: model.epoch(),
     }
 }
 
@@ -770,23 +809,30 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
     let asked = lookup(host.model());
     let buffer = host.model().buffer.as_ref().unwrap().id;
 
-    // A language server runs, which the lookup uses while it waits for the answer; `cat`
-    // stands in for it, a process that runs until it is stopped.
-    let server = crate::lsp::LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
-    let process = server.process_id();
-    let running = super::Running::new(server);
-    let server = Arc::clone(&running.server);
-    let servers = Arc::clone(&host.model().servers);
-    servers
-        .lock()
-        .insert(("rust", dir.path().to_owned()), running);
+    // A language server runs, which the lookup uses while it waits for the answer.
+    let (server, process) = serve(&mut host, "rust", dir.path());
     let in_use = server.lock();
 
-    // Trust is revoked while the language server answers: the revocation stops every server,
-    // the one in use included, and that one is reaped once the lookup lets go of it.
+    // Trust is revoked while the language server answers: by the time the window says so, the
+    // revocation has stopped every server, the one in use included, and its process has exited
+    // and is reaped, though the lookup still holds the server.
     host.dispatch(Action::ToggleTrust);
-    assert!(!host.model().trusted);
-    assert!(servers.lock().is_empty());
+    assert_eq!(host.model().status, "Revoking trust…");
+    let revoked = host.run_newest_job();
+    host.complete(revoked);
+    assert_eq!(host.model().trust, Trust::Denied);
+    assert!(
+        host.model()
+            .status
+            .starts_with("Trust in this snapshot revoked"),
+        "{}",
+        host.model().status
+    );
+    assert_eq!(host.model().parts().servers.len(), 0);
+    assert!(
+        !Path::new(&format!("/proc/{process}")).exists(),
+        "the server's process {process} still runs"
+    );
     drop(in_use);
     drop(server);
     let status = host.model().status.clone();
@@ -801,10 +847,6 @@ fn a_definition_after_trust_is_revoked_is_dropped() {
     );
     assert!(model.buffer.as_ref().unwrap().previous.is_none());
     assert_eq!(model.status, status, "the answer says nothing");
-    assert!(
-        !Path::new(&format!("/proc/{process}")).exists(),
-        "the server's process {process} still runs"
-    );
 }
 
 /// A definition lands only in the buffer and revision it was asked for: an answer for a buffer
@@ -868,7 +910,7 @@ fn quitting_waits_for_queued_marks() {
     for _ in 0..3 {
         host.dispatch(Action::ToggleApprove);
     }
-    assert_eq!(host.model().marks.len(), 2, "one mark saves, two wait");
+    assert_eq!(host.model().saves.len(), 2, "one mark saves, two wait");
     let wanted = host.model().pending.clone();
     assert!(
         wanted
@@ -878,25 +920,33 @@ fn quitting_waits_for_queued_marks() {
 
     host.dispatch(Action::Quit);
     assert_eq!(host.quits, 0, "nothing quits while marks wait");
-    assert_eq!(host.model().status, "Saving 3 marks before quitting…");
+    assert_eq!(
+        host.model().status,
+        "Saving 3 changes to the review before quitting…"
+    );
 
     // Each saved mark starts the next; the last one quits, once.
     let saved = host.run_job();
     host.complete(saved);
     assert_eq!(host.quits, 0);
-    assert_eq!(host.model().status, "Saving 2 marks before quitting…");
+    assert_eq!(
+        host.model().status,
+        "Saving 2 changes to the review before quitting…"
+    );
     host.settle();
     assert_eq!(host.quits, 1);
     assert_eq!(host.model().quitting, Quitting::Done);
 
     // The review recorded what the reviewer saw: the last verdict of each unit.
-    assert_eq!(recorded(host.model(), &wanted), wanted);
+    assert_eq!(recorded(&host.review, &wanted), wanted);
 }
 
 /// The verdicts the review recorded for the units of `wanted`, as the marks name them: an
 /// approval, or a reset for a unit nobody reviewed.
-fn recorded(model: &Model, wanted: &HashMap<UnitId, MarkVerdict>) -> HashMap<UnitId, MarkVerdict> {
-    let review = model.review.clone().unwrap();
+fn recorded(
+    review: &Review,
+    wanted: &HashMap<UnitId, MarkVerdict>,
+) -> HashMap<UnitId, MarkVerdict> {
     let history = review.history().unwrap();
     let view = history.current_view().unwrap();
     wanted
@@ -933,7 +983,7 @@ fn marks_are_refused_while_quitting_waits() {
         .iter()
         .map(|hunk| (hunk.unit, MarkVerdict::Unseen))
         .collect();
-    let before = recorded(host.model(), &units);
+    let before = recorded(&host.review, &units);
     host.dispatch(Action::ToggleApprove);
     let wanted = host.model().pending.clone();
     host.dispatch(Action::Quit);
@@ -945,11 +995,11 @@ fn marks_are_refused_while_quitting_waits() {
         Action::ResetReview,
     ] {
         host.dispatch(action);
-        assert!(host.model().marks.is_empty(), "{action:?} queued nothing");
+        assert!(host.model().saves.is_empty(), "{action:?} queued nothing");
         assert_eq!(host.model().pending, wanted, "{action:?} changed nothing");
         assert_eq!(
             host.model().status,
-            "Not marked while quitting. Saving 1 mark before quitting…"
+            "Not marked while quitting. Saving 1 change to the review before quitting…"
         );
     }
 
@@ -958,7 +1008,7 @@ fn marks_are_refused_while_quitting_waits() {
     assert_eq!(host.quits, 1);
     let mut expected = before;
     expected.extend(wanted);
-    assert_eq!(recorded(host.model(), &units), expected);
+    assert_eq!(recorded(&host.review, &units), expected);
 }
 
 /// Quitting again while marks wait, as a held key or a double click on the close button does,
@@ -972,7 +1022,7 @@ fn a_second_quit_while_waiting_drops_nothing() {
     for _ in 0..3 {
         host.dispatch(Action::ToggleApprove);
     }
-    assert_eq!(host.model().marks.len(), 2, "one mark saves, two wait");
+    assert_eq!(host.model().saves.len(), 2, "one mark saves, two wait");
     let wanted = host.model().pending.clone();
     assert!(
         wanted
@@ -984,17 +1034,20 @@ fn a_second_quit_while_waiting_drops_nothing() {
     host.dispatch(Action::Quit);
     let model = host.model();
     assert_eq!(model.quitting, Quitting::Waiting(QuitKind::Interactive));
-    assert_eq!(model.marks.len(), 2, "both approvals still wait");
+    assert_eq!(model.saves.len(), 2, "both approvals still wait");
     assert_eq!(
         model.pending, wanted,
         "every approval still shows as pending"
     );
-    assert_eq!(model.status, "Saving 3 marks before quitting…");
+    assert_eq!(
+        model.status,
+        "Saving 3 changes to the review before quitting…"
+    );
     assert_eq!(host.quits, 0, "the second quit leaves no sooner");
 
     host.settle();
     assert_eq!(host.quits, 1);
-    assert_eq!(recorded(host.model(), &wanted), wanted);
+    assert_eq!(recorded(&host.review, &wanted), wanted);
 }
 
 /// Makes every file and directory of the review data at `data` read-only, or writable again,
@@ -1017,13 +1070,7 @@ fn set_writable(data: &Path, writable: bool) {
 /// The review data of the host's open review.
 #[cfg(unix)]
 fn data_dir(host: &Host) -> std::path::PathBuf {
-    host.model()
-        .review
-        .clone()
-        .unwrap()
-        .dir()
-        .root()
-        .to_path_buf()
+    host.review.dir().root().to_path_buf()
 }
 
 /// A mark that cannot be saved stops the quitting, so the failure stays on screen; quitting
@@ -1056,6 +1103,7 @@ fn a_failed_mark_stops_quitting() {
         host.model().status
     );
     host.dispatch(Action::Quit);
+    host.settle();
     assert_eq!(host.quits, 1, "a second quit leaves");
 }
 
@@ -1086,7 +1134,7 @@ fn a_mark_after_a_stopped_quit_makes_the_next_quit_ordinary() {
     );
     host.settle();
     assert_eq!(host.quits, 1);
-    assert_eq!(recorded(host.model(), &wanted), wanted);
+    assert_eq!(recorded(&host.review, &wanted), wanted);
 }
 
 /// However many queued marks fail, the reviewer quits with exactly two quits: the first stops
@@ -1111,6 +1159,7 @@ fn failing_queued_marks_need_exactly_two_quits() {
     assert_eq!(host.quits, 0);
     assert_eq!(host.model().quitting, Quitting::Stopped);
     host.dispatch(Action::Quit);
+    host.settle();
     assert_eq!(host.quits, 1);
 
     // The second quit while an approval saves and another waits, three hunks approved
@@ -1121,7 +1170,7 @@ fn failing_queued_marks_need_exactly_two_quits() {
     for _ in 0..3 {
         host.dispatch(Action::ToggleApprove);
     }
-    assert_eq!(host.model().marks.len(), 2);
+    assert_eq!(host.model().saves.len(), 2);
     host.dispatch(Action::Quit);
     let data = data_dir(&host);
     set_writable(&data, false);
@@ -1141,7 +1190,7 @@ fn failing_queued_marks_need_exactly_two_quits() {
         Quitting::Waiting(QuitKind::Unattended)
     );
     assert_eq!(
-        host.model().marks.len(),
+        host.model().saves.len(),
         1,
         "the approval still queued is kept"
     );
@@ -1246,7 +1295,7 @@ fn folder_saves_never_overtake_each_other() {
     host.complete(saved);
     assert_eq!(host.jobs.len(), 1, "the newest folds are saved next");
     host.settle();
-    let review = host.model().review.clone().unwrap();
+    let review = host.review.clone();
     assert_eq!(
         crate::folders::load(&review).map(|state| state.collapsed),
         Ok(Vec::<String>::new())
@@ -2708,7 +2757,7 @@ fn a_failed_write_of_the_configuration_is_reported() {
     assert_eq!(std::fs::read_to_string(&config).unwrap(), "not = [toml");
 }
 
-/// Once quitting is authorized the model takes no more input: a key right after the quit, as
+/// Once quitting is authorized the driver takes no more input: a key right after the quit, as
 /// a key sequence hands on after replaying it, a divider's release and a folded folder change
 /// nothing and save nothing.
 #[test]
@@ -2728,16 +2777,26 @@ fn no_input_lands_once_quitting_is_authorized() {
     let mut host = Host::open(review);
     host.update(|model| model.settings.config_path = Some(config.clone()));
     host.dispatch(Action::Quit);
-    assert_eq!(host.quits, 1, "the quit is authorized at once");
+    assert_eq!(
+        host.model().status,
+        "Closing the review before quitting…",
+        "nothing is left to save"
+    );
+    host.settle();
+    assert_eq!(
+        host.quits, 1,
+        "the quit is authorized once the engine stopped"
+    );
 
     host.key(Action::ToggleWrap, false);
     host.key(Action::ToggleApprove, false);
-    host.update(|model| {
+    let released = host.try_update(|model| {
         model.set_sidebar_width(300.0);
         model.remember_layout();
     });
-    host.update(|model| model.tree_fold_all(true));
-    assert!(!host.model().tree_collapsed.is_empty(), "the folders fold");
+    assert!(released.is_none(), "the divider's release acts");
+    host.try_update(|model| model.tree_fold_all(true));
+    assert!(host.model().tree_collapsed.is_empty(), "the folders fold");
 
     assert!(!host.model().look().wrap, "no key acts");
     assert!(host.model().pending.is_empty(), "nothing is marked");
@@ -3391,6 +3450,7 @@ fn open_unsettled(review: Review, workers: usize) -> Host {
             Scale::fixed(cells()),
             fixed_window(),
         )),
+        review: review.clone(),
         jobs: VecDeque::new(),
         timers: Vec::new(),
         clocks: Vec::new(),
@@ -3566,7 +3626,7 @@ fn a_highlight_landing_after_a_capture_keeps_what_the_capture_still_has() {
         side_syntax(host.model(), "b.rs", true).is_none(),
         "no second job highlights b.rs"
     );
-    let landed = held();
+    let landed = held.run();
     host.complete(landed);
     assert!(
         side_syntax(host.model(), "b.rs", true).is_some(),
@@ -3582,7 +3642,7 @@ fn a_highlight_landing_after_a_capture_keeps_what_the_capture_still_has() {
     host.settle();
     std::fs::write(repo.join("b.rs"), "fn b() { 4 }\n").unwrap();
     capture(&mut host);
-    let landed = stale();
+    let landed = stale.run();
     host.complete(landed);
     let blobs = &host.model().blobs;
     assert!(
@@ -3791,7 +3851,7 @@ fn a_review_key_on_a_hunk_that_just_changed_marks_it() {
     host.dispatch(Action::ToggleApprove);
     assert!(!host.model().pending.is_empty(), "the mark is queued");
     host.settle();
-    let review = host.model().review.clone().unwrap();
+    let review = host.review.clone();
     let recorded = review.history().unwrap();
     assert_eq!(recorded.revisions().len(), 2, "the capture was recorded");
     assert!(!host.model().view().unwrap().is_provisional());
@@ -3810,7 +3870,7 @@ fn a_key_before_the_next_frame_acts_on_what_the_last_frame_showed() {
     std::fs::write(repo.join("a.rs"), two_hunks("tres", "two")).unwrap();
     host.update(|model| model.capture(false));
     while let Some(job) = host.jobs.pop_front() {
-        let completion = job();
+        let completion = job.run();
         host.complete(completion);
     }
     assert!(
@@ -3822,7 +3882,7 @@ fn a_key_before_the_next_frame_acts_on_what_the_last_frame_showed() {
 
     host.dispatch(Action::ToggleApprove);
     host.settle();
-    let review = host.model().review.clone().unwrap();
+    let review = host.review.clone();
     let history = review.history().unwrap();
     let recorded = history.current_view().unwrap();
     assert!(
@@ -3873,7 +3933,7 @@ fn a_key_held_across_a_change_never_marks_it() {
     edit_and_capture(&mut host, &repo, "tres", "two");
     host.key(Action::ToggleApprove, true);
     assert!(host.model().status.starts_with("Not marked"), "still held");
-    assert!(host.model().marks.is_empty());
+    assert!(host.model().saves.is_empty());
 
     host.dispatch(Action::ToggleApprove);
     assert!(!host.model().pending.is_empty(), "a new press marks");
@@ -3887,7 +3947,7 @@ fn a_capture_waits_for_marks_and_is_taken_again() {
     let (mut host, repo) = live_host(dir.path());
     host.dispatch(Action::NextHunk);
     host.dispatch(Action::ToggleApprove);
-    assert!(!host.model().marks.is_empty() || host.model().marking);
+    assert!(!host.model().saves.is_empty() || host.model().saving);
 
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
     // Only the capture runs: the mark's save waits behind it.
@@ -3973,7 +4033,7 @@ fn the_watch_brings_a_change_to_the_window() {
     for _ in 0..2 {
         let wait = host.waits.pop().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || sender.send(wait()).ok());
+        std::thread::spawn(move || sender.send(wait.run()).ok());
         let waited = receiver
             .recv_timeout(Duration::from_secs(10))
             .expect("the watch sees the change");
@@ -3993,7 +4053,15 @@ fn a_watch_short_of_the_tree_confirms_its_captures() {
 
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
-    assert!(!host.model().live.as_ref().unwrap().confirms());
+    let covers_all = |host: &Host| {
+        host.model()
+            .parts()
+            .watch
+            .lock()
+            .as_ref()
+            .is_some_and(|watch| watch.covers_all())
+    };
+    assert!(covers_all(&host));
     std::fs::DirBuilder::new()
         .mode(0o000)
         .create(repo.join("sealed"))
@@ -4007,13 +4075,13 @@ fn a_watch_short_of_the_tree_confirms_its_captures() {
     for _ in 0..2 {
         let wait = host.waits.pop().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || sender.send(wait()).ok());
+        std::thread::spawn(move || sender.send(wait.run()).ok());
         let waited = receiver
             .recv_timeout(Duration::from_secs(10))
             .expect("the watch sees the directory");
         host.complete(waited);
     }
-    assert!(host.model().live.as_ref().unwrap().confirms());
+    assert!(!covers_all(&host), "captures look twice");
 }
 
 /// Reviews of a range never follow anything, and `[review] live = false` turns following off.
@@ -4047,18 +4115,23 @@ fn a_working_tree_review_is_trusted_one_snapshot_at_a_time() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
     trust(&mut host);
-    assert_eq!(
-        host.model().status.split(" · ").next(),
-        Some("Trusted this snapshot")
-    );
-    let review = host.model().review.clone().unwrap();
     assert!(
-        !review.trust().unwrap().trusted,
+        host.model().status.starts_with("Trusted this snapshot"),
+        "{}",
+        host.model().status
+    );
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
+    assert!(
+        !host.review.trust().unwrap().trusted,
         "no grant for the whole review"
     );
 
     edit_and_capture(&mut host, &repo, "uno", "two");
-    assert!(!host.model().trusted, "the grant was for the old code");
+    assert_eq!(
+        host.model().trust,
+        Trust::Denied,
+        "the grant was for the old code"
+    );
 }
 
 /// A confirmation of trust asked for on one snapshot does not trust another that shows before
@@ -4072,10 +4145,15 @@ fn a_trust_confirmation_holds_only_for_its_snapshot() {
 
     edit_and_capture(&mut host, &repo, "uno", "two");
     host.dispatch(Action::ToggleTrust);
-    assert!(!host.model().trusted, "the other snapshot is not trusted");
+    assert_eq!(
+        host.model().trust,
+        Trust::Denied,
+        "the other snapshot is not trusted"
+    );
     assert!(host.model().status.contains("Press Ctrl+T again"));
     host.dispatch(Action::ToggleTrust);
-    assert!(host.model().trusted);
+    host.settle();
+    assert!(host.model().trust.granted());
 }
 
 /// Whether the process `id` has stopped: gone, or a zombie that only its owner's wait reaps.
@@ -4094,17 +4172,10 @@ fn stopped(id: u32) -> bool {
 fn a_server_stops_as_it_leaves_the_servers() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
-    let server = crate::lsp::LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
-    let process = server.process_id();
-    let running = super::Running::new(server);
-    let held = Arc::clone(&running.server);
-    host.model()
-        .servers
-        .lock()
-        .insert(("rust", dir.path().to_owned()), running);
+    let (held, process) = serve(&mut host, "rust", dir.path());
 
     edit_and_capture(&mut host, &repo, "uno", "two");
-    assert!(host.model().servers.lock().is_empty());
+    assert_eq!(host.model().parts().servers.len(), 0);
     assert!(stopped(process), "the server held by a lookup still runs");
     drop(held);
 }
@@ -4121,24 +4192,592 @@ fn trust_lost_elsewhere_stops_the_servers() {
     host.settle();
     host.dispatch(Action::ToggleTrust);
     host.dispatch(Action::TrustCheckout);
-    assert!(host.model().trusted);
-    let server = crate::lsp::LanguageServer::stand_in("cat", &[], dir.path()).unwrap();
-    let process = server.process_id();
-    host.model()
-        .servers
-        .lock()
-        .insert(("rust", dir.path().to_owned()), super::Running::new(server));
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
+    let (held, process) = serve(&mut host, "rust", dir.path());
+    drop(held);
 
     // Another window revokes the grant.
-    let review = host.model().review.clone().unwrap();
-    review
+    host.review
         .set_trust(review_core::TrustScope::Checkout, false)
         .unwrap();
     host.update(Model::changed);
     host.settle();
-    assert!(!host.model().trusted);
-    assert!(host.model().servers.lock().is_empty());
+    assert_eq!(host.model().trust, Trust::Denied);
+    assert_eq!(host.model().parts().servers.len(), 0);
     assert!(stopped(process));
+}
+
+/// A revocation stops lookups at the key press: one that started before and reaches the
+/// launch of its language server after the press starts none, though the grant stays stored
+/// until the revocation is recorded, and its answer says nothing.
+#[test]
+fn a_revocation_stops_lookups_at_the_key_press() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    trust(&mut host);
+    buffer_on_a_name(&mut host);
+    host.dispatch(Action::GoToDefinition);
+    let lookup = host.jobs.pop_back().expect("the lookup waits");
+    host.dispatch(Action::ToggleTrust);
+    assert_eq!(host.model().trust, Trust::Checking);
+
+    // The lookup reaches the launch before the revocation is recorded.
+    let head = host.model().shown_head().unwrap();
+    let tree = host.review.repo().tree_of(&head).unwrap();
+    assert!(
+        host.review.trust_for(&tree).unwrap().trusted,
+        "the grant is stored"
+    );
+    let answered = lookup.run();
+    assert!(
+        matches!(
+            &*answered.outcome,
+            Outcome::Definition(Err(super::buffer::Unanswered::Stale))
+        ),
+        "the lookup stopped before the launch"
+    );
+    assert_eq!(host.model().parts().servers.len(), 0);
+    host.complete(answered);
+    assert!(!host.model().looking_up);
+    assert_eq!(
+        host.model().status,
+        "Revoking trust…",
+        "the answer says nothing"
+    );
+
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Denied);
+    assert!(!host.review.trust_for(&tree).unwrap().trusted);
+}
+
+/// A definition asked for before a revocation never lands, even once trust is granted again
+/// in the same buffer and snapshot: the trust epoch it was asked in is gone.
+#[test]
+fn a_definition_from_before_a_revocation_never_lands_after_a_regrant() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    trust(&mut host);
+    buffer_on_a_name(&mut host);
+    host.dispatch(Action::GoToDefinition);
+    let asked = lookup(host.model());
+    // The lookup would start a language server, so it never runs here.
+    drop(host.jobs.pop_back());
+    host.update(|model| model.looking_up = false);
+    host.dispatch(Action::ToggleTrust);
+    host.settle();
+    trust(&mut host);
+
+    host.update(|model| model.looking_up = true);
+    host.complete(found_for(asked));
+    let model = host.model();
+    assert!(!model.looking_up);
+    assert!(
+        model.buffer.as_ref().unwrap().previous.is_none(),
+        "the answer from before the revocation landed"
+    );
+}
+
+/// A revocation stops every language server, whatever grant still applies after it: revoking
+/// the checkout's grant while the snapshot on screen has one of its own stops the server
+/// started under the checkout's.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_revocation_stops_every_server_whatever_grant_still_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    host.settle();
+    // The snapshot on screen has a grant of its own, as made in another window.
+    let shown = host.model().shown_head().unwrap();
+    let tree = host.review.repo().tree_of(&shown).unwrap();
+    host.review
+        .set_trust(review_core::TrustScope::Snapshot { tree }, true)
+        .unwrap();
+    let (held, process) = serve(&mut host, "rust", dir.path());
+    drop(held);
+
+    host.dispatch(Action::ToggleTrust);
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
+    assert!(
+        host.model()
+            .status
+            .starts_with("Trust in this checkout revoked; this snapshot stays trusted"),
+        "{}",
+        host.model().status
+    );
+    assert_eq!(host.model().parts().servers.len(), 0);
+    assert!(
+        stopped(process),
+        "the server started under the checkout's grant runs"
+    );
+}
+
+/// Trust found denied, as when another window revoked it, stops the language servers before
+/// the window shows the denial, so none from before it is there to use once trust is granted
+/// again on the same code, and nothing that runs late stops one started after.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_denial_stops_the_servers_before_it_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    host.settle();
+    let (held, before) = serve(&mut host, "rust", dir.path());
+    drop(held);
+
+    // Another window revokes the grant, and a capture of the same code shows.
+    host.review
+        .set_trust(review_core::TrustScope::Checkout, false)
+        .unwrap();
+    host.update(Model::changed);
+    let captured = host.run_newest_job();
+    host.complete(captured);
+    host.draw();
+    assert_eq!(host.model().trust, Trust::Checking);
+    let checked = host.run_newest_job();
+    assert!(stopped(before), "the server from before the denial runs");
+    host.complete(checked);
+    assert_eq!(host.model().trust, Trust::Denied);
+
+    // Trust is granted again, and a lookup starts the same server anew.
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
+    let (held, after) = serve(&mut host, "rust", dir.path());
+    drop(held);
+    host.settle();
+    assert!(
+        !stopped(after),
+        "the server started after the grant is stopped"
+    );
+}
+
+/// A lookup that finds the stored grant gone, as another window revoked it, stops the language
+/// servers before its answer lands, and the window shows trust denied.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lookup_that_finds_trust_denied_stops_the_servers_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    trust(&mut host);
+    buffer_on_a_name(&mut host);
+    let (held, process) = serve(&mut host, "rust-analyzer", dir.path());
+    drop(held);
+    let shown = host.model().shown_head().unwrap();
+    let tree = host.review.repo().tree_of(&shown).unwrap();
+    host.review
+        .set_trust(review_core::TrustScope::Snapshot { tree }, false)
+        .unwrap();
+
+    host.dispatch(Action::GoToDefinition);
+    let answered = host.run_newest_job();
+    assert!(stopped(process), "the server runs as the answer lands");
+    host.complete(answered);
+    assert_eq!(host.model().trust, Trust::Denied);
+    assert!(
+        host.model().status.contains("no longer applies"),
+        "{}",
+        host.model().status
+    );
+}
+
+/// A wait for the working tree holds only what waits on the watch, never the engine: a window
+/// dropped without stopping it, as on a panic, still lets go of the engine, which ends the
+/// wait, and the session ends on a thread of its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_wait_for_the_working_tree_never_keeps_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    assert_eq!(session_locks(&repo), 1);
+    let wait = host.waits.pop().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(wait.run()).ok());
+
+    drop(host);
+    let waited = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the wait ends");
+    assert!(matches!(
+        &*waited.outcome,
+        Outcome::Waited(waited) if waited.waited == crate::watch::Waited::Closed
+    ));
+    let ending = Instant::now();
+    while session_locks(&repo) > 0 {
+        assert!(
+            ending.elapsed() < Duration::from_secs(10),
+            "the session still runs"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Once everything is saved for quitting and the engine stops, no input acts and no capture
+/// shows, so nothing the reviewer does then goes unsaved; the engine stops without waiting for
+/// a capture still running, which keeps the session until it lets go.
+#[cfg(target_os = "linux")]
+#[test]
+fn closing_takes_no_input_and_waits_for_no_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    // A capture still runs with the session, and lands while the engine stops.
+    let running = host.model().parts().session.lock().clone();
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
+    host.update(|model| model.capture(false));
+    let captured = host.run_newest_job();
+
+    host.dispatch(Action::Quit);
+    while host.model().quitting != Quitting::Closing {
+        let saved = host.run_job();
+        host.complete(saved);
+    }
+    assert_eq!(host.model().status, "Closing the review before quitting…");
+    host.key(Action::ToggleWrap, false);
+    host.key(Action::ToggleApprove, false);
+    host.key(Action::CloseAllFolds, false);
+    host.complete(captured);
+    host.draw();
+    let model = host.model();
+    assert!(!model.look().wrap, "a key acts");
+    assert!(model.pending.is_empty(), "a mark is taken");
+    assert!(model.tree_collapsed.is_empty(), "a folder folds");
+    assert!(!selected_text(model).contains("uno"), "the capture shows");
+
+    host.settle();
+    assert_eq!(host.quits, 1);
+    assert_eq!(
+        session_locks(&repo),
+        1,
+        "the session ended while a capture held it"
+    );
+    drop(running);
+    assert_eq!(session_locks(&repo), 0);
+}
+
+/// Once the engine stops as the app quits, the driver takes no change, a click on a folder
+/// included, while what the jobs hand back still lands, so the app quits.
+#[test]
+fn closing_takes_no_click_and_still_quits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.dispatch(Action::Quit);
+    while host.model().quitting != Quitting::Closing {
+        let saved = host.run_job();
+        host.complete(saved);
+    }
+    let folder = host
+        .model()
+        .tree
+        .iter()
+        .position(|node| node.kind == NodeKind::Directory)
+        .expect("the demo has a folder");
+    let clicked = host.try_update(|model| model.click_tree_row(folder, folder, 1));
+    assert!(clicked.is_none(), "the click acts");
+    assert!(host.model().tree_collapsed.is_empty(), "the folder folds");
+
+    host.settle();
+    assert_eq!(host.quits, 1, "the engine's stop does not land");
+}
+
+/// An eased scroll still on its way when the engine starts to stop ends there, since layout,
+/// which moves it on, takes no turn any more: once the app quits, nothing keeps it busy.
+#[test]
+fn closing_ends_an_eased_scroll() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(demo(dir.path()), whole_file());
+    host.update(|model| model.show_file("src/engine.rs"));
+    host.dispatch(Action::FocusDiff);
+    lay_out(&mut host);
+    host.dispatch(Action::HalfPageDown);
+    assert!(host.model().diff_scroll.animating());
+
+    host.dispatch(Action::Quit);
+    host.settle();
+    assert_eq!(host.quits, 1);
+    assert!(!host.model().busy(), "the scroll keeps the app busy");
+}
+
+/// A grant made with no definition waiting for it says it was made, and goes to no definition.
+#[test]
+fn a_grant_with_no_definition_waiting_goes_to_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open_with(
+        demo(dir.path()),
+        Settings {
+            language_servers: false,
+            ..settings()
+        },
+    );
+    assert!(host.model().buffer.is_none());
+    trust(&mut host);
+    assert!(
+        host.model().status.starts_with("Trusted this snapshot"),
+        "{}",
+        host.model().status
+    );
+}
+
+/// A capture that read the trust before a revocation was recorded never shows that reading:
+/// it counts for nothing once the revocation began, and trust is read again for the capture.
+#[test]
+fn a_capture_that_read_trust_before_a_revocation_never_shows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
+
+    // A capture reads the grant, and the reviewer revokes it before the capture shows.
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
+    host.update(Model::changed);
+    let capture = host.run_newest_job();
+    host.dispatch(Action::ToggleTrust);
+    let revoked = host.run_newest_job();
+    host.complete(capture);
+    host.complete(revoked);
+    assert_eq!(host.model().trust, Trust::Denied);
+    assert!(host.model().live.as_ref().unwrap().has_waiting());
+
+    // The capture shows with the next frame, without its reading of the grant.
+    host.draw();
+    assert!(
+        selected_text(host.model()).contains("uno"),
+        "the capture shows"
+    );
+    assert_eq!(host.model().trust, Trust::Checking, "trust is read again");
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Denied);
+}
+
+/// A revocation that cannot be recorded stops the language servers all the same, keeps the
+/// window denied whatever is read later, since the grant stays stored, until the reviewer
+/// grants trust again, and stops a quit the reviewer waits for, so its warning stays in view.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustCheckout);
+    host.settle();
+    let (held, process) = serve(&mut host, "rust", dir.path());
+    drop(held);
+
+    // The review's data cannot be written while the revocation is recorded and the reviewer
+    // waits to quit.
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::Quit);
+    let data = data_dir(&host);
+    set_writable(&data, false);
+    host.settle();
+    set_writable(&data, true);
+    let model = host.model();
+    assert_eq!(model.trust, Trust::Denied);
+    assert_eq!(model.parts().servers.len(), 0);
+    assert!(stopped(process), "the server still runs");
+    assert!(
+        host.review.trust().unwrap().trusted,
+        "the grant is still stored"
+    );
+    assert_eq!(host.quits, 0, "the failure keeps the app open");
+    assert_eq!(model.quitting, Quitting::Stopped);
+    assert!(
+        model.status.starts_with("Could not revoke trust")
+            && model.status.contains("the stored grant may still apply")
+            && model
+                .status
+                .ends_with("Quitting stopped; quit again to leave anyway."),
+        "{}",
+        model.status
+    );
+
+    // A capture of another branch says nothing over the failure while the quit is stopped.
+    git_in(&repo, &["checkout", "--quiet", "-b", "other"]);
+    host.update(Model::changed);
+    host.settle();
+    assert!(
+        host.model().status.starts_with("Could not revoke trust"),
+        "{}",
+        host.model().status
+    );
+
+    // Captures of the same code and of other code read the stored grant; the window stays
+    // denied.
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Denied);
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Denied);
+
+    // A grant made again counts.
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::TrustSnapshot);
+    host.settle();
+    assert!(host.model().trust.granted());
+}
+
+/// A head shown again is a showing of its own: from one snapshot to another and back, the
+/// language servers of the first showing stop, and the reading of trust in the snapshot between,
+/// running late, stops none started once back.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_head_shown_again_has_servers_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
+    let (held, first) = serve(&mut host, "rust", dir.path());
+    drop(held);
+    let show = |host: &mut Host, top: &str| {
+        std::fs::write(repo.join("a.rs"), two_hunks(top, "two")).unwrap();
+        host.update(|model| model.capture(false));
+        let captured = host.run_newest_job();
+        host.complete(captured);
+        host.draw();
+    };
+
+    // Other code shows, and what it started, the reading of its trust among it, waits to run.
+    show(&mut host, "uno");
+    let late: Vec<Job> = host.jobs.drain(..).collect();
+    // The trusted code shows again, and a lookup there starts a server.
+    show(&mut host, "one");
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
+    assert!(stopped(first), "the server of the first showing still runs");
+    let (held, again) = serve(&mut host, "rust", dir.path());
+    drop(held);
+
+    for job in late {
+        let completion = job.run();
+        host.complete(completion);
+    }
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
+    assert!(!stopped(again), "the server started once back is stopped");
+    assert_eq!(host.model().parts().servers.len(), 1);
+}
+
+/// The lock files of the sessions running in the clone at `repo`, each pinning what a window
+/// shows.
+#[cfg(target_os = "linux")]
+fn session_locks(repo: &Path) -> usize {
+    walk(&repo.join(".git/code-review/sessions"))
+        .iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "lock")
+        })
+        .count()
+}
+
+/// Quitting waits for a decision on trust as for a mark, takes no new decision meanwhile, and
+/// then waits for the engine to stop: the language servers, and the session that pins the
+/// captures the window showed.
+#[cfg(target_os = "linux")]
+#[test]
+fn quitting_waits_for_trust_and_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    trust(&mut host);
+    let (held, process) = serve(&mut host, "rust", dir.path());
+    drop(held);
+
+    // A mark saves while the reviewer quits; no decision on trust is taken meanwhile.
+    host.dispatch(Action::NextHunk);
+    host.dispatch(Action::ToggleApprove);
+    host.dispatch(Action::Quit);
+    host.dispatch(Action::ToggleTrust);
+    assert_eq!(
+        host.model().status,
+        "Trust is not changed while quitting. Saving 1 change to the review before quitting…"
+    );
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Snapshot));
+
+    // Once everything is saved, the engine stops, and only then does the app quit.
+    while host.model().quitting != Quitting::Closing {
+        let saved = host.run_job();
+        host.complete(saved);
+    }
+    assert_eq!(host.quits, 0);
+    assert_eq!(host.model().status, "Closing the review before quitting…");
+    assert_eq!(session_locks(&repo), 1);
+    host.settle();
+    assert_eq!(host.quits, 1);
+    assert!(stopped(process), "the server still runs");
+    assert_eq!(session_locks(&repo), 0, "the session still runs");
+
+    // A revocation under way is recorded before the app quits.
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = live_host(dir.path());
+    trust(&mut host);
+    let shown = host.model().shown_head().unwrap();
+    let tree = host.review.repo().tree_of(&shown).unwrap();
+    host.dispatch(Action::ToggleTrust);
+    host.dispatch(Action::Quit);
+    assert_eq!(
+        host.model().status,
+        "Saving 1 change to the review before quitting…"
+    );
+    host.settle();
+    assert_eq!(host.quits, 1);
+    assert!(!host.review.trust_for(&tree).unwrap().trusted);
+}
+
+/// Go to definition that asked for trust goes on once the grant is recorded, in the buffer it
+/// asked in, unless another key came first.
+#[test]
+fn a_definition_waiting_for_trust_goes_on_once_granted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.update(|model| model.show_file("a.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleBuffer);
+    host.dispatch(Action::NextWord);
+    let ask = |host: &mut Host| {
+        host.dispatch(Action::GoToDefinition);
+        assert_eq!(host.model().overlay, Some(Overlay::Trust));
+        host.dispatch(Action::TrustSnapshot);
+        assert_eq!(host.model().trust, Trust::Checking);
+    };
+
+    ask(&mut host);
+    let granted = host.run_newest_job();
+    host.complete(granted);
+    assert!(host.model().looking_up, "{}", host.model().status);
+    // The lookup would start a language server, so it never runs here.
+    drop(host.jobs.pop_back());
+    host.update(|model| model.looking_up = false);
+    host.dispatch(Action::ToggleTrust);
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Denied);
+
+    ask(&mut host);
+    host.dispatch(Action::CursorDown);
+    host.settle();
+    assert!(host.model().trust.granted());
+    assert!(!host.model().looking_up, "another key came first");
 }
 
 /// A capture cuts the way back from a definition into a buffer of the old snapshot, whose
@@ -4228,7 +4867,7 @@ fn marks_saved_elsewhere_show_with_the_next_capture() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, _repo) = live_host(dir.path());
     assert_eq!(host.model().file_totals(), (0, 1));
-    let review = host.model().review.clone().unwrap();
+    let review = host.review.clone();
     let history = review.history().unwrap();
     let view = history.current_view().unwrap();
     review
@@ -5342,14 +5981,7 @@ fn a_pull_request_found_during_a_capture_captures_again() {
     // The switch's capture runs, given no pull request.
     host.update(Model::changed);
     let capture = host.run_newest_job();
-    let feat = host
-        .model()
-        .review
-        .as_ref()
-        .unwrap()
-        .repo()
-        .branch_identity("feat")
-        .unwrap();
+    let feat = host.review.repo().branch_identity("feat").unwrap();
     let pull_request = review_core::github::BranchPullRequest {
         number: 12,
         url: "https://github.com/owner/repo/pull/12".to_owned(),
@@ -5434,40 +6066,52 @@ fn trust_in_the_checkout_is_asked_for_and_scoped() {
     std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    assert!(!host.model().trusted);
+    assert_eq!(host.model().trust, Trust::Denied);
 
     host.dispatch(Action::ToggleTrust);
     assert_eq!(host.model().overlay, Some(Overlay::Trust));
-    // A capture read while the question shows waits behind it, with the grant it read then.
+    // A capture read while the question shows waits behind it, with the trust it read then,
+    // which no longer counts once the grant is made.
     host.update(Model::changed);
     let capture = host.run_newest_job();
     host.complete(capture);
     assert!(host.model().live.as_ref().unwrap().has_waiting());
     host.dispatch(Action::TrustSnapshot);
-    host.draw();
+    assert_eq!(host.model().trust, Trust::Checking);
+    assert!(bar(host.model()).ends_with("checking trust"));
+    host.settle();
     assert!(!host.model().live.as_ref().unwrap().has_waiting());
     let model = host.model();
     assert_eq!(model.overlay, None);
-    assert_eq!(model.grant, Some(Grant::Snapshot));
-    assert!(model.trusted);
+    assert_eq!(model.trust, Trust::Granted(Grant::Snapshot));
     assert!(bar(model).ends_with("trusted: this snapshot"));
 
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    assert_eq!(host.model().grant, None, "the grant was for the old code");
-    assert!(!host.model().trusted);
+    assert_eq!(
+        host.model().trust,
+        Trust::Denied,
+        "the grant was for the old code"
+    );
 
     host.dispatch(Action::ToggleTrust);
     host.dispatch(Action::TrustCheckout);
-    assert_eq!(host.model().grant, Some(Grant::Checkout));
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Granted(Grant::Checkout));
     std::fs::write(repo.join("a.rs"), two_hunks("eins", "2")).unwrap();
     host.update(Model::changed);
     host.settle();
-    assert_eq!(host.model().grant, Some(Grant::Checkout), "it lasts");
+    assert_eq!(
+        host.model().trust,
+        Trust::Granted(Grant::Checkout),
+        "it lasts"
+    );
 
     host.dispatch(Action::ToggleTrust);
-    assert_eq!(host.model().grant, None);
+    assert_eq!(host.model().status, "Revoking trust…");
+    host.settle();
+    assert_eq!(host.model().trust, Trust::Denied);
     assert!(
         host.model()
             .status
@@ -6269,7 +6913,7 @@ fn the_buffer_approves_only_the_change_under_the_cursor() {
     host.update(|model| model.buffer.as_mut().unwrap().cursor.row = 25);
     assert_eq!(host.model().buffer_hunk(), None);
     host.dispatch(Action::ToggleApprove);
-    assert!(host.model().marks.is_empty() && !host.model().marking);
+    assert!(host.model().saves.is_empty() && !host.model().saving);
 
     host.update(|model| model.buffer.as_mut().unwrap().cursor.row = 41);
     host.dispatch(Action::ToggleApprove);
@@ -6312,7 +6956,7 @@ fn an_approval_of_a_change_approved_meanwhile_is_refused() {
     host.dispatch(Action::FocusDiff);
     let unit = host.model().rows.hunks[0].unit;
     // Another window approves the first change.
-    let review = host.model().review.clone().unwrap();
+    let review = host.review.clone();
     let history = review.history().unwrap();
     review
         .approve_run(
@@ -6372,7 +7016,7 @@ fn changes_pressed_while_another_saves_are_all_approved() {
     );
     host.dispatch(Action::NextHunk);
     host.dispatch(Action::ToggleApprove);
-    assert_eq!(host.model().marks.len(), 1, "one saves, one waits");
+    assert_eq!(host.model().saves.len(), 1, "one saves, one waits");
     host.settle();
     let view = host.model().view().unwrap();
     assert!(
@@ -6417,7 +7061,7 @@ fn a_file_whose_changes_are_all_saving_is_no_stop() {
     host.dispatch(Action::FocusDiff);
     host.dispatch(Action::ToggleApprove);
     host.dispatch(Action::ToggleApprove);
-    assert!(host.model().marking, "the approvals are still saving");
+    assert!(host.model().saving, "the approvals are still saving");
     host.update(|model| model.show_file("b.rs"));
     host.dispatch(Action::FocusDiff);
     assert_eq!(host.model().next_open_file(), None);
@@ -6507,7 +7151,7 @@ fn space_on_a_folded_unit_shows_its_changes() {
         "one folded hunk"
     );
     host.dispatch(Action::ToggleApprove);
-    assert!(host.model().marks.is_empty() && !host.model().marking);
+    assert!(host.model().saves.is_empty() && !host.model().saving);
     assert_eq!(run_lines(host.model()), [11, 41]);
     let model = host.model();
     assert_eq!(model.rows.hunks[model.hunk].at(), Some(11));
@@ -6527,7 +7171,7 @@ fn the_selected_change_is_kept_by_where_it_is() {
     let unit = host.model().rows.hunks[0].unit;
     let selected = |host: &Host| host.model().rows.hunks[host.model().hunk].at();
     assert_eq!(selected(&host), Some(31));
-    let review = host.model().review.clone().unwrap();
+    let review = host.review.clone();
     let approve_elsewhere = |index: usize| {
         let history = review.history().unwrap();
         review
@@ -6553,7 +7197,7 @@ fn the_selected_change_is_kept_by_where_it_is() {
     // The press that was saving is refused; the key still held never acts on the change now
     // selected.
     host.key(Action::ToggleApprove, true);
-    assert!(host.model().marks.is_empty() && !host.model().marking);
+    assert!(host.model().saves.is_empty() && !host.model().saving);
     assert!(
         host.model().status.contains("held down"),
         "{}",
@@ -6580,7 +7224,7 @@ fn held_repeats_across_an_approval_approve_only_the_first_change() {
     let model = host.model();
     assert_eq!(run_lines(model), [41]);
     assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
-    assert!(model.marks.is_empty() && !model.marking);
+    assert!(model.saves.is_empty() && !model.saving);
     assert!(model.status.contains("held down"), "{}", model.status);
 }
 
@@ -6618,7 +7262,7 @@ fn space_j_space_before_a_save_approve_the_changes_each_sees() {
     host.key(Action::NextHunk, false);
     assert_eq!(selected(&host), Some(51));
     host.key(Action::ToggleApprove, false);
-    assert!(host.model().marking && host.model().marks.len() == 1);
+    assert!(host.model().saving && host.model().saves.len() == 1);
     host.settle();
     assert_eq!(run_lines(host.model()), [31]);
     assert_eq!(selected(&host), Some(31), "the one change left");
@@ -6684,7 +7328,7 @@ fn repeats_after_a_reveal_approve_nothing() {
     assert!(host.model().status.starts_with("Unfolded"));
     host.key(Action::ToggleApprove, true);
     assert!(
-        host.model().marks.is_empty() && !host.model().marking,
+        host.model().saves.is_empty() && !host.model().saving,
         "unfolded"
     );
 
@@ -6705,7 +7349,7 @@ fn repeats_after_a_reveal_approve_nothing() {
     );
     host.key(Action::ToggleApprove, true);
     assert!(
-        host.model().marks.is_empty() && !host.model().marking,
+        host.model().saves.is_empty() && !host.model().saving,
         "scrolled to"
     );
 
@@ -6719,7 +7363,7 @@ fn repeats_after_a_reveal_approve_nothing() {
     assert_eq!(host.model().mode, Mode::Diff);
     host.key(Action::ToggleApprove, true);
     assert!(
-        host.model().marks.is_empty() && !host.model().marking,
+        host.model().saves.is_empty() && !host.model().saving,
         "left the buffer"
     );
 }
@@ -6770,7 +7414,7 @@ fn space_on_a_removal_in_the_buffer_shows_it_in_the_diff() {
     host.dispatch(Action::ToggleBuffer);
     assert_eq!(host.model().buffer.as_ref().unwrap().cursor.row, 41);
     host.dispatch(Action::ToggleApprove);
-    assert!(host.model().marks.is_empty() && !host.model().marking);
+    assert!(host.model().saves.is_empty() && !host.model().saving);
     let model = host.model();
     assert_eq!(model.mode, Mode::Diff);
     assert_eq!(model.rows.hunks[model.hunk].at(), Some(41));
@@ -6854,11 +7498,11 @@ fn a_press_on_a_change_saving_waits_after_a_shift_above_it() {
     host.dispatch(Action::ToggleApprove);
     let inserted = host.run_job();
     host.complete(inserted);
-    assert!(host.model().marking, "the edit is saving now");
+    assert!(host.model().saving, "the edit is saving now");
 
     // Space again on the edit, as the rows read after the insertion show it.
     host.dispatch(Action::ToggleApprove);
-    assert!(host.model().marks.is_empty(), "nothing queued twice");
+    assert!(host.model().saves.is_empty(), "nothing queued twice");
     host.settle();
     let view = host.model().view().unwrap();
     assert!(

@@ -19,26 +19,28 @@
 //!
 //! Everything slow (git, analysis, the event log, highlighting, language servers) runs as a
 //! background [`Job`].
-//! Its [`Completion`] names what it was computed for, and [`Model::complete`] checks that
+//! The review, the session, the watch on the working tree and the language servers sit behind
+//! the engine handle, which only such a job reaches, so nothing on the UI thread blocks on them.
+//! Its [`Completion`] names what it was computed for, and [`Driver::complete`] checks that
 //! against what shows before it lands, so no outcome can land on the wrong view.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use review_core::tree::{NodeKind, TreeNode};
-use review_core::{History, MarkVerdict, ObjectId, Review, RevisionNumber, UnitId};
+use review_core::{
+    History, MarkVerdict, ObjectId, Review, ReviewMeta, ReviewTarget, RevisionNumber, UnitId,
+};
 
 use crate::frame::{Geometry, ListScroll, Scale, TextPan};
 use crate::front_end::FrontEnd;
 use crate::keymap::Area;
-use crate::lsp::LanguageServer;
 use crate::rows::{self, Folds, Layout};
-use crate::state::{self, MarkJob, Snapshot};
+use crate::state::{self, Snapshot};
 use crate::syntax::SideSyntax;
 use crate::text::{Pane, Selection};
 use crate::{find, keymap};
@@ -47,6 +49,7 @@ mod actions;
 pub mod buffer;
 mod diff;
 mod effects;
+mod engine;
 mod fields;
 mod folders;
 mod guard;
@@ -68,6 +71,7 @@ pub mod sync;
 #[cfg(test)]
 mod tests;
 mod tree;
+mod trust;
 
 pub use actions::Action;
 use effects::{Because, Highlighted, Outcome, Subject, TextsRead};
@@ -78,6 +82,7 @@ pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
 pub use select::{Hit, TextPress, list_of};
 pub use sync::{Sync, SyncStep};
+pub use trust::{Grant, Trust};
 
 /// How many unchanged lines each expansion of a gap reveals.
 const GAP_STEP: usize = 20;
@@ -158,15 +163,6 @@ pub struct Loaded {
     /// saw; `None` for any other review, which starts a session of its own when it follows the
     /// working tree.
     pub following: Option<Following>,
-}
-
-/// The grant of trust that lets tools run on the checkout's snapshot on screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Grant {
-    /// A grant for exactly this snapshot, which ends when the code changes.
-    Snapshot,
-    /// A grant for the whole checkout, until it is revoked.
-    Checkout,
 }
 
 /// Opens the review and loads its history, off the UI thread.
@@ -264,39 +260,6 @@ pub struct Filter {
     pub query: String,
     /// Whether the bar takes typing; after Enter, the filter stays and the tree takes the keys.
     pub editing: bool,
-}
-
-/// Which language server: its program and the worktree it runs in.
-type ServerKey = (&'static str, PathBuf);
-
-/// Running language servers by program and worktree; the map's own lock is held only to find,
-/// launch or stop them, never across a handshake or a request.
-type Servers = Arc<Mutex<HashMap<ServerKey, Running>>>;
-
-/// A running language server, locked while a lookup uses it, with what stops it without that
-/// lock.
-///
-/// It stops as it leaves the map, however it leaves: a lookup still holding the server sees
-/// its wait fail rather than keeping it running unlisted, where no revocation finds it.
-struct Running {
-    server: Arc<Mutex<LanguageServer>>,
-    stopper: crate::lsp::Stopper,
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.stopper.stop();
-    }
-}
-
-impl Running {
-    /// `server`, with its stopper.
-    fn new(server: LanguageServer) -> Self {
-        Self {
-            stopper: server.stopper(),
-            server: Arc::new(Mutex::new(server)),
-        }
-    }
 }
 
 /// File text and highlights by blob, filled in the background; content never changes under an
@@ -432,8 +395,10 @@ fn reviewed_heads(
 pub struct Model {
     /// Whether the review is open.
     pub phase: Phase,
-    /// The open review.
-    pub review: Option<Arc<Review>>,
+    /// The open review, which only background work reaches; see the `engine` module.
+    engine: Option<engine::Engine>,
+    /// What the open review is of: its key, repository and target.
+    pub meta: Option<ReviewMeta>,
     /// The revision on screen.
     pub snapshot: Option<Snapshot>,
     blobs: Blobs,
@@ -522,15 +487,18 @@ pub struct Model {
     /// work done for one snapshot never lands on another, even under the same revision number,
     /// as successive live captures of the working tree have.
     shown: u64,
+    /// The generation of the snapshot shown when its head became current, which names the
+    /// showing the language servers run for; see the `trust` module.
+    showing: u64,
     /// The version of the newest history installed; an older one knows less, such as a mark
     /// saved since, and is never installed over it.
     version: u64,
     /// Following the working tree, for a live review of it.
     live: Option<live::Live>,
-    /// Marks waiting for the engine, saved one at a time.
-    pub marks: VecDeque<MarkJob>,
-    /// Whether a mark is being saved.
-    pub marking: bool,
+    /// Marks and decisions on trust waiting for the engine, saved one at a time in order.
+    saves: VecDeque<marks::Save>,
+    /// Whether a mark or a decision on trust is being saved.
+    saving: bool,
     /// Edits of the configuration file waiting to be saved, one at a time in order.
     config_edits: VecDeque<remember::ConfigEdit>,
     /// Whether an edit of the configuration file is being saved.
@@ -573,26 +541,22 @@ pub struct Model {
     pub(crate) highlighting: usize,
     /// The shown revision's highlighting in the background.
     highlights: highlights::Highlights,
-    /// Whether language servers may run on the reviewed code; see [`Review::trust`].
-    pub trusted: bool,
-    /// For a review of the checkout, the grant that lets tools run on the snapshot on screen,
-    /// if one does.
-    pub grant: Option<Grant>,
+    /// Whether language servers may run on the snapshot on screen; see the `trust` module.
+    pub trust: Trust,
+    /// The trust epoch, which lookups check as they start a server; see the `trust` module.
+    trust_epoch: Arc<AtomicU64>,
     /// The head of the snapshot a confirming second press would trust, while trusting awaits
     /// one; another snapshot showing meanwhile drops it.
     trust_pending: Option<ObjectId>,
-    /// Whether go to definition waits for the trust it asked for.
-    trust_resumes: bool,
-    /// The decisions on trust made in the window, counted, so a grant read in the background
-    /// before the latest decision is read again rather than shown.
-    trust_decisions: u64,
+    /// The definition lookup that waits for the trust it asked for, which goes on once granted
+    /// while its buffer and snapshot still show and no other key came.
+    trust_resumes: Option<buffer::Lookup>,
     /// The text selection in the diff or the buffer.
     pub selection: Option<Selection>,
     /// The pane a selection is being dragged in.
     pub dragging: Option<Pane>,
     /// The configuration and the look.
     pub settings: Settings,
-    servers: Servers,
     /// How the front end's sizes follow the code size.
     scale: Scale,
     /// The frame the front end measured last.
@@ -609,7 +573,8 @@ impl Model {
         let presented = present::opening(&settings, &scale, &geometry);
         Self {
             phase: Phase::Loading(Instant::now()),
-            review: None,
+            engine: None,
+            meta: None,
             snapshot: None,
             blobs: Blobs::default(),
             requested: state::Outstanding::default(),
@@ -656,10 +621,11 @@ impl Model {
             picker_runs: 0,
             field_ids: 0,
             shown: 0,
+            showing: 0,
             version: 0,
             live: None,
-            marks: VecDeque::new(),
-            marking: false,
+            saves: VecDeque::new(),
+            saving: false,
             config_edits: VecDeque::new(),
             config_saving: false,
             approving: None,
@@ -679,15 +645,13 @@ impl Model {
             looking_up: false,
             highlighting: 0,
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
-            trusted: false,
-            grant: None,
+            trust: Trust::Denied,
+            trust_epoch: Arc::default(),
             trust_pending: None,
-            trust_resumes: false,
-            trust_decisions: 0,
+            trust_resumes: None,
             selection: None,
             dragging: None,
             settings,
-            servers: Servers::default(),
             scale,
             geometry,
             effects: Vec::new(),
@@ -696,8 +660,9 @@ impl Model {
 
     /// Opens the review with `opener` in the background and shows it when it is ready.
     pub fn open(&mut self, opener: Opener) {
+        let live = self.settings.live;
         self.spawn(Subject::Always(Because::Opening), move || {
-            Outcome::Opened(open(opener).map(Box::new))
+            Outcome::Opened(open(opener, live).map(Box::new))
         });
         self.spin();
     }
@@ -712,11 +677,9 @@ impl Model {
                 }
                 self.info = opened.info;
                 self.sync.synced = opened.synced;
-                self.trusted = opened.trusted;
-                if let Some(granted) = opened.granted {
-                    self.set_grant(granted.grant);
-                }
-                self.review = Some(Arc::new(opened.review));
+                self.trust = opened.trust;
+                self.meta = Some(opened.meta);
+                self.engine = Some(opened.engine);
                 self.blobs.texts.extend(opened.texts);
                 self.revisions = overview::summarize(&opened.history, self.settings.policy);
                 self.shown += 1;
@@ -745,7 +708,7 @@ impl Model {
                 }
                 self.request_syntax();
                 self.start_clock();
-                self.start_live(opened.following);
+                self.start_live(opened.follows, opened.following);
             }
             Err(err) => {
                 self.effect(Effect::Log(err.clone()));
@@ -770,8 +733,10 @@ impl Model {
     #[must_use]
     pub fn busy(&self) -> bool {
         self.publishes()
-            || self.marking
-            || !self.marks.is_empty()
+            || self.saving
+            || !self.saves.is_empty()
+            || self.trust == Trust::Checking
+            || self.quitting == Quitting::Closing
             || self.saving_config()
             || self.looking_up
             || self.highlighting > 0
@@ -796,9 +761,9 @@ impl Model {
             Some(review_core::ReviewInfo::PullRequest(pr)) => {
                 format!("#{} {}", pr.number, pr.title)
             }
-            _ => self.review.as_ref().map_or_else(
+            _ => self.meta.as_ref().map_or_else(
                 || "Code review".to_owned(),
-                |review| format!("Review of {}", review.key()),
+                |meta| format!("Review of {}", meta.key),
             ),
         }
     }
@@ -806,14 +771,13 @@ impl Model {
     /// The title of a review of the checkout, from its directory and what the capture on
     /// screen was of.
     fn checkout_title(&self) -> Option<String> {
-        let review = self.review.as_ref()?;
-        if !matches!(review.target(), review_core::ReviewTarget::Checkout { .. }) {
+        let meta = self.meta.as_ref()?;
+        if !matches!(meta.target, ReviewTarget::Checkout { .. }) {
             return None;
         }
-        let directory = review
-            .repo()
-            .work_tree()
-            .and_then(|tree| tree.file_name())
+        let directory = meta
+            .repo
+            .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let Some(subject) = self.live.as_ref().and_then(|live| live.subject()) else {
             return Some(directory);
@@ -833,44 +797,12 @@ impl Model {
         Some(format!("{directory} · {head}{number}"))
     }
 
-    /// Takes in the grant that applies to the checkout's snapshot on screen: tools may run on
-    /// it exactly while one does.
-    fn set_grant(&mut self, grant: Option<Grant>) {
-        self.grant = grant;
-        self.set_trusted(grant.is_some());
-    }
-
-    /// Takes in whether tools may run on the snapshot on screen: once they may not, as when
-    /// another window revoked trust, the language servers stop, as a revocation here stops
-    /// them.
-    fn set_trusted(&mut self, trusted: bool) {
-        if self.trusted && !trusted {
-            // Each server stops as it leaves the map.
-            self.servers.lock().clear();
-        }
-        self.trusted = trusted;
-    }
-
-    /// For a review trusted one snapshot at a time, reads again whether the snapshot on screen
-    /// is trusted, as when another one shows.
-    fn read_snapshot_trust(&mut self) {
-        // A confirmation asked for on another snapshot does not carry over.
-        self.trust_pending = None;
-        let (Some(review), Some(snapshot)) = (&self.review, &self.snapshot) else {
-            return;
-        };
-        if review.trusted_per_snapshot() {
-            let trusted = snapshot_trusted(review, &snapshot.history, snapshot.revision);
-            self.set_trusted(trusted);
-        }
-    }
-
     /// Whether the review is of the checkout, whatever it holds.
     #[must_use]
     pub fn is_checkout(&self) -> bool {
-        self.review.as_ref().is_some_and(|review| {
-            matches!(review.target(), review_core::ReviewTarget::Checkout { .. })
-        })
+        self.meta
+            .as_ref()
+            .is_some_and(|meta| matches!(meta.target, ReviewTarget::Checkout { .. }))
     }
 
     /// For a review that follows the working tree, what the capture on screen was of, whether
@@ -963,15 +895,6 @@ impl Model {
     /// take, for example.
     pub fn notice(&mut self, status: impl Into<String>) {
         self.set_status(status);
-    }
-
-    /// Stops the language servers that no lookup is using, as when the front end quits.
-    ///
-    /// A server a lookup holds stops once that lookup ends and its last holder goes.
-    pub fn stop_language_servers(&mut self) {
-        if let Some(mut servers) = self.servers.try_lock() {
-            servers.clear();
-        }
     }
 
     fn fail(&mut self, status: impl Into<String>) {
@@ -1260,9 +1183,9 @@ impl Model {
     /// Reads the head text of the shown revision's files that are not cached yet, for context
     /// lines and the file buffer.
     fn request_texts(&mut self) {
-        let Some(review) = self.review.clone() else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         let Some(view) = self.view() else {
             return;
         };
@@ -1286,10 +1209,10 @@ impl Model {
         }
         let asked = wanted.clone();
         self.highlighting += 1;
-        self.spawn(Subject::Always(Because::Content), move || {
+        self.spawn_with(Subject::Always(Because::Content), move |parts| {
             let _reading = tracing::info_span!("read_texts", blobs = wanted.len()).entered();
             let mut texts = HashMap::new();
-            if let Ok(mut reader) = review.repo().blob_reader() {
+            if let Ok(mut reader) = parts.review.repo().blob_reader() {
                 for oid in wanted {
                     if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
                         && !bytes.contains(&0)
@@ -1308,9 +1231,9 @@ impl Model {
     /// Starts the highlighting the shown revision needs now, the selected file first; see
     /// [`highlights`].
     fn pump_highlights(&mut self) {
-        let Some(review) = self.review.clone() else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         if self.highlights.indexed_for() != Some(self.shown) {
             let Some(view) = self.snapshot.as_ref().and_then(Snapshot::view) else {
                 return;
@@ -1327,10 +1250,9 @@ impl Model {
         });
         for start in starts {
             let known = self.blobs.known(&start.sides);
-            let review = Arc::clone(&review);
-            self.spawn(Subject::Always(Because::Content), move || {
+            self.spawn_with(Subject::Always(Because::Content), move |parts| {
                 Outcome::Highlighted(highlight_sides(
-                    &review,
+                    &parts.review,
                     start.id,
                     start.sides,
                     &known,
@@ -1514,15 +1436,18 @@ pub struct LiveState<'a> {
 
 /// What opening a review produced.
 pub(super) struct Opened {
-    review: Review,
+    engine: engine::Engine,
+    meta: ReviewMeta,
     /// The folded folders and the place saved with the review.
     view_state: crate::folders::ViewState,
     /// Why the saved view state was ignored, for the developer's log.
     ignored: Option<String>,
     found: Option<String>,
-    trusted: bool,
-    /// For a review of the checkout, the grant that applies to its opening capture.
-    granted: Option<live::Granted>,
+    /// Whether tools may run on the snapshot shown first.
+    trust: Trust,
+    /// Whether the review follows the working tree, under a session the engine holds, or why
+    /// it cannot.
+    follows: Result<bool, String>,
     /// For a review of the checkout, what its opening capture saw.
     following: Option<live::Opening>,
     info: Option<review_core::ReviewInfo>,
@@ -1534,24 +1459,10 @@ pub(super) struct Opened {
     texts: HashMap<ObjectId, Arc<rows::FullText>>,
 }
 
-/// Whether the reviewer trusts the snapshot of `history`'s revision `revision`, the head it
-/// reviews, for a review trusted one snapshot at a time; see [`Review::trust_for`].
-pub(super) fn snapshot_trusted(
-    review: &Review,
-    history: &History,
-    revision: RevisionNumber,
-) -> bool {
-    let tree = history
-        .view(revision)
-        .ok()
-        .and_then(|view| view.record().map(|record| record.head.clone()))
-        .and_then(|head| review.repo().tree_of(&head).ok());
-    tree.is_some_and(|tree| review.trust_for(&tree).is_ok_and(|trust| trust.trusted))
-}
-
-/// Opens the review with `opener` and reads what the window shows first; runs in the
-/// background.
-fn open(opener: Opener) -> Result<Opened, String> {
+/// Opens the review with `opener` and reads what the window shows first, and with `live`, as
+/// `[review] live` sets it, starts the session a review of the working tree follows it under;
+/// runs in the background.
+fn open(opener: Opener, live: bool) -> Result<Opened, String> {
     let Loaded {
         review,
         history,
@@ -1559,17 +1470,34 @@ fn open(opener: Opener) -> Result<Opened, String> {
         following,
     } = opener()?;
     let revision = history.current().ok_or("the review has no revision yet")?;
-    let trusted = if review.trusted_per_snapshot() {
-        snapshot_trusted(&review, &history, revision)
-    } else {
-        review.trust().map_err(|err| err.to_string())?.trusted
-    };
-    let (following, granted) = match following {
+    let trust = history
+        .view(revision)
+        .ok()
+        .and_then(|view| view.record().map(|record| record.head.clone()))
+        .and_then(|head| review.repo().tree_of(&head).ok())
+        .map_or(Trust::Denied, |tree| trust::trust_of(&review, &tree));
+    let (session, following) = match following {
         Some(following) => {
-            let (opening, granted) = live::Opening::read(&review, &history, following);
-            (Some(opening), granted)
+            let opening = live::Opening::read(&review, &history, &following);
+            (Some(following.session), Some(opening))
         }
         None => (None, None),
+    };
+    // A checkout's review shows only captures, so it follows the working tree whatever the
+    // configuration says; one of the working tree against a fixed base follows it with
+    // `[review] live`.
+    let wanted = match review.target() {
+        ReviewTarget::Checkout { .. } => true,
+        ReviewTarget::Worktree { .. } => live,
+        ReviewTarget::PullRequest { .. } | ReviewTarget::Range { .. } => false,
+    };
+    let session = match session {
+        Some(session) => Ok(Some(session)),
+        None if wanted => review
+            .start_session()
+            .map(Some)
+            .map_err(|err| live::causes(&err)),
+        None => Ok(None),
     };
     let info = review.info().ok().flatten();
     let synced = review.synced().ok().flatten();
@@ -1579,13 +1507,24 @@ fn open(opener: Opener) -> Result<Opened, String> {
         Ok(view_state) => (view_state, None),
         Err(ignored) => (crate::folders::ViewState::default(), Some(ignored)),
     };
+    let meta = ReviewMeta {
+        key: review.key().clone(),
+        repo: review
+            .repo()
+            .work_tree()
+            .unwrap_or(review.repo().git_dir())
+            .to_path_buf(),
+        target: review.target().clone(),
+    };
+    let follows = session.as_ref().map(Option::is_some).map_err(String::clone);
     Ok(Opened {
-        review,
+        engine: engine::Engine::new(review, session.ok().flatten()),
+        meta,
         view_state,
         ignored,
         found,
-        trusted,
-        granted,
+        trust,
+        follows,
         following,
         info,
         synced,

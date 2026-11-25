@@ -281,7 +281,6 @@ pub fn run(settings: Settings, loaded: Loaded) -> color_eyre::eyre::Result<()> {
         }
         session.app.tick(Instant::now());
     }
-    session.app.shut_down();
     Ok(())
 }
 
@@ -381,10 +380,13 @@ impl Session {
                     self.app.input(mouse(kind, column, row, held(*shift)));
                 }
             }
-            Command::Scroll(rows) => self
-                .app
-                .update(|model| model.scroll_list_by(List::Diff, *rows)),
-            Command::Pan(cells) => self.app.update(|model| model.pan_text(*cells)),
+            Command::Scroll(rows) => {
+                self.app
+                    .update(|model| model.scroll_list_by(List::Diff, *rows));
+            }
+            Command::Pan(cells) => {
+                self.app.update(|model| model.pan_text(*cells));
+            }
             Command::File(path) => {
                 if !state::is_file(&self.app.model().tree, path) {
                     return Err(format!("no file {path}"));
@@ -393,7 +395,8 @@ impl Session {
             }
             Command::Find(text) => self
                 .app
-                .update(|model| model.select_hunk_containing(text))?,
+                .update(|model| model.select_hunk_containing(text))
+                .ok_or("the app is closing")??,
             Command::Resize { columns, rows } => {
                 self.terminal.backend_mut().resize(*columns, *rows);
             }

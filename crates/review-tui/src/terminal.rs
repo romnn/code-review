@@ -316,7 +316,6 @@ fn show(
     }
     #[cfg(unix)]
     signals.stop();
-    app.shut_down();
     lost.map_or(Ok(()), Err)
 }
 

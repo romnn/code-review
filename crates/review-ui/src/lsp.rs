@@ -57,7 +57,8 @@ pub enum LspError {
 const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// Stops a [`LanguageServer`] from another thread, without the lock of whoever uses it: its
-/// process is killed, and a wait for it, such as the `initialize` handshake, fails at once.
+/// process is killed and reaped, and a wait for it, such as the `initialize` handshake, fails
+/// at once.
 #[derive(Clone)]
 pub struct Stopper {
     child: Arc<Mutex<Child>>,
@@ -65,12 +66,17 @@ pub struct Stopper {
 }
 
 impl Stopper {
-    /// Kills the server's process and fails any wait for it; the server reaps the process
-    /// when it is dropped.
+    /// Kills the server's process, waits for it to exit and fails any wait for it, so once
+    /// this returns the process is gone, whoever still holds the server.
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        if let Err(err) = self.child.lock().kill() {
+        let mut child = self.child.lock();
+        if let Err(err) = child.kill() {
             // The process is gone already.
+            drop(err);
+        }
+        if let Err(err) = child.wait() {
+            // It was reaped already.
             drop(err);
         }
     }
@@ -486,7 +492,8 @@ impl Drop for LanguageServer {
             // The server is already gone; killing it below is enough.
         }
         let mut child = self.child.lock();
-        // A server a `Stopper` killed already is reaped all the same.
+        // A server a `Stopper` stopped is reaped already, and waiting for it again returns at
+        // once.
         if let Err(err) = child.kill() {
             drop(err);
         }

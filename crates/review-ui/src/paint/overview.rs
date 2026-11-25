@@ -8,8 +8,8 @@ use super::header::{Meter, meter};
 use super::{Palette, Piece, Run, Style, Styled, Weight};
 use crate::color::Hsla;
 use crate::markdown::{self, Block, Inline, Span};
-use crate::model::Model;
 use crate::model::overview::RevisionSummary;
+use crate::model::{Grant, Model, Trust};
 
 /// How many characters of a commit ID show.
 const COMMIT_ID_CHARS: usize = 10;
@@ -231,9 +231,9 @@ fn commits_about(model: &Model, palette: &Palette, commits: &[review_core::Commi
             match model.live_state().and_then(|live| live.subject) {
                 Some(subject) if model.is_checkout() => crate::model::branch_and_base(subject),
                 _ => model
-                    .review
+                    .meta
                     .as_ref()
-                    .map_or_else(String::new, |review| review.key().to_string()),
+                    .map_or_else(String::new, |meta| meta.key.to_string()),
             },
             palette.text,
         )
@@ -309,14 +309,13 @@ fn checkout_details(model: &Model, palette: &Palette, no_commits: bool) -> Vec<P
         lines.push(Piece::new(note, palette.flagged));
     }
     lines.push(plain(
-        match model.grant {
-            Some(crate::model::Grant::Snapshot) => {
+        match model.trust {
+            Trust::Granted(Grant::Snapshot) => {
                 "Trusted: this snapshot, until the code changes; Ctrl+T revokes it"
             }
-            Some(crate::model::Grant::Checkout) => {
-                "Trusted: this whole checkout, until Ctrl+T revokes it"
-            }
-            None => "Untrusted: tools that run the code ask first",
+            Trust::Granted(_) => "Trusted: this whole checkout, until Ctrl+T revokes it",
+            Trust::Checking => "Checking whether tools may run on the code…",
+            Trust::Denied => "Untrusted: tools that run the code ask first",
         }
         .to_owned(),
     ));

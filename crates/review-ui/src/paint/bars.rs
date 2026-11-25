@@ -14,7 +14,7 @@ use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
 use crate::keymap::{self, Area, Section};
 use crate::model::sync::ago;
-use crate::model::{Field, Mode, Model, Phase, SyncStep, plural};
+use crate::model::{Field, Grant, Mode, Model, Phase, SyncStep, Trust, plural};
 use crate::scroll::{self, ease_out};
 use crate::state;
 
@@ -94,14 +94,13 @@ pub fn sync_label(
     // Which grant lets tools run on the checkout's code, which is never trusted by default.
     if model.is_checkout() {
         parts.push(part(
-            match model.grant {
-                Some(crate::model::Grant::Snapshot) => {
+            match model.trust {
+                Trust::Granted(Grant::Snapshot) => {
                     Piece::new("trusted: this snapshot", palette.flagged)
                 }
-                Some(crate::model::Grant::Checkout) => {
-                    Piece::new("trusted: checkout", palette.flagged)
-                }
-                None => Piece::new("untrusted", palette.faint),
+                Trust::Granted(_) => Piece::new("trusted: checkout", palette.flagged),
+                Trust::Checking => Piece::new("checking trust", palette.faint),
+                Trust::Denied => Piece::new("untrusted", palette.faint),
             },
             2,
         ));
@@ -184,7 +183,7 @@ pub fn hint_available(model: &Model, action: &str) -> bool {
     match action {
         "NextFile" => model.adjacent_file(true).is_some() || model.adjacent_file(false).is_some(),
         // The checkout's review asks for trust when the key is pressed.
-        "GoToDefinition" => model.trusted || model.is_checkout(),
+        "GoToDefinition" => model.trust.granted() || model.is_checkout(),
         "ToggleApprove" | "ToggleFlag" => match model.mode {
             Mode::Buffer => model.buffer_hunk().is_some(),
             Mode::Diff => !model.rows.hunks.is_empty(),

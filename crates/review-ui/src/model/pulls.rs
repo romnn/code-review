@@ -167,9 +167,9 @@ impl Model {
     /// Looks up the checked-out branch's pull request in the background, or after the running
     /// lookup.
     pub(super) fn look_up_pull_request(&mut self) {
-        let Some(review) = self.review.clone() else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         let Some(live) = &mut self.live else {
             return;
         };
@@ -189,8 +189,8 @@ impl Model {
             return;
         }
         pulls.running = Some(association.clone());
-        self.spawn(Subject::Always(Because::Live), move || {
-            let result = find(review.repo());
+        self.spawn_with(Subject::Always(Because::Live), move |parts| {
+            let result = find(parts.review.repo());
             Outcome::PullRequest(Box::new(Looked {
                 asked: association,
                 result,

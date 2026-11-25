@@ -1458,10 +1458,12 @@ impl ReviewApp {
         self.follow_width(width);
         let geometry = measure::measure(&self.lists.handles, self.lists_code_size, self.diff_width);
         let now = Instant::now();
+        // Once the app closes, the frame keeps the last layout.
         let Updated {
             value: running,
             effects,
         } = self.driver.update(|model| model.layout(geometry, now));
+        let running = running.unwrap_or(false);
         self.run(effects, window, cx);
         // Layout can end what held a capture back, such as a selection a resize cancelled.
         self.publish_with_next_frame(window, cx);
