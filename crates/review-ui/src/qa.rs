@@ -155,10 +155,7 @@ fn put_review(answer: &mut Map<String, Value>, model: &Model) {
             ),
         ),
         ("pending", json!(model.pending.len())),
-        (
-            "queued",
-            json!(model.marks.len() + usize::from(model.marking)),
-        ),
+        ("queued", json!(model.saves_waiting())),
         ("row_count", json!(model.rows.screen.len())),
     ];
     answer.extend(entries.map(|(key, value)| (key.to_owned(), value)));
@@ -178,7 +175,7 @@ fn put_panes(answer: &mut Map<String, Value>, model: &Model, screen: &dyn Screen
         ("picker", picker(model)),
         ("selection", selection(model)),
         ("selected_text", json!(model.selected_text())),
-        ("trusted", json!(model.trusted)),
+        ("trusted", json!(model.trust.granted())),
         ("live", live(model)),
     ];
     answer.extend(entries.map(|(key, value)| (key.to_owned(), value)));
@@ -201,7 +198,10 @@ fn live(model: &Model) -> Value {
         "busy": live.busy.map(|busy| busy.to_string()),
         "replaced": live.replaced,
         "filtered": live.filtered.len(),
-        "grant": model.grant.map(|grant| format!("{grant:?}")),
+        "grant": match model.trust {
+            crate::model::Trust::Granted(grant) => Some(format!("{grant:?}")),
+            _ => None,
+        },
     })
 }
 

@@ -174,6 +174,19 @@ state
 expect "mode":"Diff"
 expect "hunk":1,"hunks"
 
+# Trust is recorded in the background: Ctrl+T says what trusting runs, a second press trusts
+# the snapshot on screen once the grant is recorded, and Ctrl+T revokes it once the language
+# servers stopped.
+key ctrl-t
+key ctrl-t
+state
+expect "trusted":true
+expect "status":"Trusted this snapshot: tools may run on it
+key ctrl-t
+state
+expect "trusted":false
+expect "status":"Trust in this snapshot revoked\.
+
 # Overlays own the keyboard: review keys under them do nothing.
 key ?
 key space

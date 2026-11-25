@@ -869,13 +869,22 @@ minutes, when the branch or its upstream moves, or on `r`, and the overview says
 The checkout's code is never trusted by default. The first tool that needs trust, go to
 definition, asks once: trust this snapshot, which ends when the code changes, or always trust this
 checkout until `Ctrl+T` revokes it. The bottom bar says which grant applies (`untrusted`,
-`trusted: this snapshot`, `trusted: checkout`), each capture reads it again for its own tree,
-and the worker checks it on the tree it is about to run on (`Review::tool_worktree`), again
-under the language servers' lock right before it spawns a server or sends one a request, and
-once more when the answer comes. The `initialize` handshake runs after that lock is released,
-with the server already listed. A revocation records itself and stops every listed server under
-that same lock, one in its handshake or answering included, whose wait then fails, so it waits
-at most for a process to spawn, and either stops the server or is seen before any spawn.
+`trusted: this snapshot`, `trusted: checkout`, or `checking trust` while it is read or decided),
+and it is read again for every snapshot that shows. One owner, the engine's `Servers`, decides
+whether a language server may run: under one lock it reads trust, records decisions and admits
+lookups, and it holds the servers of the current showing of a head, which another showing
+replaces, a head shown again included. The worker checks trust on the tree it is about to run
+on (`Review::tool_worktree`), and again in the owner right before it starts or uses a server:
+the lookup's ticket, its showing and trust epoch, before the stored grant is read, then the
+grant, then the epoch once more, and the grant again once the server answered. The `initialize` handshake and the request run after that lock
+is released, with the server already in the set. Wherever trust is found denied in the owner,
+by a reading, a lookup or a revocation, recorded or not and whatever grant still applies,
+every server stops in that same operation, one in its handshake or answering included, whose
+wait then fails, and their processes exit before the window hears of it. A decision on trust
+is saved in the background, with the marks. A revocation also moves the window's trust epoch on
+at the key press, as every denial the window takes in does, and an answer lands only in the
+epoch it was asked in, so none from before a revocation lands
+([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 
 A capture is a synthetic commit no branch reaches, so whoever shows it pins it. Each running app
 is a session (`Review::start_session`) that holds an exclusive lock on
@@ -1390,7 +1399,10 @@ it, muted, so it never reads as code.
   example one made by `gh pr checkout`. In both apps, `gd` on an untrusted review shows a one-line
   hint, and `Ctrl+T` explains what will run and trusts on a second press, or revokes trust and
   stops the language servers. A review of a range or of the working tree trusts only the
-  snapshot on screen.
+  snapshot on screen. Trust is read and decided in the background and shows as checking
+  meanwhile, when nothing starts; a revocation that cannot be recorded stops the servers all
+  the same and keeps the window untrusted, saying the stored grant may still apply when the
+  review opens again ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 - **Window chrome.** gpui asks for server-side decorations; GNOME has no `xdg-decoration`, so
   the window falls back to client decorations and review-gui draws its own square title bar
   (`app/chrome.rs`): the title, a drag area, minimize, maximize and close. As in Zed's
@@ -1453,13 +1465,26 @@ belongs in `review-core`, so that the engine stays usable on its own.
   pickers, settings and the file buffer. It is shaped like model-view-update: input arrives as an
   `Action` (`Model::dispatch`) or a typed call, and a front end changes the model only through
   `Driver::update`, which runs the model's after-update step (saving folded folders when they
-  changed, and quitting once nothing is left to save) so no change can skip it.
-- **Quitting.** `Model::quit` queues the `Quit` effect only once the marks queued and in
-  flight and the folded folders are saved, saying so on the status line meanwhile, and while it
-  waits it refuses new marks with a note, so what it waits for only shrinks. Who asks decides
-  what a failure does. The reviewer (`QuitKind::Interactive`: `Quit` or `CloseWindow` from a
-  key, a window's close button or the compositor's close request) sees the status line, so a
-  mark that fails to save stops the quitting and its failure stays in view. Nothing the
+  changed, and quitting once nothing is left to save) so no change can skip it, and hands it
+  what jobs and timers produced through `Driver::complete`. Once the app closes,
+  `Driver::update` runs nothing, so no input of any kind acts.
+- **The engine handle.** The review, the session that pins the captures on screen, the watch on
+  the working tree and the language servers sit behind one handle in `model::engine`, which the
+  model can neither look into nor clone: all it can do is queue a background job that runs with
+  them, whose outcome comes back as plain data, so no code on the UI thread compiles that blocks
+  on git, the event log or a server. The opening job assembles it, the title and paint read a
+  plain copy of the review's `ReviewMeta`, and wherever the last holder lets go of it, whatever
+  blocks to stop goes to a thread of its own
+  ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
+- **Quitting.** `Model::quit` queues the `Quit` effect only once the marks and decisions on trust
+  queued and in flight and the folded folders are saved and then the engine stopped (its
+  language servers, its watch and its session), saying so on the status line meanwhile, and while
+  it waits it refuses new marks and decisions on trust with a note, so what it waits for only
+  shrinks. Once the engine starts to stop, the driver takes no input and no capture shows any
+  more. Who asks decides what a failure does. The reviewer (`QuitKind::Interactive`: `Quit` or
+  `CloseWindow` from a key, a window's close button or the compositor's close request) sees the
+  status line, so a mark that fails to save, or a revocation of trust that fails to record,
+  stops the quitting and its failure stays in view. Nothing the
   reviewer marked is ever dropped: asking again while the app waits changes nothing, so a held
   `q` or a double click on the close button cannot lose an approval just made. Asking again
   after a failure stopped the quitting, which the status line offers, waits for the marks still
@@ -1487,22 +1512,25 @@ belongs in `review-core`, so that the engine stays usable on its own.
   everything through it; review-gui draws code, notes, paths and pull-request text through it,
   mapping highlights and the mouse between the source's bytes and the shown text.
 - **Effects instead of async.** The model never runs anything itself. It queues `Effect`s, which
-  `Driver::update` hands back for the front end to run: `Spawn` a background job, `After` a
+  `Driver::update` and `Driver::complete` hand back for the front end to run: `Spawn` a
+  background job, a wait for the working tree included, `After` a
   delay, `Copy` and `CopyPrimary`, the window `Title`, `Fullscreen`, `Quit`, `Log` a diagnostic, and `ScrollSheet` for the overlays each front end lays out itself.
-  review-gui runs jobs on gpui's executor, review-tui each on a thread of its own, and the
-  model's tests run them in place. So the model needs no async runtime and no executor of either
+  A front end can only start a job, which then runs on a thread of its own (`Job::start`), in
+  both apps; the model's tests run them in place. So the model needs no async runtime and no executor of either
   toolkit.
 - **Completions.** A job (a `Send` closure) or a timer hands back a `Completion`: a typed
   outcome and the subject it was computed for, which the front end gives back to
-  `Model::complete` on the UI thread. `spawn` and `after` take the subject, so no job or timer
+  `Driver::complete` on the UI thread. `spawn` and `after` take the subject, so no job or timer
   can start without naming it: a preview's number, a picker search's generation, a picker, the
-  buffer and revision of a definition lookup (while the review stays trusted), or a revision.
+  buffer, revision and trust epoch of a definition lookup, a revision, or the trust epoch a
+  reading of trust was taken in.
   `Model::complete` first ends what marks the job as running, then checks the subject against
   what shows in one place, and only a current outcome reaches its handler, so no handler sees a
   stale one. An outcome that must land whatever changed says so by name, `Always` with its
-  reason: the opening, a save of marks or folded folders, whose failure must reach the reviewer
-  and which quitting waits for, a refresh, which only adds newer history, and blob texts and
-  highlights, keyed by content (highlights by blob and the syntax it resolved to).
+  reason: the opening, a save of marks, decisions on trust or folded folders, whose failure must
+  reach the reviewer and which quitting waits for, a refresh, which only adds newer history,
+  blob texts and highlights, keyed by content (highlights by blob and the syntax it resolved
+  to), and stopping the engine.
 - **Geometry and scrolling.** The model owns every list's offset, in rows. Each frame the front
   end measures a `frame::Geometry` once, plain data in its units (logical pixels or cells): the
   diff pane's and lists' widths, the narrower half of a side-by-side row, each list's height and

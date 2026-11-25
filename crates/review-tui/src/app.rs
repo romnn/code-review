@@ -236,11 +236,19 @@ impl App {
         std::mem::take(&mut self.outbox)
     }
 
-    /// Changes the model with `change` and runs the effects it queued.
-    pub fn update<R>(&mut self, change: impl FnOnce(&mut Model) -> R) -> R {
+    /// Changes the model with `change` and runs the effects it queued; returns what `change`
+    /// returned, or `None` once the app closes, when it did not run.
+    pub fn update<R>(&mut self, change: impl FnOnce(&mut Model) -> R) -> Option<R> {
         let Updated { value, effects } = self.driver.update(change);
         self.run(effects);
         value
+    }
+
+    /// Hands the model what a job or a timer handed back, even once the app closes, and runs
+    /// the effects it queued.
+    fn complete(&mut self, completion: Completion) {
+        let effects = self.driver.complete(completion);
+        self.run(effects);
     }
 
     /// Does what `action` does, as its key would.
@@ -252,12 +260,10 @@ impl App {
     fn run(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                // A thread per job already, so a job that waits for long holds no other.
-                Effect::Spawn(job) | Effect::Wait(job) => {
+                // Each job runs on a thread of its own, so none waits behind a slow one.
+                Effect::Spawn(job) => {
                     let sender = self.sender.clone();
-                    // A thread per job, so none waits behind a slow one.
-                    std::thread::spawn(move || {
-                        let completion = job();
+                    job.start(move |completion| {
                         // The main loop is gone once the app quits; nothing waits for this.
                         sender.send(Message::Done(completion)).ok();
                     });
@@ -282,7 +288,7 @@ impl App {
     pub fn handle(&mut self, message: Message) {
         match message {
             Message::Input(event) => self.input(event),
-            Message::Done(completion) => self.update(|model| model.complete(completion)),
+            Message::Done(completion) => self.complete(completion),
             // QA lines are the QA loop's, and signals the terminal's main loop's.
             #[cfg(unix)]
             Message::Qa(_) | Message::Signal(_) => {}
@@ -340,7 +346,9 @@ impl App {
         self.replay(replays);
         match outcome {
             // A terminal sends a held key's repeats as presses, so every key is one.
-            Outcome::Dispatch(action) => self.update(|model| model.key(action, false)),
+            Outcome::Dispatch(action) => {
+                self.update(|model| model.key(action, false));
+            }
             Outcome::Pending => {}
             Outcome::Unclaimed => self.type_key(&key.keystroke),
         }
@@ -394,9 +402,11 @@ impl App {
                 self.editor.insert(text);
                 self.edit_field(field);
             }
-            None => self.update(|model| {
-                model.notice("Pasted text ignored: only a / field takes text.");
-            }),
+            None => {
+                self.update(|model| {
+                    model.notice("Pasted text ignored: only a / field takes text.");
+                });
+            }
         }
     }
 
@@ -500,8 +510,12 @@ impl App {
     /// Pans the code of `list` sideways by `cells`, right when positive.
     fn pan(&mut self, list: Option<List>, cells: f64) {
         match list {
-            Some(List::Diff) => self.update(|model| model.pan_text(cells)),
-            Some(List::Buffer) => self.update(|model| model.pan_buffer(cells)),
+            Some(List::Diff) => {
+                self.update(|model| model.pan_text(cells));
+            }
+            Some(List::Buffer) => {
+                self.update(|model| model.pan_buffer(cells));
+            }
             _ => {}
         }
     }
@@ -819,7 +833,7 @@ impl App {
                 break;
             };
             let Timer { completion, .. } = self.timers.remove(index);
-            self.update(|model| model.complete(completion));
+            self.complete(completion);
         }
         if self
             .matcher
@@ -914,11 +928,6 @@ impl App {
             draw::frame(frame.buffer_mut(), *colors, model, scene, now);
         })?;
         Ok(())
-    }
-
-    /// Stops what the app started before it goes: the language servers that no lookup uses.
-    pub fn shut_down(&mut self) {
-        self.update(Model::stop_language_servers);
     }
 }
 

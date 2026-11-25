@@ -1,21 +1,29 @@
-//! Approving, flagging and resetting, the queue of marks waiting for the engine, and moving to
+//! Approving, flagging and resetting, the queue of saves waiting for the engine, and moving to
 //! a new revision.
 //!
 //! A mark resolves its units when the reviewer acts and keeps the revision they were shown in;
-//! the engine refuses it if that revision is no longer current. Marks are saved one at a time,
-//! and every completion, success or failure, derives the view again from the current state and
-//! starts the next mark, so none is ever left waiting.
+//! the engine refuses it if that revision is no longer current.
+//! Marks and decisions on trust are saved one at a time in the order made, and every
+//! completion, success or failure, starts the next save, so none is ever left waiting; a mark's
+//! completion also derives the view again from the current state.
 
 use std::sync::Arc;
 
-use review_core::{History, MarkVerdict, Recorded, Review, ShownRun, TrustScope, UnitId};
+use review_core::{History, MarkVerdict, Recorded, ShownRun, UnitId};
 
 use super::effects::{Because, Outcome, Subject};
-use super::{
-    Effect, Grant, Mode, Model, QuitKind, Quitting, SyncStep, buffer, live, overview, plural,
-};
+use super::trust::Decision;
+use super::{Effect, Mode, Model, Quitting, SyncStep, live, overview, plural};
 use crate::rows;
 use crate::state::{self, Mark, MarkJob};
+
+/// What the save queue holds.
+pub(crate) enum Save {
+    /// A mark.
+    Mark(MarkJob),
+    /// A decision on trust.
+    Trust(Decision),
+}
 
 impl Model {
     /// The units the current mode's review keys act on, and what to call them, resolved from
@@ -228,11 +236,11 @@ impl Model {
             self.quitting = Quitting::No;
         }
         let unit = change.unit;
-        self.marks.push_back(MarkJob {
+        self.saves.push_back(Save::Mark(MarkJob {
             mark: Mark::Run(change),
             revision: snapshot.revision,
             history: snapshot.history,
-        });
+        }));
         let left = self
             .rows
             .hunks
@@ -247,7 +255,7 @@ impl Model {
                 plural(left, "change")
             ),
         });
-        self.next_mark();
+        self.next_save();
         if self.mode == Mode::Diff {
             self.after_approval();
         }
@@ -257,9 +265,22 @@ impl Model {
     pub(super) fn approving_change(&self, change: &ShownRun) -> bool {
         self.approving.as_ref() == Some(change)
             || self
-                .marks
-                .iter()
+                .queued_marks()
                 .any(|job| matches!(&job.mark, Mark::Run(run) if run == change))
+    }
+
+    /// The marks waiting in the save queue.
+    pub(super) fn queued_marks(&self) -> impl Iterator<Item = &MarkJob> {
+        self.saves.iter().filter_map(|save| match save {
+            Save::Mark(job) => Some(job),
+            Save::Trust(_) => None,
+        })
+    }
+
+    /// How many saves are queued or saving, as the QA mode's state reports them.
+    #[must_use]
+    pub(crate) fn saves_waiting(&self) -> usize {
+        self.saves.len() + usize::from(self.saving)
     }
 
     /// After approving a hunk, selects the next one in the file that needs the reviewer, as
@@ -318,11 +339,11 @@ impl Model {
             self.quitting = Quitting::No;
         }
         let count = units.len();
-        self.marks.push_back(MarkJob {
+        self.saves.push_back(Save::Mark(MarkJob {
             mark: Mark::Units { units, verdict },
             revision: snapshot.revision,
             history: snapshot.history,
-        });
+        }));
         self.refresh_tree();
         // The mark shows at once: in the hunks view an approved hunk folds now, while the
         // reviewer acts, so the save landing later moves no row.
@@ -333,38 +354,41 @@ impl Model {
             MarkVerdict::Unseen => "Reset",
         };
         self.set_status(format!("{done} {what} ({}).", plural(count, "unit")));
-        self.next_mark();
+        self.next_save();
         true
     }
 
-    /// Saves the next queued mark in the background, unless one is being saved.
-    pub(super) fn next_mark(&mut self) {
-        if self.marking {
+    /// Saves the next queued mark or decision on trust in the background, unless one is being
+    /// saved.
+    pub(super) fn next_save(&mut self) {
+        if self.saving || self.engine.is_none() {
             return;
         }
-        let Some(review) = self.review.clone() else {
+        let Some(save) = self.saves.pop_front() else {
             return;
         };
-        let Some(job) = self.marks.pop_front() else {
-            return;
-        };
-        self.marking = true;
-        self.approving = match &job.mark {
-            Mark::Run(run) => Some(run.clone()),
-            Mark::Units { .. } => None,
-        };
-        self.spawn(Subject::Always(Because::Save), move || {
-            let saved = job.save(&review);
-            let history = review.history();
-            Outcome::Marked(Marked {
-                job,
-                saved,
-                history,
-            })
-        });
+        self.saving = true;
+        match save {
+            Save::Mark(job) => {
+                self.approving = match &job.mark {
+                    Mark::Run(run) => Some(run.clone()),
+                    Mark::Units { .. } => None,
+                };
+                self.spawn_with(Subject::Always(Because::Save), move |parts| {
+                    let saved = job.save(&parts.review);
+                    let history = parts.review.history();
+                    Outcome::Marked(Marked {
+                        job,
+                        saved,
+                        history,
+                    })
+                });
+            }
+            Save::Trust(decision) => self.save_decision(decision),
+        }
     }
 
-    /// Takes in a saved (or refused) mark and starts the next one.
+    /// Takes in a saved (or refused) mark and starts the next save.
     pub(super) fn marked(&mut self, marked: Marked) {
         let Marked {
             job,
@@ -372,7 +396,7 @@ impl Model {
             history,
         } = marked;
         self.saved(&job, saved, history);
-        self.next_mark();
+        self.next_save();
     }
 
     /// Takes in a saved (or refused) mark: the new history, the remaining pending verdicts,
@@ -385,8 +409,12 @@ impl Model {
     ) {
         // Pending verdicts are exactly those of the marks still queued.
         self.pending.clear();
-        for queued in &self.marks {
-            if let Mark::Units { units, verdict } = &queued.mark {
+        for save in &self.saves {
+            if let Save::Mark(MarkJob {
+                mark: Mark::Units { units, verdict },
+                ..
+            }) = save
+            {
                 for &unit in units {
                     self.pending.insert(unit, *verdict);
                 }
@@ -428,18 +456,9 @@ impl Model {
             Ok(history) => self.take_history(history),
             Err(err) => failures.push(format!("Could not reread the review: {err}")),
         }
-        // Failures go last, so a newer revision's notice never hides them; quitting now would
-        // take them off screen with the app, unless nobody can see them or the reviewer saw one
-        // and chose to leave anyway.
-        if unsaved {
-            match self.quitting {
-                Quitting::Waiting(QuitKind::Interactive) => {
-                    self.quitting = Quitting::Stopped;
-                    failures.push(self.stopped_hint().to_owned());
-                }
-                Quitting::Stopped => failures.push(self.stopped_hint().to_owned()),
-                Quitting::No | Quitting::Waiting(QuitKind::Unattended) | Quitting::Done => {}
-            }
+        // Failures go last, so a newer revision's notice never hides them.
+        if unsaved && let Some(hint) = self.stop_quitting() {
+            failures.push(hint.to_owned());
         }
         if !failures.is_empty() {
             self.fail(failures.join(". "));
@@ -502,10 +521,7 @@ impl Model {
             self.switch_revision(newer);
             return;
         }
-        let Some(review) = self.review.clone() else {
-            return;
-        };
-        if self.refreshing {
+        if self.refreshing || self.engine.is_none() {
             return;
         }
         self.refreshing = true;
@@ -513,7 +529,8 @@ impl Model {
         self.set_status("Fetching the latest changes…");
         let step = self.sync.step.clone();
         step.set(Some(SyncStep::Refresh(review_core::RefreshStep::Fetching)));
-        self.spawn(Subject::Always(Because::Refresh), move || {
+        self.spawn_with(Subject::Always(Because::Refresh), move |parts| {
+            let review = &parts.review;
             let recorded =
                 review.refresh_reporting(&mut |done| step.set(Some(SyncStep::Refresh(done))));
             step.set(Some(SyncStep::Carrying));
@@ -579,10 +596,11 @@ impl Model {
     /// the buffer and its search) goes first, then the selection is chosen again in the new
     /// revision, and a mode whose subject is gone falls back to one that has it.
     fn switch_revision(&mut self, revision: review_core::RevisionNumber) {
-        if self.marking || !self.marks.is_empty() {
+        if self.saving || !self.saves.is_empty() {
             self.set_status("Saving marks; press R again in a moment.");
             return;
         }
+        let old_head = self.shown_head();
         let Some(snapshot) = &mut self.snapshot else {
             return;
         };
@@ -615,161 +633,10 @@ impl Model {
         };
         self.enter_mode(mode);
         self.request_syntax();
-        self.read_snapshot_trust();
+        // Another head is a showing of its own, and trust is read for the revision that shows.
+        self.shown_anew(self.shown_head() != old_head);
+        self.read_trust();
         self.set_status(format!("Showing revision {revision}. {}", self.summary()));
-    }
-
-    /// `Ctrl+T`: trusts the review after a confirming second press, or revokes trust and stops
-    /// the language servers; for a review of the checkout, asks which grant to make, or
-    /// revokes the one that applies.
-    pub(super) fn toggle_trust(&mut self) {
-        let Some(review) = self.review.clone() else {
-            return;
-        };
-        if self.is_checkout() {
-            match self.grant {
-                Some(grant) => self.revoke(&review, grant),
-                None => self.ask_trust(false),
-            }
-            return;
-        }
-        // The confirmation holds only for the snapshot it was asked on.
-        let shown = self
-            .view()
-            .and_then(|view| view.record().map(|record| record.head.clone()));
-        let decision = match (self.trusted, self.trust_pending.take()) {
-            (true, _) => false,
-            (false, Some(asked)) if shown.as_ref() == Some(&asked) => true,
-            (false, _) => {
-                self.trust_pending = shown;
-                self.set_status(
-                    "Trusting runs a language server in a worktree of the reviewed head, and \
-                     through it the review's own build configuration, which can run any \
-                     program. Press Ctrl+T again to trust.",
-                );
-                return;
-            }
-        };
-        // A review whose key another clone at the same path shares is trusted one snapshot at
-        // a time: the one on screen.
-        let tree = review.trusted_per_snapshot().then(|| {
-            self.view()
-                .and_then(|view| view.record().map(|record| record.head.clone()))
-                .ok_or_else(|| review_core::Error::InvalidTarget("no revision shows".to_owned()))
-                .and_then(|head| review.repo().tree_of(&head))
-        });
-        let record = || match tree {
-            Some(tree) => {
-                tree.and_then(|tree| review.set_trust(TrustScope::Snapshot { tree }, decision))
-            }
-            None => review.set_trusted(decision),
-        };
-        // A revocation stops the language servers as it records itself.
-        let recorded = if decision {
-            record()
-        } else {
-            buffer::revoke_servers(&self.servers, || record().map(|()| true))
-        };
-        match recorded {
-            Ok(()) => {
-                self.trusted = decision;
-                let done = match (decision, review.trusted_per_snapshot()) {
-                    (true, true) => "Trusted this snapshot",
-                    (true, false) => "Trusted",
-                    (false, _) => "Trust revoked",
-                };
-                self.set_status(format!("{done} · {}", self.summary()));
-            }
-            Err(err) => self.fail(format!("Cannot record trust: {err}")),
-        }
-    }
-}
-
-impl Model {
-    /// Asks whether to trust the checkout's code, with a grant for this snapshot or the whole
-    /// checkout; with `resume`, go to definition runs once trusted.
-    pub(super) fn ask_trust(&mut self, resume: bool) {
-        if self.live.as_ref().and_then(|live| live.tree()).is_none() {
-            self.set_status("Nothing to trust yet: the working tree has not been captured.");
-            return;
-        }
-        self.trust_resumes = resume;
-        self.overlay = Some(super::Overlay::Trust);
-    }
-
-    /// `s` or `c` in the trust question: records the grant, for this snapshot or the whole
-    /// checkout, and goes on to what asked for it.
-    pub(super) fn grant_trust(&mut self, grant: Grant) {
-        if self.overlay != Some(super::Overlay::Trust) {
-            return;
-        }
-        let (Some(review), Some(tree)) = (
-            self.review.clone(),
-            self.live.as_ref().and_then(|live| live.tree()).cloned(),
-        ) else {
-            return;
-        };
-        self.overlay = None;
-        let scope = match grant {
-            Grant::Snapshot => TrustScope::Snapshot { tree },
-            Grant::Checkout => TrustScope::Checkout,
-        };
-        self.trust_decisions += 1;
-        if let Err(err) = review.set_trust(scope, true) {
-            self.fail(format!("Cannot record trust: {err}"));
-            return;
-        }
-        self.set_grant(Some(grant));
-        self.set_status(match grant {
-            Grant::Snapshot => {
-                "Trusted this snapshot: tools may run on it until the code changes. Ctrl+T \
-                 revokes."
-            }
-            Grant::Checkout => {
-                "Trusted this checkout: tools may run on whatever it holds until Ctrl+T \
-                 revokes it."
-            }
-        });
-        if std::mem::take(&mut self.trust_resumes) {
-            self.go_to_definition();
-        }
-    }
-
-    /// Revokes the checkout's `grant`, stopping the language servers, and says whether another
-    /// grant still applies.
-    fn revoke(&mut self, review: &Review, grant: Grant) {
-        let Some(tree) = self.live.as_ref().and_then(|live| live.tree()).cloned() else {
-            return;
-        };
-        let scope = match grant {
-            Grant::Snapshot => TrustScope::Snapshot { tree: tree.clone() },
-            Grant::Checkout => TrustScope::Checkout,
-        };
-        self.trust_decisions += 1;
-        let decisions = self.trust_decisions;
-        let mut still = None;
-        // The language servers stop as the revocation records itself, unless another grant
-        // still applies.
-        let revoked = buffer::revoke_servers(&self.servers, || {
-            review.set_trust(scope, false)?;
-            still = live::granted(review, &tree, decisions).grant;
-            Ok::<_, review_core::Error>(still.is_none())
-        });
-        if let Err(err) = revoked {
-            self.fail(format!("Cannot record trust: {err}"));
-            return;
-        }
-        self.set_grant(still);
-        let revoked = match grant {
-            Grant::Snapshot => "Trust in this snapshot revoked",
-            Grant::Checkout => "Trust in this checkout revoked",
-        };
-        self.set_status(match still {
-            Some(Grant::Snapshot) => {
-                format!("{revoked}; this snapshot stays trusted, which Ctrl+T revokes.")
-            }
-            Some(Grant::Checkout) | None => format!("{revoked}. {}", self.summary()),
-        });
     }
 }
 

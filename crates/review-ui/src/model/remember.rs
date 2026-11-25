@@ -30,10 +30,9 @@ impl Model {
     /// Queues `values` to be written to the configuration file after every edit queued before;
     /// `failure` begins what the status line says when they cannot be.
     ///
-    /// Without a configuration file nothing is written, and once quitting is authorized
-    /// nothing is either, since the process would exit without the write.
+    /// Without a configuration file nothing is written.
     pub(super) fn save_config(&mut self, values: Vec<Remembered>, failure: String) {
-        if self.settings.config_path.is_none() || self.quitting == super::Quitting::Done {
+        if self.settings.config_path.is_none() {
             return;
         }
         self.config_edits.push_back(ConfigEdit { values, failure });

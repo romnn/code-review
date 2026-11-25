@@ -164,7 +164,6 @@ pub(super) struct Query {
     kind: Kind,
     scope: Scope,
     text: String,
-    review: Arc<Review>,
     head: ObjectId,
     changed: Arc<Vec<Candidate>>,
     listing: Option<Arc<Listing>>,
@@ -301,9 +300,9 @@ impl Model {
 
     /// Searches for the picker's query after `delay`, cancelling the search before it.
     pub(super) fn run_picker(&mut self, delay: Duration) {
-        let Some(review) = self.review.clone() else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         self.picker_runs += 1;
         let Some(picker) = &mut self.picker else {
             return;
@@ -318,7 +317,6 @@ impl Model {
             kind: picker.kind,
             scope: picker.scope,
             text: picker.query.clone(),
-            review,
             head: picker.head.clone(),
             changed: Arc::clone(&picker.changed),
             listing: picker.listing.clone(),
@@ -339,8 +337,8 @@ impl Model {
 
     /// Runs the search `query` in the background; only the newest search's result lands.
     pub(super) fn search_picker(&mut self, query: Query) {
-        self.spawn(Subject::Search(query.generation), move || {
-            Outcome::Found(search(&query))
+        self.spawn_with(Subject::Search(query.generation), move |parts| {
+            Outcome::Found(search(&parts.review, &query))
         });
     }
 
@@ -369,9 +367,9 @@ impl Model {
     /// Reads, in the background, the text of the selected entry's file when the preview needs
     /// it and it is not in memory.
     fn read_preview(&mut self) {
-        let Some(review) = self.review.clone() else {
+        if self.engine.is_none() {
             return;
-        };
+        }
         let Some(picker) = &mut self.picker else {
             return;
         };
@@ -393,8 +391,8 @@ impl Model {
         };
         picker.reading = Some(path.clone());
         let id = picker.id;
-        self.spawn(Subject::Picker(id), move || {
-            let text = read_text(&review, &oid);
+        self.spawn_with(Subject::Picker(id), move |parts| {
+            let text = read_text(&parts.review, &oid);
             Outcome::PreviewText(PreviewText { path, text })
         });
     }
@@ -591,16 +589,13 @@ impl Model {
     /// Opens a file the review did not change as a read-only buffer at `line`, reading and
     /// highlighting it in the background.
     fn open_unchanged(&mut self, path: String, oid: ObjectId, line: usize, column: usize) {
-        let Some(review) = self.review.clone() else {
-            return;
-        };
-        if self.snapshot.is_none() {
+        if self.engine.is_none() || self.snapshot.is_none() {
             return;
         }
         self.set_status(format!("Opening {path}…"));
         self.highlighting += 1;
-        self.spawn(Subject::Shown(self.shown), move || {
-            let text = read_text(&review, &oid);
+        self.spawn_with(Subject::Shown(self.shown), move |parts| {
+            let text = read_text(&parts.review, &oid);
             // A text blob under the size limit, which `read_text` checks, is highlighted
             // whatever its name: detection reads its first line too.
             let syntax = text
@@ -677,7 +672,7 @@ fn read_text(review: &Review, oid: &ObjectId) -> Option<FullText> {
 }
 
 /// Runs one search.
-fn search(query: &Query) -> Found {
+fn search(review: &Review, query: &Query) -> Found {
     let mut found = Found {
         entries: Vec::new(),
         truncated: false,
@@ -686,7 +681,7 @@ fn search(query: &Query) -> Found {
     };
     let mut listing = query.listing.clone();
     if query.scope == Scope::Tree && listing.is_none() {
-        match query.review.repo().tree_files(&query.head) {
+        match review.repo().tree_files(&query.head) {
             Ok(files) => {
                 let loaded = Arc::new(Listing {
                     oids: files
@@ -747,7 +742,7 @@ fn search(query: &Query) -> Found {
                     found.entries = entries;
                     found.truncated = truncated;
                 }
-                Scope::Tree => match query.review.repo().grep(
+                Scope::Tree => match review.repo().grep(
                     &query.head,
                     &query.text,
                     ignore_case,

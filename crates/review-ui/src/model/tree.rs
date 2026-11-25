@@ -504,7 +504,7 @@ impl Model {
         let runs: HashSet<UnitId> = self
             .approving
             .iter()
-            .chain(self.marks.iter().filter_map(|job| match &job.mark {
+            .chain(self.queued_marks().filter_map(|job| match &job.mark {
                 crate::state::Mark::Run(run) => Some(run),
                 crate::state::Mark::Units { .. } => None,
             }))

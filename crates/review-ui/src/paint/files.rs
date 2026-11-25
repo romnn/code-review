@@ -47,7 +47,7 @@ pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
     };
     // The pull request's metadata names its branch; before it is fetched, the target its
     // number.
-    let target = model.review.as_ref().map(|review| review.target());
+    let target = model.meta.as_ref().map(|meta| &meta.target);
     let checkout = checkout_heading(model);
     let short = checkout.as_ref().and_then(|(_, _, short)| short.clone());
     let (number, name) = match (&model.info, target) {
