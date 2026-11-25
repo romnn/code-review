@@ -1022,6 +1022,9 @@ mod tests {
 
     /// The app over a fresh demo review in `dir`, on a 160×50 screen, and where its jobs
     /// report.
+    ///
+    /// A test that draws it takes [`crate::graphics::alone`] first, since the app registers the
+    /// images it uploads where every drawing test would see them.
     fn demo(dir: &std::path::Path) -> (App, Receiver<Message>) {
         let review = prepare(&DemoPaths::under(dir), &fixture_dir(), DemoRequest::Fresh).unwrap();
         let history = review.history().unwrap();
@@ -1079,6 +1082,7 @@ mod tests {
     #[test]
     fn pastes_never_act_as_keys() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1099,6 +1103,7 @@ mod tests {
     #[test]
     fn nothing_is_handled_once_quitting() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1128,8 +1133,8 @@ mod tests {
     /// lands.
     #[test]
     fn an_image_s_rows_stay_where_they_are_when_its_comparison_lands() {
-        let _registry = crate::graphics::alone();
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         app.set_graphics(Graphics::Kitty { tmux: false });
         app.set_cell(Some(images::CellSize {
@@ -1177,6 +1182,7 @@ mod tests {
     #[test]
     fn the_loading_view_shows_only_what_works() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, _receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         app.render(&mut terminal).unwrap();
@@ -1200,6 +1206,7 @@ mod tests {
     #[test]
     fn settings_opened_while_loading_show_their_keys() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, _receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         app.render(&mut terminal).unwrap();
@@ -1218,6 +1225,7 @@ mod tests {
     #[test]
     fn a_long_note_pans_to_its_end() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1243,6 +1251,7 @@ mod tests {
     #[test]
     fn a_field_without_room_draws_nothing() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1260,6 +1269,7 @@ mod tests {
     #[test]
     fn the_filter_takes_typing() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1304,6 +1314,7 @@ mod tests {
     #[test]
     fn escape_leaves_overlays_as_review_gui_does() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1354,6 +1365,7 @@ mod tests {
     #[test]
     fn a_drag_over_panned_code_selects_what_shows() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         // A screen narrow enough that the file's longest lines run past the diff's edge.
         let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
@@ -1433,6 +1445,7 @@ mod tests {
     #[test]
     fn the_divider_drags_and_resets() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         settle(&mut app, &receiver, &mut terminal);
@@ -1488,6 +1501,7 @@ mod tests {
     #[test]
     fn window_keys_do_nothing() {
         let dir = tempfile::tempdir().unwrap();
+        let _registry = crate::graphics::alone();
         let (mut app, receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         settle(&mut app, &receiver, &mut terminal);

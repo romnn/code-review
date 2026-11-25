@@ -159,15 +159,21 @@ fn run_bounded(command: &mut Command, deadline: Duration) -> Option<String> {
         sender.send(read).ok();
     });
     let read = receiver.recv_timeout(deadline);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) if read.is_ok() => break Some(status),
-            Ok(None) if read.is_ok() && started.elapsed() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
+    // The child is reaped only once its output is in, so a kill of its group always runs
+    // while the child still holds the group's id, which then cannot belong to another group.
+    let status = match read {
+        Ok(_) => loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // Too slow, or it cannot be waited for.
+                _ => break None,
             }
-            // Too slow, or it cannot be waited for, or its output was never read.
-            _ => break None,
-        }
+        },
+        // Its output never came.
+        Err(_) => None,
     };
     if status.is_none() {
         kill(&mut child);
