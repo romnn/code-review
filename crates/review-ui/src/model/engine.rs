@@ -340,6 +340,7 @@ impl Model {
 impl Servers {
     /// Puts `server` in the set as `program`, as a lookup that launched it does, and returns it
     /// as that lookup holds it.
+    #[cfg(target_os = "linux")]
     pub(super) fn insert(
         &self,
         program: &'static str,

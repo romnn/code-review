@@ -103,20 +103,23 @@ impl Host {
 
     /// The window over `review` with `settings`, opened and settled.
     fn open_with(review: Review, settings: Settings) -> Self {
-        let history = review.history().unwrap();
-        Self::open_loaded(
-            Loaded {
-                review,
-                history,
-                found: None,
-                following: None,
-            },
-            settings,
-        )
+        Self::open_loaded(loaded(review), settings)
     }
 
     /// The window over the review `loaded` opens, with `settings`, opened and settled.
     fn open_loaded(loaded: Loaded, settings: Settings) -> Self {
+        let mut host = Self::opening(loaded, settings);
+        host.settle();
+        assert!(
+            matches!(host.model().phase, Phase::Ready),
+            "the review opens"
+        );
+        host
+    }
+
+    /// The window over the review `loaded` opens, with `settings`, whose opening job waits to
+    /// run.
+    fn opening(loaded: Loaded, settings: Settings) -> Self {
         let mut host = Self {
             driver: Driver::new(Model::new(settings, Scale::fixed(cells()), fixed_window())),
             review: loaded.review.clone(),
@@ -133,11 +136,6 @@ impl Host {
         };
         let opener: Opener = Box::new(move || Ok(loaded));
         host.update(|model| model.open(opener));
-        host.settle();
-        assert!(
-            matches!(host.model().phase, Phase::Ready),
-            "the review opens"
-        );
         host
     }
 
@@ -226,7 +224,8 @@ impl Host {
     }
 
     /// Runs every job and fires every timer, and what they start in turn, drawing a frame,
-    /// which shows a capture that waits for one, whenever none is left, until none waits.
+    /// which shows the opened review or a capture that waits for one, whenever none is left,
+    /// until none waits.
     fn settle(&mut self) {
         loop {
             if let Some(job) = self.jobs.pop_front() {
@@ -242,9 +241,21 @@ impl Host {
         }
     }
 
-    /// Does what drawing a frame does to the model: shows the capture that waits for it.
+    /// Does what drawing a frame does to the model: shows the opened review or the capture that
+    /// waits for it.
     fn draw(&mut self) {
         self.try_update(Model::publish);
+    }
+}
+
+/// `review` with its history, as an opener hands it over.
+fn loaded(review: Review) -> Loaded {
+    let history = review.history().unwrap();
+    Loaded {
+        review,
+        history,
+        found: None,
+        following: None,
     }
 }
 
@@ -3440,38 +3451,11 @@ fn a_deleted_extensionless_script_is_highlighted_by_its_shebang() {
     assert_eq!(first_tone(&base, 1), crate::syntax::Tone::Function);
 }
 
-/// A host over `review` whose highlighting has `workers` workers, opened up to the jobs its
-/// opening starts, none of which has run.
+/// A host over `review` whose highlighting has `workers` workers, whose opening job waits to
+/// run.
 fn open_unsettled(review: Review, workers: usize) -> Host {
-    let history = review.history().unwrap();
-    let mut host = Host {
-        driver: Driver::new(Model::new(
-            settings(),
-            Scale::fixed(cells()),
-            fixed_window(),
-        )),
-        review: review.clone(),
-        jobs: VecDeque::new(),
-        timers: Vec::new(),
-        clocks: Vec::new(),
-        waits: Vec::new(),
-        copied: Vec::new(),
-        primary: Vec::new(),
-        sheet_steps: Vec::new(),
-        quits: 0,
-        logged: Vec::new(),
-        titles: Vec::new(),
-    };
-    let opener: Opener = Box::new(move || {
-        Ok(Loaded {
-            review,
-            history,
-            found: None,
-            following: None,
-        })
-    });
+    let mut host = Host::opening(loaded(review), settings());
     host.update(|model| model.highlights.workers = workers);
-    host.update(|model| model.open(opener));
     host
 }
 
@@ -3488,6 +3472,7 @@ fn the_selected_file_and_a_worker_highlight_at_once() {
     let mut host = open_unsettled(review, 1);
     let opening = host.run_job();
     host.complete(opening);
+    host.draw();
     let selected = host.model().selected.clone().unwrap();
     let other = if selected == "a.rs" { "b.rs" } else { "a.rs" };
     // The opening read the texts; both files' highlights start, the selected one's first.
@@ -3530,6 +3515,7 @@ fn a_cancelled_highlight_is_highlighted_again() {
     let mut host = open_unsettled(review_of(dir.path(), &files, &changed), 1);
     let opening = host.run_job();
     host.complete(opening);
+    host.draw();
     let first = host.model().selected.clone().unwrap();
     assert_eq!(
         host.jobs.len(),
@@ -3919,6 +3905,50 @@ fn a_key_before_the_next_frame_acts_on_what_the_last_frame_showed() {
             Ok(review_core::UnitState::Reviewed { .. })
         ),
         "the code that changed since is still to review"
+    );
+}
+
+/// Opening the review starts no timer, so none ticks on once it opened: the front ends draw
+/// the loading view's frames themselves for as long as it opens.
+#[test]
+fn opening_starts_no_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::opening(loaded(demo(dir.path())), settings());
+    assert!(host.timers.is_empty(), "nothing ticks while it opens");
+    let opened = host.run_job();
+    host.complete(opened);
+    host.draw();
+    assert!(matches!(host.model().phase, Phase::Ready));
+    assert!(host.timers.is_empty(), "nothing ticks once it opened");
+}
+
+/// The review shows with the first frame after it opened, as a capture does: a key handled
+/// before that frame, such as one in the same batch as the opening's completion, acts on the
+/// loading view, where nothing is to review, and never marks the rows the frame then shows.
+#[test]
+fn a_key_before_the_first_frame_marks_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::opening(loaded(demo(dir.path())), marks_only());
+    let opened = host.run_job();
+    host.complete(opened);
+    assert!(
+        matches!(host.model().phase, Phase::Loading(_)),
+        "the review waits for the next frame"
+    );
+    assert!(host.model().publishes());
+
+    host.key(Action::ToggleApprove, false);
+    assert_eq!(host.model().status, "Nothing here to review.");
+    assert!(host.model().pending.is_empty(), "nothing is marked");
+    assert!(host.jobs.is_empty(), "nothing is saved");
+
+    host.draw();
+    assert!(matches!(host.model().phase, Phase::Ready));
+    assert!(host.model().pending.is_empty());
+    host.key(Action::ToggleApprove, false);
+    assert!(
+        !host.model().pending.is_empty(),
+        "a key after the frame marks what it showed"
     );
 }
 
@@ -5556,10 +5586,11 @@ fn git_in(repo: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?}: {output:?}");
 }
 
-/// The window over the review of a checkout in `dir`, on a clean `main` with `a.rs`, which
-/// `origin/main` is level with; the repository has no remote to look a pull request up on.
+/// The review of a checkout in `dir`, on a clean `main` with `a.rs`, which `origin/main` is
+/// level with, opened as the model's opener opens it; the repository has no remote to look a
+/// pull request up on.
 /// Returns it with the working tree.
-fn checkout_host(dir: &Path) -> (Host, std::path::PathBuf) {
+fn open_checkout(dir: &Path) -> (Loaded, std::path::PathBuf) {
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
@@ -5572,9 +5603,65 @@ fn checkout_host(dir: &Path) -> (Host, std::path::PathBuf) {
         review_core::Repo::discover(&repo).unwrap(),
     )
     .unwrap();
+    (loaded, repo)
+}
+
+/// The window over the review of a checkout in `dir`, as [`open_checkout`] opens it, opened and
+/// settled.
+/// Returns it with the working tree.
+fn checkout_host(dir: &Path) -> (Host, std::path::PathBuf) {
+    let (loaded, repo) = open_checkout(dir);
     let host = Host::open_loaded(loaded, settings());
     assert!(host.model().following(), "the checkout's review follows it");
     (host, repo)
+}
+
+/// An edit made after the opening capture, while the review was still on its way to the
+/// screen, shows with the first capture once the watch starts.
+#[test]
+fn an_edit_made_while_the_review_opens_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (loaded, repo) = open_checkout(dir.path());
+    let mut host = Host::opening(loaded, settings());
+    let opened = host.run_job();
+    host.complete(opened);
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+
+    host.draw();
+    assert_eq!(
+        file_paths(&host.model().tree),
+        Vec::<&str>::new(),
+        "the review shows as the opening captured it"
+    );
+    host.settle();
+    assert_eq!(file_paths(&host.model().tree), ["a.rs"]);
+}
+
+/// Quitting while the review opens quits at once, and the review that opens after it never
+/// shows: its engine stops on a thread of its own, ending the session that pins its opening
+/// capture.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_review_opened_after_quitting_never_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (loaded, repo) = open_checkout(dir.path());
+    let mut host = Host::opening(loaded, settings());
+    host.dispatch(Action::Quit);
+    assert_eq!(host.quits, 1, "nothing waits for the opening");
+
+    let opened = host.run_job();
+    host.complete(opened);
+    let model = host.model();
+    assert!(matches!(model.phase, Phase::Loading(_)), "nothing shows");
+    assert!(!model.publishes(), "nothing waits for a frame");
+    assert!(!model.following());
+    assert!(host.jobs.is_empty(), "nothing starts");
+    // The session ends on the thread that stops the engine.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session_locks(&repo) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(session_locks(&repo), 0, "the session ended");
 }
 
 /// The files pane's header, as review-tui shows it.

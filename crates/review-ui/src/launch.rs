@@ -3,8 +3,8 @@
 //!
 //! A front end flattens [`Options`] into its own command line beside its own flags, loads the
 //! configuration with [`load_config`], adjusts it from those flags, turns it into the model's
-//! [`Settings`] with [`settings`], and opens the review with [`open`]: review-gui in the
-//! background once its window shows, review-tui before it takes over the terminal.
+//! [`Settings`] with [`settings`], and opens the review with [`open`] in the model's opener,
+//! which runs in the background behind the first frame.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -253,6 +253,10 @@ const BUSY_WAIT: Duration = Duration::from_secs(10);
 /// Opens the review the options name, records its current revision and reads its history, as
 /// the model's opener does.
 ///
+/// In a terminal, no command run for the review's repository, from the first after finding it,
+/// a fetch included, may prompt ([`Repo::forbid_prompts`]): a prompt would draw over the review.
+/// A window's commands prompt where they would, over nothing of the window's.
+///
 /// With neither a target nor a worktree, the review is the checkout's, opened as
 /// [`open_checkout`] does, which records nothing, and `say` is told so as soon as it opens; it
 /// is also in [`Loaded::found`].
@@ -260,8 +264,8 @@ const BUSY_WAIT: Duration = Duration::from_secs(10);
 /// # Errors
 ///
 /// Returns why the review could not be opened, with every cause.
-pub fn open(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, String> {
-    open_review(options, say).map_err(|err| chain(&err))
+pub fn open(options: &Options, say: &dyn Fn(&str), front_end: FrontEnd) -> Result<Loaded, String> {
+    open_review(options, say, front_end).map_err(|err| chain(&err))
 }
 
 /// Opens the review of the checkout `repo` is, with data under `data_dir`, as the model's
@@ -279,6 +283,7 @@ pub fn open_checkout(data_dir: &Path, repo: Repo) -> Result<Loaded, String> {
 }
 
 /// See [`open_checkout`]; `found` is how the review was found, for the status line.
+#[tracing::instrument(skip_all)]
 fn checkout(data_dir: &Path, repo: Repo, found: Option<String>) -> Result<Loaded, OpenError> {
     let review = Review::open_checkout(data_dir, repo)?;
     let session = review.start_session()?;
@@ -339,8 +344,14 @@ fn checkout(data_dir: &Path, repo: Repo, found: Option<String>) -> Result<Loaded
 
 /// Opens the review the options name: the checkout's (see [`open_checkout`]), saying so, with
 /// neither a target nor a worktree, and otherwise the one named, recording its current
-/// revision.
-fn open_review(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, OpenError> {
+/// revision; see [`open`] for `front_end`.
+#[tracing::instrument(skip_all)]
+fn open_review(
+    options: &Options,
+    say: &dyn Fn(&str),
+    front_end: FrontEnd,
+) -> Result<Loaded, OpenError> {
+    let no_prompts = front_end == FrontEnd::Terminal;
     let demo = match (options.demo, options.demo_revision) {
         (true, _) => Some(DemoRequest::Fresh),
         (false, Some(revision)) => Some(DemoRequest::UpTo(
@@ -349,7 +360,7 @@ fn open_review(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, OpenErro
         (false, None) => None,
     };
     if let Some(request) = demo {
-        let review = review_core::demo::prepare(
+        let mut review = review_core::demo::prepare(
             &options
                 .demo_dir
                 .as_deref()
@@ -357,6 +368,9 @@ fn open_review(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, OpenErro
             &fixture_dir(),
             request,
         )?;
+        if no_prompts {
+            review.forbid_prompts();
+        }
         return loaded(review, None);
     }
     let data_dir = match &options.data_dir {
@@ -367,7 +381,10 @@ fn open_review(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, OpenErro
         )
         .ok_or(OpenError::NoDataDir)?,
     };
-    let repo = Repo::discover(&options.repo)?;
+    let mut repo = Repo::discover(&options.repo)?;
+    if no_prompts {
+        repo.forbid_prompts();
+    }
     if options.target.is_none() && options.worktree.is_none() {
         let found = "following this checkout's working tree".to_owned();
         say(&found);
@@ -384,6 +401,7 @@ fn open_review(options: &Options, say: &dyn Fn(&str)) -> Result<Loaded, OpenErro
 }
 
 /// The review with its history, for a review that is not of the checkout.
+#[tracing::instrument(skip_all)]
 fn loaded(review: Review, found: Option<String>) -> Result<Loaded, OpenError> {
     let history = review.history()?;
     Ok(Loaded {

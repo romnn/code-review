@@ -138,12 +138,17 @@ produces verified immutable inputs; everything after it is pure analysis over ob
   The review of a checkout never deepens: a fetch has no deadline, and the capture is what the
   window waits on. Without a merge base in a shallow clone, it compares with the empty tree and
   says the history is shallow (`BaseRef::Shallow`), never that the histories are unrelated.
-- A front end can add variables to the environment of every `git` command a review runs
-  (`Review::set_command_env`); review-tui uses it to keep fetches from prompting on the terminal
-  it draws on.
-- Partial clones: analysis reads every blob it needs, which makes git fetch missing objects, and
-  the analysis cache stores the review evidence (the text of each unit), so past reviews stay
-  reproducible offline. Browsing an old revision needs its objects and may need the network.
+- Only an explicit fetch, and `gh`, reach a remote: every other git command runs with an empty
+  `GIT_ALLOW_PROTOCOL`, which lets it use no transport whatever git's version and
+  configuration, and every git command with `GIT_NO_LAZY_FETCH=1`. A front end can forbid those
+  to prompt (`Repo::forbid_prompts`), which runs them without the terminal or the console and
+  asks no askpass helper; review-tui does, since a prompt would draw on the terminal it draws
+  on.
+- Partial clones: no command fetches the objects a partial clone lacks, so a review that needs a
+  missing blob fails with the object it misses rather than reaching the network behind the
+  reviewer's back. The analysis cache stores the review evidence (the text of each unit), so
+  past reviews stay reproducible offline once analyzed; browsing an old revision needs its
+  objects.
 
 ### Snapshots of uncommitted work
 
@@ -789,7 +794,8 @@ its history would end in a revision it never saw. The window shows each capture 
 file, the hunk, the top row and the folds through the correspondence between the two; a
 capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
 way, and one compared with a snapshot no longer on screen is taken again. A capture shows only in
-the turn that draws the next frame, so every key acts on what the last frame showed, and nothing
+the turn that draws the next frame, as the review does once it opened behind the first frame,
+so every key acts on what the last frame showed, and nothing
 refuses a review key for its timing: a mark marks the capture on screen, and a later capture
 carries it only where the code stayed the same
 ([ADR 13](adr/0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)). A held review key acts only on what its press began on, whatever moved the selection,
@@ -1567,9 +1573,9 @@ belongs in `review-core`, so that the engine stays usable on its own.
   closing the window in a terminal) is left out of the keymap and does nothing when dispatched,
   and the settings list has no font sizes in a terminal.
 - **Starting and QA.** `launch` holds the command line both apps take to name a review, loads
-  the configuration and opens the review; `qa` writes QA mode's `state` answer from the model
-  and asks the front end only for its geometry, so a QA script's expectations read the same in
-  both apps apart from the numbers.
+  the configuration and opens the review, in the model's opener behind the first frame; `qa`
+  writes QA mode's `state` answer from the model and asks the front end only for its geometry,
+  so a QA script's expectations read the same in both apps apart from the numbers.
 - **Shared configuration.** One configuration file serves both apps; each keeps only the files
   pane's width apart (`[layout] sidebar` in logical pixels, `tui_sidebar` in cells, or `"fit"`
   in either). Saved view
@@ -1621,6 +1627,18 @@ tools copy through XWayland with a window that never shows.
   (`SIGTSTP` or `SIGSTOP`) is left to its default action and stops the app as it is; when it
   continues (`SIGCONT`), it takes the terminal again, raw mode included, and redraws it whole.
   A terminal that can no longer be drawn to, and input that ended, quit unattended too.
+- **First frame.** The first frame, the loading view, shows before the review opens: the card
+  saying it opens, the status line and the key that quits, without the files pane, the file
+  header or the review keys, which do nothing yet; an overlay opened meanwhile, such as the
+  settings, shows its own keys. Keys typed meanwhile act on it, and the review shows with the
+  frame after it opened
+  ([ADR 13](adr/0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)). A review
+  that could not be opened shows why, and `cr` exits with an error once the reviewer quits;
+  quitting while the review still opens is no failure. The kitty keyboard protocol's flags are
+  pushed as the terminal is taken over, without asking whether it speaks the protocol, which a
+  terminal without it ignores, but for the Linux console (`TERM=linux`), which is asked
+  nothing; nothing waits for an answer from the terminal
+  ([ADR 12](adr/0012-every-key-a-terminal-sends-is-a-press.md)).
 - **Where a terminal differs.** No zoom, font size, fullscreen or smooth scrolling, and no
   scrollbars. The files pane fits its tree as in the window, within a quarter of the terminal and
   leaving the diff 44 cells, and its width is its own `[layout] tui_sidebar`, in cells. A paste
@@ -1631,17 +1649,22 @@ tools copy through XWayland with a window that never shows.
   in a narrow pane the branch is cut first and the number always shows, and while a filter
   narrows the tree it shows at the header's right with how many files it leaves
   (`/engine 3/17`), taking room from the branch.
-- **Fetches.** The review opens before the terminal goes raw, so the first fetch can still ask
-  for credentials. Later fetches (`r` or `R`) run non-interactively through `Review::set_command_env`,
-  because the app owns the terminal: `GIT_TERMINAL_PROMPT=0`, no ssh askpass helper, and the
-  ssh git would run (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `GIT_SSH`, else `ssh`) in
-  batch mode when git takes it for OpenSSH, by `GIT_SSH_VARIANT` or `ssh.variant`, else by its
-  name, as git's `connect.c` decides. plink and other ssh programs are left as they are, since
-  they take no `-o`; a program of another name, which git probes with `-G`, is left as it is too.
-  The children still inherit the terminal: a program that opens `/dev/tty` itself, such as a
-  credential helper or `gpg`'s pinentry through `GPG_TTY`, could still draw over the screen. Its
-  environment is left alone because review-core can only add variables, not remove them, and
-  language servers share their environment with review-gui.
+- **Fetches.** Nothing may prompt over the review. Only a fetch or `gh` reaches a remote, since
+  every other git command may use no transport, so every fetch and `gh` command run for the
+  review, the fetch that opens a pull request included, runs as `Repo::forbid_prompts` has it.
+  On Unix each runs in a session of its own, without the controlling terminal that git, ssh and
+  credential helpers prompt on (`/dev/tty`), which holds whatever command runs ssh, a shell
+  wrapper included; on Windows a fetch starts detached from the console (`DETACHED_PROCESS`),
+  and so does the ssh git starts, and `gh` on a console without a window (`CREATE_NO_WINDOW`),
+  which the git it runs shares instead of opening windows of its own. None asks an askpass
+  helper either, which would prompt in a window while the review waits: `GIT_ASKPASS` is empty,
+  which git asks before `core.askPass` and `SSH_ASKPASS`, and `SSH_ASKPASS_REQUIRE` is `never`.
+  git's own prompt is off in every front end (`GIT_TERMINAL_PROMPT=0`). The other git commands
+  keep the terminal and start as fast as the platform spawns a process, since a session of its
+  own costs each a full fork. A fetch that would have to ask for a passphrase, a password or a
+  new host key fails, and the review shows why it could not be opened; an ssh agent or a
+  credential helper that does not prompt answers as usual. A program told the terminal by its
+  name, as gpg's pinentry is through `GPG_TTY`, can still open it.
 - **Diagnostics.** Nothing may be written over the screen, so diagnostics go to
   `$XDG_STATE_HOME/code-review/review-tui.log` and are printed again on standard error once the
   terminal is back.

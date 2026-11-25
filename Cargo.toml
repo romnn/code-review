@@ -56,7 +56,8 @@ quote = { version = "1", default-features = false }
 syn = { version = "3", default-features = false, features = ["full", "parsing"] }
 # Hashes cached sources the way git hashes blobs, to check them against the pinned commit.
 sha1_smol = "1.0.1"
-# Kills a timed-out git with its helpers, as one process group.
+# Kills a timed-out git with its helpers, as one process group, and runs review-core's fetches in
+# a session of its own, without the terminal.
 rustix = { version = "1.1", default-features = false, features = ["process", "std"] }
 
 # Front-end dependencies: gpui and gpui-component for review-gui, the rest for review-ui and
@@ -77,6 +78,8 @@ parking_lot = "0.12"
 nucleo-matcher = "0.3"
 # Watches a reviewed working tree, so the review follows the disk; the version gpui links.
 notify = "8.2.1"
+# A pseudo-terminal for review-tui's tests, which run the app as a terminal would.
+nix = { version = "0.31.3", default-features = false, features = ["term"] }
 # Spans for profiling: without a subscriber, each costs only a check of its callsite.
 tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes"] }
 # Writes the spans as a Perfetto trace, for review-tui's `trace` feature. The layer is published

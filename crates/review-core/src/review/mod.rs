@@ -379,14 +379,10 @@ impl Review {
         &self.repo
     }
 
-    /// Sets `vars` in the environment of every `git` and `gh` command the review runs from now
-    /// on; see [`Repo::set_command_env`].
-    pub fn set_command_env<K, V>(&mut self, vars: impl IntoIterator<Item = (K, V)>)
-    where
-        K: Into<std::ffi::OsString>,
-        V: Into<std::ffi::OsString>,
-    {
-        self.repo.set_command_env(vars);
+    /// Keeps every `git` and `gh` command the review runs from now on from prompting; see
+    /// [`Repo::forbid_prompts`].
+    pub fn forbid_prompts(&mut self) {
+        self.repo.forbid_prompts();
     }
 
     /// Returns the review's storage paths.
@@ -909,6 +905,7 @@ impl Review {
     /// Analyses and correspondences come from the memo when the last history used them, then
     /// from the cache; a provisional revision's are computed but never written, since nothing
     /// may refer to a revision that is not recorded.
+    #[tracing::instrument(name = "history", skip_all)]
     fn history_of(
         &self,
         mut events: Vec<Event>,
@@ -926,6 +923,7 @@ impl Review {
             }
         };
         let mut analyses = Vec::with_capacity(revisions.len());
+        let analysing = tracing::info_span!("analyses", revisions = revisions.len()).entered();
         for (index, revision) in revisions.iter().enumerate() {
             let pair = (revision.base.clone(), revision.head.clone());
             analyses.push((
@@ -933,7 +931,9 @@ impl Review {
                 self.analysis(&revision.base, &revision.head, publish(index), &mut |_| {})?,
             ));
         }
+        drop(analysing);
         let mut correspondences = Vec::with_capacity(revisions.len().saturating_sub(1));
+        let proving = tracing::info_span!("correspondences").entered();
         for (index, window) in analyses.windows(2).enumerate() {
             let [(older_pair, older), (newer_pair, newer)] = window else {
                 return Err(Error::NoRevisions);
@@ -944,6 +944,7 @@ impl Review {
             };
             correspondences.push(correspondence);
         }
+        drop(proving);
         self.memo.keep(&analyses, &correspondences);
         Ok(History::new(HistoryInput {
             events,

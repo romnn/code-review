@@ -36,7 +36,8 @@ trust, and none keeps running once the window says a revocation took effect.
   engine kills the servers and lets go of the watch and the session, and quitting waits for it
   as it waits for saves. A capture still running keeps the session and the watch until it ends,
   so the stop never waits for it. Wherever the last holder of anything that blocks lets go of
-  it, as when the model is dropped or a job never runs, it is dropped on a thread of its own.
+  it, as when the model is dropped, a job never runs or a review opens after the app closed, it
+  is dropped on a thread of its own.
 - **The driver takes no input once the app closes.** From the moment the engine starts to stop,
   `Driver::update`, the one way a front end changes the model, runs nothing and returns nothing,
   so no key, click, scroll or layout acts and nothing it would change goes unsaved; no capture

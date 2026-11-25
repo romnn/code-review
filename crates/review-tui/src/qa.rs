@@ -45,7 +45,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use review_ui::frame::List;
 use review_ui::keys::Keystroke;
-use review_ui::model::{Action, Loaded, Model, QuitKind, Quitting, Settings};
+use review_ui::model::{Action, Model, Opener, QuitKind, Quitting, Settings};
 use review_ui::state;
 use serde_json::{Map, Value, json};
 
@@ -189,20 +189,20 @@ fn read_commands(sender: Sender<Message>) {
     });
 }
 
-/// Runs QA mode over `loaded` until the app quits, by `quit`, by its keys or at the end of
-/// standard input, each as the reviewer's `q` quits it.
+/// Runs QA mode over the review `opener` opens until the app quits, by `quit`, by its keys or
+/// at the end of standard input, each as the reviewer's `q` quits it.
 ///
 /// # Errors
 ///
 /// Returns an error when the off-screen terminal cannot be made.
-pub fn run(settings: Settings, loaded: Loaded) -> color_eyre::eyre::Result<()> {
+pub fn run(settings: Settings, opener: Opener) -> color_eyre::eyre::Result<()> {
     let (sender, receiver) = mpsc::channel();
     read_commands(sender.clone());
     let (columns, rows) = SIZE;
     let terminal = Terminal::new(TestBackend::new(columns, rows))?;
     let app = App::new(
         settings,
-        loaded,
+        opener,
         Rect::new(0, 0, columns, rows),
         sender,
         Colors::TrueColor,

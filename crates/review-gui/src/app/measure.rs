@@ -11,7 +11,7 @@ use gpui::{Font, UniformListScrollHandle};
 use gpui_component::scroll::ScrollbarHandle as _;
 use review_ui::frame::{self, Chrome, Geometry, Heights, Metrics, Scale};
 use review_ui::look;
-use review_ui::model::{PaneLayout, Settings};
+use review_ui::model::PaneLayout;
 
 use super::ReviewApp;
 use super::render::{GRID, LINE, bar_height, strip_height};
@@ -75,24 +75,6 @@ fn pane_width(layout: PaneLayout, fit: f32, sidebar_shown: bool, window: f32, ce
     } else {
         window
     }
-}
-
-/// The diff pane's width a window `window` wide opens with, for code in a font whose cells are
-/// `advance` of its size wide.
-pub fn opening_width(settings: &Settings, advance: f32, window: f32) -> f32 {
-    let sizes = Sizes {
-        code_size: settings.code_size,
-        line_height: look::line_height(settings.appearance.shown().density),
-        advance,
-    };
-    // The tree is not built yet, so a fitted sidebar opens at its narrowest.
-    pane_width(
-        settings.layout,
-        0.0,
-        settings.layout.sidebar_visible,
-        window,
-        sizes.ui_cell(),
-    )
 }
 
 impl ReviewApp {

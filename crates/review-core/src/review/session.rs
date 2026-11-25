@@ -150,6 +150,7 @@ impl Review {
     /// # Errors
     ///
     /// Returns an error when the lock file cannot be created or locked, or git fails.
+    #[tracing::instrument(skip_all)]
     pub fn start_session(&self) -> Result<Session, Error> {
         let sessions = self.sessions_dir();
         store::create_dir(&sessions)?;

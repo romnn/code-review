@@ -92,8 +92,9 @@ widening a related one.
 - Tests that need repositories create small temporary git repos with the `git` CLI.
 - review-gui builds gpui for Wayland only and links only libxkbcommon and fontconfig; at run
   time it needs a Wayland compositor and a Vulkan driver. Check those before blaming the code.
-- review-tui needs only a terminal. It opens the review before it takes over the terminal, logs
-  diagnostics to `$XDG_STATE_HOME/code-review/review-tui.log` and prints them again on exit.
+- review-tui needs only a terminal. It draws its first frame at once and opens the review behind
+  it, logs diagnostics to `$XDG_STATE_HOME/code-review/review-tui.log` and prints them again on
+  exit.
 - The built-in demo review is the shared fixture for manual and scripted checks:
   `cargo run -p review-gui -- --demo`, `cargo run -p review-tui -- --demo` or `cr --demo show`
   rebuilds it under `target/demo/` and opens revision 1, and `--demo-revision N` advances it to

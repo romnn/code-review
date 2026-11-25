@@ -8,6 +8,11 @@
 //! Copies go to the clipboard through OSC 52, which also works over ssh, and on a local session
 //! also through the platform's clipboard command, for terminals that ignore OSC 52.
 //!
+//! The keyboard protocol is asked for without asking the terminal whether it speaks it, which
+//! would wait for an answer: one that does not ignores the request, and its keys come as it
+//! sends them.
+//! Only the Linux console is not asked, since it can print part of the request.
+//!
 //! Raw mode keeps the terminal's own keys from sending signals, so the ones that come are from
 //! outside: a hang-up, an interrupt or a termination quits once the marks queued and in flight
 //! are saved or have failed, since nobody may be there to see a failure, and a second one gives
@@ -16,7 +21,6 @@
 //! continues, it takes the terminal again, which the shell may have changed, and redraws it.
 
 use std::io::{self, Stdout, Write as _};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
@@ -34,7 +38,7 @@ use crossterm::{cursor, execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use review_ui::model::{Loaded, QuitKind, Settings};
+use review_ui::model::{Opener, Phase, QuitKind, Settings};
 use review_ui::worker;
 
 use crate::app::{App, Message, Outgoing, next_batch};
@@ -58,28 +62,23 @@ static MOUSE: AtomicBool = AtomicBool::new(true);
 /// Whether the terminal's title was pushed on its stack, so it is popped again.
 static TITLE: AtomicBool = AtomicBool::new(false);
 
-/// Whether the terminal supports the kitty keyboard protocol, asked once: the question reads
-/// the terminal's answer, which only the first take-over can, before the input thread reads.
-static KEYBOARD: OnceLock<bool> = OnceLock::new();
-
 /// xterm's control sequences that save the window title on its stack and restore it.
 const PUSH_TITLE: &str = "\x1b[22;0t";
 const POP_TITLE: &str = "\x1b[23;0t";
 
 /// Takes the terminal over: raw mode, the alternate screen, the mouse unless it may do nothing,
-/// bracketed paste, the keyboard protocol where supported, and a saved title; each step is
-/// marked before it runs, so [`give_back`] undoes whatever a failure left behind.
+/// bracketed paste, the keyboard protocol, and a saved title; each step is marked before it
+/// runs, so [`give_back`] undoes whatever a failure left behind.
 ///
 /// It takes the terminal again when the app continues after a stop, setting raw mode and the
 /// screen's modes anew, since the shell may have put its own modes back meanwhile.
+#[tracing::instrument(skip_all)]
 fn take_over(stdout: &mut Stdout) -> io::Result<()> {
     // crossterm counts raw mode as on even when a shell turned it off during a stop.
     if RAW.swap(true, Ordering::SeqCst) {
         disable_raw_mode()?;
     }
     enable_raw_mode()?;
-    let enhanced = *KEYBOARD
-        .get_or_init(|| crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false));
     SCREEN.store(true, Ordering::SeqCst);
     execute!(
         stdout,
@@ -90,7 +89,11 @@ fn take_over(stdout: &mut Stdout) -> io::Result<()> {
     if MOUSE.load(Ordering::SeqCst) {
         execute!(stdout, EnableMouseCapture)?;
     }
-    if enhanced && !ENHANCED.swap(true, Ordering::SeqCst) {
+    // A terminal without the protocol ignores the push, as it ignores the pop, but for older
+    // Linux consoles, which print what follows the `>` or `<`.
+    // Windows' console API, which crossterm uses there, takes neither.
+    let linux_console = std::env::var_os("TERM").is_some_and(|term| term == "linux");
+    if cfg!(unix) && !linux_console && !ENHANCED.swap(true, Ordering::SeqCst) {
         execute!(
             stdout,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -184,7 +187,9 @@ pub struct Checks {
     pub panic_after_first_frame: bool,
 }
 
-/// Shows the opened review in the terminal until the reviewer quits.
+/// Shows the review `opener` opens in the terminal until the reviewer quits, drawing the first
+/// frame while it opens; returns the phase the review was in when the reviewer quit, which is
+/// [`Phase::Failed`] for one that could not be opened.
 ///
 /// # Errors
 ///
@@ -193,11 +198,11 @@ pub struct Checks {
 /// queued and in flight are saved or have failed.
 pub fn run(
     settings: Settings,
-    loaded: Loaded,
+    opener: Opener,
     colors: Colors,
     log: &Log,
     checks: Checks,
-) -> io::Result<()> {
+) -> io::Result<Phase> {
     let mut stdout = io::stdout();
     MOUSE.store(settings.mouse.any(), Ordering::SeqCst);
     if let Err(err) = take_over(&mut stdout) {
@@ -208,7 +213,7 @@ pub fn run(
     let clipboard_worker = clipboard::start();
     let shown = show(
         settings,
-        loaded,
+        opener,
         colors,
         log,
         checks,
@@ -218,20 +223,23 @@ pub fn run(
     // After the terminal is back, so a backlog of copies never holds it in raw mode; a copy
     // made just before quitting still reaches its command, as far as the bound allows.
     clipboard_worker.flush(clipboard::DRAIN_DEADLINE);
-    shown.and(given_back)
+    let phase = shown?;
+    given_back?;
+    Ok(phase)
 }
 
 /// The main loop: terminal input and signals on threads of their own, job completions and
 /// timers, and one frame after each batch; copies go to the clipboard commands through
 /// `copier`.
+/// Returns the phase the review was in when the reviewer quit.
 fn show(
     settings: Settings,
-    loaded: Loaded,
+    opener: Opener,
     colors: Colors,
     log: &Log,
     checks: Checks,
     copier: &worker::Sender<clipboard::Clip>,
-) -> io::Result<()> {
+) -> io::Result<Phase> {
     let (sender, receiver) = mpsc::channel();
     let input = sender.clone();
     std::thread::spawn(move || {
@@ -255,7 +263,7 @@ fn show(
     let size = terminal.size()?;
     let mut app = App::new(
         settings,
-        loaded,
+        opener,
         Rect::new(0, 0, size.width, size.height),
         sender,
         colors,
@@ -266,7 +274,8 @@ fn show(
     let mut drawn = false;
     loop {
         if lost.is_none() {
-            // Before taking what goes out, so the title a capture brings goes with its frame.
+            // Before taking what goes out, so the title the opened review or a capture brings
+            // goes with its frame.
             app.publish();
             let outgoing = app.take_outgoing();
             for item in &outgoing {
@@ -316,11 +325,12 @@ fn show(
     }
     #[cfg(unix)]
     signals.stop();
-    lost.map_or(Ok(()), Err)
+    lost.map_or_else(|| Ok(app.model().phase.clone()), Err)
 }
 
-/// Draws one frame inside synchronized output.
-#[tracing::instrument(skip_all)]
+/// Draws one frame inside synchronized output; the trace tells the frames that show the review
+/// from those drawn while it opens.
+#[tracing::instrument(skip_all, fields(opening = matches!(app.model().phase, Phase::Loading(_))))]
 fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     let rendered = app.render(terminal);

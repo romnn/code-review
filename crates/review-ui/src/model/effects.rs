@@ -435,7 +435,7 @@ impl Model {
     /// Lands `outcome`, whose subject still shows.
     fn land(&mut self, outcome: Outcome) {
         match outcome {
-            Outcome::Opened(opened) => self.opened(opened),
+            Outcome::Opened(opened) => self.offer_opened(opened),
             Outcome::TextsRead(read) => self.texts_read(read),
             Outcome::Highlighted(highlighted) => self.highlighted(highlighted),
             Outcome::Marked(marked) => self.marked(marked),

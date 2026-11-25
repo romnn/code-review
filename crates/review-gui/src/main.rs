@@ -149,7 +149,11 @@ fn main() -> eyre::Result<()> {
             let fonts = code_font(&font, cx);
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
             let opener: model::Opener = Box::new(move || {
-                launch::open(&options.review, &|found| eprintln!("review-gui: {found}"))
+                launch::open(
+                    &options.review,
+                    &|found| eprintln!("review-gui: {found}"),
+                    FrontEnd::Window,
+                )
             });
             let window = cx.open_window(
                 WindowOptions {
