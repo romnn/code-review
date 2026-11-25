@@ -11,6 +11,8 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+# The formats a changed image's comparison decodes.
+image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 nucleo-matcher.workspace = true
 notify.workspace = true
 parking_lot.workspace = true
@@ -45,6 +47,7 @@ rustix.workspace = true
 [dev-dependencies]
 color-eyre.workspace = true
 indoc.workspace = true
+png.workspace = true
 tempfile.workspace = true
 
 [lints]

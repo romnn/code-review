@@ -69,6 +69,9 @@ pub struct Panes {
     pub header: Rect,
     /// The diff's or the buffer's rows.
     pub list: Rect,
+    /// A changed image's comparison, above the diff's rows, while the terminal shows images;
+    /// see [`crate::images::lay_out`].
+    pub comparison: Option<crate::images::ComparisonPanes>,
     /// The `/` bar, while it takes typing.
     pub find: Option<Rect>,
     /// The status line.
@@ -194,6 +197,7 @@ impl Panes {
             main,
             header,
             list,
+            comparison: None,
             find,
             status,
             hints,

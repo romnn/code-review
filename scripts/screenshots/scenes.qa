@@ -123,8 +123,9 @@ launch --demo --config target/screenshots/config/folded.toml
 launch --demo-revision 2 --config target/screenshots/config/folded.toml
 file src/engine.rs
 key 0
-find changed since
+find pub const LIMIT
 state
 expect "revision":"2"
-expect "tag":"changed since revision 1"
+expect "hunk_badges":\["Changed"\]
+expect "tag":"note · revision 1"
 shot revision-2

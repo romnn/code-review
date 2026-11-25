@@ -619,7 +619,9 @@ fn percentiles(samples: &[Duration]) -> Value {
 async fn settle(this: &WeakEntity<ReviewApp>, cx: &mut AsyncWindowContext) -> Result<(), String> {
     loop {
         let busy = this
-            .update(cx, |this, _| this.busy() || this.relayout)
+            .update(cx, |this, _| {
+                this.busy() || this.relayout || this.images.converting()
+            })
             .map_err(|err| err.to_string())?;
         if !busy {
             break;

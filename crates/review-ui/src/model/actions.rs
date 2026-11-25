@@ -206,6 +206,8 @@ actions! {
     ToggleView,
     /// Wraps long lines of code onto more rows, or cuts them and pans sideways.
     ToggleWrap,
+    /// Shows or hides the pixels that changed over a changed image's head.
+    ToggleChangedPixels,
     /// Moves the settings cursor down, previewing the entry.
     SettingsNext,
     /// Moves the settings cursor up, previewing the entry.
@@ -333,6 +335,7 @@ impl Model {
             Action::ToggleApproved => self.apply_approved(self.folds.approved.toggled()),
             Action::ToggleView => self.toggle_view(),
             Action::ToggleWrap => self.apply_wrap(!self.settings.appearance.applied.wrap),
+            Action::ToggleChangedPixels => self.toggle_changed_pixels(),
             Action::ToggleScrollMode => self.toggle_scroll_mode(),
             Action::SettingsNext => self.settings_step(true),
             Action::SettingsPrevious => self.settings_step(false),

@@ -92,6 +92,9 @@ toml = "1"
 # Writes choices made in the app back into the configuration, keeping its comments; the same
 # TOML 1.1 grammar as `toml`, which reads it.
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
+# Decodes a changed image's versions for its comparison in review-ui, which each front end draws;
+# only the formats review-ui names, the version gpui links.
+image = { version = "0.25.10", default-features = false }
 # Display widths of code lines, which set how far the views scroll sideways, in the grapheme
 # clusters ratatui's buffer draws.
 unicode-segmentation = "1.13"
@@ -104,6 +107,10 @@ crossterm = { version = "0.29", default-features = false, features = ["bracketed
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "underline-color"] }
 # Signals from outside the terminal (hang-up, `kill`, job control), the version crossterm uses.
 signal-hook = "0.3.18"
+# Draws images with the kitty graphics protocol's Unicode placeholders. review-tui builds each
+# protocol image itself, never through the library's picker, which queries the terminal and
+# changes tmux's settings (ADR 12); its default codecs and Chafa stay off.
+ratatui-image = { version = "11.1.0", default-features = false }
 
 # CLI dependencies.
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -111,6 +118,8 @@ color-eyre = "0.6"
 
 # Test dependencies.
 googletest = "0.14"
+# Writes an animated PNG for review-ui's tests, which `image` cannot; the version `image` links.
+png = { version = "0.18.1", default-features = false }
 tempfile = "3"
 
 # The graph links exactly one tree-sitter runtime, romnn/tree-sitter (ADR 3): v0.27.2 with the

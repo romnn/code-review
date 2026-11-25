@@ -3236,7 +3236,7 @@ fn enter_and_p_show_a_folded_hunk() {
 /// A review of `main..feature` in a new repository under `dir`: `main` holds `base`, and
 /// `feature` changes it to `head`, each a list of paths and contents, a path renamed in `head`
 /// under the same content as git sees it.
-fn review_of(dir: &Path, base: &[(&str, &str)], head: &[(&str, &str)]) -> Review {
+fn review_of<C: AsRef<[u8]>>(dir: &Path, base: &[(&str, C)], head: &[(&str, C)]) -> Review {
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     let git = |args: &[&str]| {
@@ -3255,7 +3255,7 @@ fn review_of(dir: &Path, base: &[(&str, &str)], head: &[(&str, &str)]) -> Review
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {output:?}");
     };
-    let write = |files: &[(&str, &str)]| {
+    let write = |files: &[(&str, C)]| {
         for (path, content) in files {
             let full = repo.join(path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -8166,5 +8166,390 @@ fn a_press_on_a_change_saving_waits_after_a_shift_above_it() {
         view.state(unit).unwrap().is_reviewed(),
         "{}",
         host.model().status
+    );
+}
+
+/// `image` encoded as `format`, as a file's bytes.
+fn image_file(image: &image::RgbaImage, format: image::ImageFormat) -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image.clone())
+        .write_to(&mut bytes, format)
+        .unwrap();
+    bytes.into_inner()
+}
+
+/// A `width` × `height` image of one opaque color.
+fn filled(width: u32, height: u32, color: [u8; 4]) -> image::RgbaImage {
+    image::RgbaImage::from_pixel(width, height, image::Rgba(color))
+}
+
+/// The comparison `path` shows once its jobs ran, as paint draws it.
+fn comparison_of(host: &mut Host, path: &str) -> Option<crate::paint::images::ComparisonPaint> {
+    host.update(|model| model.show_file(path));
+    host.settle();
+    crate::paint::images::comparison(host.model(), &crate::paint::Palette::of(host.model()))
+}
+
+/// The text of `pieces`, as one line.
+fn line_of(pieces: &[crate::paint::Piece]) -> String {
+    pieces.iter().map(|piece| piece.text.as_str()).collect()
+}
+
+/// A changed image is one unit, as any binary file, and shows both versions with how many
+/// pixels changed; the toggle shows the head with them tinted, and hides them again.
+#[test]
+fn a_changed_image_compares_its_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = filled(4, 3, [200, 30, 30, 255]);
+    let mut head = base.clone();
+    head.put_pixel(0, 0, image::Rgba([30, 200, 30, 255]));
+    head.put_pixel(3, 2, image::Rgba([0, 0, 0, 0]));
+    let review = review_of(
+        dir.path(),
+        &[("logo.png", image_file(&base, image::ImageFormat::Png))],
+        &[("logo.png", image_file(&head, image::ImageFormat::Png))],
+    );
+    let mut host = Host::open(review);
+    let shown = comparison_of(&mut host, "logo.png").expect("the images compare");
+    assert_eq!(
+        host.model().view().unwrap().units_of_file("logo.png").len(),
+        1
+    );
+
+    // Both versions, labeled with their format and size, the head drawn plain at first.
+    assert_eq!(shown.base.name.text, "base");
+    assert_eq!(shown.base.detail.text, "PNG · 4 × 3");
+    assert_eq!(shown.head.detail.text, "PNG · 4 × 3");
+    assert!(shown.base.note.is_none() && shown.head.note.is_none());
+    assert!(!shown.tinted);
+    assert_eq!(
+        line_of(&shown.status),
+        "2 of 12 pixels changed (16.6%) · o tints them"
+    );
+    let plain = shown.head.raster.clone().unwrap();
+    assert_eq!(*plain, head);
+
+    // The toggle draws the head with its changed pixels tinted, and draws it plain again.
+    host.dispatch(Action::ToggleChangedPixels);
+    let tinted =
+        crate::paint::images::comparison(host.model(), &crate::paint::Palette::of(host.model()))
+            .unwrap();
+    assert!(tinted.tinted);
+    assert_ne!(tinted.head.raster.as_deref(), Some(&head));
+    assert!(line_of(&tinted.status).ends_with("o hides them"));
+    host.dispatch(Action::ToggleChangedPixels);
+    assert!(!comparison_of(&mut host, "logo.png").unwrap().tinted);
+}
+
+/// Images of other sizes, and images whose bytes changed but whose pixels did not, say so and
+/// refuse the toggle; an added image says it has no base and a deleted one no head; a binary
+/// file that is no image shows no comparison.
+#[test]
+fn images_say_what_they_cannot_compare() {
+    let dir = tempfile::tempdir().unwrap();
+    let small = filled(2, 2, [10, 10, 10, 255]);
+    let wide = filled(3, 2, [10, 10, 10, 255]);
+    let png = |image: &image::RgbaImage| image_file(image, image::ImageFormat::Png);
+    let review = review_of(
+        dir.path(),
+        &[
+            ("data.bin", b"DATA\0one".to_vec()),
+            // Other content than new.png's, which git would take for a rename of it.
+            ("gone.png", png(&wide)),
+            ("same.png", png(&small)),
+            ("wide.png", png(&small)),
+        ],
+        &[
+            ("data.bin", b"DATA\0two".to_vec()),
+            ("new.png", png(&small)),
+            ("same.png", image_file(&small, image::ImageFormat::Bmp)),
+            ("wide.png", png(&wide)),
+        ],
+    );
+    let mut host = Host::open(review);
+
+    let resized = comparison_of(&mut host, "wide.png").unwrap();
+    assert_eq!(resized.head.detail.text, "PNG · 3 × 2");
+    assert_eq!(
+        line_of(&resized.status),
+        "the sizes differ, so no pixels are compared"
+    );
+    host.dispatch(Action::ToggleChangedPixels);
+    assert_eq!(
+        host.model().status,
+        "The versions differ in size, so no pixels are compared."
+    );
+    assert!(!host.model().changed_pixels_shown());
+
+    let same = comparison_of(&mut host, "same.png").unwrap();
+    assert_eq!(same.head.detail.text, "BMP · 2 × 2");
+    assert_eq!(
+        line_of(&same.status),
+        "the decoded images show no pixel differences"
+    );
+
+    let added = comparison_of(&mut host, "new.png").unwrap();
+    assert_eq!(
+        added.base.note.map(|note| note.text).as_deref(),
+        Some("none: the file is new")
+    );
+    assert!(added.base.raster.is_none());
+    assert_eq!(line_of(&added.status), "");
+    let deleted = comparison_of(&mut host, "gone.png").unwrap();
+    assert_eq!(
+        deleted.head.note.map(|note| note.text).as_deref(),
+        Some("none: the file is deleted")
+    );
+    assert_eq!(deleted.base.detail.text, "PNG · 3 × 2");
+
+    assert!(comparison_of(&mut host, "data.bin").is_none());
+}
+
+/// Nothing large is read or decoded: a blob past the ceiling stays unread and an image with
+/// too many pixels undecoded, each saying so beside the other version.
+#[test]
+fn large_versions_are_refused_before_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let small = image_file(&filled(2, 2, [1, 2, 3, 255]), image::ImageFormat::Png);
+    // A PNG's signature, then zeros past the ceiling.
+    let mut oversized = small[..8].to_vec();
+    oversized.resize(usize::try_from(crate::images::MAX_BYTES).unwrap() + 1, 0);
+    // A BMP's headers, claiming 5000 × 5000 pixels of 24 bits, with no pixels after them.
+    let mut huge = b"BM".to_vec();
+    for field in [54_u32, 0, 54, 40, 5000, 5000] {
+        huge.extend(field.to_le_bytes());
+    }
+    huge.extend(1_u16.to_le_bytes());
+    huge.extend(24_u16.to_le_bytes());
+    huge.extend([0; 24]);
+    let review = review_of(
+        dir.path(),
+        &[("huge.bmp", small.clone()), ("large.png", small.clone())],
+        &[("huge.bmp", huge), ("large.png", oversized)],
+    );
+    let mut host = Host::open(review);
+
+    let large = comparison_of(&mut host, "large.png").unwrap();
+    assert_eq!(large.head.detail.text, "8.3 MB");
+    assert_eq!(
+        large.head.note.map(|note| note.text).as_deref(),
+        Some("too large to preview")
+    );
+    assert!(large.base.raster.is_some());
+
+    let huge = comparison_of(&mut host, "huge.bmp").unwrap();
+    assert_eq!(huge.head.detail.text, "BMP · 5000 × 5000");
+    assert_eq!(
+        huge.head.note.map(|note| note.text).as_deref(),
+        Some("too many pixels to preview")
+    );
+}
+
+/// One comparison runs at a time and lands only for the file that shows: moving on while one
+/// runs drops what it found, and the file shown then is compared next.
+#[test]
+fn only_the_shown_file_takes_its_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = |shade| {
+        image_file(
+            &filled(2, 2, [shade, shade, shade, 255]),
+            image::ImageFormat::Png,
+        )
+    };
+    let review = review_of(
+        dir.path(),
+        &[("a.png", png(1)), ("b.png", png(2)), ("c.png", png(3))],
+        &[("a.png", png(4)), ("b.png", png(5)), ("c.png", png(6))],
+    );
+    let mut host = Host::open(review);
+    let pair_of = |host: &Host| {
+        host.model()
+            .comparison()
+            .map(|compared| compared.pair.clone())
+    };
+    assert!(
+        comparison_of(&mut host, "a.png").is_some(),
+        "a.png compares"
+    );
+    let a = pair_of(&host);
+
+    // b.png's comparison starts, and a.png's no longer shows under it.
+    host.update(|model| model.show_file("b.png"));
+    assert!(host.model().images.busy());
+    assert_eq!(pair_of(&host), None);
+    // c.png shows while b.png's job runs, which no second job joins.
+    host.update(|model| model.show_file("c.png"));
+    let waiting: Vec<Completion> = host.jobs.drain(..).map(Job::run).collect();
+    let comparing = waiting
+        .iter()
+        .filter(|completion| matches!(*completion.outcome, Outcome::Compared(_)))
+        .count();
+    assert_eq!(comparing, 1, "one comparison at a time");
+    // b.png's comparison lands for a file no longer shown, and never shows under c.png.
+    for completion in waiting {
+        host.complete(completion);
+        assert_eq!(pair_of(&host), None);
+    }
+    host.settle();
+    let c = pair_of(&host).expect("c.png compares");
+    assert_ne!(Some(&c), a.as_ref());
+    assert!(!host.model().images.busy());
+
+    // The one comparison kept is c.png's: a.png compares again.
+    host.update(|model| model.show_file("a.png"));
+    assert_eq!(pair_of(&host), None);
+    host.settle();
+    assert_eq!(pair_of(&host), a);
+}
+
+/// A still image that became an animation with the same first frame: only first frames are
+/// compared, which each label and the line under them say; nothing claims the versions are
+/// alike.
+#[test]
+fn an_animation_says_what_was_compared() {
+    use image::codecs::gif::GifEncoder;
+
+    let gif = |colors: &[[u8; 4]]| {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            for &color in colors {
+                let delay =
+                    image::Delay::from_saturating_duration(std::time::Duration::from_millis(500));
+                let frame = image::Frame::from_parts(filled(4, 3, color), 0, 0, delay);
+                encoder.encode_frame(frame).unwrap();
+            }
+        }
+        bytes
+    };
+    let sky = [142, 202, 230, 255];
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[("spinner.gif", gif(&[sky]))],
+        &[("spinner.gif", gif(&[sky, [33, 158, 188, 255]]))],
+    );
+    let mut host = Host::open(review);
+    let shown = comparison_of(&mut host, "spinner.gif").unwrap();
+    assert_eq!(shown.base.detail.text, "GIF · 4 × 3 · first frame");
+    assert_eq!(shown.head.detail.text, "GIF · 4 × 3 · first frame");
+    assert_eq!(
+        line_of(&shown.status),
+        "the first frames show no pixel differences"
+    );
+    host.dispatch(Action::ToggleChangedPixels);
+    assert_eq!(
+        host.model().status,
+        "The compared images show no pixel differences."
+    );
+}
+
+/// A front end that shows no images, as a terminal without an image protocol, has nothing
+/// read or decoded for a changed image, and the toggle says why; once it shows images, the
+/// selected image is compared.
+#[test]
+fn nothing_is_decoded_where_no_image_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = |shade| {
+        image_file(
+            &filled(2, 2, [shade, shade, shade, 255]),
+            image::ImageFormat::Png,
+        )
+    };
+    let review = review_of(dir.path(), &[("a.png", png(1))], &[("a.png", png(2))]);
+    let terminal = Settings {
+        front_end: crate::front_end::FrontEnd::Terminal,
+        ..settings()
+    };
+    let mut host = Host::open_with(review, terminal);
+    host.update(|model| model.show_file("a.png"));
+    let comparing = |host: &mut Host| {
+        let completions: Vec<Completion> = host.jobs.drain(..).map(Job::run).collect();
+        let compared = completions
+            .iter()
+            .filter(|completion| matches!(*completion.outcome, Outcome::Compared(_)))
+            .count();
+        for completion in completions {
+            host.complete(completion);
+        }
+        compared
+    };
+    assert_eq!(comparing(&mut host), 0, "an image was read");
+    host.settle();
+    assert!(host.model().comparison().is_none());
+    host.dispatch(Action::ToggleChangedPixels);
+    assert_eq!(
+        host.model().status,
+        "This terminal shows no images, so a changed image shows as a binary file."
+    );
+
+    host.update(|model| model.show_images(true));
+    assert_eq!(comparing(&mut host), 1);
+    host.settle();
+    assert!(host.model().comparison().is_some());
+}
+
+/// Moving from one image to another, the new one's comparison is pending from the first frame:
+/// its place shows both labels and nothing of the other file's images, says it is decoding
+/// only once its timer ran, and shows the new file's images once its job lands.
+#[test]
+fn a_pending_comparison_keeps_its_place_and_shows_no_other_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = |shade| {
+        image_file(
+            &filled(2, 2, [shade, shade, shade, 255]),
+            image::ImageFormat::Png,
+        )
+    };
+    let review = review_of(
+        dir.path(),
+        &[("a.png", png(1)), ("b.png", png(3))],
+        &[("a.png", png(2)), ("b.png", png(4))],
+    );
+    let mut host = Host::open(review);
+    let paint = |host: &Host| {
+        crate::paint::images::comparison(host.model(), &crate::paint::Palette::of(host.model()))
+    };
+    let shade = |version: &crate::paint::images::VersionPaint| {
+        version
+            .raster
+            .as_ref()
+            .map(|raster| raster.get_pixel(0, 0).0[0])
+    };
+    assert!(comparison_of(&mut host, "a.png").is_some());
+
+    host.update(|model| model.show_file("b.png"));
+    let pending = paint(&host).expect("the comparison keeps its place");
+    assert_eq!(pending.base.name.text, "base");
+    assert_eq!(pending.head.name.text, "head");
+    assert_eq!((shade(&pending.base), shade(&pending.head)), (None, None));
+    assert_eq!(
+        pending.base.note, None,
+        "a quick comparison never says it is decoding"
+    );
+
+    let timer = host
+        .timers
+        .iter()
+        .position(|timer| {
+            matches!(
+                *timer.outcome,
+                Outcome::Tick(super::sync::Tick::Decoding(_))
+            )
+        })
+        .expect("the comparison's grace runs");
+    host.fire(timer);
+    let slow = paint(&host).expect("the comparison keeps its place");
+    assert_eq!(
+        slow.base.note.as_ref().map(|note| note.text.as_str()),
+        Some("decoding…")
+    );
+    assert_eq!((shade(&slow.base), shade(&slow.head)), (None, None));
+
+    host.settle();
+    let landed = paint(&host).expect("b.png compares");
+    assert_eq!(
+        (shade(&landed.base), shade(&landed.head)),
+        (Some(3), Some(4))
     );
 }

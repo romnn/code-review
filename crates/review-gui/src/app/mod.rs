@@ -34,6 +34,7 @@ use review_ui::text::{self, Pane};
 use review_ui::worker;
 
 mod chrome;
+mod images;
 mod ink;
 mod keys;
 mod measure;
@@ -180,6 +181,8 @@ pub struct ReviewApp {
     fonts: Fonts,
     /// The gpui handles of the scrolled lists, which mirror the model's offsets each frame.
     lists: Lists,
+    /// The comparison's rasters as gpui draws them.
+    images: images::Images,
     /// The diff pane's width in logical pixels, which follows the window each frame.
     diff_width: f32,
     /// The code size the lists were last laid out at, which their bounds reflect.
@@ -255,6 +258,7 @@ impl ReviewApp {
             painted: PaintedRows::default(),
             fonts,
             lists,
+            images: images::Images::default(),
             diff_width,
             lists_code_size,
             extent_cell: 0.0,

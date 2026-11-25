@@ -1328,6 +1328,40 @@ it, muted, so it never reads as code.
   remembered layout. A selection keeps the half it started in and copies that side's lines,
   skipping padding but keeping blank lines. `/` searches each half apart, the base's half before
   the head's in each row, and highlights a match only in its own half.
+- **Changed images.** A file whose content changed as one opaque unit (binary, not UTF-8 or too
+  large to diff) between regular files is compared as images: once either version turns out to
+  be a PNG, JPEG, GIF, WebP or BMP image, the base and the head show side by side above its
+  rows, each fitted into half the pane under a label with its format and size in pixels, and a
+  line under them says how many pixels changed. `o` shows the head with the changed pixels
+  tinted magenta, a pixel that became transparent included, and hides them again; versions of
+  different sizes say so instead, and versions whose decoded pixels match say that what was
+  compared shows no pixel differences, never that only bytes changed. A still image is compared
+  as its EXIF orientation shows it, and an animation by its first frame alone, an APNG's first
+  animation frame rather than its default image: every GIF, an APNG and an animated WebP are
+  labeled "first frame", and the line under them says the first frames were compared, without
+  counting frames. An added or deleted image names its missing side; a version that is not an
+  image, cannot be decoded or is too large says so in its place.
+  Nothing else about the file changes: its rows stay as they were, its one unit is approved as
+  any unit is, and a change of either blob reopens it, whatever the pixels. `review_ui::images`
+  takes a pair of encoded versions, not a file, so anything rendered to pixels can feed the same
+  comparison. A job decodes the selected file's pair in the background with `image`, one pair
+  at a time, keeping one result, failures included, which lands only while its pair is still
+  the one on screen. Every bound holds before what it guards is taken: a blob's size is looked
+  up (`Repo::blob_size`) before it is read, at most the engine's 8 MiB ceiling, and an image's
+  header before it is decoded, at most 4096 × 4096 pixels and 256 MiB of decoding, the same
+  bounded decoder reading the header, the animation and the pixels. The changed pixels are
+  counted and tinted at full size; the rasters kept are at most 2048 pixels on their long side,
+  which review-gui converts for gpui once on a thread of its own, keeping a conversion until it
+  lands and installing it once, and review-tui resizes to its cells off the main loop. From
+  the frame that selects a file that may be an image, its comparison is pending, with its
+  labels, and takes 45% of the window or the list whatever its images, so the rows below never
+  move when it lands, or move once when the file turns out not to be an image; it says
+  "decoding…" only after 100 ms, on the model's timer, so a quick decode never flashes. An
+  image draws only for the comparison on screen, never under another file's header. The front
+  end says whether
+  it shows images, and nothing is read or decoded while it
+  does not: review-tui shows them only where the terminal is known to (see review-tui's
+  "Images"), and elsewhere the file keeps the binary line it always had.
 - **Settings.** `T` or `,` opens a keyboard-first settings list in the files pane's place (over the
   left of the diff when the files pane is hidden or narrower than 260 px), so the diff keeps its
   exact geometry: themes, diff styles, density, layout, token emphasis, approved hunks (folded or
@@ -1710,6 +1744,42 @@ tools copy through XWayland with a window that never shows.
 - **Diagnostics.** Nothing may be written over the screen, so diagnostics go to
   `$XDG_STATE_HOME/code-review/review-tui.log` and are printed again on standard error once the
   terminal is back.
+- **Images.** A changed image's comparison (see "Changed images" under review-gui) shows
+  through `ratatui-image` with its default features off, only where the terminal is known to
+  show images, without asking it anything
+  ([ADR 12](adr/0012-every-key-a-terminal-sends-is-a-press.md)), and where the system reports
+  the cells' size in pixels. kitty and Ghostty, named by `TERM` (`xterm-kitty`,
+  `xterm-ghostty`), get the kitty graphics protocol's Unicode placeholders; WezTerm, named by
+  `TERM_PROGRAM`, gets iTerm2's inline images, since it draws no placeholders. Inside tmux, a
+  bounded `tmux display-message` that only reads says whether the one client attached runs
+  kitty or Ghostty with 24-bit color and the pane already passes escape sequences through
+  (`allow-passthrough on`). It is read again, its whole call bounded, only when the app
+  regains focus, which it asks the terminal to report, or is resized; when another client has
+  attached, as after a detach, every image is prepared and sent afresh, or none shows when the
+  new client's terminal shows none. tmux passes focus on only with `focus-events on`, its
+  default being off: without it, a reattach from another client shows images only after a
+  resize, a known limitation, as is a tmux `after-display-message` hook that resizes the
+  pane, which can make the readings repeat. Each version's image is resized to the pixels of its cells,
+  at most 512 Ki pixels, which bounds what is resized and what the frame that first draws it
+  sends, and encoded on a thread of its own, one preparation at a time; a frame draws a
+  version's image only when it was prepared for the raster on screen, the cells it has now and
+  the terminal attached, over the finished frame and only while no overlay lies over the pane,
+  and showing the changed pixels prepares the head again, never the base. Placeholders and
+  inline images go as soon as anything draws over their cells; the terminal drops a kitty
+  image's data in the frame that sends its replacement, or once no comparison shows, and every
+  image as the app quits, a panic and a second signal included. Checked in Ghostty 1.3.1, directly and in tmux with
+  passthrough, a split pane included: the placement leaves its size to the image's pixels
+  rather than naming its cells, so Ghostty 1.3.1's narrow placeholder images in tmux
+  (ghostty#13056) do not occur. With passthrough off, nothing would show, so the file keeps its
+  binary line. Checked in WezTerm 20240203 and 20261125-182040-7d0eb968: both draw the kitty
+  placeholders as missing glyphs, with the image at the cursor, and iTerm2's inline images and
+  sixel where they belong, iTerm2's going with the cells drawn over them on a toggle, a file
+  switch, Help and a resize. Under tmux, WezTerm keeps the binary line: an inline image passed
+  through goes wherever tmux last left the terminal's cursor, over the files, and stays in
+  pieces after Help or a file switch, since tmux never knew of it. tmux's own sixel images,
+  which tmux places and redraws itself and whose support it reports as `#{sixel_support}`,
+  draw in place in a probe; they would need checking against how tmux drops an image when a
+  line under it is drawn.
 
 ### Demo review
 
@@ -1719,7 +1789,8 @@ under `crates/review-core/demo/` into `target/demo/repo`, with its review data i
 changes and adds units; revision 3 returns one hunk to its revision-1 form), a walkthrough and a
 few marks. It covers every feature the front ends render: formatting-only files, a re-wrap with a
 real edit, a plain move and a move with edits, a rename with edits, mode, symlink and binary
-changes, deletion-only chunks and noise. `--demo` rebuilds it and opens revision 1, and
+changes, changed images (pixels changed at one size, a resize, an added image, and a still image
+that became an animation), deletion-only chunks and noise. `--demo` rebuilds it and opens revision 1, and
 `--demo-revision N` advances to revision N keeping marks, in `cr`, review-gui and review-tui
 alike. It is the shared fixture for every front end.
 

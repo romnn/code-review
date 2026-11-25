@@ -18,11 +18,15 @@ use review_ui::line_edit::LineEdit;
 use review_ui::model::{Mode, Model, Overlay, SheetStep};
 use review_ui::paint::Palette;
 
+use review_ui::paint::images::ComparisonPaint;
+
 use crate::color::{Colors, over};
+use crate::images::Drawn;
 use crate::measure::Panes;
 
 mod bars;
 mod buffer;
+mod compare;
 mod diff;
 mod files;
 mod overview;
@@ -100,6 +104,10 @@ pub struct Scene<'a> {
     pub editor: &'a LineEdit,
     /// Where the cheat sheet or the overview is scrolled.
     pub sheet: &'a mut SheetScroll,
+    /// A changed image's comparison, which [`Panes::comparison`] places.
+    pub comparison: Option<&'a ComparisonPaint>,
+    /// Its images, once they are prepared.
+    pub images: Option<Drawn<'a>>,
 }
 
 /// Draws `model` as `scene` lays it out into `buffer` at `now`, in `colors`.
@@ -109,6 +117,8 @@ pub fn frame(buffer: &mut Buffer, colors: Colors, model: &Model, scene: Scene<'_
         panes,
         editor,
         sheet,
+        comparison,
+        images,
     } = scene;
     let palette = Palette::of(model);
     let mut painter = Painter::new(buffer, colors);
@@ -120,10 +130,14 @@ pub fn frame(buffer: &mut Buffer, colors: Colors, model: &Model, scene: Scene<'_
     if let Some(divider) = panes.divider {
         divider_line(&mut painter, &palette, divider);
     }
+    let compared = comparison.zip(panes.comparison);
     if model.mode == Mode::Buffer && model.buffer.is_some() {
         buffer::draw(&mut painter, model, &palette, panes);
     } else {
         diff::draw(&mut painter, model, &palette, panes, now);
+        if let Some((shown, placed)) = compared {
+            compare::draw(&mut painter, &palette, shown, &placed);
+        }
     }
     if let Some(find) = panes.find {
         bars::find_bar(&mut painter, model, &palette, find, editor);
@@ -141,6 +155,11 @@ pub fn frame(buffer: &mut Buffer, colors: Colors, model: &Model, scene: Scene<'_
         None => {}
     }
     painter.finish();
+    // Over the finished frame, whose colors no longer change, since an image's cells name it
+    // by their color; and only while nothing lies over the pane.
+    if let (Some((shown, placed)), Some(images), None) = (compared, images, model.overlay) {
+        compare::images(buffer, shown, &placed, &images);
+    }
 }
 
 /// The hairline between the files and the diff.

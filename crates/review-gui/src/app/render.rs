@@ -1543,6 +1543,7 @@ impl Render for ReviewApp {
                 self.render_divider(cx),
             )
         });
+        self.images.retain(self.driver.model(), window);
         let right = if self.mode == Mode::Buffer && self.buffer.is_some() {
             self.render_buffer(cx).into_any_element()
         } else {
@@ -1551,6 +1552,7 @@ impl Render for ReviewApp {
                 .min_w_0()
                 .h_full()
                 .child(self.render_file_header())
+                .children(self.render_comparison(window, cx))
                 .child(self.render_diff(cx))
                 .into_any_element()
         };

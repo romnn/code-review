@@ -33,6 +33,7 @@ use review_ui::model::{
     Settings, TextPress, Updated, list_of,
 };
 use review_ui::paint::display::DisplayLine;
+use review_ui::paint::images::ComparisonPaint;
 use review_ui::paint::settings::{SettingsLine, settings_lines};
 use review_ui::paint::{Palette, bars, files};
 use review_ui::rows::Body;
@@ -40,6 +41,8 @@ use review_ui::text::{Column, Pane, TextPos};
 
 use crate::color::Colors;
 use crate::draw::{self, Scene, SheetScroll, first_row};
+use crate::graphics::{Graphics, Uploads};
+use crate::images::{self, CellSize, Images, Prepared};
 use crate::keys::{self, Focus};
 use crate::log::Log;
 use crate::measure::{self, FRAME, GUTTER, MARKER, Panes, SIGN, buffer_numbers, halves};
@@ -74,6 +77,10 @@ pub enum Message {
     /// A signal from outside the terminal, which the terminal's main loop handles.
     #[cfg(unix)]
     Signal(Signal),
+    /// How the terminal shows images, once tmux said.
+    Graphics(Graphics),
+    /// A comparison's images, prepared for the terminal.
+    Prepared(Box<Prepared>),
 }
 
 /// A signal the app acts on, from outside the terminal: raw mode keeps the terminal's own keys
@@ -118,6 +125,8 @@ pub enum Outgoing {
     CopyPrimary(String),
     /// Sets the terminal's title.
     Title(String),
+    /// An escape sequence of the app's own, such as one that drops an image.
+    Escape(String),
 }
 
 /// A completion waiting for its time.
@@ -154,6 +163,8 @@ pub struct App {
     sheet_of: Option<Overlay>,
     /// Whether the divider between the files and the diff is being dragged.
     resizing: bool,
+    /// The terminal's images.
+    images: Images,
 }
 
 impl App {
@@ -188,6 +199,7 @@ impl App {
             sheet: SheetScroll::default(),
             sheet_of: None,
             resizing: false,
+            images: Images::new(),
         };
         app.update(|model| model.open(opener));
         app
@@ -221,7 +233,7 @@ impl App {
     /// waits for it.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.model().busy()
+        self.model().busy() || self.images.busy()
     }
 
     /// What the terminal must do for the model since the last call.
@@ -287,6 +299,8 @@ impl App {
             Message::Qa(_) | Message::Signal(_) => {}
             #[cfg(not(unix))]
             Message::Qa(_) => {}
+            Message::Graphics(graphics) => self.images.set_graphics(graphics),
+            Message::Prepared(prepared) => self.images.prepared(*prepared),
             Message::InputEnded(reason) => {
                 self.log
                     .write(&format!("the terminal's input ended: {reason}"));
@@ -891,10 +905,22 @@ impl App {
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         self.follow_field();
-        let panes = Panes::new(area, self.model());
+        // The model reads and decodes images only while the terminal shows them.
+        let shows = self.images.cell().is_some();
+        if self.model().shows_images() != shows {
+            self.update(|model| model.show_images(shows));
+        }
+        let mut panes = Panes::new(area, self.model());
+        let comparison = self.comparison();
+        if comparison.is_some() {
+            images::lay_out(&mut panes);
+        }
         let geometry = measure::geometry(&panes, self.model());
         let now = Instant::now();
         self.update(|model| model.layout(geometry, now));
+        self.images
+            .follow(comparison.as_ref(), &panes, &self.sender);
+        self.drop_images(false);
         self.panes = Some(panes);
         // Each sheet opens at its top.
         let overlay = self.model().overlay;
@@ -907,6 +933,7 @@ impl App {
             editor,
             sheet,
             colors,
+            images,
             ..
         } = self;
         let model = driver.model();
@@ -918,10 +945,41 @@ impl App {
                 panes: &panes,
                 editor,
                 sheet,
+                comparison: comparison.as_ref(),
+                images: images.drawn(),
             };
             draw::frame(frame.buffer_mut(), *colors, model, scene, now);
         })?;
         Ok(())
+    }
+
+    /// The comparison the diff pane shows, while the terminal shows images, as the model knows,
+    /// and the diff, not the buffer, has the pane.
+    fn comparison(&self) -> Option<ComparisonPaint> {
+        let model = self.model();
+        if model.mode == Mode::Buffer && model.buffer.is_some() {
+            return None;
+        }
+        review_ui::paint::images::comparison(model, &Palette::of(model))
+    }
+
+    /// Takes in how the terminal shows images, as far as it says without tmux.
+    pub fn set_graphics(&mut self, graphics: Graphics) {
+        self.images.set_graphics(graphics);
+    }
+
+    /// Takes in the terminal's cell size in pixels, as it reports it before a frame.
+    pub fn set_cell(&mut self, cell: Option<CellSize>) {
+        self.images.set_cell(cell);
+    }
+
+    /// Has the terminal drop the images no frame draws any more, and with `all`, every image
+    /// the app showed, as it quits.
+    pub fn drop_images(&mut self, all: bool) {
+        let drops = Uploads::drops(all);
+        if !drops.is_empty() {
+            self.outbox.push(Outgoing::Escape(drops));
+        }
     }
 }
 
@@ -1063,6 +1121,43 @@ mod tests {
         // The key after it in the batch changes nothing.
         app.handle(w());
         assert!(app.model().look().wrap);
+    }
+
+    /// Selecting an image lays out its comparison from the first frame, while its versions are
+    /// still decoded, so the file's rows sit below it at once and stay where they are once it
+    /// lands.
+    #[test]
+    fn an_image_s_rows_stay_where_they_are_when_its_comparison_lands() {
+        let _registry = crate::graphics::alone();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, receiver) = demo(dir.path());
+        app.set_graphics(Graphics::Kitty { tmux: false });
+        app.set_cell(Some(images::CellSize {
+            width: 8,
+            height: 16,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        settle(&mut app, &receiver, &mut terminal);
+        let binary_row = |terminal: &Terminal<TestBackend>| {
+            screen(terminal)
+                .iter()
+                .position(|row| row.contains("binary content changed"))
+        };
+
+        app.update(|model| model.show_file("web/images/chart.png"));
+        app.render(&mut terminal).unwrap();
+        assert!(app.model().pending_comparison().is_some());
+        let pending = app.panes.as_ref().map(|panes| panes.list);
+        let row = binary_row(&terminal);
+        assert!(
+            row.is_some(),
+            "the binary row shows under the pending comparison"
+        );
+
+        settle(&mut app, &receiver, &mut terminal);
+        assert!(app.model().comparison().is_some());
+        assert_eq!(app.panes.as_ref().map(|panes| panes.list), pending);
+        assert_eq!(binary_row(&terminal), row);
     }
 
     /// The screen's rows as text, wide symbols once.

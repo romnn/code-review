@@ -58,6 +58,7 @@ pub fn state(model: &Model, screen: &dyn Screen) -> Value {
     answer.insert("view".to_owned(), view_state(model, screen));
     answer.extend(screen.text());
     answer.insert("status".to_owned(), json!(model.status));
+    answer.insert("comparison".to_owned(), comparison(model));
     answer.insert(
         "progress".to_owned(),
         json!({
@@ -353,6 +354,31 @@ fn selection(model: &Model) -> Value {
             "head": [selection.head.row, selection.head.col],
         })
     }))
+}
+
+/// The selected file's image comparison, as its labels read: each version's name, detail and
+/// note, whether the head shows its changed pixels, and the line under them.
+fn comparison(model: &Model) -> Value {
+    let Some(shown) = crate::paint::images::comparison(model, &Palette::of(model)) else {
+        return Value::Null;
+    };
+    let version = |version: &crate::paint::images::VersionPaint| {
+        json!({
+            "detail": version.detail.text,
+            "note": version.note.as_ref().map(|note| &note.text),
+            "size": version.raster.as_ref().map(|raster| raster.dimensions()),
+        })
+    };
+    json!({
+        "base": version(&shown.base),
+        "head": version(&shown.head),
+        "tinted": shown.tinted,
+        "status": shown
+            .status
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect::<String>(),
+    })
 }
 
 /// The look on screen and the settings list.

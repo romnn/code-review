@@ -44,6 +44,14 @@ the move keeps its edits, each line shown once with the indentation it gained ma
 after every other file but the root's, so most tree rows the QA scripts click stay where they
 are.
 
+`web/images/` holds the changed images, a few hundred bytes each, drawn with ImageMagick without
+antialiasing or metadata: `chart.png` keeps its size while one bar grows and turns orange, so
+its changed pixels show; `logo.png` doubles from 32 to 64 pixels; `badge.png` is new; and
+`spinner.gif`, a still image in the base, becomes a two-frame animation whose first frame is
+that image, so only first frames are compared and they show no difference, as each says. They sort after
+every other directory's files but `web/`'s, so the tree rows the QA scripts click stay where they
+are.
+
 Snapshots duplicate the files a commit does not change, but each one reads and edits as plain
 files. A file the pull request adds is therefore in every `head-*` tree. Edit its copies in
 `head-2` and `head-3` only where those revisions should change it.

@@ -90,6 +90,7 @@ shows within a second, keeping your place, and only what you mark is recorded.
 | `/`, `Ctrl+P`, `Ctrl+G` | Find in the diff, find a file, search file contents |
 | `f`, `v` | The whole file around its changes, or each hunk apart |
 | `w` | Wrap long lines, or cut them and pan sideways |
+| `o` | On a changed image, tint the pixels that changed |
 | `\|`, `S` | Side by side or unified, next diff style |
 | `T` | Settings: themes, diff styles, density, layout |
 | `i` | Pull request overview |
@@ -97,7 +98,9 @@ shows within a second, keeping your place, and only what you mark is recorded.
 
 ## The terminal app
 
-`cr` runs anywhere a terminal does, over SSH included, as a single static binary.
+`cr` runs anywhere a terminal does, over SSH included, as a single static binary. In kitty,
+Ghostty and WezTerm, and in tmux with `allow-passthrough` in kitty and Ghostty, a changed image
+shows its two versions side by side, as in the desktop app.
 
 <p align="center">
   <br>

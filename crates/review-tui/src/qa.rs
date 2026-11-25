@@ -21,7 +21,7 @@
 //! - `find <text>` selects the hunk of the next diff row containing `text`.
 //! - `resize <columns>x<rows>` resizes the screen, 160x50 at first.
 //! - `shot <path>` writes the screen to `<path>.txt` as text and to `<path>.ansi` with its
-//!   colors as SGR sequences.
+//!   colors as SGR sequences, each cell of an image as `▚`.
 //! - `clipboard` prints what the app last copied to the clipboard, as a JSON string, and
 //!   `primary` what it last put in the primary selection.
 //! - `state` prints the observable state as one line of JSON, as review-gui's does, with the
@@ -29,6 +29,9 @@
 //! - `quit` quits as `q` does: once the marks and folded folders still being saved are saved.
 //! - `rapid <command>` answers without waiting for the work the command starts;
 //!   `rapid state` prints the state at once.
+//!
+//! The screen is a terminal that shows kitty graphics in cells of [`CELL`] pixels, so a
+//! changed image is compared and laid out as in kitty or Ghostty.
 
 use std::collections::VecDeque;
 use std::io::{BufRead as _, Write as _};
@@ -52,12 +55,20 @@ use serde_json::{Map, Value, json};
 use crate::app::{App, Message, Outgoing, next_batch};
 use crate::color::Colors;
 use crate::draw::{SheetScroll, first_row};
+use crate::graphics::Graphics;
+use crate::images::CellSize;
 use crate::keys;
 use crate::log::Log;
 use crate::measure::Panes;
 
 /// The screen QA mode starts with, in cells.
 const SIZE: (u16, u16) = (160, 50);
+
+/// The size of the screen's cells in pixels, as a terminal reports it.
+const CELL: CellSize = CellSize {
+    width: 8,
+    height: 16,
+};
 
 /// A parsed QA command.
 #[derive(Debug, Clone, PartialEq)]
@@ -200,7 +211,7 @@ pub fn run(settings: Settings, opener: Opener) -> color_eyre::eyre::Result<()> {
     read_commands(sender.clone());
     let (columns, rows) = SIZE;
     let terminal = Terminal::new(TestBackend::new(columns, rows))?;
-    let app = App::new(
+    let mut app = App::new(
         settings,
         opener,
         Rect::new(0, 0, columns, rows),
@@ -208,6 +219,8 @@ pub fn run(settings: Settings, opener: Opener) -> color_eyre::eyre::Result<()> {
         Colors::TrueColor,
         Log::direct(),
     );
+    app.set_graphics(Graphics::Kitty { tmux: false });
+    app.set_cell(Some(CELL));
     let mut session = Session {
         app,
         terminal,
@@ -304,8 +317,8 @@ impl Session {
             match outgoing {
                 Outgoing::Copy(text) => self.clipboard = Some(text),
                 Outgoing::CopyPrimary(text) => self.primary = Some(text),
-                // Off screen there is no title to set.
-                Outgoing::Title(_) => {}
+                // Off screen there is no title to set, and no image shows.
+                Outgoing::Title(_) | Outgoing::Escape(_) => {}
             }
         }
     }
@@ -622,11 +635,21 @@ fn rows(buffer: &Buffer) -> Vec<Vec<&ratatui::buffer::Cell>> {
         .collect()
 }
 
+/// What `cell` shows in a screen's text: `▚` for a cell of an image, whose symbol carries the
+/// kitty graphics protocol's placeholder and, in its first cell, the image itself.
+fn symbol(cell: &ratatui::buffer::Cell) -> &str {
+    if cell.symbol().contains('\u{10eeee}') {
+        "▚"
+    } else {
+        cell.symbol()
+    }
+}
+
 /// The screen as plain text, one line per row, without trailing blanks.
 fn text(buffer: &Buffer) -> String {
     let mut text = String::new();
     for row in rows(buffer) {
-        let line: String = row.iter().map(|cell| cell.symbol()).collect();
+        let line: String = row.iter().map(|cell| symbol(cell)).collect();
         text.push_str(line.trim_end());
         text.push('\n');
     }
@@ -646,7 +669,7 @@ fn ansi(buffer: &Buffer) -> String {
                 text.push('m');
                 last = Some(sgr);
             }
-            text.push_str(cell.symbol());
+            text.push_str(symbol(cell));
         }
         text.push_str("\x1b[0m\n");
     }
