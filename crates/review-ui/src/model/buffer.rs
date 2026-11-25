@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU64;
 use review_core::{RevisionView, UnitId};
 
 use super::effects::{Outcome, Subject};
-use super::engine::{Servers, Ticket};
+use super::engine::{Parts, Servers};
 use super::{DEFINITION_DEADLINE, Mode, Model, Trust};
 use crate::frame::Request;
 use crate::lsp::{self, LanguageServer};
@@ -46,7 +46,7 @@ impl Marker {
 pub enum Origin {
     /// The head version of a file under review, by display path.
     Review(String),
-    /// A file a definition led to, by its path in the worktree.
+    /// A file a definition led to, by its path in the checkout, or its whole path outside it.
     Definition(String),
     /// A file the review did not change, by its path in the head snapshot, opened from a
     /// picker.
@@ -429,10 +429,15 @@ impl Model {
         }
     }
 
-    /// `g d`: asks a language server, in the background, where the identifier under the cursor
-    /// is defined, and moves there, opening another file as a buffer when it is elsewhere.
+    /// `g d`: asks a language server running in the checkout, in the background, where the
+    /// identifier under the cursor is defined, and moves there, opening another file as a buffer
+    /// when it is elsewhere.
+    ///
+    /// It runs only on the code on disk: a review of a range or a pull request, or an older
+    /// revision, is refused, and on an untrusted checkout the trust question comes only once the
+    /// disk is found to hold what shows; the lookup refuses what shows once the disk has moved
+    /// past it.
     pub(super) fn go_to_definition(&mut self) {
-        self.trust_pending = None;
         if !self.settings.language_servers {
             self.set_status(
                 "Go to definition is off: language servers never start while [lsp] enabled = \
@@ -440,23 +445,13 @@ impl Model {
             );
             return;
         }
-        match self.trust {
-            Trust::Granted(_) => {}
-            Trust::Checking => {
-                self.set_status("Trust is being checked; press g d again in a moment.");
-                return;
-            }
-            Trust::Denied if self.is_checkout() => {
-                self.ask_trust(true);
-                return;
-            }
-            Trust::Denied => {
-                self.set_status(
-                    "Go to definition needs a language server, which runs code from this \
-                     review. Press Ctrl+T to trust it first.",
-                );
-                return;
-            }
+        if let Some(why) = self.not_on_disk() {
+            self.set_status(why);
+            return;
+        }
+        if self.trust == Trust::Checking {
+            self.set_status("Trust is being checked; press g d again in a moment.");
+            return;
         }
         if self.looking_up {
             self.set_status("A definition lookup is still running.");
@@ -468,7 +463,7 @@ impl Model {
         let path = match &buffer.origin {
             Origin::Review(path) | Origin::Definition(path) | Origin::Head(path) => path.clone(),
         };
-        let (row, col) = (buffer.cursor.row, buffer.cursor.col);
+        let TextPos { row, col } = buffer.cursor;
         if text::identifiers(buffer.line(row))
             .iter()
             .all(|word| !(word.start <= col && col < word.end))
@@ -476,47 +471,63 @@ impl Model {
             self.set_status("Put the cursor on a name to go to its definition.");
             return;
         }
-        let Some(head) = self.shown_head().filter(|_| self.engine.is_some()) else {
+        let Some(head) = self
+            .view()
+            .and_then(|view| view.record().map(|record| record.head.clone()))
+            .filter(|_| self.engine.is_some())
+        else {
             return;
         };
         // The answer lands only in the buffer, snapshot and trust epoch it was asked in.
-        let ticket = self.ticket();
+        let epoch = self.epoch();
         let lookup = Lookup {
             buffer: buffer.id,
             shown: self.shown,
-            epoch: ticket.epoch,
+            epoch,
         };
-        let current = Arc::clone(&self.trust_epoch);
+        if self.trust == Trust::Denied {
+            // Asked only for code on disk, the reviewer never trusts the checkout for a lookup
+            // that could not run.
+            self.looking_up = true;
+            self.set_status("Checking the code on disk…");
+            self.spawn_with(Subject::Lookup(lookup), move |parts| {
+                let checked = parts
+                    .review
+                    .repo()
+                    .tree_of(&head)
+                    .map_err(|err| Unanswered::Failed(err.to_string()))
+                    .and_then(|shown| on_disk(parts, &shown));
+                Outcome::OnDisk(checked)
+            });
+            return;
+        }
+        let asking = Asking {
+            head,
+            path,
+            lines: Arc::clone(&buffer.lines),
+            cursor: buffer.cursor,
+            epoch,
+            current: Arc::clone(&self.trust_epoch),
+        };
         self.looking_up = true;
         self.set_status("Looking up the definition; the language server may need to index first…");
         self.spawn_with(Subject::Lookup(lookup), move |parts| {
-            let review = &parts.review;
-            let found = review
-                .repo()
-                .tree_of(&head)
-                .and_then(|tree| {
-                    let root = review.tool_worktree(&tree)?;
-                    Ok((tree, root))
-                })
-                .map_err(|err| match err {
-                    // Trust found denied goes the way a reading that finds it does.
-                    review_core::Error::Untrusted(_) => {
-                        parts.servers.check(ticket, &current, || Trust::Denied);
-                        Unanswered::Denied
-                    }
-                    err => Unanswered::Failed(err.to_string()),
-                })
-                .and_then(|(tree, root)| {
-                    let asked = Asked {
-                        servers: &parts.servers,
-                        ticket,
-                        current: &current,
-                        trusted: &|| review.trust_for(&tree).is_ok_and(|trust| trust.trusted),
-                    };
-                    find_definition(&asked, &root, &path, row, col)
-                });
-            Outcome::Definition(found)
+            Outcome::Definition(look_up(parts, &asking))
         });
+        self.guard_servers();
+    }
+
+    /// Takes in whether the disk holds what shows, as an untrusted lookup asks before the trust
+    /// question: asks it, unless trust was granted meanwhile, or says why the lookup cannot run.
+    pub(super) fn checked_on_disk(&mut self, checked: Result<(), Unanswered>) {
+        match checked {
+            Ok(()) if self.trust == Trust::Denied => {
+                self.set_status("");
+                self.ask_trust(true);
+            }
+            Ok(()) => self.go_to_definition(),
+            Err(why) => self.definition_found(Err(why)),
+        }
     }
 
     /// Takes in the answer of a definition lookup for the buffer, revision and trust epoch that
@@ -527,22 +538,38 @@ impl Model {
             Err(Unanswered::Denied) => {
                 self.take_trust(Trust::Denied);
                 self.fail(
-                    "Go to definition: trust in this code no longer applies, as when another \
+                    "Go to definition: trust in this checkout no longer applies, as when another \
                      window revoked it, so its language servers stopped.",
                 );
             }
             Err(Unanswered::Stale) => self.fail(format!("Go to definition: {REVOKED_TRUST}")),
+            Err(Unanswered::Moved) => self.fail(
+                "Go to definition needs the code on disk, which no longer matches what shows; \
+                 press r, then g d again.",
+            ),
             Err(Unanswered::Failed(err)) => self.fail(format!("Go to definition: {err}")),
         }
     }
 
     /// Moves to a definition: in this buffer when it is in the same file, otherwise in a buffer
     /// of the other file that `Ctrl+O` leaves.
+    ///
+    /// The definition's line and column count in its file's text as read from disk, which the
+    /// buffer of the same file must show as it is.
     fn show_definition(&mut self, found: Definition) {
         let Some(current) = self.buffer.take() else {
             return;
         };
         let same = current.title() == found.path;
+        if same && current.lines.lines != found.lines.lines {
+            self.buffer = Some(current);
+            self.fail(format!(
+                "Go to definition: {} on disk is not what shows, so the definition is not shown \
+                 there.",
+                found.path
+            ));
+            return;
+        }
         let mut next = if same {
             current
         } else {
@@ -597,7 +624,7 @@ pub(super) struct Lookup {
 
 /// Where a definition is, with its file's text.
 pub(super) struct Definition {
-    /// The file, relative to the worktree.
+    /// The file, relative to the checkout, or its whole path outside it.
     pub(super) path: String,
     /// The definition's zero-based line.
     pub(super) line: usize,
@@ -616,29 +643,144 @@ const REVOKED_TRUST: &str = "trust was revoked or another snapshot shows, so no 
 /// Why a definition lookup came back without a definition.
 #[derive(Debug)]
 pub(super) enum Unanswered {
-    /// Its ticket no longer counts: trust was decided, or another head shows, so the window
-    /// moved its trust epoch on.
+    /// Its trust epoch no longer counts: trust was decided, or another snapshot shows, so the
+    /// window moved its trust epoch on.
     Stale,
     /// Trust was found denied since the lookup started, and every language server stopped.
     Denied,
+    /// The code on disk is not what shows, before the question or once it was answered.
+    Moved,
     /// Anything else, as the status line says it.
     Failed(String),
+}
+
+/// What a definition lookup asks about, taken from the window as the key was pressed.
+struct Asking {
+    /// The head of the snapshot on screen, whose tree the code on disk must be.
+    head: review_core::ObjectId,
+    /// The buffer's file, relative to the checkout or a whole path outside it.
+    path: String,
+    /// The buffer's text, which the file on disk must hold.
+    lines: Arc<FullText>,
+    /// The buffer's cursor.
+    cursor: TextPos,
+    /// The trust epoch the lookup was asked in.
+    epoch: u64,
+    /// The window's trust epoch now.
+    current: Arc<AtomicU64>,
+}
+
+/// The review of the checkout lookups run in.
+fn checkout_of(parts: &Parts) -> Result<&review_core::Review, Unanswered> {
+    parts
+        .checkout
+        .as_ref()
+        .ok_or_else(|| Unanswered::Failed("this review has no code on disk".to_owned()))
+}
+
+/// Whether the checkout holds on disk the tree `shown` of the snapshot on screen, recording
+/// nothing; runs in the background.
+///
+/// A checkout that turns out to be another clone stops every language server here, as its
+/// code is not what was trusted.
+fn on_disk(parts: &Parts, shown: &review_core::ObjectId) -> Result<(), Unanswered> {
+    match checkout_of(parts)?.tree_on_disk() {
+        Ok(tree) if tree == *shown => Ok(()),
+        Ok(_) => Err(Unanswered::Moved),
+        Err(review_core::Error::CloneReplaced) => {
+            parts.servers.stop();
+            Err(Unanswered::Failed(
+                "this checkout was replaced by another clone; reopen cr to review it".to_owned(),
+            ))
+        }
+        Err(review_core::Error::GitBusy(busy)) => Err(Unanswered::Failed(format!(
+            "git is busy ({busy}); press g d again once it finishes"
+        ))),
+        Err(err) => Err(Unanswered::Failed(err.to_string())),
+    }
+}
+
+/// Looks the definition up in the checkout, when it holds the code on screen, before the
+/// question and once it is answered (see [`on_disk`] and [`find_definition`]); runs in the
+/// background.
+fn look_up(parts: &Parts, asking: &Asking) -> Result<Definition, Unanswered> {
+    let failed = |err: &dyn std::fmt::Display| Unanswered::Failed(err.to_string());
+    let checkout = checkout_of(parts)?;
+    let root = checkout
+        .repo()
+        .work_tree()
+        .ok_or_else(|| Unanswered::Failed("the repository has no working tree".to_owned()))?;
+    let shown = parts
+        .review
+        .repo()
+        .tree_of(&asking.head)
+        .map_err(|err| failed(&err))?;
+    on_disk(parts, &shown)?;
+    let asked = Asked {
+        servers: &parts.servers,
+        epoch: asking.epoch,
+        current: &asking.current,
+        trusted: &|| checkout.trusted().unwrap_or_default(),
+    };
+    let found = find_definition(&asked, root, &asking.path, &asking.lines, asking.cursor)?;
+    as_in_snapshot(&parts.review, &asking.head, &found)?;
+    on_disk(parts, &shown)?;
+    Ok(found)
+}
+
+/// Refuses a definition in a file of the snapshot whose head is `head` that holds other text on
+/// disk than the snapshot does, as a file git keeps at its staged version under a filter can,
+/// though the tree on disk is the snapshot's: its line and column count in the text on disk.
+fn as_in_snapshot(
+    review: &review_core::Review,
+    head: &review_core::ObjectId,
+    found: &Definition,
+) -> Result<(), Unanswered> {
+    let failed = |err: review_core::Error| Unanswered::Failed(err.to_string());
+    let files = review.repo().tree_files(head).map_err(failed)?;
+    let Some(file) = files.into_iter().find(|file| file.path == found.path) else {
+        return Ok(());
+    };
+    match review
+        .repo()
+        .blob_reader()
+        .and_then(|mut reader| reader.read(&file.oid))
+    {
+        Ok(review_core::git::Blob::Content(bytes))
+            if FullText::new(&String::from_utf8_lossy(&bytes)).lines == found.lines.lines =>
+        {
+            Ok(())
+        }
+        Ok(review_core::git::Blob::Content(_)) => Err(Unanswered::Failed(format!(
+            "{} on disk is not what shows",
+            found.path
+        ))),
+        Ok(review_core::git::Blob::Oversized { .. }) => Err(Unanswered::Failed(format!(
+            "{} is too large to show",
+            found.path
+        ))),
+        Err(err) => Err(failed(err)),
+    }
 }
 
 /// What a definition lookup asks the language servers with.
 struct Asked<'a> {
     servers: &'a Servers,
-    ticket: Ticket,
+    /// The trust epoch the lookup was asked in.
+    epoch: u64,
     /// The window's trust epoch now.
     current: &'a AtomicU64,
     /// Whether the stored grant still applies.
     trusted: &'a dyn Fn() -> bool,
 }
 
-/// Finds where the identifier at byte `column` of line `line` of `path` (relative to `root`) is
-/// defined, starting a language server for `root` on first use while the servers admit the
-/// lookup (see [`Servers::admit`]), and reads that file.
+/// Finds where the identifier at `cursor` in `path` (relative to `root`) is defined, starting a
+/// language server for `root` on first use while the servers admit the lookup (see
+/// [`Servers::admit`]), and reads that file.
 ///
+/// The question counts only in the text `lines`, which the file must hold on disk, as the
+/// server reads it there; the server is told that text before every question, so an edit since
+/// the last one never leaves it answering about the old text.
 /// The handshake and the request run outside the servers' lock, with the server in the set,
 /// so a revocation meanwhile stops it there and the wait fails.
 /// A stored grant gone once the server answered, as when another window revoked it meanwhile,
@@ -647,8 +789,8 @@ fn find_definition(
     asked: &Asked<'_>,
     root: &Path,
     path: &str,
-    line: usize,
-    column: usize,
+    lines: &FullText,
+    cursor: TextPos,
 ) -> Result<Definition, Unanswered> {
     let failed = Unanswered::Failed;
     // Language servers answer with canonical paths, so the root must be canonical to strip it.
@@ -660,22 +802,27 @@ fn find_definition(
         .ok_or_else(|| failed(format!("no language server is configured for {path}")))?;
     let text = std::fs::read_to_string(&file)
         .map_err(|err| failed(format!("cannot read {path}: {err}")))?;
+    // A file git keeps at its staged version under a filter driver, or one a sparse checkout
+    // leaves off disk, is not what shows even when the rest of the checkout is.
+    if !text.lines().eq(lines.lines.iter().map(String::as_str)) {
+        return Err(failed(format!("{path} on disk is not what shows")));
+    }
     let source = text
         .lines()
-        .nth(line)
-        .ok_or_else(|| failed(format!("{path} has no line {}", line + 1)))?;
+        .nth(cursor.row)
+        .ok_or_else(|| failed(format!("{path} has no line {}", cursor.row + 1)))?;
     let position = lsp::Position {
-        line,
-        character: lsp::utf16_column(source, column.min(source.len())),
+        line: cursor.row,
+        character: lsp::utf16_column(source, cursor.col.min(source.len())),
     };
     let server = asked.servers.admit(
-        asked.ticket,
+        asked.epoch,
         asked.current,
         asked.trusted,
         command.program,
         || LanguageServer::launch(&command, root).map_err(|err| err.to_string()),
     )?;
-    let initialized = server.lock().initialize(&command, root);
+    let initialized = server.lock().initialize(root);
     let answered = match initialized {
         Ok(()) => server
             .lock()
@@ -689,7 +836,7 @@ fn find_definition(
     if !(asked.trusted)() {
         asked
             .servers
-            .check(asked.ticket, asked.current, || Trust::Denied);
+            .check(asked.epoch, asked.current, true, || Trust::Denied);
         return Err(Unanswered::Denied);
     }
     let definition = answered.map_err(|err| failed(err.to_string()))?;
@@ -701,7 +848,7 @@ fn find_definition(
         .path
         .canonicalize()
         .unwrap_or_else(|_| definition.path.clone());
-    // Inside the review, the path as the review names files, with `/` on every platform.
+    // Inside the checkout, the path as the review names files, with `/` on every platform.
     let shown = target_path.strip_prefix(root).map_or_else(
         |_| target_path.display().to_string(),
         |relative| {
@@ -712,7 +859,16 @@ fn find_definition(
                 .join("/")
         },
     );
-    let target_line = target.lines().nth(definition.position.line).unwrap_or("");
+    // The answer counts only where the file read now has the line it names.
+    let target_line = target
+        .lines()
+        .nth(definition.position.line)
+        .ok_or_else(|| {
+            failed(format!(
+                "{shown} has no line {}, which the language server named",
+                definition.position.line + 1
+            ))
+        })?;
     let column = lsp::byte_column(target_line, definition.position.character);
     Ok(Definition {
         syntax: crate::syntax::analyze(&shown, &target),
@@ -725,61 +881,27 @@ fn find_definition(
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
-    /// What a lookup of the window's first showing asks with, the stored grant applying as
+    /// What a lookup of the window's first trust epoch asks with, the stored grant applying as
     /// `trusted` says.
     fn asked<'a>(servers: &'a Servers, trusted: &'a dyn Fn() -> bool) -> Asked<'a> {
         static CURRENT: AtomicU64 = AtomicU64::new(0);
         Asked {
             servers,
-            ticket: Ticket {
-                showing: 0,
-                epoch: 0,
-            },
+            epoch: 0,
             current: &CURRENT,
             trusted,
         }
     }
 
-    /// Follows a method call in the demo to its definition; skipped where rust-analyzer is not
-    /// installed.
-    #[test]
-    fn definition_from_a_demo_head_line() {
-        if !crate::lsp::rust_analyzer_installed() {
-            eprintln!("skipped: rust-analyzer is not installed");
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let review = review_core::demo::prepare(
-            &review_core::demo::DemoPaths::under(dir.path()),
-            &review_core::demo::fixture_dir(),
-            review_core::demo::DemoRequest::Fresh,
-        )
-        .unwrap();
-        let history = review.history().unwrap();
-        let root = review
-            .worktree(history.revisions().last().unwrap())
-            .unwrap();
-        let text = std::fs::read_to_string(root.join("src/engine.rs")).unwrap();
-        let (line, source) = text
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains("self.balance(account)"))
-            .unwrap();
-        let column = source.find("balance(").unwrap();
-        let servers = Servers::default();
-        let found = find_definition(
-            &asked(&servers, &|| true),
-            &root,
-            "src/engine.rs",
-            line,
-            column,
-        )
-        .unwrap();
-        assert_eq!(found.path, "src/engine.rs");
-        assert!(found.lines.lines[found.line].contains("fn balance("));
-    }
+    /// The text `lib.rs` holds in these tests, on disk and on screen alike.
+    const LIB: &str = "fn a() {}\n";
+
+    /// The cursor on `a` in [`LIB`].
+    const ON_A: TextPos = TextPos { row: 0, col: 3 };
 
     /// A stored grant gone once the language server answered, as when another window revoked
     /// it while the lookup waited, drops the answer and stops the servers.
@@ -787,7 +909,7 @@ mod tests {
     #[test]
     fn a_revocation_while_the_server_answers_drops_the_answer() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), LIB).unwrap();
         let servers = Servers::default();
         // A server that ends at once, so it answers the handshake with a failure.
         let answering = LanguageServer::stand_in("true", &[], dir.path()).unwrap();
@@ -804,7 +926,13 @@ mod tests {
             reads.set(reads.get() + 1);
             reads.get() == 1
         };
-        let found = find_definition(&asked(&servers, &trusted), dir.path(), "lib.rs", 0, 3);
+        let found = find_definition(
+            &asked(&servers, &trusted),
+            dir.path(),
+            "lib.rs",
+            &FullText::new(LIB),
+            ON_A,
+        );
         assert!(matches!(found, Err(Unanswered::Denied)));
         assert_eq!(servers.len(), 0);
         assert!(
@@ -818,10 +946,42 @@ mod tests {
     #[test]
     fn no_server_starts_once_trust_is_revoked() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), LIB).unwrap();
         let servers = Servers::default();
-        let found = find_definition(&asked(&servers, &|| false), dir.path(), "lib.rs", 0, 3);
+        let found = find_definition(
+            &asked(&servers, &|| false),
+            dir.path(),
+            "lib.rs",
+            &FullText::new(LIB),
+            ON_A,
+        );
         assert!(matches!(found, Err(Unanswered::Denied)));
+        assert_eq!(servers.len(), 0);
+    }
+
+    /// A file whose text on disk is not what shows, as one git keeps at its staged version
+    /// under a filter driver, is refused before any server is asked, since the cursor's line
+    /// and column count in the text on screen.
+    #[test]
+    fn a_file_unlike_on_disk_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), LIB).unwrap();
+        let servers = Servers::default();
+        let found = find_definition(
+            &asked(&servers, &|| panic!("the stored grant is read")),
+            dir.path(),
+            "lib.rs",
+            &FullText::new(indoc! {"
+                // staged
+                fn a() {}
+            "}),
+            ON_A,
+        );
+        assert!(
+            matches!(&found, Err(Unanswered::Failed(why)) if why == "lib.rs on disk is not what shows"),
+            "{:?}",
+            found.err()
+        );
         assert_eq!(servers.len(), 0);
     }
 }

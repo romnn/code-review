@@ -8,26 +8,35 @@ The UI thread of review-tui and review-gui only draws, maps input to model calls
 effects; it never blocks. Until now that held by habit: the model kept the review, the live
 session, the watch on the working tree and the language servers in fields any model code could
 reach, so a blocking call compiled on the UI thread, and several had crept in. Reading trust took
-the log's lock as a capture showed, `R` on a range resolved a tree through git, granting and
-revoking trust appended to the log in the key handler, a new head stopped and waited for the
-language servers, a review of the working tree started its session, and the session, the watch
-and the servers waited for git, threads and processes as they were dropped.
+the log's lock as a capture showed, granting and revoking trust appended to the log in the key
+handler, a new head stopped and waited for the language servers, a review of the working tree
+started its session, and the session, the watch and the servers waited for git, threads and
+processes as they were dropped.
 
-Trust guards running reviewed code. Its writes were safe because they were synchronous: a
-revocation stopped the servers under the lock a launch holds while it reads the stored grant.
-Moving trust off the UI thread must keep that: no server starts on code the reviewer did not
-trust, and none keeps running once the window says a revocation took effect.
+Trust guards running the reviewed code. A language server reads the workspace's build
+configuration, which can name any program as a `rustc` wrapper, and with its builds on it runs
+build scripts and proc macros, which can run anything and write anywhere the reviewer can. Its
+writes were safe because they were synchronous: a revocation stopped the servers under the lock a
+launch holds while it reads the stored grant. Moving trust off the UI thread must keep that: no
+server starts on code the reviewer did not trust, and none keeps running once the window says a
+revocation took effect.
+
+Where a server runs decides what it can do and what a grant means. It needs the code on disk.
+The reviewer reviews the checkout, a branch's working tree against its base, with their own and
+agents' edits arriving through the live sync; pull requests that are not checked out are not
+reviewed in practice. rust-analyzer is useful only with its builds on, in the project's own build
+state.
 
 ## Decision
 
 - **One engine handle, private to background work.** `review_ui::model::engine` holds the review,
-  the session, the watch and the language servers. The model can neither look into the handle
-  nor clone it: all it can do is queue a job that runs with the engine's parts, through the
-  existing effects, whose outcome comes back as plain data, or hand the handle to the job that
-  stops it. The wait for the working tree to change holds only the watch's waiter, which holds
-  the watch weakly, so no wait keeps the engine alive. The opening job assembles the handle,
-  splitting the checkout's session off what its opening capture saw. The title and paint read a
-  plain copy of `ReviewMeta`.
+  the checkout's review that holds the trust in it, the session, the watch and the language
+  servers. The model can neither look into the handle nor clone it: all it can do is queue a job
+  that runs with the engine's parts, through the existing effects, whose outcome comes back as
+  plain data, or hand the handle to the job that stops it. The wait for the working tree to change
+  holds only the watch's waiter, which holds the watch weakly, so no wait keeps the engine alive.
+  The opening job assembles the handle, splitting the checkout's session off what its opening
+  capture saw. The title and paint read a plain copy of `ReviewMeta`.
 - **A front end can only start a job.** A job is opaque: its one public operation runs it on a
   thread of its own and hands its completion back, so no front end can run it in place on the UI
   thread. Both apps run every job that way, a wait for the working tree included, so there is
@@ -43,41 +52,86 @@ trust, and none keeps running once the window says a revocation took effect.
   so no key, click, scroll or layout acts and nothing it would change goes unsaved; no capture
   shows either. Jobs' and timers' completions keep landing through `Driver::complete`, which is
   how the engine's stop lands and the app quits.
-- **Trust shows as one state, `Checking`, `Denied` or `Granted` with its scope,** which is
-  `Checking` while a reading or a decision is under way, and then nothing starts.
-- **One owner decides whether a language server may run.** The engine's `Servers` hold one set
-  of servers, for the current showing of a head, named by the generation of the snapshot shown
-  when that head became current, so a head shown again is a showing of its own. Its one lock
-  serializes the readings of trust, the decisions on trust and the admission of lookups, and
-  stopping a server waits for its process to exit. Wherever trust is found denied there, by a
-  reading, a lookup or a revocation, every server stops in that same operation, before the
-  window hears of it. Another showing's reading replaces the set the same way, and a reading
-  that no longer counts, of an older showing or epoch, reads nothing and changes nothing. No job stops servers later, so none can stop
-  a server started after it.
+- **Language servers run only in the checkout, on the code on disk.** A server runs in the
+  checkout's working tree, its current directory and workspace root, with rust-analyzer's builds
+  on and the project's own target directory. Go to definition runs only where what shows is the
+  code on disk: the newest revision of a review of the working tree, the checkout's review or one
+  opened with `--worktree`. A review of a range or a pull request, or an older revision, says so
+  before it asks for trust: check out the branch and review it there.
+- **One grant per checkout and clone.** The checkout's review holds it, keyed by the working tree
+  and the clone, as a `trust` event of scope `in_checkout` in its log. It covers whatever the
+  checkout holds after later edits and branch switches, until it is revoked, and only while the
+  checkout is the same clone. A `--worktree` review shares it: the opening job binds the
+  checkout's review of the clone there then. The question asks afresh for running in place, and
+  says that build scripts, proc macros and the workspace's configuration can run any program
+  and write in the checkout. Decisions recorded for tools running in copies of the code, of the
+  whole review, one snapshot or the checkout's copies, stay readable in the log and grant
+  nothing.
+- **A lookup checks the disk before the question and after the answer.** The lookup job compares
+  the tree of the head the last frame showed with a capture of the working tree taken now, with
+  every filter off, recording and pinning nothing, refused while git is busy
+  (`Review::tree_on_disk`). Code that is not on disk is refused before any server is asked, and
+  on an untrusted checkout before the trust question, so the reviewer never grants trust for a
+  lookup that cannot run; an answer is dropped when the disk, the view or the trust changed while
+  it ran. The file asked about must hold on disk the text on screen, so the cursor's line and
+  column name the same bytes, which a file git keeps at its staged version under a filter, or one
+  a sparse checkout leaves off disk, need not. A definition in a file of the snapshot on screen
+  must hold on disk the text of its blob there, for the same reason; one elsewhere, such as in
+  the standard library, opens as read from disk. It opens in the buffer on screen only when that
+  buffer shows the same text.
+- **A server outlives the captures and holds no text of the client's.** It keeps the index it
+  built while the reviewer and agents edit. Each question opens the file with its text, which is
+  its text on disk, and closes it once answered, so the server reads every file from disk again,
+  through its own watch on the files, and never keeps text the file no longer has.
+- **Trust shows as one state, `Checking`, `Denied` or `Granted`,** which is `Checking` while a
+  reading or a decision is under way, and then nothing starts.
+- **One owner decides whether a language server may run.** The engine's `Servers` hold the one
+  set of servers running in the checkout. Its one lock serializes the readings of trust, the
+  decisions on trust and the admission of lookups. Wherever trust is found denied there, by a
+  reading, a lookup, the watch on the grant or a revocation, every server stops in that same
+  operation, before the window hears of it. A reading of a view that is not the checkout's code,
+  such as an older revision, stops them the same way. The worker that finds the checkout replaced
+  by another clone, a capture or a lookup, stops them there, and so does the job that ends the
+  review in a window whose log or clone was replaced. A reading that no longer counts, of an
+  older epoch, reads nothing and changes nothing. No job stops servers later, so none can stop a
+  server started after it, except where the review ended and no lookup starts one any more.
+- **Stopping a server asks it to exit, then kills its process group.** It sends a `shutdown`
+  request and an `exit` notification and closes the server's input, and waits up to two seconds
+  for the server to exit, so a server stops what it started itself, as rust-analyzer stops the
+  commands it runs in process groups of their own. Then it kills the server's process group,
+  which holds the server and what it started there and left running, such as Cargo, build
+  scripts and proc macros, and reaps the server. Once it returns, the server and every process
+  of its group are gone; a process the server started outside its group and did not stop itself
+  is out of reach. The server is reaped only after its group is killed, so no other group that
+  takes its id is ever signalled.
 - **A decision on trust is a save,** queued with the marks in their one ordered queue, which
   quitting waits for; once the app waits to quit, it takes no new one. One is under way at most,
   since trust is being checked until it is recorded, and the save queue keeps the snapshot on
   screen meanwhile. Its job records it and reads the trust that applies after it in the owner.
-  A revocation stops every server there, whatever grant still applies and whether or not it was
-  recorded, so the status line says the revocation took effect only once none runs, even while a
-  lookup still holds one. A revocation that cannot be recorded stops a quit the reviewer waits
-  for, as a failed mark does, and the owner keeps trust denied, whatever is stored, until a
-  grant is recorded.
+  A revocation stops every server there, whether or not it was recorded, so the status line says
+  the revocation took effect only once none runs, even while a lookup still holds one. A
+  revocation that cannot be recorded stops a quit the reviewer waits for, as a failed mark does,
+  and the owner keeps trust denied, whatever is stored, until a grant is recorded.
 - **Every snapshot that shows has its trust read again by the owner.** A capture or `R` shows
-  the new diff at once, with trust `Checking` until the reading lands. A pull request's review
-  is trusted as a whole, as before.
+  the new diff at once, with trust `Checking` until the reading lands.
+- **While a server may run, the owner reads the grant every 30 seconds, whatever shows.** A
+  lookup arms the watch, and each reading that finds a server running arms the next. It reads
+  the grant and the clone through the checkout's review bound as the window opened, so it covers
+  a `--worktree` review too, and runs whether the window follows the disk or not, an overlay
+  holds captures back or git is busy. So a revocation in another window, or another clone at the
+  checkout's path, stops this window's servers within 30 seconds and the time they take to exit.
 - **A trust epoch orders what lands.** It moves on with every decision, every other snapshot
   that shows and every denial the window takes in, and a reading or a lookup's answer lands only
   in the epoch it was asked in, so an answer from before a revocation never lands, even after
   trust is granted again.
-- **A lookup is admitted by its ticket and the stored grant.** A lookup carries a ticket: the
-  showing and the epoch it started in. Under the owner's lock, before it finds or launches a
-  server, a ticket that no longer counts is refused before the stored grant is read, which may
-  wait for another writer; then the grant is read, and the epoch asked for again. A lookup of an
-  epoch in which the owner found trust denied is refused as denied. A launched server is in the
-  set before the lock is released; the handshake and the request run outside it. Once the
-  server answers, the stored grant is read again: gone, as when another window revoked it
-  meanwhile, it stops the servers as a denial found anywhere does, and the answer is dropped.
+- **A lookup is admitted by its epoch and the stored grant.** Under the owner's lock, before it
+  finds or launches a server, a lookup whose epoch no longer counts is refused before the stored
+  grant is read, which may wait for another writer; then the grant is read, the clone checked,
+  and the epoch asked for again. A lookup of an epoch in which the owner found trust denied is
+  refused as denied. A launched server is in the set before the lock is released; the handshake
+  and the request run outside it. Once the server answers, the stored grant is read again: gone,
+  as when another window revoked it meanwhile, it stops the servers as a denial found anywhere
+  does, and the answer is dropped.
 
 ## Consequences
 
@@ -89,20 +143,48 @@ trust, and none keeps running once the window says a revocation took effect.
 - A front end changes the model only through `Driver::update`, whose value is `None` once the
   app closes, and hands it completions only through `Driver::complete`.
 - The bottom bar says `checking trust` for the moment a reading takes after every capture.
-- `Ctrl+T` answers at once with "Granting trust…" or "Revoking trust…", and says the outcome
-  once the job confirms it; `g d` and `Ctrl+T` say trust is being checked while it is.
-- A failed revocation leaves the grant stored, so the review is trusted again when it opens
-  anew; the status line says so.
+- `Ctrl+T` asks the trust question or answers at once with "Revoking trust…", and says the
+  outcome once the job confirms it; `g d` and `Ctrl+T` say trust is being checked while it is.
+- Go to definition is unavailable for pull requests that are not checked out, ranges and older
+  revisions; their reviews read the code from git objects as before. Nothing is copied: no data
+  directory grows by a copy of the sources per snapshot, and the read-only copies older versions
+  left stay until removed, but for the demo, which removes them as it rebuilds.
+- rust-analyzer builds in the checkout's target directory, so its builds share the project's
+  build state and its lock with the reviewer's own Cargo runs.
+- A lookup reads the working tree's tree twice, each as long as a capture's look at it takes,
+  and while captures keep showing, as while an agent edits, an answer for a snapshot no longer
+  on screen is dropped; the server keeps its index for the next question.
+- The server reads the files it is not asked about through its own watch on them, so an answer
+  within moments of an edit of another file may still be about that file as it was; the window
+  shows the edit only once its capture lands, which takes longer.
+- A revocation, a quit or a replaced clone waits up to two seconds for each server that ignores
+  the request to exit, under the owner's lock.
+- A failed revocation leaves the grant stored, so the checkout is trusted again when the review
+  opens anew; the status line says so.
 - Out of reach still: another window's revocation landing within milliseconds of this window's
-  launch, which only the stored grant checked under the lock catches; the processes a server
-  starts itself, which killing the server does not stop; and the terminal's frames and clipboard
-  writes on review-tui's main loop.
+  launch, which only the stored grant checked under the lock catches; a process a server started
+  outside its process group and did not stop when asked to exit; and the terminal's frames and
+  clipboard writes on review-tui's main loop.
 - A lookup that finds trust denied while the reviewer moved to another buffer stops the servers,
   but its answer does not land, so the window shows the denial once trust is next read or
   another lookup finds it.
 
 ## Rejected alternatives
 
+- **Language servers in read-only copies of each reviewed snapshot.** They worked for any review,
+  pull requests and older revisions included, but each copied the sources of a snapshot tree into
+  the review's data and kept it forever, read-only copies broke plain deletion, rust-analyzer had
+  to run with builds off and index from scratch so as not to build in them, and a grant per
+  snapshot or per pull request promised a boundary the server, which reads build inputs outside
+  the tree, could not keep. Most of the races trust and the servers had to close lived on those
+  paths, for reviews the reviewer does not do.
+- **Restarting the servers whenever the code changes.** It would never answer about stale text,
+  but rust-analyzer indexing a large workspace again after every edit is unusable; opening only
+  the file asked about, for the question alone, leaves every other file to the server's reading
+  of the disk at no such cost.
+- **Keeping the files asked about open, and sending each again when it changed.** The server
+  treats an open file's text as the client's and ignores the disk for it, so a file asked about
+  earlier and edited since answered with its old text when another file's question led into it.
 - **A background owner thread per window, taking data-only commands.** It would cover races
   between windows and reap servers at exit, at several times the size: a command enum, its
   replies and a close handshake, for races that only an asynchronous rewrite introduces.
@@ -111,20 +193,22 @@ trust, and none keeps running once the window says a revocation took effect.
   the review, marks included.
 - **A resettable flag that a revocation sets and a launch reads.** Whoever resets it can let a
   stale launch through; an epoch that only moves on cannot.
-- **Retiring servers in a job of its own after a head change or a denial.** Retirement decided
-  by a last-use epoch that reuse rewrites drew a race in two review rounds running: a process
-  from before a denial survived it once a lookup reused it, and a late retirement stopped a
-  server started after a new grant. Stopping the servers in the operation that finds the denial
-  or the new showing leaves nothing to run late.
+- **Retiring servers in a job of its own after a denial.** Retirement decided by a last-use epoch
+  that reuse rewrites drew a race in two review rounds running: a process from before a denial
+  survived it once a lookup reused it, and a late retirement stopped a server started after a new
+  grant. Stopping the servers in the operation that finds the denial leaves nothing to run late.
 - **A closed `Input` enum that every reviewer action goes through.** Gating the driver, already
   the only way a front end changes the model, covers every present and future input the same,
   without moving every input method behind an enum.
 
 ## References
 
-- `crates/review-ui/src/model/engine.rs` (`Engine`, `Parts`, `Servers`, `Ticket`, `Waiting`)
+- `crates/review-ui/src/model/engine.rs` (`Engine`, `Parts`, `Servers`, `Waiting`)
 - `crates/review-ui/src/model/effects.rs` (`Job`, `Driver`)
 - `crates/review-ui/src/model/trust.rs`
-- `crates/review-ui/src/model/buffer.rs` (`find_definition`)
+- `crates/review-ui/src/model/buffer.rs` (`go_to_definition`, `look_up`, `find_definition`)
+- `crates/review-ui/src/lsp.rs` (`LanguageServer`, `Stopper`)
+- `crates/review-core/src/review/trust.rs` (`Review::trusted`, `Review::checkout_review`,
+  `Review::tree_on_disk`)
 - `crates/review-ui/src/model/quit.rs`
 - `crates/review-ui/src/model/marks.rs` (`Save`)

@@ -202,13 +202,6 @@ enum Command {
         #[arg(long)]
         count: Option<u64>,
     },
-    /// Print the path of a detached worktree at a revision's head, for browsing.
-    Worktree {
-        /// The revision, `3` or `3@<tag>` as `cr show` prints it; defaults to the current (last)
-        /// one.
-        #[arg(long, value_name = "N[@TAG]")]
-        revision: Option<commands::RevisionReference>,
-    },
 }
 
 /// Export formats.
@@ -293,7 +286,6 @@ fn main() -> eyre::Result<()> {
             }
         },
         Command::Watch { interval, count } => commands::watch(&context, interval, count),
-        Command::Worktree { revision } => commands::worktree(&context, revision.as_ref()),
     }
 }
 

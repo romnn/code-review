@@ -43,6 +43,9 @@ pub(super) enum Tick {
     /// The time for the periodic lookup of the checked-out branch's pull request; each lookup
     /// sets the next.
     PullRequest,
+    /// The time for the periodic reading of the grant while language servers may run; each
+    /// reading that finds one running sets the next.
+    Guard,
 }
 
 /// The review's freshness.
@@ -168,6 +171,7 @@ impl Model {
             Tick::Minute => self.start_clock(),
             Tick::Reconcile => self.reconcile(),
             Tick::PullRequest => self.pull_request_due(),
+            Tick::Guard => self.guard_due(),
             Tick::Spin | Tick::Recovered => {}
         }
     }

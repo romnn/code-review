@@ -57,7 +57,7 @@ widening a related one.
 - Fetches never touch refs outside `refs/code-review/*` or `FETCH_HEAD`: always
   `--no-write-fetch-head --refmap=` with explicit refspecs.
 - Never execute reviewed code without explicit trust. Language servers, build tools and anything
-  that reads the reviewed tree's build configuration start only when `Review::trust` says the
+  that reads the reviewed tree's build configuration start only when `Review::trusted` says the
   review is trusted.
 - Code copied from Zed goes only into GPL-3.0-or-later crates, with a comment naming the source
   file and Zed commit.

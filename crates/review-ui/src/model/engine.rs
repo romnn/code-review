@@ -1,5 +1,6 @@
-//! The engine handle: the review, the session that pins what the window shows, the watch on
-//! the working tree and the language servers, which only background work can reach.
+//! The engine handle: the review, the checkout's review that holds the trust in it, the session
+//! that pins what the window shows, the watch on the working tree and the language servers,
+//! which only background work can reach.
 //!
 //! [`Servers`] is the one authority on whether a language server may start or be used: see the
 //! `trust` module.
@@ -42,6 +43,10 @@ pub(super) struct Engine {
 pub(super) struct Parts {
     /// The review.
     pub(super) review: Review,
+    /// The review of the checkout, which holds the trust to run tools in it, bound to the clone
+    /// there when the review opened; `None` for a review whose code is not on disk (see
+    /// [`Review::checkout_review`]).
+    pub(super) checkout: Option<Review>,
     /// The session that pins the captures the window shows, for a review that follows the
     /// working tree, until the engine stops; a capture holds it too while it runs, and it ends
     /// once the last holder lets go.
@@ -59,35 +64,24 @@ pub(super) struct Parts {
 /// dropped, the wait ends.
 pub(super) struct Waiting(Waiter);
 
-/// The language servers of the head on screen, with what decides whether they may run.
+/// The language servers running in the checkout, with what decides whether they may run.
 ///
-/// It holds one set of servers, for the current showing of a head, and its lock serializes the
-/// readings of trust, the decisions on trust and the admission of lookups.
+/// It holds one set of servers, which outlives the captures that show, so a server indexes the
+/// checkout once, and its lock serializes the readings of trust, the decisions on trust and the
+/// admission of lookups.
 /// It is held only for those, never across a handshake or a request.
 #[derive(Default)]
 pub(super) struct Servers(Mutex<Set>);
 
-/// The servers of one showing of a head, all in the worktree of its tree, by program.
+/// The servers running in the checkout, by program.
 #[derive(Default)]
 struct Set {
-    /// The showing they run for; see [`Ticket::showing`].
-    showing: u64,
     /// The first trust epoch a lookup is admitted in: the one after the last denial found here.
     floor: u64,
     running: HashMap<&'static str, Running>,
     /// Whether a revocation could not be recorded, which keeps trust denied here until a grant
-    /// is recorded, whatever the stored grants say.
+    /// is recorded, whatever the stored grant says.
     withdrawn: bool,
-}
-
-/// What a reading of trust or a lookup was asked in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Ticket {
-    /// The showing on screen: the generation of the snapshot shown when its head became
-    /// current; see [`Model::shown`]. So a head shown again is a showing of its own.
-    pub(super) showing: u64,
-    /// The trust epoch.
-    pub(super) epoch: u64,
 }
 
 /// A running language server, locked while a lookup uses it, with what stops it without that
@@ -108,34 +102,54 @@ impl Drop for Running {
 }
 
 impl Servers {
-    /// Reads, with `read`, the trust in the head that `ticket`'s showing shows, as a capture or
-    /// another revision showing asks; `current` is the window's trust epoch now.
+    /// Reads, with `read`, the trust in the checkout, as every snapshot that shows asks, in trust
+    /// `epoch`; `current` is the window's trust epoch now, and `on_disk` whether the window
+    /// shows the code the checkout holds rather than, say, an older revision.
     ///
-    /// A newer showing replaces the set, stopping its servers, and a ticket that no longer
-    /// counts, of an older showing or epoch, changes nothing and reads nothing, since reading
+    /// A reading whose epoch no longer counts changes nothing and reads nothing, since reading
     /// may wait for another writer of the review.
+    /// Without the checkout's code on screen, every server stops, as no lookup needs one.
     /// Trust found denied stops every server before it is returned, and no lookup of the
-    /// ticket's epoch or before is admitted any more.
+    /// reading's epoch or before is admitted any more.
     pub(super) fn check(
         &self,
-        ticket: Ticket,
+        epoch: u64,
         current: &AtomicU64,
+        on_disk: bool,
         read: impl FnOnce() -> Trust,
     ) -> Trust {
         let mut set = self.0.lock();
-        if ticket.showing < set.showing || current.load(Ordering::SeqCst) != ticket.epoch {
+        if current.load(Ordering::SeqCst) != epoch {
             return Trust::Denied;
         }
-        if ticket.showing > set.showing {
+        if !on_disk {
             // Each server stops as it leaves the set.
             set.running.clear();
-            set.showing = ticket.showing;
         }
         let trust = if set.withdrawn { Trust::Denied } else { read() };
         if !trust.granted() {
-            set.deny(ticket);
+            set.deny(epoch);
         }
         trust
+    }
+
+    /// Reads, with `read`, the trust in the checkout while any server runs, as the window's
+    /// watch on the grant does whatever shows; `current` is the window's trust epoch now.
+    ///
+    /// Trust found denied, as when another window revoked it or another clone took the
+    /// checkout's path, stops every server before it is returned, and no lookup of the current
+    /// epoch or before is admitted any more.
+    /// Without a server running, it reads nothing and returns `None`.
+    pub(super) fn guard(&self, current: &AtomicU64, read: impl FnOnce() -> Trust) -> Option<Trust> {
+        let mut set = self.0.lock();
+        if set.running.is_empty() {
+            return None;
+        }
+        let trust = if set.withdrawn { Trust::Denied } else { read() };
+        if !trust.granted() {
+            set.deny(current.load(Ordering::SeqCst));
+        }
+        Some(trust)
     }
 
     /// Records a decision on trust with `record`, which returns the trust that applies after it.
@@ -159,34 +173,35 @@ impl Servers {
         recorded.map(|trust| if set.withdrawn { Trust::Denied } else { trust })
     }
 
-    /// Hands a lookup of `ticket` the server `program`, launching it with `launch` when none
-    /// runs, while the stored grant, which `trusted` reads, still applies; `current` is the
+    /// Hands a lookup of trust `epoch` the server `program`, launching it with `launch` when
+    /// none runs, while the stored grant, which `trusted` reads, still applies; `current` is the
     /// window's trust epoch now.
     ///
     /// All under the lock, so a decision or a reading of trust either comes first and is seen
     /// here, or waits for the launch, which only spawns the process, and stops what it
     /// launched.
-    /// A ticket that no longer counts is refused before the stored grant is read, which may
-    /// wait for another writer of the review, and the epoch is asked for again after it, since
-    /// the reviewer may revoke trust meanwhile.
-    /// Trust found denied since the ticket's epoch, here or by a reading, refuses it as denied,
-    /// and so does a stored grant that no longer applies, which stops every server.
+    /// A lookup whose epoch no longer counts is refused before the stored grant is read, which
+    /// may wait for another writer of the review, and the epoch is asked for again after it,
+    /// since the reviewer may revoke trust meanwhile.
+    /// Trust found denied since the lookup's epoch, here or by a reading, refuses it as denied,
+    /// and so does a stored grant that no longer applies, as in another clone, which stops
+    /// every server.
     /// The server is in the set before the lock is released, so a revocation finds it.
     pub(super) fn admit(
         &self,
-        ticket: Ticket,
+        epoch: u64,
         current: &AtomicU64,
         trusted: impl FnOnce() -> bool,
         program: &'static str,
         launch: impl FnOnce() -> Result<LanguageServer, String>,
     ) -> Result<Arc<Mutex<LanguageServer>>, Unanswered> {
-        let lasts = || current.load(Ordering::SeqCst) == ticket.epoch;
+        let lasts = || current.load(Ordering::SeqCst) == epoch;
         let mut set = self.0.lock();
-        if ticket.showing != set.showing || !lasts() {
+        if !lasts() {
             return Err(Unanswered::Stale);
         }
-        if ticket.epoch < set.floor || set.withdrawn || !trusted() {
-            set.deny(ticket);
+        if epoch < set.floor || set.withdrawn || !trusted() {
+            set.deny(epoch);
             return Err(Unanswered::Denied);
         }
         if !lasts() {
@@ -217,30 +232,33 @@ impl Servers {
         }
     }
 
-    /// Stops every server, as the engine stops.
-    fn stop(&self) {
+    /// Stops every server, as the engine stops or the checkout turns out to be another clone,
+    /// whose code no grant covers; a lookup admitted after reads the grant that no longer
+    /// applies.
+    pub(super) fn stop(&self) {
         self.0.lock().running.clear();
     }
 }
 
 impl Set {
     /// Stops every server, its process gone by the time this returns, and admits no lookup of
-    /// `ticket`'s epoch or before any more: the window moves its epoch on as it takes the
-    /// denial in.
-    fn deny(&mut self, ticket: Ticket) {
+    /// `epoch` or before any more: the window moves its epoch on as it takes the denial in.
+    fn deny(&mut self, epoch: u64) {
         // Each server stops as it leaves the set.
         self.running.clear();
-        self.floor = self.floor.max(ticket.epoch + 1);
+        self.floor = self.floor.max(epoch + 1);
     }
 }
 
 impl Engine {
-    /// The handle on `review`, with the session the window follows the working tree under, if
-    /// it does; made by the job that opens the review.
-    pub(super) fn new(review: Review, session: Option<Session>) -> Self {
+    /// The handle on `review`, with the review of its `checkout`, if it has code on disk, and
+    /// the session the window follows the working tree under, if it does; made by the job that
+    /// opens the review.
+    pub(super) fn new(review: Review, checkout: Option<Review>, session: Option<Session>) -> Self {
         Self {
             parts: Arc::new(Parts {
                 review,
+                checkout,
                 session: Mutex::new(session.map(Arc::new)),
                 watch: Mutex::new(None),
                 servers: Servers::default(),
@@ -298,10 +316,13 @@ impl Model {
         })));
     }
 
-    /// Queues the job that stops watching the working tree, which ends the wait on it.
+    /// Queues the job that stops watching the working tree, which ends the wait on it, and
+    /// stops the language servers, as the review ends in this window and no lookup runs any
+    /// more.
     pub(super) fn unwatch(&mut self) {
         self.spawn_with(Subject::Always(Because::Live), |parts| {
             drop(parts.watch.lock().take());
+            parts.servers.stop();
             Outcome::Unwatched
         });
     }
@@ -388,21 +409,11 @@ mod tests {
         !Path::new(&format!("/proc/{id}")).exists()
     }
 
-    /// The ticket of `showing` in `epoch`.
-    fn ticket(showing: u64, epoch: u64) -> Ticket {
-        Ticket { showing, epoch }
-    }
-
-    /// Admits a lookup of `ticket` for `rust`, the stored grant applying as `trusted` says,
+    /// Admits a lookup of trust `epoch` for `rust`, the stored grant applying as `trusted` says,
     /// launching a stand-in in `dir`; returns the process it got.
-    fn admit(
-        servers: &Servers,
-        ticket: Ticket,
-        trusted: bool,
-        dir: &Path,
-    ) -> Result<u32, Unanswered> {
-        let current = AtomicU64::new(ticket.epoch);
-        let server = servers.admit(ticket, &current, || trusted, "rust", || Ok(stand_in(dir)))?;
+    fn admit(servers: &Servers, epoch: u64, trusted: bool, dir: &Path) -> Result<u32, Unanswered> {
+        let current = AtomicU64::new(epoch);
+        let server = servers.admit(epoch, &current, || trusted, "rust", || Ok(stand_in(dir)))?;
         let process = server.lock().process_id();
         Ok(process)
     }
@@ -432,7 +443,7 @@ mod tests {
                 let current = AtomicU64::new(0);
                 let trusted = || !revoked.load(Ordering::SeqCst);
                 servers
-                    .admit(ticket(0, 0), &current, trusted, "rust", launch)
+                    .admit(0, &current, trusted, "rust", launch)
                     .map(|server| server.lock().process_id())
             }
         });
@@ -450,15 +461,16 @@ mod tests {
         assert!(gone(process), "the server launched still runs");
         assert_eq!(servers.len(), 0);
         assert!(matches!(
-            admit(&servers, ticket(0, 1), false, dir.path()),
+            admit(&servers, 1, false, dir.path()),
             Err(Unanswered::Denied)
         ));
     }
 
     /// A revocation while a server is in its handshake, which runs outside the servers' lock,
-    /// returns at once and stops it, and the handshake fails.
+    /// stops it without waiting for the handshake, once the server, which ignores the request to
+    /// exit, is killed after the exit deadline, and the handshake fails.
     #[test]
-    fn a_revocation_during_a_slow_handshake_returns_promptly() {
+    fn a_revocation_during_a_slow_handshake_waits_only_for_the_exit_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let servers = Arc::new(Servers::default());
         let worker = std::thread::spawn({
@@ -470,11 +482,8 @@ mod tests {
                     LanguageServer::stand_in("sleep", &["30"], &root).map_err(|err| err.to_string())
                 };
                 let current = AtomicU64::new(0);
-                let server = servers
-                    .admit(ticket(0, 0), &current, || true, "rust", launch)
-                    .unwrap();
-                let command = crate::lsp::server_for(Path::new("lib.rs")).unwrap();
-                server.lock().initialize(&command, &root)
+                let server = servers.admit(0, &current, || true, "rust", launch).unwrap();
+                server.lock().initialize(&root)
             }
         });
         // The server is in the set, shaking hands.
@@ -491,8 +500,8 @@ mod tests {
         let revoking = Instant::now();
         servers.decide(true, || Ok::<_, ()>(Trust::Denied)).unwrap();
         assert!(
-            revoking.elapsed() < Duration::from_secs(1),
-            "the revocation waited"
+            revoking.elapsed() < crate::lsp::EXIT_DEADLINE + Duration::from_secs(1),
+            "the revocation waited for the handshake"
         );
         let shaken = worker.join().unwrap();
         assert!(
@@ -510,25 +519,25 @@ mod tests {
     fn a_revocation_stops_every_server() {
         let dir = tempfile::tempdir().unwrap();
         let servers = Servers::default();
-        let granted = || Trust::Granted(super::super::Grant::Snapshot);
+        let granted = || Trust::Granted;
 
-        let first = admit(&servers, ticket(0, 0), true, dir.path()).unwrap();
+        let first = admit(&servers, 0, true, dir.path()).unwrap();
         servers.decide(false, || Ok::<_, ()>(granted())).unwrap();
         assert_eq!(servers.len(), 1, "a grant stops none");
         let still = servers.decide(true, || Ok::<_, ()>(granted())).unwrap();
         assert_eq!(still, granted());
         assert!(gone(first), "another grant still applies");
 
-        let second = admit(&servers, ticket(0, 1), true, dir.path()).unwrap();
+        let second = admit(&servers, 1, true, dir.path()).unwrap();
         let failed = servers.decide(true, || Err::<Trust, _>("the log is read-only"));
         assert!(failed.is_err());
         assert!(gone(second), "a failed revocation stops them");
         assert_eq!(
-            servers.check(ticket(0, 2), &AtomicU64::new(2), granted),
+            servers.check(2, &AtomicU64::new(2), true, granted),
             Trust::Denied
         );
         assert!(matches!(
-            admit(&servers, ticket(0, 2), true, dir.path()),
+            admit(&servers, 2, true, dir.path()),
             Err(Unanswered::Denied)
         ));
         assert_eq!(
@@ -536,109 +545,93 @@ mod tests {
             granted()
         );
         assert_eq!(
-            servers.check(ticket(0, 3), &AtomicU64::new(3), granted),
+            servers.check(3, &AtomicU64::new(3), true, granted),
             granted()
         );
     }
 
     /// Trust found denied, as another window revoked it, stops every server before the reading
-    /// returns; once trust is granted again on the same code, a lookup launches a server of its
-    /// own rather than using one from before, and one from before the denial is refused.
+    /// returns; once trust is granted again, a lookup launches a server of its own rather than
+    /// using one from before, and one from before the denial is refused.
     #[test]
     fn a_denial_leaves_no_server_from_before_it() {
         let dir = tempfile::tempdir().unwrap();
         let servers = Servers::default();
-        let before = admit(&servers, ticket(0, 0), true, dir.path()).unwrap();
+        let before = admit(&servers, 0, true, dir.path()).unwrap();
         assert_eq!(
-            servers.check(ticket(0, 0), &AtomicU64::new(0), || Trust::Denied),
+            servers.check(0, &AtomicU64::new(0), true, || Trust::Denied),
             Trust::Denied
         );
         assert!(gone(before), "the server from before the denial runs");
 
         // A lookup of the epoch the denial was found in comes after it, the grant stored again.
         assert!(matches!(
-            admit(&servers, ticket(0, 0), true, dir.path()),
+            admit(&servers, 0, true, dir.path()),
             Err(Unanswered::Denied)
         ));
         // The window took the denial in and trust is granted again, in a later epoch.
-        let after = admit(&servers, ticket(0, 2), true, dir.path()).unwrap();
+        let after = admit(&servers, 2, true, dir.path()).unwrap();
         assert_ne!(after, before);
         assert!(!gone(after));
     }
 
-    /// A lookup whose ticket no longer counts is refused before the stored grant is read, which
+    /// A lookup whose epoch no longer counts is refused before the stored grant is read, which
     /// may wait for another writer of the review; one whose epoch moves on while it reads is
     /// refused after.
     #[test]
-    fn admission_reads_the_grant_only_for_a_ticket_that_counts() {
-        let dir = tempfile::tempdir().unwrap();
+    fn admission_reads_the_grant_only_for_a_lookup_that_counts() {
         let servers = Servers::default();
         let unread = || panic!("the stored grant is read");
         let launch = || panic!("a server launches");
         let current = AtomicU64::new(1);
-        let refused = servers.admit(ticket(0, 0), &current, unread, "rust", launch);
+        let refused = servers.admit(0, &current, unread, "rust", launch);
         assert!(
             matches!(refused, Err(Unanswered::Stale)),
             "an earlier epoch"
         );
-        let refused = servers.admit(ticket(1, 1), &current, unread, "rust", launch);
-        assert!(matches!(refused, Err(Unanswered::Stale)), "another showing");
 
         let revoking = || {
             current.fetch_add(1, Ordering::SeqCst);
             true
         };
-        let refused = servers.admit(ticket(0, 1), &current, revoking, "rust", launch);
+        let refused = servers.admit(1, &current, revoking, "rust", launch);
         assert!(
             matches!(refused, Err(Unanswered::Stale)),
             "a revocation meanwhile"
         );
-        let _ = dir;
         assert_eq!(servers.len(), 0);
     }
 
-    /// A reading whose epoch no longer counts, as once the app closes, reads nothing and changes
-    /// nothing, so it never waits for another writer of the review.
+    /// The servers outlive the snapshots that show while the window shows the checkout's code,
+    /// stop once it shows code the checkout no longer holds, and a reading that no longer
+    /// counts, as once the app closes, reads nothing and stops none.
     #[test]
-    fn a_reading_that_no_longer_counts_reads_nothing() {
+    fn servers_run_while_the_checkouts_code_shows() {
         let dir = tempfile::tempdir().unwrap();
         let servers = Servers::default();
-        let running = admit(&servers, ticket(0, 0), true, dir.path()).unwrap();
-        let read = servers.check(ticket(0, 0), &AtomicU64::new(1), || {
+        let granted = || Trust::Granted;
+        let running = admit(&servers, 0, true, dir.path()).unwrap();
+
+        // Another capture of the checkout shows.
+        assert_eq!(
+            servers.check(1, &AtomicU64::new(1), true, granted),
+            granted()
+        );
+        assert!(!gone(running), "a capture stopped the server");
+
+        // A late reading of a snapshot no longer on screen stops nothing.
+        let read = servers.check(1, &AtomicU64::new(2), false, || {
             panic!("the stored grant is read")
         });
         assert_eq!(read, Trust::Denied);
-        assert!(!gone(running));
-    }
+        assert!(!gone(running), "a late reading stopped the server");
 
-    /// Another head showing replaces the servers, and showing a head again is a showing of its
-    /// own: from one head to another and back, the servers of the first showing stop, and a
-    /// reading of the head between, running late, stops none started since.
-    #[test]
-    fn a_showing_has_servers_of_its_own() {
-        let dir = tempfile::tempdir().unwrap();
-        let servers = Servers::default();
-        let granted = || Trust::Granted(super::super::Grant::Snapshot);
-        let first = admit(&servers, ticket(0, 0), true, dir.path()).unwrap();
-
-        // The first head shows again, as showing 3, before the reading of showing 2 runs.
+        // An older revision shows.
         assert_eq!(
-            servers.check(ticket(3, 3), &AtomicU64::new(3), granted),
+            servers.check(2, &AtomicU64::new(2), false, granted),
             granted()
         );
-        assert!(gone(first), "the first showing's server runs");
-        let again = admit(&servers, ticket(3, 3), true, dir.path()).unwrap();
-        assert_eq!(
-            servers.check(ticket(2, 2), &AtomicU64::new(3), || { Trust::Denied }),
-            Trust::Denied
-        );
-        assert!(
-            !gone(again),
-            "the late reading stopped a server of a later showing"
-        );
-        assert!(matches!(
-            admit(&servers, ticket(2, 3), true, dir.path()),
-            Err(Unanswered::Stale)
-        ));
+        assert!(gone(running), "the server runs for an older revision");
+        assert_eq!(servers.len(), 0);
     }
 }

@@ -1,8 +1,8 @@
-//! Trust: whether tools that can execute reviewed code, such as language servers, may run.
+//! Trust: whether tools that run the code in a checkout, such as language servers, may run.
 
 use color_eyre::eyre;
 use googletest::prelude::*;
-use review_core::{Error, ObjectId, Repo, Review, ReviewTarget, Trust, TrustScope};
+use review_core::{Error, Repo, Review, ReviewTarget};
 
 use crate::common::{TestRepo, refresh};
 
@@ -15,42 +15,21 @@ fn open(repo: &TestRepo, target: ReviewTarget) -> eyre::Result<Review> {
     )?)
 }
 
-/// No review is trusted until the reviewer decides, whoever wrote the code, and a decision is
-/// stored in the log, read back by a fresh handle, and overridden by the next decision.
+/// Only the review of a checkout holds trust: a review of a range or a pull request has no code
+/// on disk and is never trusted, while a review of the working tree against a fixed ref shares
+/// the checkout's grant.
 #[test]
-fn trust_defaults_and_decisions_round_trip() -> eyre::Result<()> {
+fn only_the_checkout_holds_trust() -> eyre::Result<()> {
     let repo = TestRepo::new()?;
     repo.write("a.txt", "one\n")?;
     let base = repo.commit("base")?;
     repo.branch_at("feature", &base)?;
     repo.write("a.txt", "two\n")?;
-    let head = repo.commit("head")?;
+    repo.commit("head")?;
 
-    // The working tree and a local branch: what they hold may come from anywhere.
-    let worktree = open(
-        &repo,
-        ReviewTarget::Worktree {
-            base: "main".to_owned(),
-        },
-    )?;
-    assert_that!(
-        worktree.trust()?,
-        eq(Trust {
-            trusted: false,
-            decided: false
-        })
-    );
-    let local = repo.review()?;
-    refresh(&local)?;
-    assert_that!(
-        local.trust()?,
-        eq(Trust {
-            trusted: false,
-            decided: false
-        })
-    );
-
-    // Nor are a pull request and a bare commit.
+    // A range and a pull request: nothing to trust, and nothing that holds trust for them.
+    let range = repo.review()?;
+    refresh(&range)?;
     let pull_request = open(
         &repo,
         ReviewTarget::PullRequest {
@@ -60,76 +39,37 @@ fn trust_defaults_and_decisions_round_trip() -> eyre::Result<()> {
             number: 7,
         },
     )?;
-    assert_that!(
-        pull_request.trust()?,
-        eq(Trust {
-            trusted: false,
-            decided: false
-        })
-    );
-    let commit = open(
+    for review in [&range, &pull_request] {
+        assert_that!(review.trusted()?, eq(false));
+        assert_that!(
+            review.set_trusted(true),
+            err(matches_pattern!(Error::InvalidTarget(_)))
+        );
+        assert!(review.checkout_review()?.is_none());
+    }
+
+    // The working tree against a fixed ref: the checkout's review holds its trust.
+    let worktree = open(
         &repo,
-        ReviewTarget::Range {
+        ReviewTarget::Worktree {
             base: "main".to_owned(),
-            head,
         },
     )?;
-    assert_that!(
-        commit.trust()?,
-        eq(Trust {
-            trusted: false,
-            decided: false
-        })
-    );
+    let checkout = Review::open_checkout(repo.data_dir(), Repo::discover(repo.path())?)?;
+    let holder = worktree
+        .checkout_review()?
+        .ok_or_else(|| eyre::eyre!("no review holds the trust"))?;
+    assert_that!(holder.key(), eq(checkout.key()));
+    assert_that!(worktree.trusted()?, eq(false));
 
-    // A decision survives reopening the review and does not disturb its history.
-    pull_request.set_trusted(true)?;
-    let reopened = Review::load(repo.data_dir(), pull_request.key())?;
-    assert_that!(
-        reopened.trust()?,
-        eq(Trust {
-            trusted: true,
-            decided: true
-        })
-    );
+    // A grant survives reopening the review, and the latest decision wins.
+    assert_that!(checkout.trusted()?, eq(false));
+    checkout.set_trusted(true)?;
+    assert_that!(holder.trusted()?, eq(true));
+    let reopened = Review::load(repo.data_dir(), checkout.key())?;
+    assert_that!(reopened.trusted()?, eq(true));
     assert_that!(reopened.history()?.revisions().len(), eq(0));
-
-    // The latest decision wins.
-    pull_request.set_trusted(false)?;
-    pull_request.set_trusted(true)?;
-    assert_that!(
-        pull_request.trust()?,
-        eq(Trust {
-            trusted: true,
-            decided: true
-        })
-    );
-    Ok(())
-}
-
-/// A review of a range or of the working tree, whose key another clone at the same path
-/// shares, is trusted one snapshot at a time: a grant for the whole review is refused, and one
-/// for a snapshot covers that snapshot alone.
-#[test]
-fn a_range_is_trusted_one_snapshot_at_a_time() -> eyre::Result<()> {
-    let repo = TestRepo::new()?;
-    repo.write("a.txt", "one\n")?;
-    let base = repo.commit("base")?;
-    repo.branch_at("feature", &base)?;
-    repo.write("a.txt", "two\n")?;
-    repo.commit("head")?;
-    let local = repo.review()?;
-    refresh(&local)?;
-    assert_that!(
-        local.set_trusted(true),
-        err(matches_pattern!(Error::InvalidTarget(_)))
-    );
-
-    let tree = ObjectId::parse(&repo.git(&["rev-parse", "feature^{tree}"])?)?;
-    let other = ObjectId::parse(&repo.git(&["rev-parse", "main^{tree}"])?)?;
-    local.set_trust(TrustScope::Snapshot { tree: tree.clone() }, true)?;
-    assert_that!(local.trust_for(&tree)?.trusted, eq(true));
-    assert_that!(local.trust_for(&other)?.trusted, eq(false));
-    assert_that!(local.trust()?.trusted, eq(false));
+    checkout.set_trusted(false)?;
+    assert_that!(holder.trusted()?, eq(false));
     Ok(())
 }

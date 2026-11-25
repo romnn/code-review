@@ -228,16 +228,13 @@ fn every_command_works_with_json() -> eyre::Result<()> {
     let partition = cr_json_in(repo, data, &key, &["walkthrough", "show"])?;
     assert_eq!(partition["steps"][0]["title"], "Values");
 
-    // Watch records nothing new, and the browsing worktree exists at the head.
+    // Watch records nothing new.
     cr_in(
         repo,
         data,
         &key,
         &["watch", "--count", "1", "--interval", "0"],
     )?;
-    let worktree = cr_json_in(repo, data, &key, &["worktree"])?;
-    let path = worktree["path"].as_str().unwrap_or_default();
-    assert!(Path::new(path).join("lib.rs").exists());
     Ok(())
 }
 

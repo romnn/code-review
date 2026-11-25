@@ -202,11 +202,10 @@ fn open_existing(paths: &DemoPaths) -> Result<Option<Review>, Error> {
 
 /// Builds the repository and the review from scratch, at revision 1.
 fn build(paths: &DemoPaths, fixture: &Path, manifest: &Manifest) -> Result<Review, Error> {
+    // The data of a demo older versions looked a definition up in holds read-only copies of
+    // its files.
     for directory in [&paths.repo, &paths.data] {
-        if directory.exists() {
-            std::fs::remove_dir_all(directory)
-                .map_err(|source| Error::io("remove", directory, source))?;
-        }
+        crate::store::remove_read_only(directory)?;
     }
     crate::store::create_dir(&paths.repo)?;
     git(

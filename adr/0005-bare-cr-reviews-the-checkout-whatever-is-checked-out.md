@@ -49,12 +49,13 @@ the work has landed.
   revert, a bisect or unmerged entries), and is discarded when `HEAD`, the base or the index
   moved while it ran. A capture the watcher saw change while it ran is never markable.
 - **Nothing runs on the reviewer's behalf without a grant.**
-  Every git command runs with hooks and fsmonitor off; captures and the copies tools run in run
-  with filters off, and a filtered file keeps its staged version.
-  No review is trusted by default, a named range or `--worktree` included; for the checkout
-  review a grant covers the exact snapshot, or the whole checkout until revoked, which the status
-  bar shows, and for a range or `--worktree` review, whose key another clone at the same path
-  shares, only the exact snapshot.
+  Every git command runs with hooks and fsmonitor off; captures run with filters off, and a
+  filtered file keeps its staged version.
+  No checkout is trusted by default. The checkout review holds one grant for its working tree
+  and clone, which covers later edits and branch switches until revoked and which the status
+  bar shows; a `--worktree` review shares the grant of the clone it opened in, and a named range
+  or pull request, whose code is not on disk, has none
+  ([ADR 14](0014-only-background-work-reaches-the-engine.md)).
 - **CLI references name their review**: unit ids print as `u1-0000@<tag>`, and a mutation with a
   tag of another review, or a bare id without `--review`, is refused.
 

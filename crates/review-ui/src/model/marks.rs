@@ -506,9 +506,17 @@ impl Model {
         let newer = snapshot.newer();
         match newer {
             Some(_) if self.following() => self.capture(false),
-            Some(newer) => self.set_status(format!(
-                "Revision {newer} is available; press R to switch to it."
-            )),
+            Some(newer) => {
+                self.set_status(format!(
+                    "Revision {newer} is available; press R to switch to it."
+                ));
+                // What shows is older than the code on disk now, which no lookup runs on, so
+                // the language servers stop as trust is read again.
+                if self.has_checkout() {
+                    self.next_epoch();
+                    self.read_trust();
+                }
+            }
             None => {}
         }
     }
@@ -608,7 +616,6 @@ impl Model {
             self.set_status("Saving marks; press R again in a moment.");
             return;
         }
-        let old_head = self.shown_head();
         let Some(snapshot) = &mut self.snapshot else {
             return;
         };
@@ -641,8 +648,8 @@ impl Model {
         };
         self.enter_mode(mode);
         self.request_syntax();
-        // Another head is a showing of its own, and trust is read for the revision that shows.
-        self.shown_anew(self.shown_head() != old_head);
+        // Lookups of the revision before end, and trust is read for the one that shows.
+        self.next_epoch();
         self.read_trust();
         self.set_status(format!("Showing revision {revision}. {}", self.summary()));
     }

@@ -346,7 +346,8 @@ pub fn buffer_header(model: &Model, palette: &Palette) -> Option<BufferHeader> {
     let buffer = model.buffer.as_ref()?;
     let origin = match &buffer.origin {
         Origin::Review(_) => "whole file, read-only",
-        Origin::Definition(_) => "definition, read-only · Ctrl+O back",
+        Origin::Definition(_) if buffer.previous.is_some() => "definition, read-only · Ctrl+O back",
+        Origin::Definition(_) => "definition, read-only",
         Origin::Head(_) => "not changed in this review, read-only",
     };
     Some(BufferHeader {

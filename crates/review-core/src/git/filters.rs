@@ -1,9 +1,9 @@
 //! Running git with the repository's filter drivers turned off.
 //!
 //! A filter driver (`filter.<name>.clean`, `smudge` or `process`) is a program the configuration
-//! names and the reviewed tree's `.gitattributes` selects, so a capture or a checkout of reviewed
-//! content would run it.
-//! Commands that read or write the working tree turn every configured driver off instead.
+//! names and the reviewed tree's `.gitattributes` selects, so a capture of reviewed content would
+//! run it.
+//! Commands that read the working tree turn every configured driver off instead.
 
 use std::collections::BTreeSet;
 use std::process::Command;

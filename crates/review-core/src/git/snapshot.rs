@@ -162,35 +162,6 @@ impl Repo {
         Ok(ObjectId::parse(&text)?)
     }
 
-    /// Writes the files of `tree` into the directory `dir`, which must be empty or absent, as
-    /// they are stored: no filter driver runs on them. `index` is a path for a temporary index,
-    /// which is deleted afterwards.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git cannot read the tree or write its files.
-    pub(crate) fn write_tree_files(
-        &self,
-        tree: &ObjectId,
-        dir: &Path,
-        index: &Path,
-    ) -> Result<(), Error> {
-        let index = TemporaryIndex {
-            path: index.to_path_buf(),
-        };
-        let filters = self.filters_off()?;
-        let command = || {
-            let mut command = filters.command(self);
-            command
-                .env("GIT_INDEX_FILE", &index.path)
-                .env("GIT_WORK_TREE", dir);
-            command
-        };
-        Self::run_command(command(), ["read-tree", tree.as_str()])?;
-        Self::run_command(command(), ["checkout-index", "--all", "--force"])?;
-        Ok(())
-    }
-
     /// Writes a commit of `tree` with the fixed identity and date of snapshots, whose parent is
     /// `parent` when there is one.
     fn snapshot_commit(
@@ -216,6 +187,16 @@ impl Repo {
         Ok(ObjectId::parse(
             String::from_utf8_lossy(&commit.stdout).trim(),
         )?)
+    }
+
+    /// Returns the tree a [`capture_worktree`](Self::capture_worktree) would record now, writing
+    /// no commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a bare repository or when any git step fails.
+    pub(crate) fn capture_tree(&self) -> Result<ObjectId, Error> {
+        Ok(self.worktree_tree()?.tree)
     }
 
     /// Returns whether [`capture_worktree`](Self::capture_worktree) would record anything beyond

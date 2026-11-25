@@ -64,7 +64,7 @@ impl Model {
             self.press = None;
         }
         // A definition waiting for trust goes on only if the next key grants it.
-        if !matches!(input.action, Action::TrustSnapshot | Action::TrustCheckout) {
+        if input.action != Action::TrustCheckout {
             self.trust_resumes = None;
         }
         self.input = Some(input);

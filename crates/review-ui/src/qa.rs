@@ -198,10 +198,6 @@ fn live(model: &Model) -> Value {
         "busy": live.busy.map(|busy| busy.to_string()),
         "replaced": model.replaced().map(|replaced| format!("{replaced:?}")),
         "filtered": live.filtered.len(),
-        "grant": match model.trust {
-            crate::model::Trust::Granted(grant) => Some(format!("{grant:?}")),
-            _ => None,
-        },
     })
 }
 

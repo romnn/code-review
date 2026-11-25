@@ -623,22 +623,6 @@ pub fn watch(context: &Context, interval: u64, count: Option<u64>) -> eyre::Resu
     }
 }
 
-pub fn worktree(context: &Context, revision: Option<&RevisionReference>) -> eyre::Result<()> {
-    let Shown { review, recorded } = context.load_shown(revision)?;
-    let history = review.history()?;
-    let view = pick_view(context, &review, &history, revision, recorded.as_ref())?;
-    let record = view.record().ok_or_eyre("revision has no record")?;
-    let path = review.worktree(record)?;
-    if context.json {
-        return print_json(&serde_json::json!({
-            "revision": render::tagged(review.key(), view.number()),
-            "path": path,
-        }));
-    }
-    println!("{}", path.display());
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::process::Command;

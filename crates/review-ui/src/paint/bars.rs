@@ -15,7 +15,7 @@ use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
 use crate::keymap::{self, Area, Section};
 use crate::model::sync::ago;
-use crate::model::{Field, Grant, Mode, Model, Phase, Replaced, SyncStep, Trust, plural};
+use crate::model::{Field, Mode, Model, Phase, Replaced, SyncStep, Trust, plural};
 use crate::scroll::{self, ease_out};
 use crate::state;
 
@@ -97,14 +97,11 @@ pub fn sync_label(
             2,
         ));
     }
-    // Which grant lets tools run on the checkout's code, which is never trusted by default.
-    if model.is_checkout() {
+    // Whether tools may run in the checkout, which is never trusted by default.
+    if model.has_checkout() {
         parts.push(part(
             match model.trust {
-                Trust::Granted(Grant::Snapshot) => {
-                    Piece::new("trusted: this snapshot", palette.flagged)
-                }
-                Trust::Granted(_) => Piece::new("trusted: checkout", palette.flagged),
+                Trust::Granted => Piece::new("trusted", palette.flagged),
                 Trust::Checking => Piece::new("checking trust", palette.faint),
                 Trust::Denied => Piece::new("untrusted", palette.faint),
             },
@@ -188,8 +185,8 @@ fn step_label(model: &Model, step: SyncStep) -> String {
 pub fn hint_available(model: &Model, action: &str) -> bool {
     match action {
         "NextFile" => model.adjacent_file(true).is_some() || model.adjacent_file(false).is_some(),
-        // The checkout's review asks for trust when the key is pressed.
-        "GoToDefinition" => model.trust.granted() || model.is_checkout(),
+        // It asks for trust when the key is pressed, but runs only on the code on disk.
+        "GoToDefinition" => model.shows_checkout(),
         "ToggleApprove" | "ToggleFlag" => match model.mode {
             Mode::Buffer => model.buffer_hunk().is_some(),
             Mode::Diff => !model.rows.hunks.is_empty(),
@@ -274,7 +271,7 @@ pub fn bar_hints(
     // The trust question's answers belong to it alone, and it has nothing to scroll.
     let asking = model.overlay == Some(crate::model::Overlay::Trust);
     hints.retain(|hint| {
-        let answer = matches!(hint.action, "TrustSnapshot" | "TrustCheckout");
+        let answer = hint.action == "TrustCheckout";
         answer == asking || hint.action == "CloseOverlay"
     });
     // In scroll mode, `j` and `k` scroll a line.

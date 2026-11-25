@@ -39,6 +39,9 @@ two-face.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 color-eyre.workspace = true
 indoc.workspace = true

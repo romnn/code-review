@@ -61,7 +61,7 @@ use crate::watch::Waited;
 
 /// How often the working tree is captured whatever the watch saw, catching what it cannot see:
 /// a ref moving without the index changing, a submodule's commit, events the system dropped.
-const RECONCILE: Duration = Duration::from_secs(30);
+pub(super) const RECONCILE: Duration = Duration::from_secs(30);
 
 /// How often the working tree is captured when it cannot be watched.
 const POLL: Duration = Duration::from_secs(5);
@@ -111,7 +111,7 @@ pub(crate) struct Live {
     subject: Option<review_core::Subject>,
     /// The paths the capture on screen kept at their staged version, under a filter driver.
     filtered: Vec<String>,
-    /// The tree of the capture on screen, which a grant of trust names.
+    /// The tree of the capture on screen, which tells a capture of the same code.
     tree: Option<ObjectId>,
     /// The base and head the review's commits were last listed between.
     listed: Option<(Option<ObjectId>, Option<ObjectId>)>,
@@ -159,11 +159,6 @@ impl Live {
     pub(crate) fn filtered(&self) -> &[String] {
         &self.filtered
     }
-
-    /// The tree of the capture on screen, which a grant of trust names.
-    pub(crate) fn tree(&self) -> Option<&ObjectId> {
-        self.tree.as_ref()
-    }
 }
 
 /// How a review that follows the checkout starts: the session its opening capture is pinned
@@ -194,9 +189,8 @@ pub(super) struct Opening {
 }
 
 impl Opening {
-    /// Reads what the window needs about `following`'s capture, which `history` ends in: the
-    /// tree the trust names, the branch and upstream, and the commits; its session goes to the
-    /// engine.
+    /// Reads what the window needs about `following`'s capture, which `history` ends in: its
+    /// tree, the branch and upstream, and the commits; its session goes to the engine.
     #[tracing::instrument(name = "read_opening", skip_all)]
     pub(super) fn read(
         review: &review_core::Review,
@@ -605,20 +599,23 @@ impl Model {
 
     /// Ends the review in this window for good, as `replaced` says what was read from was
     /// replaced: nothing is captured, looked up or saved any more, the watch on the working
-    /// tree stops, and what waits to show is dropped.
+    /// tree stops, and what waits to show is dropped; another clone is never trusted.
     /// For another log, so are the marks not saved yet, which could land only in it.
     /// `unsaved` says a mark being saved was not; when marks were lost, quitting that waited
     /// for them stops, so the reviewer learns of it.
     pub(super) fn stop(&mut self, replaced: Replaced, unsaved: bool) {
         let stopped = self.replaced.is_some();
         let replaced = *self.replaced.get_or_insert(replaced);
+        if replaced == Replaced::Clone && !stopped {
+            self.take_trust(super::Trust::Denied);
+        }
         if let Some(live) = &mut self.live {
             live.watched = false;
             live.waiting = None;
             live.again = None;
-            if !stopped {
-                self.unwatch();
-            }
+        }
+        if !stopped {
+            self.unwatch();
         }
         let mut unsaved = unsaved;
         if replaced == Replaced::Log {
@@ -839,9 +836,6 @@ impl Model {
         };
         let moved = Moved::new(&links);
         let was = self.was_on();
-        let old_head = old
-            .view()
-            .and_then(|view| view.record().map(|record| record.head.clone()));
 
         self.snapshot = Some(Snapshot {
             history: Arc::clone(&history),
@@ -865,8 +859,9 @@ impl Model {
         // The snapshot on screen was laid out from its view, so it has one.
         let old_view = old.view();
         self.keep_place(&was, old_view.as_ref(), &view, &moved);
-        // Another head is a showing of its own, and trust is read for the capture.
-        self.shown_anew(view.record().map(|record| &record.head) != old_head.as_ref());
+        // Lookups of the snapshot before end, and trust is read again, as another window may
+        // have revoked it.
+        self.next_epoch();
         self.read_trust();
         self.request_syntax();
         let changed = self.what_changed(&view, moved_to.filter(|_| same_code));
@@ -1354,7 +1349,11 @@ fn live_capture(
                 ));
             }
             Capture::Busy(busy) => return Err(Missed::Busy(busy)),
-            Capture::Replaced => return Err(Missed::Replaced(Replaced::Clone)),
+            Capture::Replaced => {
+                // No grant covers another clone's code, so its language servers stop at once.
+                parts.servers.stop();
+                return Err(Missed::Replaced(Replaced::Clone));
+            }
         }
     }
 }

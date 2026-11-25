@@ -705,21 +705,12 @@ const DEFAULTS: &[Default] = &[
         None,
     ),
     (
-        "TrustSnapshot",
-        &["s"],
-        &[Area::Overlay],
-        "Review",
-        "",
-        Some((1, "trust this snapshot")),
-        None,
-    ),
-    (
         "TrustCheckout",
         &["c"],
         &[Area::Overlay],
         "Review",
         "",
-        Some((1, "always trust this checkout")),
+        Some((1, "trust this checkout")),
         None,
     ),
     (

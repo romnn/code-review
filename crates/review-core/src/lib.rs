@@ -76,11 +76,10 @@ pub use ids::{
 };
 pub use review::{
     BaseRef, Capture, Commit, LiveCapture, PullRequest, Recorded, RefreshStep, Review, ReviewInfo,
-    ReviewMeta, ReviewTarget, RevisionInput, Session, Subject, Synced, Trust, filtered_note,
-    github,
+    ReviewMeta, ReviewTarget, RevisionInput, Session, Subject, Synced, filtered_note, github,
 };
 pub use standing::{ReviewPolicy, Standing};
-pub use store::events::{MarkVerdict, TrustScope};
+pub use store::events::MarkVerdict;
 pub use view::{
     ChangeKind, Collapse, Counts, Delta, DiffLine, DiffLineKind, FileChangeSummary, FileStatus,
     FileTone, Interdiff, LineEnding, LineRun, Location, MoveEnd, MoveView, NoteAttachment,
