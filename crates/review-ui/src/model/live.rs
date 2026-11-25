@@ -107,8 +107,6 @@ pub(crate) struct Live {
     updating: bool,
     /// What git was busy with at the last capture, which keeps the view on screen.
     busy: Option<Busy>,
-    /// Whether the checkout is another clone now, which ends the following for good.
-    replaced: bool,
     /// What the capture on screen was of.
     subject: Option<review_core::Subject>,
     /// The paths the capture on screen kept at their staged version, under a filter driver.
@@ -145,11 +143,6 @@ impl Live {
     /// What git is busy with in the checkout, which keeps the view on screen.
     pub(crate) fn busy(&self) -> Option<Busy> {
         self.busy
-    }
-
-    /// Whether the checkout is another clone now, so nothing is captured any more.
-    pub(crate) fn replaced(&self) -> bool {
-        self.replaced
     }
 
     /// What the capture on screen was of.
@@ -307,10 +300,50 @@ pub(super) struct Captured {
 pub(super) enum Missed {
     /// Git is busy in the checkout.
     Busy(Busy),
-    /// The checkout is another clone now.
-    Replaced,
+    /// What the review was read from was replaced.
+    Replaced(Replaced),
     /// The capture failed, for this reason.
     Failed(String),
+}
+
+/// What took the place of what a review was read from, which ends the review in a window: it
+/// captures, looks up and saves nothing any more, and says to open the review again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    /// The checkout is another clone now, whose history is not this review's.
+    Clone,
+    /// The review's event log is another one now, such as a backup restored; see
+    /// [`review_core::Error::LogReplaced`].
+    Log,
+}
+
+impl Replaced {
+    /// Says what was replaced and that the review is to be opened again.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Clone => "This checkout was replaced by another clone; reopen cr to review it.",
+            Self::Log => "This review's event log was replaced; reopen cr to review it.",
+        }
+    }
+
+    /// Says why a review key marked nothing.
+    fn refusal(self) -> &'static str {
+        match self {
+            Self::Clone => {
+                "Not marked: this checkout was replaced by another clone; reopen cr to review it."
+            }
+            Self::Log => {
+                "Not marked: this review's event log was replaced; reopen cr to review it."
+            }
+        }
+    }
+}
+
+/// Whether `err` says the review's log was replaced, which ends the review rather than failing
+/// what ran into it.
+pub(super) fn replaced_log(err: &review_core::Error) -> bool {
+    matches!(err, review_core::Error::LogReplaced { .. })
 }
 
 impl Model {
@@ -460,13 +493,13 @@ impl Model {
 
     /// The periodic capture, which walks the watched tree again first every [`REWALK`].
     pub(super) fn reconcile(&mut self) {
+        // A review whose checkout or log was replaced is never captured again.
+        if self.replaced.is_some() {
+            return;
+        }
         let Some(live) = &mut self.live else {
             return;
         };
-        // A checkout that is another clone is never captured again.
-        if live.replaced {
-            return;
-        }
         let every = if live.watched { RECONCILE } else { POLL };
         let rewalk = live.walked.is_none_or(|walked| walked.elapsed() >= REWALK);
         if rewalk {
@@ -492,14 +525,14 @@ impl Model {
         if self.engine.is_none() {
             return;
         }
+        if self.replaced.is_some() {
+            return;
+        }
         let known: HashSet<ObjectId> = self.blobs.texts.keys().cloned().collect();
         let from = self.shown;
         let Some(live) = &mut self.live else {
             return;
         };
-        if live.replaced {
-            return;
-        }
         if live.capturing {
             live.again = Some(live.again.unwrap_or(false) || rewalk);
             return;
@@ -548,29 +581,68 @@ impl Model {
     /// `r` on a review that follows the working tree: captures it again now, and looks up the
     /// branch's pull request; nothing is recorded.
     pub(super) fn recapture(&mut self) {
+        if let Some(replaced) = self.replaced {
+            self.fail(replaced.message());
+            return;
+        }
         let Some(live) = &mut self.live else {
             return;
         };
-        if live.replaced {
-            self.fail("This checkout was replaced by another clone; reopen cr to review it.");
-            return;
-        }
         live.asked = true;
         self.set_status(CAPTURING_AGAIN);
         self.capture(false);
         self.look_up_pull_request_now();
     }
 
-    /// Why the view on screen takes no marks now, if it takes none: the checkout is another
-    /// clone.
+    /// Why the view on screen takes no marks now, if it takes none: the checkout or the
+    /// review's log was replaced.
     ///
     /// Neither a capture under way nor busy git stops a mark: it acts on the capture on screen,
     /// which the engine records as shown, and checks under the review's lock.
-    pub(super) fn live_refusal(&self) -> Option<String> {
-        self.live.as_ref().filter(|live| live.replaced).map(|_| {
-            "Not marked: this checkout was replaced by another clone; reopen cr to review it."
-                .to_owned()
-        })
+    pub(super) fn refusal(&self) -> Option<&'static str> {
+        self.replaced.map(Replaced::refusal)
+    }
+
+    /// Ends the review in this window for good, as `replaced` says what was read from was
+    /// replaced: nothing is captured, looked up or saved any more, the watch on the working
+    /// tree stops, and what waits to show is dropped.
+    /// For another log, so are the marks not saved yet, which could land only in it.
+    /// `unsaved` says a mark being saved was not; when marks were lost, quitting that waited
+    /// for them stops, so the reviewer learns of it.
+    pub(super) fn stop(&mut self, replaced: Replaced, unsaved: bool) {
+        let stopped = self.replaced.is_some();
+        let replaced = *self.replaced.get_or_insert(replaced);
+        if let Some(live) = &mut self.live {
+            live.watched = false;
+            live.waiting = None;
+            live.again = None;
+            if !stopped {
+                self.unwatch();
+            }
+        }
+        let mut unsaved = unsaved;
+        if replaced == Replaced::Log {
+            unsaved |= self
+                .saves
+                .iter()
+                .any(|save| matches!(save, super::marks::Save::Mark(_)));
+            self.saves
+                .retain(|save| matches!(save, super::marks::Save::Trust(_)));
+            self.pending.clear();
+            self.refresh_tree();
+            self.rebuild_in_place();
+        }
+        if stopped && !unsaved {
+            return;
+        }
+        let mut status = vec![replaced.message()];
+        if unsaved {
+            status.push("Marks not saved yet are lost.");
+            if let Some(hint) = self.stop_quitting() {
+                status.push(hint);
+            }
+        }
+        self.fail(status.join(" "));
     }
 
     /// Takes in a capture: keeps it to show with the next frame, and starts the capture asked
@@ -584,6 +656,10 @@ impl Model {
         };
         live.capturing = false;
         live.given = None;
+        // A review that ended while the capture ran shows nothing more.
+        if self.replaced.is_some() {
+            return;
+        }
         let mut again = live.again.take();
         match captured {
             Ok(mut captured) => {
@@ -608,12 +684,9 @@ impl Model {
             }
             // The overview says what git is doing; what shows stays, and takes marks.
             Err(Missed::Busy(busy)) => live.busy = Some(busy),
-            Err(Missed::Replaced) => {
-                live.replaced = true;
-                live.watched = false;
-                live.waiting = None;
+            Err(Missed::Replaced(replaced)) => {
                 again = None;
-                self.fail("This checkout was replaced by another clone; reopen cr to review it.");
+                self.stop(replaced, false);
             }
             Err(Missed::Failed(err)) => {
                 self.effect(Effect::Log(format!(
@@ -1185,10 +1258,6 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
     let confirm = watch.as_ref().is_none_or(|watch| !watch.covers_all());
     drop(watch);
     let captured = live_capture(parts, input, confirm);
-    if matches!(captured, Err(Missed::Replaced)) {
-        // Nothing is captured any more, so nothing is watched either.
-        drop(parts.watch.lock().take());
-    }
     let LiveCapture {
         history,
         subject,
@@ -1269,7 +1338,13 @@ fn live_capture(
         } else {
             review.live_history(&session, input.keep, input.pull_requests)
         }
-        .map_err(|err| Missed::Failed(causes(&err)))?;
+        .map_err(|err| {
+            if replaced_log(&err) {
+                Missed::Replaced(Replaced::Log)
+            } else {
+                Missed::Failed(causes(&err))
+            }
+        })?;
         match captured {
             Capture::Captured(captured) => return Ok(*captured),
             Capture::Moved if attempts < MOVED_ATTEMPTS => {}
@@ -1279,7 +1354,7 @@ fn live_capture(
                 ));
             }
             Capture::Busy(busy) => return Err(Missed::Busy(busy)),
-            Capture::Replaced => return Err(Missed::Replaced),
+            Capture::Replaced => return Err(Missed::Replaced(Replaced::Clone)),
         }
     }
 }

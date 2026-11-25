@@ -269,11 +269,8 @@ fn checkout_details(model: &Model, palette: &Palette, no_commits: bool) -> Vec<P
     };
     let mut lines = Vec::new();
     let plain = |text: String| Piece::new(text, palette.dim);
-    if live.replaced {
-        lines.push(Piece::new(
-            "This checkout was replaced by another clone; reopen cr to review it.",
-            palette.error,
-        ));
+    if let Some(replaced) = model.replaced() {
+        lines.push(Piece::new(replaced.message(), palette.error));
     }
     if let Some(busy) = live.busy {
         lines.push(Piece::new(

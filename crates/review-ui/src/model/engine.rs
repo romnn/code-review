@@ -298,6 +298,14 @@ impl Model {
         })));
     }
 
+    /// Queues the job that stops watching the working tree, which ends the wait on it.
+    pub(super) fn unwatch(&mut self) {
+        self.spawn_with(Subject::Always(Because::Live), |parts| {
+            drop(parts.watch.lock().take());
+            Outcome::Unwatched
+        });
+    }
+
     /// Takes the engine and queues the job that stops it, the language servers, the watch and
     /// the session, as the app quits; returns whether there was one to stop.
     ///

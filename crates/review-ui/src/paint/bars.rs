@@ -15,7 +15,7 @@ use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
 use crate::keymap::{self, Area, Section};
 use crate::model::sync::ago;
-use crate::model::{Field, Grant, Mode, Model, Phase, SyncStep, Trust, plural};
+use crate::model::{Field, Grant, Mode, Model, Phase, Replaced, SyncStep, Trust, plural};
 use crate::scroll::{self, ease_out};
 use crate::state;
 
@@ -75,16 +75,21 @@ pub fn sync_label(
     };
     if let Some(activity) = activity {
         parts.push(part(Piece::new(activity, palette.dim), 0));
+    } else if let Some(replaced) = model.replaced() {
+        let label = match replaced {
+            Replaced::Clone => "checkout replaced",
+            Replaced::Log => "log replaced",
+        };
+        parts.push(part(Piece::new(label, palette.error), 0));
     } else if model.sync.failing(now) {
         parts.push(part(Piece::new("sync failed", palette.error), 0));
     } else if let Some(live) = model.live_state() {
         // A review that follows the working tree is as fresh as the disk, unless something
         // keeps it from updating.
-        parts.push(match (live.replaced, live.busy, live.updating) {
-            (true, ..) => part(Piece::new("checkout replaced", palette.error), 0),
-            (false, Some(busy), _) => part(Piece::new(busy_label(busy), palette.flagged), 0),
-            (false, None, true) => part(Piece::new("updating…", palette.accent), 0),
-            (false, None, false) => part(Piece::new("live", palette.faint), 2),
+        parts.push(match (live.busy, live.updating) {
+            (Some(busy), _) => part(Piece::new(busy_label(busy), palette.flagged), 0),
+            (None, true) => part(Piece::new("updating…", palette.accent), 0),
+            (None, false) => part(Piece::new("live", palette.faint), 2),
         });
     } else if let Some(synced) = &model.sync.synced {
         parts.push(part(

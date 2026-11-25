@@ -41,6 +41,32 @@ real monorepo, and every write a build makes there.
   an unchanged link requires the change byte-for-byte equal at a trusted position, so it is
   exactly a change the reviewer marked.
   Once a capture in between is marked, it is recorded, and the chain runs through it as before.
+- **A capture derives only what changed.**
+  The review keeps the history it last read, of the log up to just past its last complete
+  record, and the last capture on top of it, by what was captured.
+  With neither changed, a capture is that history again.
+  A capture of other code keeps the recorded history and proves only its link from the last
+  recorded revision.
+  Records appended meanwhile, by this window or another window or agent, apply in log order,
+  and review state is derived again from the earliest revision they add or mark.
+  One reducer does all of it, so a history read again is the one read from the start.
+  A history never changes once read, so a mark acts on exactly the history its frame showed.
+  A capture reads the log before and after it looks: one during which the review
+  recorded another revision is discarded, one during which a mark was saved shows it, and the
+  window captures again when a capture was read before a mark it saved.
+- **Another log in the review's place ends the review in the window.**
+  The log only grows, so replacing it while a window is open, such as restoring a backup, is
+  outside its contract; a supported restore happens with the review closed.
+  A window notices one where it cheaply can: a log gone or shorter than what it read, another
+  file where the platform tells files apart, or other bytes in the last 64 it read.
+  A mark, an approval or a note, and the capture it records, is written only to a log that
+  still starts with what the history it was made on was read from, checked under the
+  exclusive `review.lock` before anything is written or truncated.
+  Either ends the review in the window as a replaced clone does
+  ([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)): it says to reopen
+  the review, stops watching, captures and saves nothing more, and drops the marks not saved
+  yet, saying so and stopping a quit that waited for them; every clone of the review then
+  reads and writes the log no more.
 - **A review key never acts on code the reviewer has not seen:** a capture shows only with the
   next frame ([ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)).
 - **Only what git does not ignore is watched.**
@@ -64,9 +90,18 @@ real monorepo, and every write a build makes there.
   capture releases the pins of earlier ones its window no longer shows.
   Opening the review again releases the pins another window of the same review still uses,
   which costs that window only the pin, not the objects, which git keeps for two weeks.
-- A capture computes the whole analysis of the working tree against its base, about 0.2 s for a
-  diff of 20,000 lines, and the history is rebuilt on each one; analyses already read stay in
-  memory, so nothing is decoded twice.
+- A capture of new code computes the whole analysis of the working tree against its base, about
+  0.2 s for a diff of 20,000 lines, and its correspondence with the last recorded revision.
+  On a generated review of 70 revisions and 3,654 records, a capture of nothing new spends
+  under 0.2 ms of its 35–45 ms on the log and the history and the rest on git, one after a mark
+  from another window under 1 ms, and one of an edit 8–14 ms on its link besides its analysis.
+- Opening reads the whole log once and decodes every revision's analysis and correspondence,
+  and a partial approval derives the history from the start under the lock.
+- Reading trust after each capture reads the whole log.
+- A mark, an approval or a note digests the log up to what its history was read from, under
+  the lock, besides reading the whole log as it did.
+- A log replaced in place by one as long, ending in the same 64 bytes, on a platform that does
+  not tell files apart, still shows until a mark is attempted on it.
 - Go to definition on a capture checks out a worktree of that capture and starts its language
   servers there, as on any revision; a new capture stops the servers of the old one, so each
   capture used for browsing indexes again.
@@ -76,10 +111,21 @@ real monorepo, and every write a build makes there.
   Git rereads a file only when it is as new as the index ("racily clean"), so a copy dated now
   would make a same-size edit from the index's own second invisible to the capture.
 
+## Rejected alternatives
+
+- **Reading a replaced log again from the start.** The window orders the histories it gets by
+  the log's length, which compares only within one log: a history of another log as long
+  passed for the one on screen, so approvals the log no longer holds stayed, and a slow read
+  of the old log could put its history back after the new one was read. Each fix left another
+  such case.
+
 ## References
 
 - `crates/review-core/src/review/live.rs` (`Review::live_history`, `Review::settle`)
-- `crates/review-core/src/history.rs` (`History::is_provisional`, `History::version`)
+- `crates/review-core/src/review/memo.rs`, `crates/review-core/src/review/mod.rs`
+  (`Review::history`)
+- `crates/review-core/src/history.rs` (`History::extended`, `History::is_provisional`,
+  `History::version`)
 - `crates/review-core/src/git/snapshot.rs` (`capture_worktree`, `copy_index`)
 - `crates/review-ui/src/watch.rs` (`Watch`, `Waiter`)
 - `crates/review-ui/src/model/live.rs`

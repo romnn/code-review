@@ -127,7 +127,7 @@ impl Model {
             ));
             return;
         }
-        if let Some(why) = self.live_refusal() {
+        if let Some(why) = self.refusal() {
             self.set_status(why);
             return;
         }
@@ -407,6 +407,17 @@ impl Model {
         saved: Result<(), review_core::Error>,
         history: Result<History, review_core::Error>,
     ) {
+        self.approving = None;
+        if saved.as_ref().err().is_some_and(live::replaced_log)
+            || history.as_ref().err().is_some_and(live::replaced_log)
+        {
+            if let Err(err) = &saved {
+                let what = what(&job.mark);
+                self.effect(Effect::Log(format!("could not record {what}: {err:#}")));
+            }
+            self.stop(live::Replaced::Log, saved.is_err());
+            return;
+        }
         // Pending verdicts are exactly those of the marks still queued.
         self.pending.clear();
         for save in &self.saves {
@@ -420,7 +431,6 @@ impl Model {
                 }
             }
         }
-        self.approving = None;
         let mut failures = Vec::new();
         let unsaved = match (saved, &job.mark) {
             (Ok(()), _) => false,
@@ -440,12 +450,7 @@ impl Model {
                 true
             }
             (Err(err), mark) => {
-                let what = match mark {
-                    Mark::Units { units, .. } => {
-                        format!("the mark of {}", plural(units.len(), "unit"))
-                    }
-                    Mark::Run(run) => format!("the approval of a change of {}", run.unit),
-                };
+                let what = what(mark);
                 // The log keeps it for when the app quits before anyone reads the status line.
                 self.effect(Effect::Log(format!("could not record {what}: {err:#}")));
                 failures.push(format!("Could not record {what}: {err}"));
@@ -583,6 +588,9 @@ impl Model {
                     self.set_status("Up to date; no new revision.");
                 }
             }
+            (Err(err), _) | (_, Err(err)) if live::replaced_log(&err) => {
+                self.stop(live::Replaced::Log, false);
+            }
             (Err(err), _) | (_, Err(err)) => {
                 self.fail(format!("Could not refresh: {err}"));
                 self.sync_failed();
@@ -658,4 +666,12 @@ pub(super) struct Refreshed {
     pub(super) history: Result<History, review_core::Error>,
     /// When the review last synced, read after it.
     pub(super) synced: Result<Option<review_core::Synced>, review_core::Error>,
+}
+
+/// What `mark` records, as a failure to record it names it.
+fn what(mark: &Mark) -> String {
+    match mark {
+        Mark::Units { units, .. } => format!("the mark of {}", plural(units.len(), "unit")),
+        Mark::Run(run) => format!("the approval of a change of {}", run.unit),
+    }
 }

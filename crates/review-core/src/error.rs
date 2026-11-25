@@ -103,9 +103,13 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    /// The event log shrank below a position a reader had already passed.
-    #[error("event log {path} shrank below a complete record boundary")]
-    LogShrank {
+    /// The event log is not the one a review read: it is gone or shorter, another file took its
+    /// place, or it no longer holds what was read.
+    ///
+    /// The log only grows, so this is another log, such as a backup restored, and the review
+    /// must be opened again.
+    #[error("event log {path} was replaced since it was read")]
+    LogReplaced {
         /// The log file.
         path: PathBuf,
     },

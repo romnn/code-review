@@ -7,7 +7,7 @@ use super::display::display_width;
 use super::{Bar, Palette, Piece, Room, Weight, split_path};
 use crate::config::DiffLayout;
 use crate::model::buffer::Origin;
-use crate::model::{Model, Phase};
+use crate::model::{Model, Phase, Replaced};
 use crate::rows::FileSection;
 use crate::scroll::float;
 use crate::state;
@@ -401,13 +401,22 @@ fn empty_card(model: &Model, palette: &Palette) -> StateCard {
         title: Piece::new(title, palette.text).weighted(Weight::Semibold),
         detail: Piece::new(detail, palette.dim),
     };
-    let live = model.live_state();
-    if live.is_some_and(|live| live.replaced) {
-        return card(
-            "This checkout was replaced",
-            "Another clone is at this path now; reopen cr to review it.".to_owned(),
-        );
+    match model.replaced() {
+        Some(Replaced::Clone) => {
+            return card(
+                "This checkout was replaced",
+                "Another clone is at this path now; reopen cr to review it.".to_owned(),
+            );
+        }
+        Some(Replaced::Log) => {
+            return card(
+                "This review's event log was replaced",
+                "Another log took its place; reopen cr to review it.".to_owned(),
+            );
+        }
+        None => {}
     }
+    let live = model.live_state();
     let files = model
         .tree
         .iter()

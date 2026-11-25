@@ -673,6 +673,12 @@ the same reviewed lines.
 Notes follow the same chains. A note whose chain ends, or splits ambiguously, attaches to the file
 and is flagged as outdated, keeping its original revision and text as provenance.
 
+The history is derived by applying the log's records in log order. A review keeps the history it
+last read and reads only the records appended since, applying them to it and deriving review state
+again from the earliest revision they add or mark; everything before stays shared with the history
+read before, which never changes once read. The same reducer derives a history from the start, so
+the two are always the same.
+
 ### Walkthroughs
 
 A walkthrough is JSON written for one revision:
@@ -768,7 +774,17 @@ Rules:
   complete records and never keeps the bytes of an incomplete trailing line: it rereads from its
   last complete-record boundary every time, because recovery may truncate that tail and another
   writer may append a different record at the same offset. A corrupt record in the interior of the
-  log is a hard error, never skipped.
+  log is a hard error, never skipped. A reader that keeps its place reads on only while the log is
+  the one it read, as far as it cheaply tells: not gone or shorter, the same file where the
+  platform tells files apart, and the same last 64 bytes it read.
+- **Another log in the review's place ends the review.** Replacing the log while a window is
+  open, such as restoring a backup, is outside the contract, and a supported restore happens with
+  the review closed. A writer appends a mark, an approval or a note, and the capture it records,
+  only to a log that still starts with what the history it was made on was read from, checked
+  under the exclusive lock before it writes or truncates anything. A replacement a reader or a
+  writer finds ends the review in the window, as a replaced clone does: it says to reopen, and
+  marks not saved yet are dropped
+  ([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)).
 
 An event log keeps the state human-readable, diffable and easy to sync, and avoids linking SQLite,
 which would conflict with an embedder's own `libsqlite3-sys`.
@@ -790,7 +806,9 @@ the opening capture, each capture looks twice and counts only when both looks sa
 as a provisional revision after the last recorded one, which `Review::mark` and
 `Review::note` record first, under the lock, only while the log still ends where the capture
 was compared. A capture during which the review recorded another revision is discarded, since
-its history would end in a revision it never saw. The window shows each capture in place of the snapshot on screen, keeping the
+its history would end in a revision it never saw. A capture of nothing new, with nothing appended
+to the log, is the last capture's history again, and one of other code proves only its link from
+the last recorded revision. The window shows each capture in place of the snapshot on screen, keeping the
 file, the hunk, the top row and the folds through the correspondence between the two; a
 capture waits while marks are saved, a picker or overlay is open, a drag or a search is under
 way, and one compared with a snapshot no longer on screen is taken again. A capture shows only in

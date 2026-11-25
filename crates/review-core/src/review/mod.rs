@@ -30,15 +30,16 @@ use crate::analysis::{ANALYSIS_FORMAT, Analysis, analyze};
 use crate::correspond::{CORRESPONDENCE_FORMAT, Correspondence, correspond};
 use crate::error::Error;
 use crate::git::Repo;
-use crate::history::{History, HistoryInput};
+use crate::history::{History, HistoryInput, Links};
 use crate::ids::{MoveId, ObjectId, ReviewKey, RevisionNumber, UnitId};
 use crate::store::events::{
     Event, MarkEvent, MarkVerdict, NoteEvent, PartialApprovalEvent, RevisionEvent,
 };
-use crate::store::log::{LockGuard, LogTail, LogWriter};
+use crate::store::log::{LockGuard, LogTail, LogWriter, Prefix};
 use crate::store::{self, ReviewDir};
 use crate::view::{RevisionView, ShownRun, SinceReviewed};
 use crate::walkthrough;
+use memo::Replayed;
 
 /// What a review covers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,7 +686,7 @@ impl Review {
     /// The number of the last recorded revision, or `None` before the first.
     fn last_revision(&self) -> Result<Option<RevisionNumber>, Error> {
         let events = LogTail::new(&self.dir).poll()?;
-        Ok(revision_events(&self.dir.events(), &events)?
+        Ok(revision_events(&self.dir.events(), &events, 0)?
             .last()
             .map(|revision| revision.number))
     }
@@ -746,8 +747,8 @@ impl Review {
     ) -> Result<Recorded, Error> {
         let analysis = self.analysis(&input.base, &input.head, Publish::UnderLock, progress)?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
-        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
-        let revisions = revision_events(&self.dir.events(), log.events())?;
+        let mut log = self.open_log(&lock, None)?;
+        let revisions = revision_events(&self.dir.events(), log.events(), 0)?;
         if let Some(existing) = revisions
             .last()
             .filter(|revision| revision.base == input.base && revision.head == input.head)
@@ -769,7 +770,7 @@ impl Review {
         {
             return Err(Error::Raced("review"));
         }
-        let number = self.next_number(revisions.last())?;
+        let number = self.next_number(revisions.last().map(|last| last.number))?;
         self.append_revision(
             &mut log,
             RevisionEvent {
@@ -799,9 +800,9 @@ impl Review {
     }
 
     /// The number of the revision after `last`, or the first one.
-    fn next_number(&self, last: Option<&RevisionEvent>) -> Result<RevisionNumber, Error> {
+    fn next_number(&self, last: Option<RevisionNumber>) -> Result<RevisionNumber, Error> {
         match last {
-            Some(last) => last.number.next().ok_or_else(|| Error::InconsistentLog {
+            Some(last) => last.next().ok_or_else(|| Error::InconsistentLog {
                 path: self.dir.events(),
                 detail: "revision numbers exhausted".to_owned(),
             }),
@@ -844,7 +845,7 @@ impl Review {
         publish: Publish,
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Arc<Analysis>, Error> {
-        if let Some(remembered) = self.memo.analysis(&(base.clone(), head.clone())) {
+        if let Some(remembered) = self.memo.analysis(base, head) {
             return Ok(remembered);
         }
         let path = self.dir.analysis(base, head);
@@ -890,75 +891,129 @@ impl Review {
 
     /// Reads the log under a shared lock and derives the full history.
     ///
+    /// A review reads only the records appended since it last read its history, and derives
+    /// again only what they change; its clones share what it read.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the log is corrupt or an analysis cannot be computed.
+    /// Returns [`Error::LogReplaced`] once this review or a clone of it found its log is not
+    /// the one it read, and an error when the log is corrupt or an analysis cannot be computed.
     pub fn history(&self) -> Result<History, Error> {
-        let mut tail = LogTail::new(&self.dir);
-        let events = tail.poll()?;
-        self.history_of(events, tail.offset(), None)
+        if self.memo.replaced() {
+            return Err(self.log_replaced());
+        }
+        let mut replayed = self
+            .memo
+            .replayed()
+            .map_or_else(|| Replayed::start(&self.dir), |kept| Replayed::clone(&kept));
+        let events = self.memo.note_replaced(replayed.tail.poll())?;
+        if events.is_empty() {
+            return Ok(replayed.history);
+        }
+        replayed.history =
+            self.extend_history(&replayed.history, events, replayed.tail.prefix(), None)?;
+        let history = replayed.history.clone();
+        self.memo.keep_replayed(Arc::new(replayed));
+        Ok(history)
     }
 
-    /// Derives the history from the log's `events`, read when the log was `version` bytes long,
+    /// Opens the log under `lock` to append to it, unless this review or a clone of it found
+    /// the log replaced; with `shown`, the history what is appended was made on, only while
+    /// the log still starts with what `shown` was read from, so nothing lands in another log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LogReplaced`] when the log was found replaced or does not start with
+    /// what `shown` was read from, and an error when it cannot be read.
+    fn open_log<'lock>(
+        &self,
+        lock: &'lock LockGuard,
+        shown: Option<&History>,
+    ) -> Result<LogWriter<'lock>, Error> {
+        if self.memo.replaced() {
+            return Err(self.log_replaced());
+        }
+        self.memo.note_replaced(LogWriter::open(
+            &self.dir.events(),
+            lock,
+            shown.map(History::prefix),
+        ))
+    }
+
+    fn log_replaced(&self) -> Error {
+        Error::LogReplaced {
+            path: self.dir.events(),
+        }
+    }
+
+    /// Extends `history` by the log's `events`, read since it was until the log was `prefix`,
     /// followed by the provisional revision `live` when there is one.
     ///
-    /// Analyses and correspondences come from the memo when the last history used them, then
-    /// from the cache; a provisional revision's are computed but never written, since nothing
-    /// may refer to a revision that is not recorded.
-    #[tracing::instrument(name = "history", skip_all)]
-    fn history_of(
+    /// Analyses and the links between consecutive revisions come from the memo when a history
+    /// it keeps has them, then from the cache; a provisional revision's are computed but never
+    /// written, since nothing may refer to a revision that is not recorded.
+    #[tracing::instrument(name = "history", skip_all, fields(records = events.len()))]
+    fn extend_history(
         &self,
+        history: &History,
         mut events: Vec<Event>,
-        version: u64,
+        prefix: Prefix,
         live: Option<RevisionEvent>,
     ) -> Result<History, Error> {
-        let provisional = live.is_some();
+        let provisional = live.as_ref().map(|live| live.number);
         events.extend(live.map(Event::Revision));
-        let revisions = revision_events(&self.dir.events(), &events)?;
-        let publish = |index: usize| {
-            if provisional && index + 1 == revisions.len() {
+        revision_events(&self.dir.events(), &events, history.revisions().len())?;
+        let publish = |revision: &RevisionEvent| {
+            if Some(revision.number) == provisional {
                 Publish::UnderLock
             } else {
                 Publish::Now
             }
         };
-        let mut analyses = Vec::with_capacity(revisions.len());
-        let analysing = tracing::info_span!("analyses", revisions = revisions.len()).entered();
-        for (index, revision) in revisions.iter().enumerate() {
-            let pair = (revision.base.clone(), revision.head.clone());
-            analyses.push((
-                pair,
-                self.analysis(&revision.base, &revision.head, publish(index), &mut |_| {})?,
-            ));
-        }
-        drop(analysing);
-        let mut correspondences = Vec::with_capacity(revisions.len().saturating_sub(1));
-        let proving = tracing::info_span!("correspondences").entered();
-        for (index, window) in analyses.windows(2).enumerate() {
-            let [(older_pair, older), (newer_pair, newer)] = window else {
-                return Err(Error::NoRevisions);
-            };
-            let correspondence = match self.memo.correspondence(older_pair, newer_pair) {
-                Some(correspondence) => correspondence,
-                None => Arc::new(self.correspondence(older, newer, publish(index + 1))?),
-            };
-            correspondences.push(correspondence);
-        }
-        drop(proving);
-        self.memo.keep(&analyses, &correspondences);
-        Ok(History::new(HistoryInput {
+        history.extended(HistoryInput {
             events,
-            analyses: analyses.into_iter().map(|(_, analysis)| analysis).collect(),
-            correspondences,
-            version,
-            provisional,
-        }))
+            prefix,
+            provisional: provisional.is_some(),
+            analysis: &|revision| {
+                tracing::info_span!("analysis").in_scope(|| {
+                    self.analysis(
+                        &revision.base,
+                        &revision.head,
+                        publish(revision),
+                        &mut |_| {},
+                    )
+                })
+            },
+            links: &|revision, older, newer| {
+                tracing::info_span!("links")
+                    .in_scope(|| self.links(older, newer, publish(revision)))
+            },
+        })
+    }
+
+    /// Returns the links between consecutive revisions analyzed as `older` and `newer`, from
+    /// the memo, or else from their correspondence.
+    fn links(
+        &self,
+        older: &Analysis,
+        newer: &Analysis,
+        publish: Publish,
+    ) -> Result<Arc<Links>, Error> {
+        if let Some(links) = self.memo.links(older, newer) {
+            return Ok(links);
+        }
+        let correspondence = self.correspondence(older, newer, publish)?;
+        Ok(Arc::new(Links::new(
+            &correspondence,
+            older.units.len(),
+            newer.units.len(),
+        )))
     }
 
     /// Appends events under the lock.
     fn append(&self, events: Vec<Event>) -> Result<(), Error> {
         let lock = LockGuard::acquire(&self.dir.lock())?;
-        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
+        let mut log = self.open_log(&lock, None)?;
         for event in events {
             log.append(event)?;
         }
@@ -995,7 +1050,7 @@ impl Review {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
-        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
+        let mut log = self.open_log(&lock, Some(view.history()))?;
         self.settle(&mut log, view, true)?;
         for event in events {
             log.append(event)?;
@@ -1029,11 +1084,16 @@ impl Review {
         let changed = || Error::ChangedSinceShown { unit };
         let evidence = view.evidence_digest(unit)?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
-        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
+        let mut log = self.open_log(&lock, Some(view.history()))?;
         // The comparison is derived from the log and, for a capture not recorded yet, the
         // capture itself, so a refused approval records nothing, not even the capture.
         let capture = self.unsettled(&log, view, true)?;
-        let history = self.history_of(log.events().to_vec(), log.length(), capture.clone())?;
+        let history = self.extend_history(
+            &History::empty(),
+            log.events().to_vec(),
+            log.opened(),
+            capture.clone(),
+        )?;
         let now = history.view(view.number())?;
         if now.evidence_digest(unit)? != evidence {
             return Err(changed());
@@ -1133,7 +1193,7 @@ impl Review {
             at: store::now_seconds(),
         });
         let lock = LockGuard::acquire(&self.dir.lock())?;
-        let mut log = LogWriter::open(&self.dir.events(), &lock)?;
+        let mut log = self.open_log(&lock, Some(view.history()))?;
         self.settle(&mut log, view, false)?;
         log.append(event)
     }
@@ -1155,8 +1215,13 @@ impl Review {
     }
 }
 
-/// Extracts the revision events and checks that they are numbered 1, 2, 3, … in log order.
-fn revision_events(path: &Path, events: &[Event]) -> Result<Vec<RevisionEvent>, Error> {
+/// Extracts the revision events and checks that they are numbered in log order after the
+/// `recorded` revisions before them: 1, 2, 3, … from the start of the log.
+fn revision_events(
+    path: &Path,
+    events: &[Event],
+    recorded: usize,
+) -> Result<Vec<RevisionEvent>, Error> {
     let revisions: Vec<RevisionEvent> = events
         .iter()
         .filter_map(|event| match event {
@@ -1164,7 +1229,7 @@ fn revision_events(path: &Path, events: &[Event]) -> Result<Vec<RevisionEvent>, 
             _ => None,
         })
         .collect();
-    for (index, revision) in revisions.iter().enumerate() {
+    for (index, revision) in (recorded..).zip(&revisions) {
         if Some(revision.number) != RevisionNumber::from_index(index) {
             return Err(Error::InconsistentLog {
                 path: path.to_path_buf(),

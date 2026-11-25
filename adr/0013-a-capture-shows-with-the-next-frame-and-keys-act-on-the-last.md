@@ -42,7 +42,8 @@ the same batch as the keys typed while it opened.
   next one is under way: a mark names the snapshot and units it was made on, and the engine
   records exactly that; a later capture carries it only along the usual correspondences, so code
   that changed since shows as still to review. The busy checks around a capture stay, and the
-  overview says what git is doing; a checkout replaced by another clone still stops marks.
+  overview says what git is doing; a checkout replaced by another clone, or a review's log
+  replaced, still stops marks.
 - **The status line keeps the outcome of the reviewer's last action through captures,** and
   what it said about how the snapshot stood, such as that a file is done or which file is next,
   clears once another capture shows, since it may no longer hold; the header's progress, derived
