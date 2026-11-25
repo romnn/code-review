@@ -1,11 +1,12 @@
 # 4. A working-tree review follows the disk, and records a capture only when it is marked
 
-**Status:** accepted, widened to the checkout review by [ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md), its refusal of review keys on a changed hunk superseded by [ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md) · **Date:** 2026-11-14
+**Status:** accepted · **Date:** 2026-11-14
 
 ## Context
 
-A review of the working tree ([ADR 2](0002-uncommitted-work-is-reviewed-against-the-default-branch.md))
-is mostly opened while an agent or the reviewer still edits it.
+A review of a working tree, the checkout review
+([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)) or one opened with
+`--worktree`, is mostly opened while an agent or the reviewer still edits it.
 Until now it showed the working tree as captured when it opened, and `R` recorded another
 capture as a new revision.
 Following the disk the way lazygit does means capturing it on every change.
@@ -40,12 +41,8 @@ real monorepo, and every write a build makes there.
   an unchanged link requires the change byte-for-byte equal at a trusted position, so it is
   exactly a change the reviewer marked.
   Once a capture in between is marked, it is recorded, and the chain runs through it as before.
-- **A review key never acts on code that changed under it.**
-  A hunk that changed in the last capture refuses review keys for a second, and for as long as a
-  key pressed before the change keeps repeating; so does a hunk or file the reviewer was moved
-  onto because theirs went away.
-  A terminal sends a held key as repeated presses, so a press is told from a held key by the
-  time between them.
+- **A review key never acts on code the reviewer has not seen:** a capture shows only with the
+  next frame ([ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)).
 - **Only what git does not ignore is watched.**
   On Linux and the BSDs every directory git does not ignore gets a watch of its own, found by
   asking git about each level of the tree; on macOS and Windows one watch covers the tree and
@@ -75,11 +72,15 @@ real monorepo, and every write a build makes there.
   capture used for browsing indexes again.
 - Changes the watch cannot see show within 30 seconds: a ref moving without the index changing,
   a submodule's commit, `info/exclude` and `core.excludesFile`.
+- Captures keep the copied index's modification time.
+  Git rereads a file only when it is as new as the index ("racily clean"), so a copy dated now
+  would make a same-size edit from the index's own second invisible to the capture.
 
 ## References
 
 - `crates/review-core/src/review/live.rs` (`Review::live_history`, `Review::settle`)
 - `crates/review-core/src/history.rs` (`History::is_provisional`, `History::version`)
+- `crates/review-core/src/git/snapshot.rs` (`capture_worktree`, `copy_index`)
 - `crates/review-ui/src/watch.rs` (`Watch`, `Waiter`)
 - `crates/review-ui/src/model/live.rs`
 - `crates/review-core/tests/acceptance/live.rs`

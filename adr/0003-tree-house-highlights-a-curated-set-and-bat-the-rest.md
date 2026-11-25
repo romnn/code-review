@@ -1,7 +1,6 @@
 # 3. tree-house highlights a curated set of languages, and bat's syntaxes the rest
 
-**Status:** accepted · **Date:** 2026-11-13 · **Supersedes:** highlighting only review-core's
-formatting-proof languages, with Zed's queries on a plain tree-sitter query cursor
+**Status:** accepted · **Date:** 2026-11-13
 
 ## Context
 

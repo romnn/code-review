@@ -1,7 +1,6 @@
 # 1. `cr` is the one released binary, and runs the terminal app
 
-**Status:** accepted · **Date:** 2026-11-13 · **Supersedes:** releasing `review-tui` and `cr` as
-two binaries, with `cr` licensed MIT OR Apache-2.0
+**Status:** accepted · **Date:** 2026-11-13
 
 ## Context
 
@@ -27,8 +26,8 @@ The alternatives considered were:
 
 - Without a command, `cr` is the terminal app: `cr`, `cr 128`, `cr main..feature`,
   `cr --worktree [ref]` and `cr --demo` open that review in the terminal.
-  Without a target, the review is chosen as `cr open` chooses it
-  ([ADR 2](0002-uncommitted-work-is-reviewed-against-the-default-branch.md)).
+  Without a target, it opens the checkout review
+  ([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)).
 - With a command (`cr open`, `cr status`, `cr show`, `cr mark`, …) it is the scriptable interface,
   with `--json` output, as before.
 - A target and a command cannot both be given, and a command's name is never read as a target.

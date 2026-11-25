@@ -1,9 +1,6 @@
 # 6. A hunk shows its code once, with the tokens that changed
 
-**Status:** accepted, its line colors amended by
-[ADR 7](0007-a-hunk-shows-its-review-state-in-its-bar.md) · **Date:** 2026-11-21 ·
-**Supersedes:** the non-goal "Tree-sitter proves formatting equivalence and highlights code; it
-never shapes the diff" in PLAN.md, for the unified layout
+**Status:** accepted · **Date:** 2026-11-21
 
 ## Context
 
@@ -79,14 +76,15 @@ and the front ends paint it.
   error, no gap is layout.
 - **What shows once, and what shows twice.** Lines go together where kept code joins an old line
   to a new one, or one change or whitespace change touches them, in groups no edit crosses. A
-  group shows once, each new line in its new layout, numbered in the head file, with a `~` and no
-  line color, when nothing that changed in it would hide: it has no whitespace change, and each
+  group shows once, each new line in its new layout, numbered in the head file, with a `~` and the
+  line color of its review state ([ADR 7](0007-a-hunk-shows-its-review-state-in-its-bar.md)),
+  when nothing that changed in it would hide: it has no whitespace change, and each
   deletion was made by one change on one old line that kept some of its code, has a place on one
   of the group's new lines, is at most 32 characters, and takes no more of its line than the code
   the line keeps; and every mark starts and ends between whole characters, so a deleted accent
   never joins the letter before it. Inserted tokens are marked behind a stronger green, and a
-  deletion shows where it stood, struck out in red on a stronger red, which it keeps in an
-  approved hunk, never copied, found, or painted over by a find match or a selection. Any other
+  deletion shows where it stood, struck out in red on a stronger red, in gray once its hunk is
+  approved (ADR 7), never copied, found, or painted over by a find match or a selection. Any other
   group shows its old lines above its new ones. A line no kept code joins shows as a removed or
   an added line of its own, as does a line of a group shown once that keeps no code and deletes
   nothing. In a hunk where a group shows both versions, unmarked code reads as kept, so there a

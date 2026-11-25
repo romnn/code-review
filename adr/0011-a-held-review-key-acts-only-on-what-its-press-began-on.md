@@ -1,9 +1,6 @@
 # 11. A held review key acts only on what its press began on
 
-**Status:** accepted, its terminal timing superseded by
-[ADR 12](0012-every-key-a-terminal-sends-is-a-press.md), its refusals while git is busy and on a
-changed hunk by [ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md) ·
-**Date:** 2026-11-24
+**Status:** accepted · **Date:** 2026-11-24
 
 ## Context
 
@@ -15,10 +12,8 @@ window's approval that leaves the selection on another change, and a press that 
 acts on: Space on a folded unit, on a hunk scrolled away, or in the review buffer on a change
 only the diff shows.
 
-A terminal inside tmux sends a held key as the same bytes as taps. gpui's `is_held` tells a
-repeat from a press, and so would the kitty keyboard protocol's event types where a terminal
-speaks them, with every key reported as an escape code, since otherwise a key that types text
-still comes as plain bytes. The reviewer works in plain tmux, so no protocol can be required.
+gpui's `is_held` tells a repeat from a press. A terminal inside tmux sends a held key as the same
+bytes as taps ([ADR 12](0012-every-key-a-terminal-sends-is-a-press.md)).
 
 ## Decision
 
@@ -29,26 +24,18 @@ still comes as plain bytes. The reviewer works in plain tmux, so no protocol can
   change since review by the engine's `ShownRun`, anything else by its units. A repeat on
   anything else, or on anything after its press revealed what it acts on, is refused, and
   says so; a new press acts.
-- **A repeat is what the front end says it is where it can tell:** review-gui passes gpui's
-  `is_held`. review-tui tells nothing: keys of one review action closer together than half a
-  second are one key held down. Asking a terminal for the kitty protocol's event types, to
-  make the guard exact there, is a later enhancement; nothing will depend on it.
-- **A capture on screen takes marks while the next one is under way.** A mark marks what the
-  reviewer saw, which the engine records only as shown and checks under the review's lock;
-  only busy git and a replaced clone refuse marks, since the capture on screen may then not be
-  what the checkout is. A hunk that changed in the working tree still refuses review keys for
-  a second ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)).
+- **A repeat is what the front end says it is:** review-gui passes gpui's `is_held`, so a held
+  Space there approves one change and stops. review-tui cannot tell, and every key it sends is a
+  press (ADR 12).
 
 ## Consequences
 
-- Two taps of Space within half a second in a terminal are one held key: the second, now on
-  the next change, is refused and asks for a new press.
 - Every way the selection changes is covered by one comparison of targets, not by a guard for
   each way the rows are laid out again.
 
 ## References
 
 - `crates/review-ui/src/model/guard.rs`
-- `crates/review-ui/src/model/live.rs` (`carried_change`, `live_refusal`)
+- `crates/review-ui/src/model/live.rs` (`carried_change`)
 - `crates/review-ui/src/model/marks.rs` (`approve_change`)
 - `crates/review-gui/src/app/keys.rs`
