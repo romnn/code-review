@@ -177,6 +177,8 @@ pub(super) enum Outcome {
     Captured(Result<Box<Captured>, Missed>),
     /// A lookup of the checked-out branch's pull request.
     PullRequest(Box<Looked>),
+    /// The watch on the working tree stopped.
+    Unwatched,
     /// The engine stopped, as the app quits.
     Disposed,
 }
@@ -401,6 +403,7 @@ impl Model {
             | Outcome::Waited(_)
             | Outcome::Captured(_)
             | Outcome::PullRequest(_)
+            | Outcome::Unwatched
             | Outcome::Disposed => {}
         }
     }
@@ -454,6 +457,7 @@ impl Model {
             Outcome::Waited(waited) => self.waited(*waited),
             Outcome::Captured(captured) => self.captured(captured),
             Outcome::PullRequest(looked) => self.looked_up(*looked),
+            Outcome::Unwatched => {}
             Outcome::Disposed => self.closed(),
         }
     }

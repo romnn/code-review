@@ -196,7 +196,7 @@ fn live(model: &Model) -> Value {
         "lookup": live.lookup,
         "updating": live.updating,
         "busy": live.busy.map(|busy| busy.to_string()),
-        "replaced": live.replaced,
+        "replaced": model.replaced().map(|replaced| format!("{replaced:?}")),
         "filtered": live.filtered.len(),
         "grant": match model.trust {
             crate::model::Trust::Granted(grant) => Some(format!("{grant:?}")),

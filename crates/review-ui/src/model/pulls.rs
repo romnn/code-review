@@ -170,12 +170,12 @@ impl Model {
         if self.engine.is_none() {
             return;
         }
+        if self.replaced.is_some() {
+            return;
+        }
         let Some(live) = &mut self.live else {
             return;
         };
-        if live.replaced() {
-            return;
-        }
         let pulls = &mut live.pulls;
         let Some(association) = pulls.association.clone() else {
             return;

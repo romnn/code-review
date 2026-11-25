@@ -5851,7 +5851,7 @@ fn a_replaced_checkout_stops_and_says_so() {
     host.update(Model::changed);
     host.settle();
     let model = host.model();
-    assert!(model.live.as_ref().unwrap().replaced());
+    assert_eq!(model.replaced(), Some(Replaced::Clone));
     assert!(model.status.starts_with("This checkout was replaced"));
     assert_eq!(
         card(model).map(|(title, _)| title).as_deref(),
@@ -5859,6 +5859,115 @@ fn a_replaced_checkout_stops_and_says_so() {
     );
     host.update(Model::changed);
     assert!(host.jobs.is_empty(), "nothing is captured any more");
+}
+
+/// The event log of the review of the checkout in `dir`, as [`open_checkout`] opens it.
+fn log_of(dir: &Path) -> std::path::PathBuf {
+    let reviews = dir.join("data").join("reviews");
+    let review = std::fs::read_dir(reviews).unwrap().next().unwrap().unwrap();
+    review.path().join("events.jsonl")
+}
+
+/// The window over the review of a checkout in `dir` whose top hunk of `a.rs` is approved and
+/// saved, with the bottom one selected.
+fn approved_checkout_host(dir: &Path) -> Host {
+    let (mut host, repo) = checkout_host(dir);
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "two")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert!(log_of(dir).exists(), "the approval recorded the capture");
+    host
+}
+
+/// A review whose event log was replaced, here by a shorter one, stops being captured, says
+/// to reopen, and marks nothing more.
+#[test]
+fn a_replaced_log_stops_the_review_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = approved_checkout_host(dir.path());
+    let log = log_of(dir.path());
+    let text = std::fs::read_to_string(&log).unwrap();
+    let first = text.lines().next().unwrap();
+    std::fs::write(&log, format!("{first}\n")).unwrap();
+
+    host.update(Model::changed);
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.replaced(), Some(Replaced::Log));
+    assert!(
+        model
+            .status
+            .starts_with("This review's event log was replaced")
+    );
+    assert!(bar(model).contains("log replaced"));
+    host.update(Model::changed);
+    assert!(host.jobs.is_empty(), "nothing is captured any more");
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    assert!(
+        host.model()
+            .status
+            .starts_with("Not marked: this review's event log was replaced")
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{first}\n"));
+}
+
+/// A mark made after the event log was replaced, before any capture saw it, writes nothing,
+/// stops the review, and drops the marks still queued.
+#[test]
+fn a_mark_on_a_replaced_log_writes_nothing_and_stops_the_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = approved_checkout_host(dir.path());
+    let log = log_of(dir.path());
+    let text = std::fs::read_to_string(&log).unwrap();
+    let first = text.lines().next().unwrap();
+    std::fs::write(&log, format!("{first}\n")).unwrap();
+
+    host.dispatch(Action::ToggleApprove);
+    assert!(!host.model().pending.is_empty(), "the mark shows at once");
+    host.settle();
+    let model = host.model();
+    assert_eq!(model.replaced(), Some(Replaced::Log));
+    assert!(
+        model
+            .status
+            .starts_with("This review's event log was replaced")
+    );
+    assert!(model.pending.is_empty() && model.saves.is_empty());
+    assert!(
+        model.parts().watch.lock().is_none(),
+        "the working tree is not watched any more"
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{first}\n"));
+}
+
+/// A quit that waits for the one mark being saved, which the event log replaced meanwhile
+/// refuses, stops and says the mark was lost, which the app's log keeps as well.
+#[test]
+fn a_mark_a_replaced_log_refused_stops_the_quit_that_waited_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = approved_checkout_host(dir.path());
+    let log = log_of(dir.path());
+    let text = std::fs::read_to_string(&log).unwrap();
+    let first = text.lines().next().unwrap();
+    std::fs::write(&log, format!("{first}\n")).unwrap();
+
+    host.dispatch(Action::ToggleApprove);
+    assert!(host.model().saves.is_empty(), "the mark is being saved");
+    host.dispatch(Action::Quit);
+    host.settle();
+    let model = host.model();
+    assert_eq!(host.quits, 0, "the app does not close over the lost mark");
+    assert_eq!(model.quitting, Quitting::Stopped);
+    assert!(model.status.contains("Marks not saved yet are lost."));
+    assert!(
+        host.logged
+            .iter()
+            .any(|line| line.starts_with("could not record the mark of 1 unit"))
+    );
 }
 
 /// The pull request's lookup: an answer for another branch is dropped, the branch's lands with

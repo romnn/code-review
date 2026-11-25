@@ -4,6 +4,8 @@
 //! Review state is derived here.
 //! Correspondences chain across revisions, so each unit knows its last reviewed predecessor even
 //! when intermediate revisions were never reviewed.
+//! The log's records apply in log order, and a history read again is the one read before
+//! extended by the records appended since, so it costs what they changed, not the whole review.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use crate::error::Error;
 use crate::ids::{ObjectId, RevisionNumber, UnitId, UnitIndex};
 use crate::standing::ReviewPolicy;
 use crate::store::events::{Event, MarkVerdict, NoteEvent, RevisionEvent, WalkthroughEvent};
+use crate::store::log::Prefix;
 use crate::view::RevisionView;
 
 /// A verdict that counts as reviewed.
@@ -135,18 +138,61 @@ impl From<&RevisionEvent> for RevisionRecord {
     }
 }
 
-/// The links touching one unit, toward the previous and the next revision.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct UnitLinks {
-    pub predecessors: Vec<Link>,
-    pub successors: Vec<Link>,
+impl From<&RevisionRecord> for RevisionEvent {
+    fn from(record: &RevisionRecord) -> Self {
+        Self {
+            number: record.number,
+            base: record.base.clone(),
+            head: record.head.clone(),
+            target: record.target.clone(),
+            merge_bases: record.merge_bases.clone(),
+            recorded_at: record.recorded_at,
+            branch: record.branch.clone(),
+            head_commit: record.head_commit.clone(),
+            pull_request: record.pull_request,
+        }
+    }
+}
+
+/// The links between two consecutive revisions, by unit on either side.
+#[derive(Debug, Default)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct Links {
+    /// For each unit of the older revision, its links to the newer one.
+    successors: Vec<Vec<Link>>,
+    /// For each unit of the newer revision, its links to the older one.
+    predecessors: Vec<Vec<Link>>,
+}
+
+impl Links {
+    /// Indexes `correspondence` between a revision of `older` units and one of `newer` units,
+    /// dropping each end of a link that names a unit out of range.
+    pub(crate) fn new(correspondence: &Correspondence, older: usize, newer: usize) -> Self {
+        let mut links = Self {
+            successors: vec![Vec::new(); older],
+            predecessors: vec![Vec::new(); newer],
+        };
+        for link in &correspondence.links {
+            if let Some(entry) = links.successors.get_mut(link.older.get()) {
+                entry.push(*link);
+            }
+            if let Some(entry) = links.predecessors.get_mut(link.newer.get()) {
+                entry.push(*link);
+            }
+        }
+        links
+    }
 }
 
 /// One revision's data within a [`History`].
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub(crate) struct RevisionData {
     pub record: RevisionRecord,
     pub analysis: Arc<Analysis>,
-    pub links: Vec<UnitLinks>,
+    /// The latest valid review action on each unit that has one: a later mark replaces a
+    /// partial approval and the other way around.
+    actions: HashMap<UnitIndex, Action>,
     pub states: Vec<UnitState>,
 }
 
@@ -155,127 +201,160 @@ pub(crate) struct RevisionData {
 /// A history read for a live working-tree review may end in a provisional revision: the
 /// working tree as captured just now, numbered after the last recorded revision but not
 /// recorded, so it takes part in no other history; see [`Self::is_provisional`].
+///
+/// A history never changes once read.
+/// Histories read one after another share whatever the log's records since left as it was,
+/// and cloning one copies no text.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct History {
-    revisions: Vec<RevisionData>,
-    /// The reviewed text of each unit whose latest review action is a partial approval, which
-    /// every later unit whose state names that unit compares with.
-    approved: HashMap<UnitId, String>,
-    notes: Vec<NoteEvent>,
-    walkthroughs: Vec<WalkthroughEvent>,
-    warnings: Vec<String>,
-    version: u64,
+    revisions: Vec<Arc<RevisionData>>,
+    /// The links between each revision and the next.
+    links: Vec<Arc<Links>>,
+    notes: Arc<Vec<NoteEvent>>,
+    walkthroughs: Arc<Vec<WalkthroughEvent>>,
+    warnings: Arc<Vec<String>>,
+    /// The part of the log this history was read from.
+    prefix: Prefix,
     provisional: bool,
 }
 
-/// The inputs to build a [`History`].
-pub(crate) struct HistoryInput {
-    /// The log's events, followed by the provisional revision's event when there is one.
+/// What extends a [`History`]: the records appended to the log since it was read, or a
+/// provisional revision, and where to get what each revision among them needs.
+pub(crate) struct HistoryInput<'a> {
+    /// The records, in log order, followed by the provisional revision's when there is one.
     pub events: Vec<Event>,
-    pub analyses: Vec<Arc<Analysis>>,
-    pub correspondences: Vec<Arc<Correspondence>>,
-    /// The length of the log the events were read from, in bytes.
-    pub version: u64,
+    /// The part of the log the history has read once extended.
+    pub prefix: Prefix,
     /// Whether the last revision is provisional.
     pub provisional: bool,
+    /// Returns the analysis of a revision.
+    pub analysis: &'a dyn Fn(&RevisionEvent) -> Result<Arc<Analysis>, Error>,
+    /// Returns the links into a revision from the revision before it.
+    pub links: &'a LinksInto<'a>,
 }
 
+/// Returns the links into a revision from the revision before it, given the revision, the
+/// analysis of the one before and its own.
+pub(crate) type LinksInto<'a> =
+    dyn Fn(&RevisionEvent, &Analysis, &Analysis) -> Result<Arc<Links>, Error> + 'a;
+
 impl History {
-    /// Builds the history and derives every unit's state.
-    #[tracing::instrument(name = "standings", skip_all)]
-    pub(crate) fn new(input: HistoryInput) -> Self {
+    /// Returns the history of a review that recorded nothing.
+    pub(crate) fn empty() -> Self {
+        Self {
+            revisions: Vec::new(),
+            links: Vec::new(),
+            notes: Arc::default(),
+            walkthroughs: Arc::default(),
+            warnings: Arc::default(),
+            prefix: Prefix::empty(),
+            provisional: false,
+        }
+    }
+
+    /// Returns this history extended by `input`: its records applied in log order, then the
+    /// states derived again from the earliest revision they add or act on.
+    ///
+    /// Every revision before that one stays shared with this history, and so do the links
+    /// between them; only a history of recorded revisions is extended, since nothing follows a
+    /// provisional revision.
+    /// Applying a log's records in one input or in several gives the same history, which is
+    /// how a history read again equals one read from the start.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of `input`'s `analysis` and `links`.
+    pub(crate) fn extended(&self, input: HistoryInput<'_>) -> Result<Self, Error> {
         let HistoryInput {
             events,
-            analyses,
-            correspondences,
-            version,
+            prefix,
             provisional,
+            analysis,
+            links,
         } = input;
-        let mut records = Vec::new();
-        let mut actions = Vec::new();
-        let mut notes = Vec::new();
-        let mut walkthroughs = Vec::new();
-        for event in events {
-            match event {
-                Event::Revision(revision) => records.push(RevisionRecord::from(&revision)),
-                Event::Mark(mark) => actions.push(LoggedAction {
-                    revision: mark.revision,
-                    unit: mark.unit,
-                    evidence: mark.evidence,
-                    action: Action::Mark(mark.verdict),
-                }),
-                Event::PartialApproval(approval) => actions.push(LoggedAction {
-                    revision: approval.revision,
-                    unit: approval.unit,
-                    evidence: approval.evidence,
-                    action: Action::Partial(approval.text),
-                }),
-                Event::Note(note) => notes.push(note),
-                Event::Walkthrough(walkthrough) => walkthroughs.push(walkthrough),
-                // Trust gates tools in the front ends; it does not change review state.
-                Event::Trust(_) => {}
-            }
-        }
-        let mut revisions: Vec<RevisionData> = records
-            .into_iter()
-            .zip(analyses)
-            .map(|(record, analysis)| RevisionData {
-                links: vec![UnitLinks::default(); analysis.units.len()],
-                states: Vec::new(),
-                record,
-                analysis,
-            })
-            .collect();
-        for (index, correspondence) in correspondences.iter().enumerate() {
-            for link in &correspondence.links {
-                if let Some(entry) = revisions
-                    .get_mut(index)
-                    .and_then(|older| older.links.get_mut(link.older.get()))
-                {
-                    entry.successors.push(*link);
-                }
-                if let Some(entry) = revisions
-                    .get_mut(index + 1)
-                    .and_then(|newer| newer.links.get_mut(link.newer.get()))
-                {
-                    entry.predecessors.push(*link);
-                }
-            }
-        }
         let mut history = Self {
-            revisions,
-            approved: HashMap::new(),
-            notes: Vec::new(),
-            walkthroughs: Vec::new(),
-            warnings: Vec::new(),
-            version,
+            prefix,
             provisional,
+            ..self.clone()
         };
-        history.notes = notes
-            .into_iter()
-            .filter_map(|mut note| {
-                note.unit =
-                    history.check_evidence(note.revision, note.unit, &note.evidence, "note")?;
-                Some(note)
-            })
-            .collect();
-        history.walkthroughs = walkthroughs;
-        let direct = history.direct_actions(actions);
-        history.derive_states(&direct);
-        history.approved = direct
-            .into_iter()
-            .filter_map(|(unit, action)| match action {
-                Action::Partial(text) => Some((unit, text)),
-                Action::Mark(_) => None,
-            })
-            .collect();
-        history
+        let mut from = history.revisions.len();
+        for event in events {
+            let acted_on = match event {
+                Event::Revision(revision) => {
+                    let analysis = analysis(&revision)?;
+                    if let Some(older) = history.revisions.last() {
+                        let links = links(&revision, &older.analysis, &analysis)?;
+                        history.links.push(links);
+                    }
+                    history.revisions.push(Arc::new(RevisionData {
+                        record: RevisionRecord::from(&revision),
+                        analysis,
+                        actions: HashMap::new(),
+                        states: Vec::new(),
+                    }));
+                    None
+                }
+                Event::Mark(mark) => history.act(
+                    mark.revision,
+                    mark.unit,
+                    &mark.evidence,
+                    Action::Mark(mark.verdict),
+                ),
+                Event::PartialApproval(approval) => history.act(
+                    approval.revision,
+                    approval.unit,
+                    &approval.evidence,
+                    Action::Partial(approval.text),
+                ),
+                Event::Note(mut note) => {
+                    if let Some(unit) =
+                        history.check_evidence(note.revision, note.unit, &note.evidence, "note")
+                    {
+                        note.unit = unit;
+                        Arc::make_mut(&mut history.notes).push(note);
+                    }
+                    None
+                }
+                Event::Walkthrough(walkthrough) => {
+                    Arc::make_mut(&mut history.walkthroughs).push(walkthrough);
+                    None
+                }
+                // Trust gates tools in the front ends; it does not change review state.
+                Event::Trust(_) => None,
+            };
+            if let Some(index) = acted_on {
+                from = from.min(index);
+            }
+        }
+        history.derive_states(from);
+        Ok(history)
+    }
+
+    /// Applies a review action recorded in the log to unit `unit` of revision `revision`, once
+    /// its evidence is checked, and returns the revision's index when it applied.
+    fn act(
+        &mut self,
+        revision: RevisionNumber,
+        unit: UnitIndex,
+        evidence: &str,
+        action: Action,
+    ) -> Option<usize> {
+        let what = match action {
+            Action::Mark(_) => "mark",
+            Action::Partial(_) => "partial approval",
+        };
+        let unit = self.check_evidence(revision, unit, evidence, what)?;
+        let data = self.revisions.get_mut(revision.index())?;
+        Arc::make_mut(data).actions.insert(unit, action);
+        Some(revision.index())
     }
 
     /// Resolves a recorded unit reference, verifying its evidence digest.
     ///
     /// When the unit at the recorded index has different evidence (an analysis recomputed with a
     /// different numbering), the unit with that exact evidence is used instead; when there is
-    /// none, the reference is dropped with a warning.
+    /// none, or the revision is not recorded before the reference, it is dropped with a warning.
     fn check_evidence(
         &mut self,
         revision: RevisionNumber,
@@ -283,13 +362,19 @@ impl History {
         evidence: &str,
         what: &str,
     ) -> Option<UnitIndex> {
-        let analysis = &self.revisions.get(revision.index())?.analysis;
-        if analysis.evidence_digest(unit).as_deref() == Some(evidence) {
+        let Some(data) = self.revisions.get(revision.index()) else {
+            Arc::make_mut(&mut self.warnings).push(format!(
+                "ignored a {what} on {}: its revision is not recorded before it",
+                UnitId::new(revision, unit)
+            ));
+            return None;
+        };
+        if data.analysis.evidence_digest(unit).as_deref() == Some(evidence) {
             return Some(unit);
         }
-        let found = analysis.find_by_digest(evidence);
+        let found = data.analysis.find_by_digest(evidence);
         if found.is_none() {
-            self.warnings.push(format!(
+            Arc::make_mut(&mut self.warnings).push(format!(
                 "ignored a {what} on {}: the unit's evidence no longer matches",
                 UnitId::new(revision, unit)
             ));
@@ -297,49 +382,35 @@ impl History {
         found
     }
 
-    /// Returns the latest valid review action per unit, keyed by revision and unit: a later
-    /// mark replaces a partial approval and the other way around.
-    fn direct_actions(&mut self, actions: Vec<LoggedAction>) -> HashMap<UnitId, Action> {
-        let mut direct = HashMap::new();
-        for recorded in actions {
-            let what = match recorded.action {
-                Action::Mark(_) => "mark",
-                Action::Partial(_) => "partial approval",
-            };
-            if let Some(unit) =
-                self.check_evidence(recorded.revision, recorded.unit, &recorded.evidence, what)
-            {
-                direct.insert(UnitId::new(recorded.revision, unit), recorded.action);
-            }
-        }
-        direct
-    }
-
-    /// Derives every unit's state, revision by revision.
-    fn derive_states(&mut self, direct: &HashMap<UnitId, Action>) {
-        for index in 0..self.revisions.len() {
+    /// Derives the state of every unit of the revisions from index `from` on.
+    #[tracing::instrument(name = "standings", skip_all, fields(from))]
+    fn derive_states(&mut self, from: usize) {
+        for index in from..self.revisions.len() {
             let Some(number) = RevisionNumber::from_index(index) else {
                 continue;
             };
-            let previous: Vec<UnitState> = index
-                .checked_sub(1)
-                .and_then(|previous| self.revisions.get(previous))
-                .map(|previous| previous.states.clone())
-                .unwrap_or_default();
-            let Some(revision) = self.revisions.get_mut(index) else {
+            let (earlier, later) = self.revisions.split_at_mut(index);
+            let Some(revision) = later.first_mut() else {
                 continue;
             };
-            revision.states = (0..revision.analysis.units.len())
+            let previous = earlier
+                .last()
+                .map_or(&[][..], |previous| previous.states.as_slice());
+            let links = index
+                .checked_sub(1)
+                .and_then(|previous| self.links.get(previous));
+            let revision = Arc::make_mut(revision);
+            let states = (0..revision.analysis.units.len())
                 .map(|unit| {
                     let unit = UnitIndex::new(unit);
-                    let links = revision
-                        .links
-                        .get(unit.get())
-                        .map(|links| links.predecessors.as_slice());
+                    let predecessors = links
+                        .and_then(|links| links.predecessors.get(unit.get()))
+                        .map_or(&[][..], Vec::as_slice);
                     let id = UnitId::new(number, unit);
-                    state_of(id, direct.get(&id), links.unwrap_or_default(), &previous)
+                    state_of(id, revision.actions.get(&unit), predecessors, previous)
                 })
                 .collect();
+            revision.states = states;
         }
     }
 
@@ -370,7 +441,13 @@ impl History {
     /// apart from a provisional revision.
     #[must_use]
     pub fn version(&self) -> u64 {
-        self.version
+        self.prefix.length()
+    }
+
+    /// Returns the part of the log this history was read from, which a writer acting on it
+    /// checks the log still starts with.
+    pub(crate) fn prefix(&self) -> &Prefix {
+        &self.prefix
     }
 
     /// Returns whether revision `number` is provisional: the working tree as captured for a live
@@ -442,7 +519,7 @@ impl History {
     }
 
     pub(crate) fn revision(&self, number: RevisionNumber) -> Option<&RevisionData> {
-        self.revisions.get(number.index())
+        self.revisions.get(number.index()).map(AsRef::as_ref)
     }
 
     pub(crate) fn notes(&self) -> &[NoteEvent] {
@@ -456,33 +533,94 @@ impl History {
     /// Returns the reviewed text a partial approval left on unit `unit`, when that is the
     /// unit's latest review action.
     pub(crate) fn approved_text(&self, unit: UnitId) -> Option<&str> {
-        self.approved.get(&unit).map(String::as_str)
+        match self.revision(unit.revision())?.actions.get(&unit.index())? {
+            Action::Partial(text) => Some(text),
+            Action::Mark(_) => None,
+        }
     }
 
     /// Returns the predecessor links of a unit.
     pub(crate) fn predecessors(&self, unit: UnitId) -> &[Link] {
-        self.revision(unit.revision())
-            .and_then(|revision| revision.links.get(unit.index().get()))
-            .map_or(&[], |links| links.predecessors.as_slice())
+        unit.revision()
+            .index()
+            .checked_sub(1)
+            .and_then(|older| self.links.get(older))
+            .and_then(|links| links.predecessors.get(unit.index().get()))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Returns the successor links of a unit.
     pub(crate) fn successors(&self, unit: UnitId) -> &[Link] {
-        self.revision(unit.revision())
-            .and_then(|revision| revision.links.get(unit.index().get()))
-            .map_or(&[], |links| links.successors.as_slice())
+        self.links
+            .get(unit.revision().index())
+            .and_then(|links| links.successors.get(unit.index().get()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns the analysis of a revision of `base` against `head`, if the history has one.
+    pub(crate) fn analysis_of(&self, base: &ObjectId, head: &ObjectId) -> Option<&Arc<Analysis>> {
+        self.revisions
+            .iter()
+            .map(|revision| &revision.analysis)
+            .find(|analysis| &analysis.base == base && &analysis.head == head)
+    }
+
+    /// Returns the links between a revision analyzed as `older` and the next one, analyzed as
+    /// `newer`, if the history has two such.
+    pub(crate) fn links_between(&self, older: &Analysis, newer: &Analysis) -> Option<&Arc<Links>> {
+        let same = |revision: &RevisionData, analysis: &Analysis| {
+            revision.analysis.base == analysis.base && revision.analysis.head == analysis.head
+        };
+        self.revisions
+            .windows(2)
+            .zip(&self.links)
+            .find_map(|(window, links)| match window {
+                [before, after] if same(before, older) && same(after, newer) => Some(links),
+                _ => None,
+            })
     }
 }
 
-/// A review action recorded in the log, before its unit reference is checked.
-struct LoggedAction {
-    revision: RevisionNumber,
-    unit: UnitIndex,
-    evidence: String,
-    action: Action,
+#[cfg(test)]
+impl History {
+    /// Returns the numbers of the revisions whose data this history shares with `other`,
+    /// rather than deriving its own.
+    pub(crate) fn shared_revisions(&self, other: &Self) -> Vec<usize> {
+        shared(&self.revisions, &other.revisions)
+            .map(|index| index + 1)
+            .collect()
+    }
+
+    /// Returns the numbers of the revisions whose links from the revision before them this
+    /// history shares with `other`, rather than proving its own.
+    pub(crate) fn shared_links(&self, other: &Self) -> Vec<usize> {
+        shared(&self.links, &other.links)
+            .map(|index| index + 2)
+            .collect()
+    }
+
+    /// Whether this history holds the very notes, walkthroughs and warnings `other` holds,
+    /// rather than copies of them.
+    pub(crate) fn shares_text(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.notes, &other.notes)
+            && Arc::ptr_eq(&self.walkthroughs, &other.walkthroughs)
+            && Arc::ptr_eq(&self.warnings, &other.warnings)
+    }
+}
+
+/// The indices at which `mine` and `theirs` hold the same allocation.
+#[cfg(test)]
+fn shared<'a, T>(mine: &'a [Arc<T>], theirs: &'a [Arc<T>]) -> impl Iterator<Item = usize> + 'a {
+    mine.iter()
+        .zip(theirs)
+        .enumerate()
+        .filter(|(_, (mine, theirs))| Arc::ptr_eq(mine, theirs))
+        .map(|(index, _)| index)
 }
 
 /// What a reviewer did to a unit.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 enum Action {
     /// Marked it as a whole.
     Mark(MarkVerdict),
@@ -563,5 +701,95 @@ fn state_of(
                     UnitState::ChangedSinceReviewed { verdict, reviewed }
                 })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use color_eyre::eyre;
+
+    use super::*;
+    use crate::analysis::ANALYSIS_FORMAT;
+
+    /// The revision numbered `number`, of a head of its own.
+    fn revision(number: u32) -> eyre::Result<Event> {
+        Ok(Event::Revision(RevisionEvent {
+            number: RevisionNumber::new(number).ok_or_else(|| eyre::eyre!("revision 0"))?,
+            base: ObjectId::parse(&"0".repeat(40))?,
+            head: ObjectId::parse(&format!("{number:040}"))?,
+            target: None,
+            merge_bases: Vec::new(),
+            recorded_at: 0,
+            branch: None,
+            head_commit: None,
+            pull_request: None,
+        }))
+    }
+
+    /// A request for the links into a revision.
+    #[derive(Debug, PartialEq)]
+    struct Linked {
+        into: u32,
+        older: ObjectId,
+        newer: ObjectId,
+    }
+
+    /// Each revision added gets the analysis of its own record, and links only from the
+    /// revision right before it, also when its records come in another input than that one's.
+    #[test]
+    fn each_revision_gets_its_own_analysis_and_links_from_the_one_before() -> eyre::Result<()> {
+        let linked = RefCell::new(Vec::new());
+        let analysis = |revision: &RevisionEvent| {
+            Ok(Arc::new(Analysis {
+                format: ANALYSIS_FORMAT,
+                base: revision.base.clone(),
+                head: revision.head.clone(),
+                files: Vec::new(),
+                units: Vec::new(),
+                moves: Vec::new(),
+            }))
+        };
+        let links = |revision: &RevisionEvent, older: &Analysis, newer: &Analysis| {
+            linked.borrow_mut().push(Linked {
+                into: revision.number.get(),
+                older: older.head.clone(),
+                newer: newer.head.clone(),
+            });
+            Ok(Arc::new(Links::default()))
+        };
+        let input = |events| HistoryInput {
+            events,
+            prefix: Prefix::empty(),
+            provisional: false,
+            analysis: &analysis,
+            links: &links,
+        };
+        let history = History::empty()
+            .extended(input(vec![revision(1)?, revision(2)?]))?
+            .extended(input(vec![revision(3)?]))?;
+
+        for record in history.revisions() {
+            let analysis = history.view(record.number)?.analysis().map(|it| &it.head);
+            assert_eq!(analysis, Some(&record.head));
+        }
+        let head = |number: u32| ObjectId::parse(&format!("{number:040}"));
+        assert_eq!(
+            linked.into_inner(),
+            [
+                Linked {
+                    into: 2,
+                    older: head(1)?,
+                    newer: head(2)?,
+                },
+                Linked {
+                    into: 3,
+                    older: head(2)?,
+                    newer: head(3)?,
+                },
+            ]
+        );
+        Ok(())
     }
 }

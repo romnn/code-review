@@ -77,7 +77,7 @@ pub use actions::Action;
 use effects::{Because, Highlighted, Outcome, Subject, TextsRead};
 pub use effects::{Completion, Driver, Effect, Job, SheetStep, Updated};
 pub use fields::{Field, FieldState};
-pub use live::{Following, abbreviated, branch_and_base};
+pub use live::{Following, Replaced, abbreviated, branch_and_base};
 pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
 pub use select::{Hit, TextPress, list_of};
@@ -498,6 +498,8 @@ pub struct Model {
     version: u64,
     /// Following the working tree, for a live review of it.
     live: Option<live::Live>,
+    /// What took the place of what the review was read from, which ends the review here.
+    replaced: Option<Replaced>,
     /// Marks and decisions on trust waiting for the engine, saved one at a time in order.
     saves: VecDeque<marks::Save>,
     /// Whether a mark or a decision on trust is being saved.
@@ -628,6 +630,7 @@ impl Model {
             showing: 0,
             version: 0,
             live: None,
+            replaced: None,
             saves: VecDeque::new(),
             saving: false,
             config_edits: VecDeque::new(),
@@ -835,8 +838,14 @@ impl Model {
             filtered: live.filtered(),
             updating: live.updating(),
             busy: live.busy(),
-            replaced: live.replaced(),
         })
+    }
+
+    /// What took the place of what the review was read from, which ends the review in this
+    /// window, if anything did.
+    #[must_use]
+    pub fn replaced(&self) -> Option<Replaced> {
+        self.replaced
     }
 
     /// One line on where the review stands, with how many of the reviewed hunks were approved
@@ -1449,8 +1458,6 @@ pub struct LiveState<'a> {
     pub updating: bool,
     /// What git is busy with in the checkout, which keeps the view on screen.
     pub busy: Option<review_core::Busy>,
-    /// Whether the checkout is another clone now, so nothing is captured any more.
-    pub replaced: bool,
 }
 
 /// What opening a review produced.
