@@ -1,9 +1,6 @@
 # 9. A hunk changed since it was reviewed shows what changed on top of it
 
-**Status:** accepted, its one stop and one mark superseded by
-[ADR 10](0010-each-change-since-a-review-is-approved-on-its-own.md) · **Date:** 2026-11-23 · amends
-[ADR 6](0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md): an interdiff no longer
-shows as nested blocks; what changed since a review shows through the same script as a hunk
+**Status:** accepted · **Date:** 2026-11-23
 
 ## Context
 
@@ -35,13 +32,12 @@ added, and no comparison of the two heads shows that.
   of the lines that differ, with an edit script over plain words and punctuation, so every
   whitespace change shows. It is computed from the history alone, without reading blobs, and
   only when the hunk is laid out.
-- **A delta shows as a new change does,** each run through ADR 6's script: a line once with the
-  tokens that changed, or the reviewed lines above the current ones. Its hunk spans only its
-  first run to its last: it is selected there, its bar runs there, and its header names those
-  lines. The lines the same as reviewed before and after are context around it like any
-  unchanged line, folded into gaps in the hunks view. Those between runs stay in the hunk, so it
-  is one stop and one mark, and the hunks view folds them beyond a few lines too. The file view
-  shows every line.
+- **A delta shows as a new change does,** each run through
+  [ADR 6](0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md)'s script: a line once
+  with the tokens that changed, or the reviewed lines above the current ones. The lines the same
+  as reviewed, before, between and after the runs, are context like any unchanged line, folded
+  into gaps in the hunks view. The file view shows every line. Each run is a stop and a mark of
+  its own ([ADR 10](0010-each-change-since-a-review-is-approved-on-its-own.md)).
 - **A reviewed line knows where it is in the head it was reviewed in,** for its syntax colors,
   and has no line number. That head is highlighted like the shown files. Side by side, the
   reviewed lines are on the left and the current ones on the right.
@@ -50,12 +46,10 @@ added, and no comparison of the two heads shows that.
 
 ## Consequences
 
-- Nested interdiff rows and their titles are gone; nested rows remain for a move's edits.
+- What changed since a review shows in no nested rows; they remain only for a move's edits.
 - A change against a moved target branch shows whole, as a new change would, under a header that
   says why.
 - A file unit shows its current entries; what it was when reviewed is in `cr show --json`.
-- Space approves a hunk as soon as any of it shows, as for any hunk taller than the screen, so
-  with runs far apart the reviewer scrolls to the last run before approving.
 - Highlighting is indexed per shown snapshot, so a mark another session makes on an earlier
   revision while this one shows a later one can leave a reviewed head unhighlighted until the
   next snapshot shows.

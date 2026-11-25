@@ -100,7 +100,7 @@ trust, and none keeps running once the window says a revocation took effect.
   but its answer does not land, so the window shows the denial once trust is next read or
   another lookup finds it.
 
-## Not taken
+## Rejected alternatives
 
 - **A background owner thread per window, taking data-only commands.** It would cover races
   between windows and reap servers at exit, at several times the size: a command enum, its

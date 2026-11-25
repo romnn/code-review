@@ -1,17 +1,14 @@
 # 10. Each change since a review is approved on its own
 
-**Status:** accepted · **Date:** 2026-11-24 · supersedes the one stop and one mark of a unit
-that shows what changed since it was reviewed in
-[ADR 9](0009-a-hunk-changed-since-it-was-reviewed-shows-what-changed-on-top-of-it.md), keeping
-its eligibility
+**Status:** accepted · **Date:** 2026-11-24
 
 ## Context
 
 [ADR 9](0009-a-hunk-changed-since-it-was-reviewed-shows-what-changed-on-top-of-it.md) shows a
 hunk approved at one revision that changed since as what changed on top of it: runs of lines
-that differ, with the lines the same as reviewed as context. The hunk still spans its first run
-to its last and is one stop and one mark, so two one-line edits 200 lines apart in an accepted
-addition are one hunk whose bar runs along 200 lines of approved code, and Space approves both
+that differ, with the lines the same as reviewed as context. As one hunk from its first run to
+its last, one stop and one mark, two one-line edits 200 lines apart in an accepted addition
+would be one hunk whose bar runs along 200 lines of approved code, and Space would approve both
 edits wherever the reviewer is. lazygit stages each hunk of unstaged changes on its own.
 
 The unit is what carries review state across revisions, with its evidence, so a run cannot be a
@@ -54,8 +51,7 @@ diff that can align differently whenever either side changes.
   [ADR 11](0011-a-held-review-key-acts-only-on-what-its-press-began-on.md) takes for a new
   target.
 - **Each run is a display hunk,** a stop for `j`/`k` and a Space target of its own, with no
-  header, so its bar runs along it alone; the file's header gives its label. The lines the same
-  as reviewed around and between runs are context like any unchanged line. Space queues the
+  header, so its bar runs along it alone; the file's header gives its label. Space queues the
   approval like any mark, even while another saves, and moves on to the next open change at
   once, as after approving a hunk. Until it is saved, that run alone shows approved, never the
   unit, which would show its other runs approved too, and a verdict on the whole unit made

@@ -1,17 +1,17 @@
 # 7. A hunk shows its review state in its bar
 
-**Status:** accepted · **Date:** 2026-11-22 · amends
-[ADR 6](0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md): a line shown once has a
-soft line color until approved, and an approved hunk strikes its deleted text out in gray
+**Status:** accepted · **Date:** 2026-11-22
 
 ## Context
 
 In the file view a hunk shows only by its lines and a bar along its left edge. Only the selected
 hunk and hunks the reviewer had decided on had a bar, in the theme's accent for the selected open
-hunk. ADR 6 gave a line shown once (`~`) no line color, so a hunk of such lines looked the same
-whether approved or not. Whether code still needed the reviewer was therefore hard to see, and so
-was which hunk the keys act on once it was approved. The accent is blue in most themes and close
-to the green of approved in several, such as Rosé Pine and Nightfox.
+hunk. A line shown once (`~`,
+[ADR 6](0006-a-hunk-shows-its-code-once-with-the-tokens-that-changed.md)) is neither removed nor
+added, so without a line color of its own a hunk of such lines looked the same whether approved
+or not. Whether code still needed the reviewer was therefore hard to see, and so was which hunk
+the keys act on once it was approved. The accent is blue in most themes and close to the green
+of approved in several, such as Rosé Pine and Nightfox.
 
 ## Decision
 
@@ -22,10 +22,9 @@ to the green of approved in several, such as Rosé Pine and Nightfox.
 - **The selected hunk shows in the gutter and the band:** its line numbers are in the text color,
   the others' quiet, and once approved it sits on a brighter gray than the other approved hunks.
 - **A line shown once has a soft line color until approved,** of the modified kind, neither red
-  nor green and softer than a removed or added line's, so open code shows wherever it is; ADR 6
-  gave it none.
-- **Approved deleted text is struck out in gray,** not in red as ADR 6 had it, so nothing in an
-  approved hunk still reads as a change to review; the gray tint still marks a deleted space.
+  nor green and softer than a removed or added line's, so open code shows wherever it is.
+- **Approved deleted text is struck out in gray,** not in red, so nothing in an approved hunk
+  still reads as a change to review; the gray tint still marks a deleted space.
 - **review-gui marks each open or flagged hunk on the diff's scrollbar track** in its state's
   color, so what is left of a long diff shows without scrolling to it.
 

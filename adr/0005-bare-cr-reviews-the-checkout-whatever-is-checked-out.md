@@ -1,17 +1,12 @@
 # 5. Bare `cr` reviews the checkout, whatever is checked out
 
-**Status:** accepted · **Date:** 2026-11-17 · supersedes
-[ADR 2](0002-uncommitted-work-is-reviewed-against-the-default-branch.md) and widens
-[ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)
+**Status:** accepted · **Date:** 2026-11-17
 
 ## Context
 
-ADR 2 chose a review once, when `cr` opened: the remembered review, else the branch's open pull
-request, else the working tree, else a range.
-A pull request review records only pushed heads, so a reviewer who approved every hunk of a pull
-request in its checkout and then edited it saw everything stay green, even after reopening.
-A clean default branch did not open at all, and nothing followed a branch switch, a new pull
-request, a rename or a merge without restarting `cr`.
+`cr` without a target has to open some review of the checkout, and the work in a checkout keeps
+changing under it: edits, commits, branches, pull requests, renames and merges.
+A review chosen once, when `cr` opens, cannot follow that (see "Rejected alternatives").
 
 The reviewer wants one window that stays open for hours across many pull requests: it shows
 uncommitted and committed work alike, knows the branch and its pull request, and empties once
@@ -24,12 +19,16 @@ the work has landed.
   `refs/code-review/clone-id` points to.
   A clone replaced at the same path gets a new id, and so a new review; a running window that
   sees its clone replaced stops and says so.
-  Its history holds only captures of the disk, recorded when something is marked (ADR 4) or when
+  Its history holds only captures of the disk, recorded when something is marked
+  ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)) or when
   a command prints it.
-- **Pull requests and ranges named explicitly are snapshot reviews**, as before: fetched pushed
-  heads, never live, with histories of their own.
-  The remembered review and the detection rules of ADR 2 are gone, so commands without
-  `--review` act on the checkout review.
+- **Pull requests and ranges named explicitly are snapshot reviews:** fetched pushed heads,
+  never live, with histories of their own.
+  Commands without `--review` act on the checkout review.
+- **A key is never reopened for a different target.**
+  A `--worktree` review is keyed `<checkout>:<base>..WORKTREE`, which a range ending at a branch
+  named `WORKTREE` would share, so opening one over the other fails with `KeyConflict`, checked
+  under `review.lock`.
 - **The subject is observed on every capture, never stored as identity**: the branch, the real
   `HEAD`, the branch's pull request from a bounded background lookup, and the base.
   The base is the remote-tracking ref of an open pull request's base branch; else the remote
@@ -74,10 +73,25 @@ the work has landed.
 - A file renamed or edited in the base reopens its units with the reason, even when the edit
   itself is the same.
 - A changed file under a filter, such as LFS, shows only once staged.
+- A collision-proof key format would make `KeyConflict` impossible by construction, but needs a
+  migration of stored keys; the runtime check is enough for a branch literally named `WORKTREE`.
+
+## Rejected alternatives
+
+- **Choosing a review once, when `cr` opens:** the review last opened for this checkout and
+  branch, else the branch's open pull request, else, on a branch with uncommitted changes, the
+  working tree against the default branch under a key that names no branch, else
+  `<default branch>..<branch>`.
+  A pull request review records only pushed heads, so a reviewer who approved every hunk of a
+  pull request in its checkout and then edited it saw everything stay green, even after
+  reopening.
+  A clean default branch did not open at all, and nothing followed a branch switch, a new pull
+  request, a rename or a merge without restarting `cr`.
 
 ## References
 
-- `crates/review-core/src/review/mod.rs` (`Review::open_checkout`, `Review::subject`)
+- `crates/review-core/src/review/mod.rs` (`Review::open_checkout`, `Review::open`,
+  `Review::subject`)
 - `crates/review-core/src/review/live.rs` (`Review::live_history`, `Capture`, sessions)
 - `crates/review-core/src/correspond.rs` (the carry rules)
 - `crates/review-core/src/git/` (the command boundary, filters, `Repo::busy`, the clone id)

@@ -2,8 +2,13 @@
 
 Native Rust tool for reviewing large diffs and GitHub pull requests. Read [PLAN.md](PLAN.md) for
 the design and milestones, [prior-work.md](prior-work.md) for the survey behind it, and the
-decision records in [adr/](adr) before changing an area one governs. Keep them up to date when a
-decision changes: an accepted ADR changes only through a new one that supersedes it.
+decision records in [adr/](adr) before changing an area one governs.
+
+The ADRs are a snapshot of the current design decisions, not their history; git keeps the history.
+When a decision changes, rewrite the ADR that governs it so it states the current decision, instead
+of amending it or adding one that supersedes it. A design it replaces may stay in it as a rejected
+alternative, with the reason. Add a new ADR only for an area no existing one covers, and prefer
+widening a related one.
 
 ## Layout
 
