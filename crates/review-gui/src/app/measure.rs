@@ -102,6 +102,9 @@ pub struct Fonts {
     pub advance: f32,
 }
 
+/// The rows of the diff the comparison above it always leaves.
+const COMPARISON_DIFF_ROWS: f32 = 3.0;
+
 /// The sizes of the window at one code size and density, in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
@@ -163,6 +166,23 @@ impl Sizes {
     /// size: the pane header and the two bottom bars.
     fn list_chrome(&self) -> f32 {
         self.bar() + 2.0 * self.strip()
+    }
+
+    /// The room the comparison above the diff and the diff share in a window `window` pixels
+    /// high, with the title bar when `title_bar`: what the pane header, the bottom bars and the
+    /// find bar leave.
+    pub fn comparison_room(&self, window: f32, title_bar: bool) -> f32 {
+        let title = if title_bar {
+            super::chrome::HEIGHT
+        } else {
+            0.0
+        };
+        window - title - self.list_chrome() - self.bar()
+    }
+
+    /// The least the diff keeps under the comparison: [`COMPARISON_DIFF_ROWS`] rows.
+    pub fn comparison_rows(&self) -> f32 {
+        COMPARISON_DIFF_ROWS * self.row_height()
     }
 
     /// The same for the tree, whose pane has its two progress lines above it instead of a
@@ -337,6 +357,31 @@ mod tests {
         assert_eq!(predicted.buffer, None);
         let same = geometry.grid(&scale, &at(before.code_size)).viewports;
         assert_eq!(same.diff, Some(876.0 / 28.0));
+    }
+
+    /// In a window 400 pixels high the largest comparison still leaves the diff three rows
+    /// under it, the find bar open too, and a large font in the same window keeps both the
+    /// comparison and the diff.
+    #[test]
+    fn a_short_window_keeps_rows_under_the_comparison() {
+        let height = |code_size: f32| {
+            let sizes = Sizes::new(&at(code_size), 0.6);
+            let room = sizes.comparison_room(400.0, true);
+            let height = review_ui::panes::comparison_height(
+                Some(1000.0),
+                400.0,
+                room,
+                sizes.bar(),
+                sizes.comparison_rows(),
+            );
+            (room, height, sizes.comparison_rows())
+        };
+        let (room, comparison, rows) = height(17.333_334);
+        assert!(comparison > 0.0);
+        assert_eq!(room - comparison, rows);
+        let (room, comparison, _) = height(40.0);
+        assert!(comparison > 0.0);
+        assert!(room - comparison > 0.0);
     }
 
     /// The settings panel's sizes follow the code size it opened with, as its text does.

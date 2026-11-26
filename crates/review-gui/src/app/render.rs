@@ -730,7 +730,7 @@ impl ReviewApp {
     /// The divider between the files and the diff: a hairline with a wider grip.
     fn render_divider(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let colors = self.palette();
-        let active = self.resizing;
+        let active = self.resizing == Some(super::select::Edge::Divider);
         let accent = to_gpui(colors.accent);
         div()
             .id("sidebar-divider")

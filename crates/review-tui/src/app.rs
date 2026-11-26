@@ -180,7 +180,7 @@ impl App {
         log: Log,
     ) -> Self {
         // The first frame shows the review opening, without the files pane.
-        let opening = Panes::lay_out(area, settings.layout, 0, false, false);
+        let opening = Panes::lay_out(area, settings.layout.sidebar, 0, false, false);
         let geometry = measure::opening(&opening, settings.code_size);
         let model = Model::new(settings, Scale::fixed(measure::sizes()), geometry);
         let matcher = Matcher::new(&model.settings.keymap);

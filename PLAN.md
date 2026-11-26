@@ -1355,7 +1355,10 @@ it, muted, so it never reads as code.
   lands and installing it once, and review-tui resizes to its cells off the main loop. From
   the frame that selects a file that may be an image, its comparison is pending, with its
   labels, and takes 45% of the window or the list whatever its images, so the rows below never
-  move when it lands, or move once when the file turns out not to be an image; it says
+  move when it lands (in review-gui, dragging its bottom edge sets another height, between room
+  for its bars and 96 px of images and what leaves the diff three rows under the window's bars
+  and the find bar, remembered as `[layout] comparison` in logical pixels once a drag changes
+  it), or move once when the file turns out not to be an image; it says
   "decoding…" only after 100 ms, on the model's timer, so a quick decode never flashes. An
   image draws only for the comparison on screen, never under another file's header. The front
   end says whether
@@ -1693,7 +1696,8 @@ belongs in `review-core`, so that the engine stays usable on its own.
   so a QA script's expectations read the same in both apps apart from the numbers.
 - **Shared configuration.** One configuration file serves both apps; each keeps only the files
   pane's width apart (`[layout] sidebar` in logical pixels, `tui_sidebar` in cells, or `"fit"`
-  in either). Saved view
+  in either), and only review-tui reads mouse settings, from `[tui.mouse]`: review-gui always
+  has the whole mouse. A leftover top-level `[mouse]` sets nothing and is named as moved. Saved view
   state is shared under the name `review-lite` (see "Storage").
 
 ### review-tui
@@ -1706,13 +1710,13 @@ inside one pane and copies nothing by itself; `y`, a right click, Ctrl+C or Ctrl
 to the clipboard and the primary selection (Ctrl+Shift+C and Super+C too, where the terminal
 passes them on rather than keeping them for its own copy, as Ghostty's `performable:` binding
 does and Alacritty cannot), Esc drops it, and the bar dims `y copy` while nothing is selected.
-`[mouse] copy_on_select = true`, in the configuration file only, copies as a drag ends, as in
-micromux. The rest of `[mouse]` says what else the mouse may do, each part on by default:
+`[tui.mouse] copy_on_select = true`, in the configuration file only, copies as a drag ends, as
+in micromux. The rest of `[tui.mouse]` says what else the mouse may do, each part on by default:
 `select` (selecting text, and the right click that copies it), `navigate` (every click that acts
 on what it lands on: files, hunks, gaps, the buffer's cursor, picker entries, settings, the
 divider) and `scroll` (the wheel and the scrollbars), while `enabled = false` turns them all off,
 and review-tui then leaves the mouse to the terminal, whose own selection works. The model
-checks each part at its mouse entry points, so both front ends follow it, and `y` copies while
+checks each part at its mouse entry points, and `y` copies while
 the files have the keys, since a press in the diff leaves them there without `navigate`. A copy goes to the terminal through OSC 52, which also works
 over ssh, and on a local session also to `wl-copy`, `xclip` or `xsel` (`pbcopy` on macOS), in a
 process group of its own, since terminals such as GNOME Terminal ignore OSC 52, as micromux

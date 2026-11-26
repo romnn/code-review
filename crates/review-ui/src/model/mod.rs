@@ -142,12 +142,15 @@ pub struct Settings {
     pub problems: Vec<String>,
 }
 
-/// The files pane's width and whether it shows.
+/// The files pane's width and whether it shows, and the comparison's height.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PaneLayout {
     /// The width, the front end's own: fitted to the tree, or set in its units, logical pixels
     /// in review-gui and cells in review-tui; see [`FrontEnd::sidebar_key`].
     pub sidebar: crate::panes::SidebarWidth,
+    /// The height of review-gui's image and PDF comparison in logical pixels, once its edge was
+    /// dragged; review-tui keeps its fixed share. See [`crate::panes::comparison_height`].
+    pub comparison: Option<f32>,
     /// Whether the files show, which every front end shares.
     pub sidebar_visible: bool,
 }
@@ -1175,6 +1178,26 @@ impl Model {
             return;
         }
         self.layout.sidebar = crate::panes::SidebarWidth::Set(width);
+    }
+
+    /// Sets the comparison's height in logical pixels, as a drag of its edge left it, and
+    /// writes it to the configuration file in the background, for the next launch.
+    pub fn remember_comparison_height(&mut self, height: f32) {
+        self.layout.comparison = Some(height);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a height in logical pixels, clamped far below i64's range"
+        )]
+        let height = height.round() as i64;
+        let values = vec![crate::config::Remembered {
+            table: "layout",
+            key: "comparison",
+            value: height.into(),
+        }];
+        self.save_config(
+            values,
+            "Could not remember the comparison's height".to_owned(),
+        );
     }
 
     /// The cells the tree's widest row takes from its start to the end of its name, with every

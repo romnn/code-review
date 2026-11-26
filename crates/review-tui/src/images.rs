@@ -469,7 +469,6 @@ mod tests {
 
     use image::RgbaImage;
     use review_ui::color::Hsla;
-    use review_ui::model::PaneLayout;
     use review_ui::paint::Piece;
 
     use super::*;
@@ -503,11 +502,8 @@ mod tests {
 
     /// A `width` × 50 terminal's panes without the files, with a comparison laid out.
     fn panes(width: u16) -> Panes {
-        let layout = PaneLayout {
-            sidebar: review_ui::panes::SidebarWidth::Fit,
-            sidebar_visible: false,
-        };
-        let mut panes = Panes::lay_out(Rect::new(0, 0, width, 50), layout, 0, false, false);
+        let fit = review_ui::panes::SidebarWidth::Fit;
+        let mut panes = Panes::lay_out(Rect::new(0, 0, width, 50), fit, 0, false, false);
         lay_out(&mut panes);
         panes
     }

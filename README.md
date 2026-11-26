@@ -108,6 +108,9 @@ navigator that `}` and `{` step through. In kitty, Ghostty and WezTerm, and in t
 `allow-passthrough` in kitty and Ghostty, a changed image shows its two versions side by side,
 as in the desktop app, and so does a PDF's page pair, which `P` hides.
 The Linux release is a static binary built without PDF support, where a PDF is a binary file.
+The `[tui.mouse]` table of `~/.config/code-review/config.toml` says what the mouse may do in
+`cr`, each part on unless set off: `select`, `navigate` and `scroll`, or `enabled = false` for
+none, which leaves the mouse to the terminal. The desktop app always has the whole mouse.
 
 <p align="center">
   <br>
@@ -138,7 +141,8 @@ The Linux release is a static binary built without PDF support, where a PDF is a
 A changed image shows its base and head side by side, and `o` tints the pixels that changed.
 A changed PDF shows its selected page pair rendered the same way above the diff of the pages'
 extracted text, its changed words marked; `}` and `{` step through the pages, and `P` hides the
-rendered pair. Both are one unit to approve.
+rendered pair. Both are one unit to approve. Dragging the edge under the side-by-side versions
+sets their height, which the configuration file's `[layout]` remembers.
 
 <p align="center">
   <br>

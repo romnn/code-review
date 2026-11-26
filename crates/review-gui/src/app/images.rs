@@ -11,8 +11,11 @@
 
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::prelude::*;
-use gpui::{Context, Div, ObjectFit, RenderImage, Window, div, img, px};
+use gpui::{
+    Context, Div, MouseButton, MouseDownEvent, ObjectFit, RenderImage, Window, div, img, px,
+};
 use gpui_component::{h_flex, v_flex};
 use review_ui::images::{DISPLAY_EDGE, Raster};
 use review_ui::model::Model;
@@ -20,11 +23,9 @@ use review_ui::paint::Palette;
 use review_ui::paint::images::{self, VersionPaint};
 
 use super::render::GRID;
+use super::select::Edge;
 use super::{ReviewApp, ink};
 use crate::color::to_gpui;
-
-/// The window's height the comparison takes.
-const SHARE: f32 = 0.45;
 
 /// A raster as gpui draws it.
 struct Rendered {
@@ -175,8 +176,9 @@ fn bgra(raster: &Raster) -> Arc<RenderImage> {
 
 impl ReviewApp {
     /// The comparison above the diff, while the selected file's versions are images or may be:
-    /// the labels, both versions fitted into halves of the pane, and the line under them,
-    /// always [`SHARE`] of the window's height, so the rows below never move when it lands.
+    /// the labels, both versions fitted into halves of the pane, and the line under them, as
+    /// high as [`review_ui::panes::comparison_height`] says whatever it shows, so the rows below
+    /// never move when it lands. Its bottom edge drags to set that height.
     pub(super) fn render_comparison(
         &mut self,
         window: &Window,
@@ -186,7 +188,50 @@ impl ReviewApp {
         let shown = images::comparison(self, &colors)?;
         let bar = self.sizes().bar();
         let gap = GRID * 3.0;
-        let height = (f32::from(window.viewport_size().height) * SHARE - bar * 2.0).max(bar);
+        let (wanted, active) = match self.resizing {
+            Some(Edge::Comparison { height, .. }) => (Some(height), true),
+            _ => (self.driver.model().layout.comparison, false),
+        };
+        let height = self.comparison_height(wanted, window);
+        let accent = to_gpui(colors.accent);
+        // The bottom edge: a hairline with a wider grip, which lights while it drags; a window
+        // with no room to move it gets the hairline alone.
+        let drags = self.comparison_drags(window);
+        let line = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(1.0))
+            .bg(if active {
+                accent
+            } else {
+                to_gpui(colors.hairline)
+            });
+        let edge = div()
+            .id("comparison-edge")
+            .group("comparison-edge")
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(GRID + 1.0))
+            .child(if drags {
+                line.group_hover("comparison-edge", |line| line.bg(accent))
+            } else {
+                line
+            })
+            .when(drags, |edge| {
+                edge.cursor(gpui::CursorStyle::ResizeUpDown)
+                    .child(self.regions.mark("comparison-edge", "ns-resize"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.press_comparison_edge(f32::from(event.position.y), height, cx);
+                        }),
+                    )
+            });
         let base = self.comparison_half(&shown.base, &colors, cx);
         let head = self.comparison_half(&shown.head, &colors, cx);
         let status = h_flex()
@@ -204,12 +249,13 @@ impl ReviewApp {
         };
         Some(
             v_flex()
+                .relative()
                 .flex_none()
                 .w_full()
                 .px(px(gap))
+                .h(px(height))
+                .overflow_hidden()
                 .bg(to_gpui(colors.surface))
-                .border_b_1()
-                .border_color(to_gpui(colors.hairline))
                 .text_size(px(self.sizes().ui_size()))
                 .child(
                     h_flex()
@@ -218,8 +264,16 @@ impl ReviewApp {
                         .child(label(&shown.base))
                         .child(label(&shown.head)),
                 )
-                .child(h_flex().h(px(height)).gap(px(gap)).child(base).child(head))
-                .child(status),
+                // The images take what the bars and the hairline leave.
+                .child(
+                    h_flex()
+                        .h(px((height - bar * 2.0 - 1.0).max(0.0)))
+                        .gap(px(gap))
+                        .child(base)
+                        .child(head),
+                )
+                .child(status)
+                .child(edge),
         )
     }
 

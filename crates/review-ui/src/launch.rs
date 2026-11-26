@@ -145,6 +145,10 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
             .is_none_or(|action| capabilities.allows(action))
     });
     problems.extend(config.problems.iter().cloned());
+    let mouse = front_end.mouse(&config).unwrap_or_else(|problem| {
+        problems.push(problem);
+        config::Mouse::default()
+    });
     let (chosen, themes) = choose_theme(path.as_deref(), config.theme.as_deref(), &mut problems)?;
     let styles = look::styles(&config.styles);
     let wanted = config.diff_style.as_deref().unwrap_or(look::DEFAULT_STYLE);
@@ -179,7 +183,7 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
         styles,
         context: config.context,
         shorten_chains: config.shorten_chains,
-        mouse: config.mouse,
+        mouse,
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -190,6 +194,7 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
         added: config.added,
         layout: PaneLayout {
             sidebar: front_end.sidebar_width(&config.layout),
+            comparison: config.layout.comparison,
             sidebar_visible: config.layout.sidebar_visible,
         },
         keymap,
@@ -429,11 +434,17 @@ mod tests {
     use super::*;
 
     /// A front end without a code size or a window of its own gets no keys for them, while
-    /// review-gui keeps every key, and each reads its own pane width.
+    /// review-gui keeps every key, each reads its own pane width, and only review-tui reads
+    /// `[tui.mouse]`: review-gui always has the whole mouse.
     #[test]
     fn settings_follow_the_front_end() {
         let configured = || Configured {
-            config: Config::default(),
+            config: config::parse(indoc::indoc! {"
+                [tui.mouse]
+                navigate = false
+                copy_on_select = true
+            "})
+            .unwrap(),
             path: None,
             problems: Vec::new(),
         };
@@ -457,6 +468,38 @@ mod tests {
         );
         assert_eq!(window.layout.sidebar, crate::panes::SidebarWidth::Fit);
         assert_eq!(terminal.layout.sidebar, crate::panes::SidebarWidth::Fit);
+        assert_eq!(window.mouse, config::Mouse::default());
+        assert!(!terminal.mouse.navigate && terminal.mouse.select && terminal.mouse.copy_on_select);
+    }
+
+    /// A mistake in `[tui.mouse]` costs review-gui nothing, its theme included, and review-tui
+    /// only its mouse settings, which it names.
+    #[test]
+    fn a_mistake_in_the_terminal_s_mouse_spares_the_window() {
+        let configured = || Configured {
+            config: config::parse(indoc::indoc! {"
+                [theme]
+                name = \"one-dark\"
+                [tui.mouse]
+                navigat = false
+            "})
+            .unwrap(),
+            path: None,
+            problems: Vec::new(),
+        };
+        let window = settings(configured(), FrontEnd::Window).unwrap();
+        assert_eq!(window.appearance.applied.theme.name, "one-dark");
+        assert_eq!(window.problems, Vec::<String>::new());
+        let terminal = settings(configured(), FrontEnd::Terminal).unwrap();
+        assert_eq!(terminal.appearance.applied.theme.name, "one-dark");
+        assert_eq!(terminal.mouse, config::Mouse::default());
+        assert!(
+            terminal.problems.len() == 1
+                && terminal.problems[0]
+                    .starts_with("[tui] cannot be used: unknown field `navigat`"),
+            "{:?}",
+            terminal.problems
+        );
     }
 
     /// An error's causes follow it, as a report prints them.

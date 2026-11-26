@@ -1,10 +1,11 @@
 //! The front ends that draw the model: what each can do, so the model offers only what it can
-//! honor, and the settings each keeps apart from the other in the shared configuration file.
+//! honor, and the settings each keeps apart from the other in the shared configuration file:
+//! the files pane's width, and the mouse, which only review-tui's configuration narrows.
 //!
 //! Everything else is shared: the keys, the configuration, the themes, and the view state saved
 //! with a review, such as the folded folders, so folds made in one front end show in the other.
 
-use crate::config::LayoutConfig;
+use crate::config::{Config, LayoutConfig, Mouse};
 use crate::model::Action;
 use crate::panes::SidebarWidth;
 
@@ -41,6 +42,19 @@ impl FrontEnd {
         match self {
             Self::Window => "sidebar",
             Self::Terminal => "tui_sidebar",
+        }
+    }
+
+    /// What the mouse may do in the front end: in a window everything, whatever `config` says,
+    /// and in a terminal what its `[tui.mouse]` allows.
+    ///
+    /// # Errors
+    ///
+    /// In a terminal, says what is wrong with `[tui]`; a window never reads it.
+    pub fn mouse(self, config: &Config) -> Result<Mouse, String> {
+        match self {
+            Self::Window => Ok(Mouse::default()),
+            Self::Terminal => config.tui_mouse.clone(),
         }
     }
 

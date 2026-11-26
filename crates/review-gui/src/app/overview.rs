@@ -94,7 +94,6 @@ impl ReviewApp {
         reason = "one declarative layout; splitting it would scatter the element tree"
     )]
     pub(super) fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let navigate = self.settings.mouse.navigate;
         let colors = self.palette();
         let code_font = self.fonts.code.clone();
         let content = overview(self, &colors);
@@ -143,11 +142,7 @@ impl ReviewApp {
                                     .cursor_pointer()
                                     .hover(|button| button.bg(to_gpui(colors.hairline)))
                                     .child(pr.open.text.text)
-                                    .on_click(move |_, _, cx| {
-                                        if navigate {
-                                            cx.open_url(&url);
-                                        }
-                                    }),
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
                             ),
                     )
                     .child(section(pr.description_title))

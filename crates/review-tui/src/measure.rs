@@ -9,7 +9,7 @@
 
 use ratatui::layout::Rect;
 use review_ui::frame::{Chrome, Geometry, Heights, Sizes};
-use review_ui::model::{Mode, Model, PaneLayout};
+use review_ui::model::{Mode, Model};
 use review_ui::paint::settings;
 use review_ui::panes;
 
@@ -136,7 +136,7 @@ impl Panes {
         let fit = crate::draw::fit_cells(model.tree_cells());
         let mut panes = Self::lay_out(
             area,
-            model.layout,
+            model.layout.sidebar,
             fit,
             model.sidebar_shown(),
             model.typing(),
@@ -151,10 +151,16 @@ impl Panes {
         panes
     }
 
-    /// The panes on a screen `area` large with the files pane `layout` wide when `sidebar`
+    /// The panes on a screen `area` large with the files pane `width` wide when `sidebar`
     /// shows, `fit` cells when it fits its tree, and the `/` bar when `find` shows.
     #[must_use]
-    pub fn lay_out(area: Rect, layout: PaneLayout, fit: u16, sidebar: bool, find: bool) -> Self {
+    pub fn lay_out(
+        area: Rect,
+        width: panes::SidebarWidth,
+        fit: u16,
+        sidebar: bool,
+        find: bool,
+    ) -> Self {
         let bottom = area.bottom();
         let hints = row(area, bottom.saturating_sub(1));
         let status = row(area, bottom.saturating_sub(2));
@@ -165,7 +171,7 @@ impl Panes {
             ..area
         };
         let (sidebar, divider, main) = if sidebar {
-            let width = panes::sidebar_cells(layout.sidebar, fit, top.width);
+            let width = panes::sidebar_cells(width, fit, top.width);
             let side = Rect { width, ..top };
             let divider = Rect {
                 x: top.x + width,
@@ -451,19 +457,12 @@ pub fn geometry(panes: &Panes, model: &Model) -> Geometry {
 mod tests {
     use super::*;
 
-    fn layout(sidebar: f32) -> PaneLayout {
-        PaneLayout {
-            sidebar: panes::SidebarWidth::Set(sidebar),
-            sidebar_visible: true,
-        }
-    }
-
     /// A 160×50 terminal: the files pane, its divider and the diff share the rows above the
     /// two bars, and the `/` bar takes a row above them while it shows.
     #[test]
     fn panes_share_the_screen() {
         let area = Rect::new(0, 0, 160, 50);
-        let panes = Panes::lay_out(area, layout(32.0), 0, true, false);
+        let panes = Panes::lay_out(area, panes::SidebarWidth::Set(32.0), 0, true, false);
         let sidebar = panes.sidebar.unwrap();
         assert_eq!(sidebar.area, Rect::new(0, 0, 32, 48));
         assert_eq!(sidebar.tree, Rect::new(0, 4, 32, 44));
@@ -473,7 +472,7 @@ mod tests {
         assert_eq!(panes.status, Rect::new(0, 48, 160, 1));
         assert_eq!(panes.hints, Rect::new(0, 49, 160, 1));
 
-        let finding = Panes::lay_out(area, layout(32.0), 0, false, true);
+        let finding = Panes::lay_out(area, panes::SidebarWidth::Set(32.0), 0, false, true);
         assert_eq!(finding.sidebar, None);
         assert_eq!(finding.find, Some(Rect::new(0, 47, 160, 1)));
         assert_eq!(finding.main, Rect::new(0, 0, 160, 47));
@@ -484,14 +483,11 @@ mod tests {
     #[test]
     fn a_fitted_files_pane_takes_its_tree_s_width() {
         let area = Rect::new(0, 0, 160, 50);
-        let fitted = PaneLayout {
-            sidebar: panes::SidebarWidth::Fit,
-            sidebar_visible: true,
-        };
+        let fitted = panes::SidebarWidth::Fit;
         let panes = Panes::lay_out(area, fitted, 37, true, false);
         assert_eq!(panes.sidebar.unwrap().area.width, 37);
         assert_eq!(panes.main, Rect::new(38, 0, 122, 48));
-        let set = Panes::lay_out(area, layout(32.0), 37, true, false);
+        let set = Panes::lay_out(area, panes::SidebarWidth::Set(32.0), 37, true, false);
         assert_eq!(set.sidebar.unwrap().area.width, 32);
         // A tree wider than a quarter of the screen gets the quarter.
         let wide = Panes::lay_out(area, fitted, 60, true, false);
@@ -501,7 +497,13 @@ mod tests {
     /// A screen too small for anything lays out empty panes instead of failing.
     #[test]
     fn tiny_screens_lay_out_empty_panes() {
-        let panes = Panes::lay_out(Rect::new(0, 0, 3, 1), layout(32.0), 0, true, true);
+        let panes = Panes::lay_out(
+            Rect::new(0, 0, 3, 1),
+            panes::SidebarWidth::Set(32.0),
+            0,
+            true,
+            true,
+        );
         assert_eq!(panes.list.height, 0);
         assert_eq!(panes.hints.height, 1);
     }
