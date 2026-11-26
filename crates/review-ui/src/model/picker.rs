@@ -662,7 +662,7 @@ pub(super) struct Unchanged {
 
 /// Reads blob `oid` as text; `None` for a binary blob or a failed read.
 fn read_text(review: &Review, oid: &ObjectId) -> Option<FullText> {
-    let mut reader = review.repo().blob_reader().ok()?;
+    let mut reader = review.snapshots().blob_reader().ok()?;
     match reader.read(oid).ok()? {
         review_core::git::Blob::Content(bytes) if !bytes.contains(&0) => {
             Some(FullText::new(&String::from_utf8_lossy(&bytes)))
@@ -681,7 +681,7 @@ fn search(review: &Review, query: &Query) -> Found {
     };
     let mut listing = query.listing.clone();
     if query.scope == Scope::Tree && listing.is_none() {
-        match review.repo().tree_files(&query.head) {
+        match review.snapshots().tree_files(&query.head) {
             Ok(files) => {
                 let loaded = Arc::new(Listing {
                     oids: files
@@ -742,7 +742,7 @@ fn search(review: &Review, query: &Query) -> Found {
                     found.entries = entries;
                     found.truncated = truncated;
                 }
-                Scope::Tree => match review.repo().grep(
+                Scope::Tree => match review.snapshots().grep(
                     &query.head,
                     &query.text,
                     ignore_case,

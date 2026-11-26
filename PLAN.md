@@ -109,35 +109,75 @@ users have (partial clones, worktrees, alternates), matches what `git diff` show
 engine's dependency tree small enough to embed in another application without version conflicts. The git layer
 produces verified immutable inputs; everything after it is pure analysis over object IDs.
 
-- A long-lived `git cat-file --batch` process reads blobs.
+cr writes nothing into the reviewed repository: no object, ref, lock, index file or date
+([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)). Two
+kinds of git command run:
+
+- `Repo` only observes the reviewed repository and exports objects from it: refs, `HEAD`,
+  configuration, merge bases, and packs of an explicit list of objects (`git pack-objects`).
+- Every command that writes runs against a `PrivateRepo`, a bare repository cr owns in its data
+  directory: each review's archive (`reviews/<key>/archive/`), which holds every snapshot the
+  review recorded or shows with all it reaches, under their own object IDs, and transient
+  repositories that fetches land in. Every git command drops each `GIT_*` variable cr inherited
+  or an embedder set but those that say how git reaches a remote (`GIT_SSH*`, `GIT_SSL_*`,
+  `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_EXEC_PATH`, `GIT_ALLOW_PROTOCOL`) and, for the
+  reviewed repository's commands, which configuration files it reads (`GIT_CONFIG_GLOBAL`,
+  `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_COUNT` and its keys and values). A
+  private repository's commands read the clone's configuration instead, as `git config --list
+  --includes` reads it in the clone, passed as command-scope configuration with no global or
+  system file read again, without the keys that describe the clone's own repository, its
+  includes, the hooks configuration defines, its filter drivers and `core.fsyncObjectFiles`,
+  and with cr's own settings after it: no garbage collection, maintenance or reflogs, and, on
+  the commands that write, every command on a copy of the index among them, since expanding a
+  sparse index writes trees, objects, packs and refs synced to disk in batches. They run as `git
+  -C` in the checkout, or the git directory of a bare clone, so a relative path in the clone's
+  configuration means what it means there. The archive copies the clone's `info/attributes`
+  when it opens. The reviewed repository's commands read no index (`GIT_INDEX_FILE` names no
+  file): git reads one even to compare trees or look up attributes in a commit, and dates a
+  split index's shared file anew as it does. Objects reach it
+  from the reviewed repository only through `PrivateRepo::import`, which lists what it lacks of
+  the roots' closure there, packs exactly that in the reviewed repository and indexes the pack;
+  a pack shows as a whole, so a commit or tree in the archive always has all it reaches. A
+  private repository never has the reviewed one as an alternate: git dates an object it finds
+  through one anew whenever it writes an equal one. The data directory must resolve outside the
+  checkout and its git directories.
+
+- A long-lived `git cat-file --batch` process reads blobs, of the review's archive.
 - `git diff-tree -r -z --raw -M <base> <head>` lists changed entries with modes, object IDs and
   rename detection.
 - GitHub PR metadata (target branch, head) comes from `gh pr view <n> --json ...`.
-- Fetches go into operation-specific refs (`refs/code-review/tmp/<id>`), never `FETCH_HEAD`, and
-  snapshot identity is taken from the fetched objects, not from an earlier observation. Every fetch
-  passes `--no-write-fetch-head --refmap=` so a remote's configured refspecs never update
-  remote-tracking refs; nothing outside `refs/code-review/*` changes. Fetches never recurse into
-  submodules.
+- Fetches land in a transient private repository that reads the clone's configuration and runs
+  in the checkout, so remotes resolve and are reached as there, into its `refs/code-review/*`,
+  never `FETCH_HEAD`, and snapshot identity is taken from the fetched objects, not from an
+  earlier observation. Every fetch passes `--no-write-fetch-head --refmap=` so a remote's
+  configured refspecs never update remote-tracking refs, and never recurses into submodules or
+  runs maintenance. Only the snapshots a review records are imported from it into the archive;
+  the repository and the rest of its history go once they are.
 - Every git command runs with `core.hooksPath=/dev/null`, `core.fsmonitor=false` and
   `GIT_NO_REPLACE_OBJECTS=1`: no hook or monitor the configuration names runs, and object IDs
-  mean their own content. A working-tree capture and a checkout of a snapshot for browsing also
-  turn off every configured filter driver (`clean`, `smudge` and `process` emptied, `required`
-  false). A path whose `filter` attribute is set in the working tree's, the index's or `HEAD`'s
+  mean their own content. No filter driver runs in a private repository, since the clone's
+  `filter.*` settings never reach one. A path whose `filter` attribute is set in the working
+  tree's, the index's or `HEAD`'s
   attributes is not captured from disk: it keeps its staged entry, and the capture lists the
   ones that differ so a front end can say they are captured once staged.
-- Every snapshot is pinned under `refs/code-review/<review>/snap/<object-id>`, named by its own
-  object ID, so pinning is idempotent: a ref that already exists holds the same object by
-  construction. A force-push or GC cannot lose a pinned snapshot, and a crash after pinning leaves
-  only a harmless extra pin, reconciled against the event log later.
-- `git merge-base --all` computes the base. Several merge bases are reported to the user and the
-  first is used. A shallow clone without the merge base is deepened with `--deepen` from the PR's
-  remote (or `origin` for local reviews), wanting the target and the clone's shallow boundary
-  commits but never the head, which may be a synthetic working-tree capture or an unpublished
-  commit; wants the remote does not know are dropped one by one. Deepening has the same isolation
-  as every other fetch; when it cannot find a merge base, the review fails with an explicit error.
-  The review of a checkout never deepens: a fetch has no deadline, and the capture is what the
-  window waits on. Without a merge base in a shallow clone, it compares with the empty tree and
-  says the history is shallow (`BaseRef::Shallow`), never that the histories are unrelated.
+- Every recorded snapshot is pinned in its review's archive under `refs/snap/<object-id>`, named
+  by its own object ID, so pinning is idempotent: a ref that already exists holds the same object
+  by construction. A force-push or GC in the reviewed repository cannot lose a snapshot the
+  archive holds, and a crash after pinning leaves only a harmless extra pin. The target a base
+  was computed from is only a label of the revision, and is not kept.
+- `git merge-base --all` computes the base, read-only in the reviewed repository; a synthetic
+  capture's history is its parent's, the `HEAD` it was taken on. Several merge bases are
+  reported to the user and the first is used and imported. A pull request's merge base is found
+  in the transient repository its ends were fetched into, with their whole history. A shallow
+  clone without the merge base is deepened from `origin` for local reviews: the history it holds
+  of the target and the head and its shallow boundary are copied into a transient repository,
+  which is deepened with `--deepen`, wanting the target and the boundary commits but never the
+  head, which may be a synthetic working-tree capture or an unpublished commit; wants the remote
+  does not know are dropped one by one. When it cannot find a merge base, the review fails with
+  an explicit error. The review of a checkout never deepens: a fetch has no deadline, and the
+  capture is what the window waits on. Without a merge base in a shallow clone, it compares with
+  the empty tree and says the history is shallow (`BaseRef::Shallow`), never that the histories
+  are unrelated.
 - Only an explicit fetch, and `gh`, reach a remote: every other git command runs with an empty
   `GIT_ALLOW_PROTOCOL`, which lets it use no transport whatever git's version and
   configuration, and every git command with `GIT_NO_LAZY_FETCH=1`. A front end can forbid those
@@ -146,19 +186,30 @@ produces verified immutable inputs; everything after it is pure analysis over ob
   on.
 - Partial clones: no command fetches the objects a partial clone lacks, so a review that needs a
   missing blob fails with the object it misses rather than reaching the network behind the
-  reviewer's back. The analysis cache stores the review evidence (the text of each unit), so
-  past reviews stay reproducible offline once analyzed; browsing an old revision needs its
-  objects.
+  reviewer's back; so does an import during which the reviewed repository collected an object.
+  Once imported, a snapshot stays readable in the archive whatever the reviewed repository does,
+  for analysis and browsing alike.
 
 ### Snapshots of uncommitted work
 
-To review an agent's uncommitted turn, capture the working tree without touching the user's index:
-with a temporary `GIT_INDEX_FILE` holding a copy of the user's index (which keeps git's stat cache
-and sparse-checkout entries, and the index's date, so git still rereads files as new as the index
-whose stat cannot show an edit; `git read-tree HEAD` when there is no index), `git add -A` (tracked
-and untracked files, respecting `.gitignore`), `git write-tree` and `git commit-tree` with a fixed
-identity and date produce a synthetic snapshot commit, pinned like any other; a working tree with
-nothing beyond `HEAD` is captured as `HEAD` itself. Staged and unstaged changes are captured together. Two captures of
+To review an agent's uncommitted turn, capture the working tree without touching the user's
+repository: a private git directory stands in for the worktree's, with a detached `HEAD`, a copy
+of the user's index (which keeps git's stat cache and sparse-checkout entries, and the index's
+date, so git still rereads files as new as the index whose stat cannot show an edit; `git
+read-tree HEAD` when there is no index), the shared index a split index is based on, and copies
+of the sparse-checkout patterns, `info/exclude` and `info/attributes`, and its commands read the
+clone's configuration as the clone reads it. Git writes while it reads an index, dating a split
+index's shared file anew and writing the trees of a sparse index's directories, so every command
+that reads the copy runs there with the review's archive as its only object database, the watch's
+ignore queries included, one copy per walk of the tree. The objects of `HEAD`, then every object
+the copied index names, are imported before any command could expand a sparse index: the listing
+runs with `sparse.expectFilesOutsideOfPatterns`, so git expands nothing while it reads, and fails
+on anything git reports, since git drops a directory it cannot expand without a word. Then the
+changed paths (tracked and untracked files,
+respecting `.gitignore`) are staged, and `git write-tree` and `git commit-tree` with a fixed
+identity and date produce a synthetic snapshot commit in the archive, pinned like any other; a
+working tree with nothing beyond `HEAD` is captured as `HEAD` itself. Staged and unstaged
+changes are captured together. Two captures of
 different contents are two revisions; a capture identical to the current revision deduplicates.
 A review that follows the working tree shows captures without recording them until one is
 marked (see "Live updates"). A working tree with an unborn `HEAD`, or one with no default branch
@@ -729,6 +780,10 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   concurrent refreshes wins, either being a true sync time. Writing it is best-effort: a
   refresh that recorded its revision succeeds even when the record cannot be stored, and
   `Recorded::sync_error` says why.
+- `archive/`: the review's archive, a bare git repository with every snapshot the review recorded
+  or shows and all they reach, pinned by `refs/snap/<id>` and the sessions' `refs/live/`, the
+  sessions' lock files under `sessions/`, the private directories captures run in under
+  `scratch/`, and `cutover`, once it holds every snapshot the log records.
 - `view/<front-end>.json`: each front end's own view state, through `Review::view_state` and
   `Review::save_view_state`, such as the folded folders. review-gui and review-tui share theirs
   under the name `review-lite`, review-gui's name when it first stored them, so folds made in
@@ -737,12 +792,38 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   and a front end that cannot read it starts afresh.
 
 The review of a checkout is keyed by its working tree and its clone,
-`<working tree>:WORKTREE@<clone>`. The clone's identity is a blob of random bytes that
-`refs/code-review/clone-id` names in the common git directory, so every worktree of a clone
-shares it and a new clone made at the same path has another; the ref is created once, with a
-create-only update, so of two first opens the second adopts the first's. The review stores the
-whole identity as its target, and a running app checks it on every capture, so a review never
-captures a clone its history is not in.
+`<working tree>:WORKTREE@<clone>`. The clone's identity is a random id that
+`clones/<digest>.json` in the data directory binds to the clone's common git directory, by its
+resolved path and what the filesystem tells the directory apart by: its device, inode and
+creation time, or on Windows its volume and file index. Every worktree of a clone shares it, and
+a new clone made at the same path, another directory to the filesystem, gets another, which
+replaces the path's binding; bindings are made one at a time, so of two first opens the second
+adopts the first's. The review
+stores the whole identity as its target, and a running app checks it on every capture, save and
+use of trust, finding the checkout's common git directory anew each time, so a review never
+captures a clone its history is not in, even once its worktree path belongs to another clone's
+worktree.
+
+Every base and head the log records is in the archive, which every open checks under
+`review.lock` by asking the archive for each one's commit (`git cat-file --batch-check`),
+importing any it lacks from the reviewed repository and verifying it whole, and by listing its
+pins, pinning any snapshot that has none; a snapshot whose commit is there but not all it reaches
+is copied whole again. A review an earlier version kept, with its snapshots
+pinned under `refs/code-review/<key>/snap/` in the reviewed repository and the clone's identity in
+its `refs/code-review/clone-id`, so moves into its archive on its first open, while those refs
+still pin them, and a revision such a version still running records later moves on the next open.
+The first move counts only once a replay of the log from the archive alone, with no cache,
+derives exactly the history the reviewed repository does with the review's cache, the one the
+reviewer saw; then `cutover` is written, after the archive's objects, packs and refs reached the
+disk. Until then the log, an unfinished record at its end included, and the reviewed repository
+stay as they were and the next open tries again; keys, revision numbers, events and evidence
+digests never change. The first binding of a path, one never bound before, keeps the identity
+of the clone's ref when a review of a checkout with it is stored, that review's checkout is still
+a worktree of this very clone, resolved read-only, and no binding holds the id yet, so a copy of
+the clone never takes it, whichever is opened first and wherever its worktree is; opening that review by its key binds it as opening the
+checkout does. The old refs and session files stay in the reviewed repository until the reviewer
+removes them, and windows of older versions are closed when upgrading: a window of this version
+fails on a revision an older one records meanwhile until it is opened again.
 
 A revision event of a capture of a working tree also records the branch checked out, the commit
 `HEAD` was at and the number of the branch's pull request, when there were ones. They describe the
@@ -752,8 +833,9 @@ is one revision, which keeps the branch it was first recorded on.
 Rules:
 
 - **State transitions are serialized as a whole.** Recording a revision takes `review.lock`,
-  rereads the log, compares the snapshot pair with the current revision's, pins both snapshots,
-  publishes the analysis, appends the event with the next number, and only then releases the lock.
+  rereads the log, compares the snapshot pair with the current revision's, pins both snapshots
+  in the archive, publishes the analysis, appends the event with the next number, and only then
+  releases the lock.
   The appended event is the commit point: a revision number exists only once its event is in the log, so a crash before
   that leaves nothing to clean up but idempotent pins and a content-addressed analysis file.
   Recording what a target resolves to now (`Review::refresh`) pins it under a session of its own
@@ -853,8 +935,9 @@ review opens all the same, as an empty view.
 
 A capture is taken only while git is idle in the worktree: none while `index.lock`,
 `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge`, `rebase-apply` or `BISECT_LOG`
-exist in its git directory or the index has unmerged paths (`Capture::Busy`), checked before and
-after the capture. The subject, the base's commit and the real index's modification time and
+exist in its git directory, checked before and after the capture, or its copy of the index has
+unmerged paths (`Capture::Busy`). The subject, the base's commit and the real index's
+modification time and
 size are read before and after too, and a capture during which any of them changed is discarded
 (`Capture::Moved`) so the caller takes it again. A checkout that is another clone now captures
 nothing (`Capture::Replaced`).
@@ -916,29 +999,30 @@ window's trust epoch on at the key press, as every denial the window takes in do
 lands only in the epoch it was asked in, so none from before a revocation lands
 ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 
-A capture is a synthetic commit no branch reaches, so whoever shows it pins it. Each running app
-is a session (`Review::start_session`) that holds an exclusive lock on
-`code-review/sessions/<review>/<id>.lock` in the clone's common git directory, next to the pins
-it guards whatever data directory the review is kept in, for its lifetime, and pins the base, the
-head and the target of each capture it shows, before analyzing it, under
-`refs/code-review/<review>/live/<session>/<capture>/`, where `<capture>` is 16 hex digits of a
-digest of the head, base and target, so two captures of one head against different bases keep
-their own pins and the ref paths stay within Windows' path length limit. A session removes only its
+A capture is a synthetic commit no branch reaches, written into the review's archive, so whoever
+shows it pins it there. Each running app is a session (`Review::start_session`) that holds an
+exclusive lock on `sessions/<id>.lock` in the archive, next to the pins it guards, for its
+lifetime, and a capture pins its base and head before it returns them, deriving no history, under
+`refs/live/<session>/<capture>/` in the archive, where `<capture>` is 16 hex digits of a digest
+of the head, base and target, so two captures of one head against different bases keep their
+own pins and the ref paths stay within Windows' path length limit. A session removes only its
 own pins, those of captures it no longer shows and all of them when it ends, and another
 session's only once that session's lock file can be locked, which means it is over; it then
 removes the file too.
 
 For PR reviews, poll every 30 seconds (configurable): `git ls-remote` for the PR head and the target
 branch, and `gh pr view` for the target branch name, since a PR can be retargeted. A change of
-either side fetches into a temporary ref, verifies the fetched objects, records a revision and
-analyzes it in the background. The UI shows a banner such as "New push: 3 new and 2 changed
+either side fetches into a transient repository, imports the fetched snapshots into the archive,
+records a revision and analyzes it in the background. The UI shows a banner such as "New push:
+3 new and 2 changed
 units" and applies it on request, keeping the cursor on the current unit.
 
 ### Code browsing at a revision
 
-Every revision is browsed from git objects: the buffer, the pickers and searches read blobs and
-trees of the revision's head (`git cat-file`, `git ls-tree`), never a checkout of it, so a pull
-request, a range and an older revision browse as the newest capture does.
+Every revision is browsed from git objects in the review's archive: the buffer, the pickers and
+searches read blobs and trees of the revision's head (`git cat-file`, `git ls-tree`), never a
+checkout of it, so a pull request, a range and an older revision browse as the newest capture
+does.
 
 Tools that execute code from the reviewed tree, such as language servers, run only in the
 checkout itself, on the code on disk, and only with the checkout's grant (`Review::trusted`).

@@ -72,10 +72,14 @@ state.
   header says why.
 - **Language servers run only in the checkout, on the code on disk.** A server runs in the
   checkout's working tree, its current directory and workspace root, with rust-analyzer's builds
-  on and the project's own target directory. Go to definition runs only where what shows is the
-  code on disk: the newest revision of a review of the working tree, the checkout's review or one
-  opened with `--worktree`. A review of a range or a pull request, or an older revision, says so
-  before it asks for trust: check out the branch and review it there.
+  on and the project's own target directory. It is the one exception to cr writing nothing into
+  the reviewed repository
+  ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)): once the
+  reviewer trusts the checkout, the server builds there, writing `target/` as the reviewer's own
+  Cargo would; cr's own commands still write nothing there. Go to definition runs only where what
+  shows is the code on disk: the newest revision of a review of the working tree, the checkout's
+  review or one opened with `--worktree`. A review of a range or a pull request, or an older
+  revision, says so before it asks for trust: check out the branch and review it there.
 - **One grant per checkout and clone.** The checkout's review holds it, keyed by the working tree
   and the clone, as a `trust` event of scope `in_checkout` in its log. It covers whatever the
   checkout holds after later edits and branch switches, until it is revoked, and only while the
@@ -88,15 +92,16 @@ state.
 - **A lookup checks the disk before the question and after the answer.** The lookup job compares
   the tree of the head the last frame showed with a capture of the working tree taken now, with
   every filter off, recording and pinning nothing, refused while git is busy
-  (`Review::tree_on_disk`). Code that is not on disk is refused before any server is asked, and
-  on an untrusted checkout before the trust question, so the reviewer never grants trust for a
-  lookup that cannot run; an answer is dropped when the disk, the view or the trust changed while
-  it ran. The file asked about must hold on disk the text on screen, so the cursor's line and
-  column name the same bytes, which a file git keeps at its staged version under a filter, or one
-  a sparse checkout leaves off disk, need not. A definition in a file of the snapshot on screen
-  must hold on disk the text of its blob there, for the same reason; one elsewhere, such as in
-  the standard library, opens as read from disk. It opens in the buffer on screen only when that
-  buffer shows the same text.
+  (`Review::tree_on_disk`); the capture takes the path every capture takes, writing its tree into
+  the archive of the checkout's review and nothing into the checkout. Code that is not on disk is
+  refused before any server is asked, and on an untrusted checkout before the trust question, so
+  the reviewer never grants trust for a lookup that cannot run; an answer is dropped when the
+  disk, the view or the trust changed while it ran. The file asked about must hold on disk the
+  text on screen, so the cursor's line and column name the same bytes, which a file git keeps at
+  its staged version under a filter, or one a sparse checkout leaves off disk, need not. A
+  definition in a file of the snapshot on screen must hold on disk the text of its blob there, for
+  the same reason; one elsewhere, such as in the standard library, opens as read from disk. It
+  opens in the buffer on screen only when that buffer shows the same text.
 - **A server outlives the captures and holds no text of the client's.** It keeps the index it
   built while the reviewer and agents edit. Each question opens the file with its text, which is
   its text on disk, and closes it once answered, so the server reads every file from disk again,

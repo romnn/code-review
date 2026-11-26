@@ -345,7 +345,7 @@ fn compare(review: &Review, pair: Pair) -> Compared {
 /// Each blob's size is looked up before it is read, since a reader streams a blob past its
 /// ceiling through its pipe to skip it.
 pub(super) fn read(review: &Review, pair: &Pair) -> (Encoded, Encoded) {
-    let repo = review.repo();
+    let repo = review.snapshots();
     let mut reader = repo.blob_reader().ok();
     let mut read = |oid: Option<&ObjectId>| {
         let Some(oid) = oid else {

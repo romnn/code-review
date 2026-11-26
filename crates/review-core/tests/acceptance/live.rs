@@ -61,10 +61,14 @@ fn last_revision(history: &History) -> eyre::Result<RevisionRecord> {
     Ok((*last).clone())
 }
 
-/// The names of the review's refs, sorted.
-fn refs(repo: &TestRepo) -> eyre::Result<Vec<String>> {
-    let listed = repo.git(&["for-each-ref", "--format=%(refname)", "refs/code-review"])?;
-    let mut names: Vec<String> = listed.lines().map(str::to_owned).collect();
+/// The names of the refs of the review's archive, sorted.
+fn refs(review: &Review) -> eyre::Result<Vec<String>> {
+    let mut names: Vec<String> = review
+        .snapshots()
+        .refs_under("refs/")?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
     names.sort();
     Ok(names)
 }
@@ -95,7 +99,7 @@ fn walk(dir: &std::path::Path) -> eyre::Result<Vec<String>> {
 
 /// An unchanged working tree gives the recorded history; an edit gives one more, provisional
 /// revision that records nothing: no event, no snapshot pin, no cache file, only its session's
-/// pins of its base, head and target.
+/// pins of its base and head.
 #[gtest]
 fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
@@ -111,7 +115,7 @@ fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Resul
             .filter(|name| !name.starts_with(session.pins()))
             .collect()
     };
-    let refs_before = not_live(refs(&repo)?);
+    let refs_before = not_live(refs(&review)?);
     let cache_before = cached(&repo)?;
     repo.write("a.rs", &two_functions("first();", "second();"))?;
     let live = capture(&review, &session, &[])?;
@@ -123,14 +127,11 @@ fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Resul
 
     expect_that!(std::fs::read(review.dir().events())?, eq(&events));
     expect_that!(cached(&repo)?, eq(&cache_before));
-    expect_that!(not_live(refs(&repo)?), eq(&refs_before));
+    expect_that!(not_live(refs(&review)?), eq(&refs_before));
     let record = &live.revisions()[1];
     let pins = session.pins_of(record);
     let mut expected = vec![format!("{pins}/base"), format!("{pins}/head")];
-    if record.target.is_some() {
-        expected.push(format!("{pins}/target"));
-    }
-    let mut live_refs: Vec<String> = refs(&repo)?
+    let mut live_refs: Vec<String> = refs(&review)?
         .into_iter()
         .filter(|name| name.starts_with(session.pins()))
         .collect();
@@ -151,7 +152,7 @@ fn live_pins_go_unless_kept() -> eyre::Result<()> {
     repo.write("a.rs", "fn a() { two(); }\n")?;
     let second = capture(&review, &session, std::slice::from_ref(&first))?.revisions()[1].clone();
     let pinned = |record: &RevisionRecord| -> eyre::Result<bool> {
-        Ok(refs(&repo)?.contains(&head_pin(&session, record)))
+        Ok(refs(&review)?.contains(&head_pin(&session, record)))
     };
     expect_true!(pinned(&first)?);
     expect_true!(pinned(&second)?);
@@ -162,12 +163,12 @@ fn live_pins_go_unless_kept() -> eyre::Result<()> {
 
     // A session that ends takes its pins with it.
     drop(session);
-    expect_false!(refs(&repo)?.iter().any(|name| name.contains("/live/")));
+    expect_false!(refs(&review)?.iter().any(|name| name.contains("/live/")));
     Ok(())
 }
 
 /// Two captures with the same head against different bases each keep pins of their own, so the
-/// capture still on screen keeps its base and target pinned while the newer one is taken.
+/// capture still on screen keeps its base pinned while the newer one is taken.
 #[gtest]
 fn captures_of_one_head_on_two_bases_are_pinned_apart() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
@@ -184,23 +185,15 @@ fn captures_of_one_head_on_two_bases_are_pinned_apart() -> eyre::Result<()> {
     expect_that!(second.head, eq(&first.head));
     expect_that!(second.base, not(eq(&first.base)));
 
-    // The first capture's pins still name its own base and target.
-    let pinned = |name: String| repo.git(&["rev-parse", "--verify", "--quiet", &name]);
+    // The first capture's pins still name its own base.
+    let pinned = |name: String| review.snapshots().ref_target(&name);
     expect_that!(
         pinned(format!("{}/base", session.pins_of(&first)))?,
-        eq(first.base.as_str())
-    );
-    let first_target = first
-        .target
-        .as_ref()
-        .ok_or_else(|| eyre::eyre!("no target"))?;
-    expect_that!(
-        pinned(format!("{}/target", session.pins_of(&first)))?,
-        eq(first_target.as_str())
+        some(eq(&first.base))
     );
     expect_that!(
         pinned(format!("{}/base", session.pins_of(&second)))?,
-        eq(second.base.as_str())
+        some(eq(&second.base))
     );
     Ok(())
 }
@@ -235,7 +228,7 @@ fn marking_a_provisional_revision_records_it_first() -> eyre::Result<()> {
         find(&states, "second")?.state,
         matches_pattern!(UnitState::Reviewed { .. })
     );
-    expect_true!(refs(&repo)?.contains(&review.pin_ref(&live.revisions()[1].head)));
+    expect_true!(refs(&review)?.contains(&review.pin_ref(&live.revisions()[1].head)));
     Ok(())
 }
 

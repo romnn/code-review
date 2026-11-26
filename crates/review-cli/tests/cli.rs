@@ -814,3 +814,94 @@ fn show_on_a_clean_main_says_nothing_is_to_review() -> eyre::Result<()> {
     assert_eq!(json["subject"]["base"]["kind"], "remote_default");
     Ok(())
 }
+
+/// `cr` run from elsewhere, with a relative data directory and `GIT_*` variables that point at
+/// another repository, index, object database and configuration file, reviews the checkout `-C`
+/// names as its clone has git read it, a conditional include on its git directory included,
+/// stores the review where it was told, and leaves every file of the checkout's git directory as
+/// it was.
+#[test]
+fn cr_run_from_elsewhere_reads_only_the_checkout() -> eyre::Result<()> {
+    let parent = tempfile::tempdir()?;
+    let (repo, other) = (parent.path().join("checkout"), parent.path().join("other"));
+    for dir in [&repo, &other] {
+        std::fs::create_dir(dir)?;
+        git(dir, &["init", "--quiet", "--initial-branch=main"])?;
+        std::fs::write(dir.join("a.txt"), "a\n")?;
+        git(dir, &["add", "--all"])?;
+        git(dir, &["commit", "--quiet", "-m", "base"])?;
+    }
+    // In the clone, a conditional include on its git directory has git ignore `secret.txt`.
+    let excludes = parent.path().join("excludes");
+    std::fs::write(&excludes, "secret.txt\n")?;
+    let included = parent.path().join("included.config").display().to_string();
+    let excludes = excludes.display().to_string();
+    git(
+        &repo,
+        &[
+            "config",
+            "--file",
+            &included,
+            "core.excludesFile",
+            &excludes,
+        ],
+    )?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output()?;
+    let git_dir = String::from_utf8(output.stdout)?.trim().to_owned();
+    git(
+        &repo,
+        &[
+            "config",
+            &format!("includeIf.gitdir:{git_dir}.path"),
+            &included,
+        ],
+    )?;
+    std::fs::write(repo.join("new.txt"), "new\n")?;
+    std::fs::write(repo.join("secret.txt"), "secret\n")?;
+    let before = files(&repo.join(".git"))?;
+
+    let other_git = other.join(".git");
+    let output = Command::new(env!("CARGO_BIN_EXE_cr"))
+        .current_dir(parent.path())
+        .args(["-C", "checkout", "--data-dir", "data", "show", "--json"])
+        .env("GIT_DIR", &other_git)
+        .env("GIT_INDEX_FILE", other_git.join("index"))
+        .env("GIT_OBJECT_DIRECTORY", other_git.join("objects"))
+        .env("GIT_CONFIG", repo.join(".git/config"))
+        .env("XDG_CONFIG_HOME", config_home(parent.path()))
+        .env_remove("CR_DATA_DIR")
+        .env_remove("CODE_REVIEW_CONFIG")
+        .envs(GIT_ENV)
+        .output()?;
+    eyre::ensure!(
+        output.status.success(),
+        "cr show failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown = String::from_utf8(output.stdout)?;
+    assert!(shown.contains("new.txt"), "{shown}");
+    assert!(!shown.contains("secret.txt"), "{shown}");
+    assert!(parent.path().join("data/reviews").is_dir());
+    assert_eq!(files(&repo.join(".git"))?, before);
+    Ok(())
+}
+
+/// Every file under `dir`, with its bytes and when it was last modified, sorted.
+fn files(dir: &Path) -> eyre::Result<Vec<(PathBuf, Vec<u8>, std::time::SystemTime)>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            found.extend(files(&entry.path())?);
+        } else {
+            let modified = entry.metadata()?.modified()?;
+            found.push((entry.path(), std::fs::read(entry.path())?, modified));
+        }
+    }
+    found.sort();
+    Ok(found)
+}

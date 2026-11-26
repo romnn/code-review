@@ -2,12 +2,19 @@
 //!
 //! It produces verified, immutable inputs (object IDs and blob contents); everything after it is
 //! pure analysis over object IDs.
+//!
+//! The reviewed repository is only ever read: a [`Repo`] has no command that writes.
+//! Every command that writes runs against a private repository, one cr owns in its data
+//! directory, which takes what it needs from the reviewed one by an explicit list of objects in
+//! a pack of their own, and reads the reviewed clone's configuration as the clone reads it.
 
 mod blobs;
 mod diff_tree;
-mod filters;
+pub(crate) mod fetch;
 mod ignore;
+mod private;
 mod refs;
+mod scratch;
 mod snapshot;
 mod state;
 
@@ -15,9 +22,12 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 pub use blobs::{Blob, BlobReader, MAX_TEXT_BLOB_BYTES};
 pub use diff_tree::{ChangeStatus, EntryType, FileMode, RawChange, RawSide};
+pub use ignore::{IgnoreRules, Ignores};
+pub(crate) use private::{PrivateRepo, refuse_inside};
 pub use snapshot::WorktreeCapture;
 pub(crate) use state::IndexStamp;
 pub use state::{BranchIdentity, Busy, Head};
@@ -28,12 +38,38 @@ use crate::ids::ObjectId;
 /// Configuration every git command the engine runs gets, as `-c` options.
 ///
 /// Hooks and a filesystem monitor are programs the repository's configuration names, and the
-/// engine never runs them: it only reads the repository and writes its own objects and refs.
-pub(crate) const COMMAND_CONFIG: [&str; 4] = [
+/// engine never runs them: it only reads the reviewed repository and writes its own.
+/// Git for Windows takes paths beyond 260 characters, such as those below a review's data.
+pub(crate) const COMMAND_CONFIG: [&str; 6] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "core.longpaths=true",
+];
+
+/// Configuration every git command run in a private repository gets besides
+/// [`COMMAND_CONFIG`], after the clone's so that it wins: the repository collects no garbage on
+/// its own and keeps no reflogs, so what it holds and for how long is cr's decision.
+const PRIVATE_CONFIG: [&str; 6] = [
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "core.logAllRefUpdates=false",
+];
+
+/// Configuration of the commands that write to a private repository, see [`durable`]: what
+/// they write reaches the disk before git reports it written, so a revision the log records
+/// never names an object or a pin that a crash lost; objects in batches, since a capture can
+/// write thousands.
+const DURABLE_CONFIG: [&str; 4] = [
+    "-c",
+    "core.fsync=objects,derived-metadata,reference",
+    "-c",
+    "core.fsyncMethod=batch",
 ];
 
 /// Environment every git command the engine runs gets.
@@ -47,6 +83,53 @@ pub(crate) const COMMAND_ENV: [(&str, &str); 4] = [
     ("GIT_NO_REPLACE_OBJECTS", "1"),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("LC_ALL", "C"),
+];
+
+/// The `GIT_*` variables that git commands keep of cr's environment and of the variables an
+/// embedder sets, by name, or by prefix for a name ending in `_`: those that say how git reaches
+/// a remote and where git's own programs are.
+///
+/// Every other `GIT_*` variable, such as `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_CONFIG`, could
+/// point a command at another repository, index, object database or configuration file than the
+/// one it names, or have it write a trace, so none reaches git.
+const TRANSPORT_ENV: [&str; 8] = [
+    "GIT_ALLOW_PROTOCOL",
+    "GIT_ASKPASS",
+    "GIT_EXEC_PATH",
+    "GIT_PROXY_COMMAND",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
+    "GIT_SSL_",
+];
+
+/// The `GIT_*` variables, named as in [`TRANSPORT_ENV`], that say which configuration git reads
+/// besides a repository's own: commands of the reviewed repository keep them, and those of a
+/// private repository take the clone's configuration as they made it instead.
+const CONFIG_ENV: [&str; 6] = [
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_KEY_",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_VALUE_",
+];
+
+/// Keys of the clone's configuration, by name, or by section for a name ending in `.`, that a
+/// private repository's commands never take: those that describe the clone's own repository,
+/// the includes already read, the hooks configuration defines, which `core.hooksPath` does not
+/// turn off, the filter drivers, which no command cr runs may start, and the setting
+/// `core.fsync` replaced, which has git warn on every command.
+const UNSHARED_CONFIG: [&str; 9] = [
+    "core.bare",
+    "core.fsyncobjectfiles",
+    "core.repositoryformatversion",
+    "core.worktree",
+    "extensions.",
+    "filter.",
+    "hook.",
+    "include.",
+    "includeif.",
 ];
 
 /// Environment of every command that reaches a remote for a repository whose commands may not
@@ -75,7 +158,10 @@ pub struct GrepLine {
     pub text: String,
 }
 
-/// A git repository, addressed by its working tree or git directory.
+/// A git repository, addressed by its working tree or git directory, that commands only read.
+///
+/// It is the reviewed repository, or the reading side of a private repository, such as a
+/// review's archive ([`crate::Review::snapshots`]).
 #[derive(Debug, Clone)]
 pub struct Repo {
     work_tree: Option<PathBuf>,
@@ -87,6 +173,26 @@ pub struct Repo {
     env: Vec<(OsString, OsString)>,
     /// Whether those commands may not prompt; see [`Self::forbid_prompts`].
     no_prompts: bool,
+    /// For a private repository, what its commands take of the clone it serves; see
+    /// [`Self::clone_context`].
+    clone: Option<Arc<CloneContext>>,
+}
+
+/// What a private repository's commands take of the reviewed clone they serve: its
+/// configuration as git reads it there, in place of every configuration file but the private
+/// repository's own, and the directory they run in, the clone's checkout or the git directory
+/// of a bare clone, so that a relative path in that configuration means what it means there.
+#[derive(Debug)]
+pub(crate) struct CloneContext {
+    pub config: Vec<ConfigEntry>,
+    pub dir: PathBuf,
+}
+
+/// A key of a repository's configuration with its value, as git prints them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigEntry {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 /// A ref and the object it points to.
@@ -110,6 +216,7 @@ pub struct Remote {
 /// Raw output of a finished git command.
 struct Output {
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 /// Runs `command` in a session of its own, which has no controlling terminal: opening
@@ -163,6 +270,7 @@ impl Repo {
             common_dir: PathBuf::new(),
             env: Vec::new(),
             no_prompts: false,
+            clone: None,
         };
         let git_dir = probe.run_text(["rev-parse", "--absolute-git-dir"])?;
         let common_dir =
@@ -181,6 +289,7 @@ impl Repo {
             common_dir: PathBuf::from(common_dir),
             env: Vec::new(),
             no_prompts: false,
+            clone: None,
         })
     }
 
@@ -189,6 +298,18 @@ impl Repo {
     #[must_use]
     pub fn common_dir(&self) -> &Path {
         &self.common_dir
+    }
+
+    /// Returns the absolute common git directory the working tree has now, or a bare
+    /// repository's git directory, which is another than [`Self::common_dir`] once another
+    /// clone took the working tree's place.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the working tree is no longer in a repository.
+    pub(crate) fn current_common_dir(&self) -> Result<PathBuf, Error> {
+        self.run_text(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .map(PathBuf::from)
     }
 
     /// Returns the top-level working tree directory, if the repository has one.
@@ -206,6 +327,10 @@ impl Repo {
     /// Sets `vars` in the environment of every `git` and `gh` command run for the repository
     /// from now on, replacing the variables set before, on top of the process's own
     /// environment.
+    ///
+    /// Git takes only the `GIT_*` variables that say how it reaches a remote and which
+    /// configuration it reads, as of the process's own environment, never one that points it at
+    /// another repository.
     pub fn set_command_env<K, V>(&mut self, vars: impl IntoIterator<Item = (K, V)>)
     where
         K: Into<OsString>,
@@ -229,7 +354,7 @@ impl Repo {
     /// and credential helpers prompt on, whatever command the user set to run ssh.
     /// None asks an askpass helper either, which would prompt in a window.
     /// A command that would have to ask, such as a fetch that needs a passphrase, fails instead.
-    /// No other command can prompt, since none reaches a remote (see [`Self::fetch`]).
+    /// No other command can prompt, since none reaches a remote.
     pub fn forbid_prompts(&mut self) {
         self.no_prompts = true;
     }
@@ -242,28 +367,136 @@ impl Repo {
         }
     }
 
-    /// Returns a `git` command bound to this repository, with [`COMMAND_CONFIG`] and
-    /// [`COMMAND_ENV`] applied, that may use no transport.
-    ///
-    /// It reaches no remote whatever git's version and configuration, not even for an object a
-    /// partial clone lacks, which some versions and paths fetch despite `GIT_NO_LAZY_FETCH`.
+    /// Returns a `git` command bound to this repository, as [`Self::unbound`] makes it.
     pub(crate) fn command(&self) -> Command {
-        let mut command = self.git();
-        command.env("GIT_ALLOW_PROTOCOL", "");
+        let mut command = self.unbound();
+        self.bind(&mut command);
         command
     }
 
-    /// Returns a `git` command bound to this repository, with [`COMMAND_CONFIG`] and
-    /// [`COMMAND_ENV`] applied, that may use the transports the user allows.
+    /// Returns a `git` command bound to this repository, as [`Self::unbound`] makes it, but
+    /// that may use the transports the user allows: one that fetches.
     fn git(&self) -> Command {
-        let mut command = Command::new("git");
+        let mut command = self.base();
+        self.bind(&mut command);
+        command
+    }
+
+    /// Has `command` run in this repository.
+    fn bind(&self, command: &mut Command) {
         match &self.work_tree {
             Some(work_tree) => command.arg("-C").arg(work_tree),
             None => command.arg("--git-dir").arg(&self.git_dir),
         };
-        command.args(COMMAND_CONFIG).envs(COMMAND_ENV);
-        self.apply_env(&mut command);
+    }
+
+    /// Returns a `git` command bound to no repository, with [`COMMAND_CONFIG`], [`COMMAND_ENV`]
+    /// and the environment the repository's commands get, that may use no transport.
+    ///
+    /// It reaches no remote whatever git's version and configuration, not even for an object a
+    /// partial clone lacks, which some versions and paths fetch despite `GIT_NO_LAZY_FETCH`.
+    pub(crate) fn unbound(&self) -> Command {
+        let mut command = self.base();
+        command.env("GIT_ALLOW_PROTOCOL", "");
         command
+    }
+
+    /// Returns a `git` command bound to no repository, with [`COMMAND_CONFIG`], [`COMMAND_ENV`]
+    /// and the variables of [`Self::set_command_env`], and of `GIT_*` variables only the ones
+    /// [`TRANSPORT_ENV`] and [`CONFIG_ENV`] name.
+    ///
+    /// A private repository's command runs in the clone's directory, and reads the clone's
+    /// configuration, after the repository's own, and no other: no global or system file,
+    /// which the clone's configuration already holds as it read them, and nothing it would
+    /// evaluate again where the private repository is, such as a conditional include on the git
+    /// directory.
+    fn base(&self) -> Command {
+        let private = self.clone.is_some();
+        let mut command = Command::new("git");
+        if let Some(clone) = &self.clone {
+            command.arg("-C").arg(&clone.dir);
+        }
+        for (name, _) in std::env::vars_os() {
+            if !kept_env(&name, private) {
+                command.env_remove(name);
+            }
+        }
+        command.args(COMMAND_CONFIG);
+        command.envs(
+            self.env
+                .iter()
+                .filter(|(name, _)| kept_env(name, private))
+                .map(|(name, value)| (name, value)),
+        );
+        command.envs(COMMAND_ENV);
+        if self.clone.is_none() {
+            // Git reads the index even to compare trees or look up attributes in one, and dates
+            // a split index's shared file anew as it does. The reviewed repository's commands
+            // need no index, so they read none: the path names no file, and none writes one.
+            let no_index = format!("cr-no-index-{}", crate::random::hex(12));
+            command.env("GIT_INDEX_FILE", std::env::temp_dir().join(no_index));
+        }
+        if let Some(clone) = &self.clone {
+            command
+                .args(PRIVATE_CONFIG)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_COUNT", clone.config.len().to_string());
+            for (index, ConfigEntry { key, value }) in clone.config.iter().enumerate() {
+                command
+                    .env(format!("GIT_CONFIG_KEY_{index}"), os_string(key))
+                    .env(format!("GIT_CONFIG_VALUE_{index}"), os_string(value));
+            }
+        }
+        command
+    }
+
+    /// Returns what a private repository serving this repository takes of it: the
+    /// configuration git reads here, includes and all, but the keys [`UNSHARED_CONFIG`] names,
+    /// with `true` for a key without a value, and the working tree, or the git directory of a
+    /// bare repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot read the configuration.
+    pub(crate) fn clone_context(&self) -> Result<Arc<CloneContext>, Error> {
+        let output = self.run(["config", "--list", "--includes", "-z"])?;
+        // `key NL value NUL`, or `key NUL` for a key without a value.
+        let entries = output
+            .stdout
+            .split(|&byte| byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .filter_map(|entry| {
+                let (key, value) = match entry.iter().position(|&byte| byte == b'\n') {
+                    Some(newline) => {
+                        let (key, rest) = entry.split_at(newline);
+                        (key, rest.get(1..).unwrap_or_default())
+                    }
+                    None => (entry, &b"true"[..]),
+                };
+                let lowered = key.to_ascii_lowercase();
+                let shared = !UNSHARED_CONFIG.iter().any(|unshared| {
+                    let unshared = unshared.as_bytes();
+                    if unshared.ends_with(b".") {
+                        lowered.starts_with(unshared)
+                    } else {
+                        lowered == unshared
+                    }
+                });
+                shared.then(|| ConfigEntry {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                })
+            });
+        Ok(Arc::new(CloneContext {
+            config: entries.collect(),
+            dir: self.work_tree().unwrap_or(self.git_dir()).to_path_buf(),
+        }))
+    }
+
+    /// Returns the hash algorithm of the repository's objects, `sha1` or `sha256`.
+    pub(crate) fn object_format(&self) -> Result<String, Error> {
+        self.run_text(["rev-parse", "--show-object-format"])
     }
 
     /// Runs a git command and returns its standard output.
@@ -307,6 +540,7 @@ impl Repo {
         }
         Ok(Output {
             stdout: output.stdout,
+            stderr: output.stderr,
         })
     }
 
@@ -345,46 +579,26 @@ impl Repo {
         Ok(ObjectId::parse(&text)?)
     }
 
-    /// Returns every merge base of `target` and `head`, best first, deepening a shallow clone from
-    /// `deepen_from` when needed.
-    ///
-    /// Deepening never asks the remote for the head: a working-tree snapshot or an unpublished
-    /// local commit exists only here.
-    /// It deepens the clone's shallow boundary instead, whose commits all came from the remote,
-    /// plus the target, with no ref updates and no `FETCH_HEAD`.
+    /// Returns every merge base of `target` and `head`, best first.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NoMergeBase`] when the histories are unrelated or a shallow clone cannot be
-    /// deepened far enough.
-    pub fn merge_bases(
-        &self,
-        target: &ObjectId,
-        head: &ObjectId,
-        deepen_from: Option<&str>,
-    ) -> Result<Vec<ObjectId>, Error> {
-        for _ in 0..8 {
-            let output = self.run(["merge-base", "--all", target.as_str(), head.as_str()]);
-            if let Ok(output) = output {
-                let bases = parse_oid_lines(&output.stdout)?;
-                if !bases.is_empty() {
-                    return Ok(bases);
-                }
-            }
-            let Some(remote) = deepen_from else {
-                break;
-            };
-            if !self.is_shallow()? {
-                break;
-            }
-            if !self.deepen(remote, target)? {
-                break;
-            }
+    /// Returns [`Error::NoMergeBase`] when the histories are unrelated, or a shallow clone does
+    /// not hold the history they share.
+    pub fn merge_bases(&self, target: &ObjectId, head: &ObjectId) -> Result<Vec<ObjectId>, Error> {
+        let bases = match self.run(["merge-base", "--all", target.as_str(), head.as_str()]) {
+            Ok(output) => parse_oid_lines(&output.stdout)?,
+            // `git merge-base` exits with 1 when there is none.
+            Err(Error::CommandFailed { .. }) => Vec::new(),
+            Err(err) => return Err(err),
+        };
+        if bases.is_empty() {
+            return Err(Error::NoMergeBase {
+                target: target.clone(),
+                head: head.clone(),
+            });
         }
-        Err(Error::NoMergeBase {
-            target: target.clone(),
-            head: head.clone(),
-        })
+        Ok(bases)
     }
 
     /// Returns whether the clone is shallow: its history stops at commits whose parents it does
@@ -397,37 +611,78 @@ impl Repo {
         Ok(self.run_text(["rev-parse", "--is-shallow-repository"])? == "true")
     }
 
-    /// Deepens the shallow history by 200 commits from the shallow boundary and from `target`.
+    /// Returns those of `oids` the repository does not have, in their order.
+    pub(crate) fn missing(&self, oids: &[ObjectId]) -> Result<Vec<ObjectId>, Error> {
+        if oids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input = object_lines(oids);
+        let output = Self::run_command_with_input(
+            self.command(),
+            &["cat-file", "--batch-check", "--buffer"],
+            input.into_bytes(),
+            &[0],
+        )?;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_suffix(" missing"))
+            .map(|oid| ObjectId::parse(oid).map_err(Error::from))
+            .collect()
+    }
+
+    /// Returns every object `roots` reach, themselves included, but a commit's parents: its
+    /// tree, every tree below it and every blob, without the commits gitlinks name.
     ///
-    /// When the remote does not know one of the wanted commits (an unpublished target, or a
-    /// boundary commit force-pushed away), the commits are fetched one by one and the unknown ones
-    /// are dropped.
-    /// Returns whether any fetch succeeded.
-    fn deepen(&self, remote: &str, target: &ObjectId) -> Result<bool, Error> {
-        let shallow_file = self.run_text([
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingObject`] when the repository lacks one of them, and an error when
+    /// git fails.
+    pub(crate) fn closure(&self, roots: &[ObjectId]) -> Result<Vec<ObjectId>, Error> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(missing) = self.missing(roots)?.into_iter().next() {
+            return Err(Error::MissingObject(missing));
+        }
+        let input = object_lines(roots);
+        let output = Self::run_command_with_input(
+            self.command(),
+            &[
+                "rev-list",
+                "--objects",
+                "--no-walk=unsorted",
+                "--missing=print",
+                "--stdin",
+            ],
+            input.into_bytes(),
+            &[0],
+        )?;
+        // `<object> [<path>]`, or `?<object>` for one the repository lacks.
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| {
+                let first = line.split(' ').next().unwrap_or_default();
+                match first.strip_prefix('?') {
+                    Some(missing) => Err(Error::MissingObject(ObjectId::parse(missing)?)),
+                    None => Ok(ObjectId::parse(first)?),
+                }
+            })
+            .collect()
+    }
+
+    /// Returns the tree of `commit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `commit` is not a commit in the repository.
+    pub fn tree_of(&self, commit: &ObjectId) -> Result<ObjectId, Error> {
+        let text = self.run_text([
             "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "shallow",
+            "--verify",
+            "--end-of-options",
+            &format!("{commit}^{{tree}}"),
         ])?;
-        let boundary = std::fs::read_to_string(&shallow_file).unwrap_or_default();
-        let mut wants: Vec<String> = vec![target.as_str().to_owned()];
-        wants.extend(
-            boundary
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned),
-        );
-        if self.fetch_with(remote, &wants, &["--deepen=200"]).is_ok() {
-            return Ok(true);
-        }
-        let mut deepened = false;
-        for want in &wants {
-            deepened |= self
-                .fetch_with(remote, std::slice::from_ref(want), &["--deepen=200"])
-                .is_ok();
-        }
-        Ok(deepened)
+        Ok(ObjectId::parse(&text)?)
     }
 
     /// Lists the changed entries between two commits, with rename detection.
@@ -450,35 +705,21 @@ impl Repo {
         diff_tree::parse(&output.stdout)
     }
 
-    /// Points `name` at `oid`, creating or overwriting the ref.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git refuses the update.
-    pub fn update_ref(&self, name: &str, oid: &ObjectId) -> Result<(), Error> {
-        self.run(["update-ref", "--no-deref", name, oid.as_str()])?;
-        Ok(())
-    }
-
-    /// Deletes the ref `name` if it exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when git fails to delete an existing ref.
-    pub fn delete_ref(&self, name: &str) -> Result<(), Error> {
-        if self.ref_target(name)?.is_some() {
-            self.run(["update-ref", "-d", name])?;
-        }
-        Ok(())
-    }
-
-    /// Lists the commits in `base..head`, newest first, at most 500.
+    /// Lists the commits in `base..head`, or every commit of `head` without a base, newest
+    /// first, at most 500.
     ///
     /// # Errors
     ///
     /// Returns an error when git fails.
-    pub fn commits(&self, base: &str, head: &str) -> Result<Vec<crate::review::Commit>, Error> {
-        let range = format!("{base}..{head}");
+    pub fn commits(
+        &self,
+        base: Option<&str>,
+        head: &str,
+    ) -> Result<Vec<crate::review::Commit>, Error> {
+        let range = match base {
+            Some(base) => format!("{base}..{head}"),
+            None => head.to_owned(),
+        };
         let output = self.run([
             "log",
             "--max-count=500",
@@ -730,7 +971,8 @@ impl Repo {
         if paths.is_empty() {
             return Ok(HashMap::new());
         }
-        let output = self.run_with_paths(
+        let output = Self::run_command_with_paths(
+            self.command(),
             &[
                 "check-attr",
                 "-z",
@@ -740,29 +982,14 @@ impl Repo {
                 "linguist-generated",
                 "diff",
             ],
-            paths.iter().copied(),
+            paths.iter().map(|path| path.as_bytes()),
             &[0],
         )?;
         Ok(parse_generated_attributes(&output.stdout))
     }
 
-    /// Runs a git command that reads NUL-terminated `paths` on standard input, and returns its
-    /// standard output when it exits with one of the `success` codes.
-    fn run_with_paths<'a>(
-        &self,
-        args: &[&str],
-        paths: impl IntoIterator<Item = &'a str>,
-        success: &[i32],
-    ) -> Result<Output, Error> {
-        Self::run_command_with_paths(
-            self.command(),
-            args,
-            paths.into_iter().map(str::as_bytes),
-            success,
-        )
-    }
-
-    /// Runs `command` with `args` like [`Self::run_with_paths`], with paths given as bytes.
+    /// Runs `command` with `args`, writing NUL-terminated `paths` to its standard input, and
+    /// returns its standard output when it exits with one of the `success` codes.
     fn run_command_with_paths<'a>(
         command: Command,
         args: &[&str],
@@ -837,43 +1064,8 @@ impl Repo {
         }
         Ok(Output {
             stdout: output.stdout,
+            stderr: output.stderr,
         })
-    }
-
-    /// Fetches `refspecs` from `remote`, updating no ref outside the refspecs' destinations and
-    /// not touching `FETCH_HEAD`.
-    ///
-    /// Fetches are the only git commands that reach a remote, over the transports the user
-    /// allows, and run as [`Self::forbid_prompts`] has it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the fetch fails.
-    pub fn fetch(&self, remote: &str, refspecs: &[String]) -> Result<(), Error> {
-        self.fetch_with(remote, refspecs, &[])
-    }
-
-    /// Fetches exactly `refspecs`: no tags, no `FETCH_HEAD`, no submodules, and an empty
-    /// `--refmap` so the remote's configured fetch refspecs never update remote-tracking refs.
-    fn fetch_with(&self, remote: &str, refspecs: &[String], options: &[&str]) -> Result<(), Error> {
-        let mut args: Vec<String> = [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--no-recurse-submodules",
-            "--refmap=",
-        ]
-        .into_iter()
-        .chain(options.iter().copied())
-        .map(str::to_owned)
-        .collect();
-        args.push(remote.to_owned());
-        args.extend(refspecs.iter().cloned());
-        let mut command = self.git();
-        self.prepare_remote(&mut command);
-        Self::run_command(command, args)?;
-        Ok(())
     }
 
     /// Returns the repository's default remote, which a shallow clone deepens from and whose
@@ -1021,6 +1213,58 @@ impl Repo {
         }
         Ok(None)
     }
+}
+
+/// Has `command`, a git command that writes to a private repository and whose subcommand is
+/// still to come, write durably; see [`DURABLE_CONFIG`].
+pub(crate) fn durable(command: &mut Command) {
+    command.args(DURABLE_CONFIG);
+}
+
+/// Whether git commands keep the variable `name` of cr's environment or of the variables an
+/// embedder sets: any but `GIT_*`, and of those only what [`TRANSPORT_ENV`] names, and what
+/// [`CONFIG_ENV`] names unless the command runs in a `private` repository.
+///
+/// Names compare without case, as Windows has them.
+fn kept_env(name: &OsStr, private: bool) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    if !name.starts_with("GIT_") {
+        return true;
+    }
+    let named = |names: &[&str]| {
+        names.iter().any(|listed| {
+            if listed.ends_with('_') {
+                name.starts_with(listed)
+            } else {
+                name == *listed
+            }
+        })
+    };
+    named(&TRANSPORT_ENV) || (!private && named(&CONFIG_ENV))
+}
+
+/// `bytes` as an `OsString`: exactly on Unix, where any bytes are, and as UTF-8 elsewhere,
+/// where git's own output is.
+fn os_string(bytes: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        OsStr::from_bytes(bytes).to_owned()
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8_lossy(bytes).into_owned().into()
+    }
+}
+
+/// `oids` one per line, as git reads objects on its standard input.
+pub(crate) fn object_lines(oids: &[ObjectId]) -> String {
+    let mut lines = String::with_capacity(oids.len() * 65);
+    for oid in oids {
+        lines.push_str(oid.as_str());
+        lines.push('\n');
+    }
+    lines
 }
 
 fn parse_oid_lines(stdout: &[u8]) -> Result<Vec<ObjectId>, Error> {

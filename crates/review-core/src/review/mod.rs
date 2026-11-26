@@ -2,10 +2,16 @@
 //!
 //! All state transitions are serialized by `review.lock` and committed by appending one event to
 //! the log.
-//! Analyses and correspondences are content-addressed caches that can be recomputed from git at any
-//! time.
+//! Analyses and correspondences are content-addressed caches that can be recomputed from the
+//! review's archive at any time.
+//!
+//! The reviewed repository is only read: snapshots, pins and sessions live in the review's
+//! archive, a private repository in its data directory, and the clone's identity in the data
+//! directory too.
 
+mod archive;
 mod checkout;
+mod clone;
 pub mod github;
 mod info;
 mod live;
@@ -28,7 +34,8 @@ use serde::{Deserialize, Serialize};
 use crate::analysis::{ANALYSIS_FORMAT, Analysis, analyze};
 use crate::correspond::{CORRESPONDENCE_FORMAT, Correspondence, correspond};
 use crate::error::Error;
-use crate::git::Repo;
+use crate::git::fetch::FetchRepo;
+use crate::git::{IgnoreRules, PrivateRepo, Repo};
 use crate::history::{History, HistoryInput, Links};
 use crate::ids::{MoveId, ObjectId, ReviewKey, RevisionNumber, UnitId};
 use crate::store::events::{
@@ -38,6 +45,7 @@ use crate::store::log::{LockGuard, LogTail, LogWriter, Prefix};
 use crate::store::{self, ReviewDir};
 use crate::view::{RevisionView, ShownRun, SinceReviewed};
 use crate::walkthrough;
+use checkout::{Looks, Observed};
 use memo::Replayed;
 
 /// What a review covers.
@@ -70,8 +78,9 @@ pub enum ReviewTarget {
     /// The checkout: whatever its working tree holds, on whatever branch, against the base its
     /// subject resolves to on every capture (see [`Subject`]).
     Checkout {
-        /// The clone's identity (see [`Repo::ensure_clone_id`]), so that another clone at the same
-        /// path never reads this one's history.
+        /// The clone's identity, which cr keeps in its data directory (see
+        /// [`Review::open_checkout`]), so that another clone at the same path never reads this
+        /// one's history.
         clone: ObjectId,
     },
 }
@@ -134,8 +143,7 @@ impl ReviewTarget {
     /// Returns the review key for this target in `repo_dir`.
     ///
     /// A pull request review is keyed per clone, `<host>/<owner>/<repo>#<number>@<common-dir>`,
-    /// because its pinned snapshots live in that clone's object store; a second clone starts its
-    /// own review rather than reading history it cannot reach.
+    /// so a second clone starts its own review.
     /// A local review is keyed by the working tree and its refs, and the review of a checkout by
     /// the working tree and the clone, `<working tree>:WORKTREE@<first 16 digits of the clone>`.
     ///
@@ -300,7 +308,10 @@ impl RevisionMeta {
 #[derive(Debug, Clone)]
 pub struct Review {
     dir: ReviewDir,
+    /// The reviewed repository, which the review only reads.
     repo: Repo,
+    /// The snapshots the review recorded or shows, and their pins.
+    archive: PrivateRepo,
     meta: ReviewMeta,
     memo: memo::Memo,
 }
@@ -308,14 +319,19 @@ pub struct Review {
 impl Review {
     /// Opens the review of `target` in `repo`, creating its storage on first use.
     ///
+    /// A review an earlier version stored moves its snapshots into its archive first (see
+    /// [`Self::snapshots`]).
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::KeyConflict`] when the key is stored for another target, such as a range
-    /// ending at a branch named `WORKTREE` and a working-tree review against the same base, and
-    /// an error when the storage cannot be created.
+    /// Returns [`Error::InsideRepository`] for review storage inside `repo`,
+    /// [`Error::KeyConflict`] when the key is stored for another target, such as a range ending
+    /// at a branch named `WORKTREE` and a working-tree review against the same base, the errors
+    /// of moving a stored review into its archive, such as [`Error::MissingObject`], and an
+    /// error when the storage cannot be created.
     pub fn open(data_dir: &Path, repo: Repo, target: ReviewTarget) -> Result<Self, Error> {
         let key = target.key(&repo)?;
-        let dir = ReviewDir::new(data_dir, &key);
+        let dir = storage(data_dir, &key, &repo)?;
         let meta = ReviewMeta {
             key,
             repo: repo.work_tree().unwrap_or(repo.git_dir()).to_path_buf(),
@@ -333,10 +349,12 @@ impl Review {
         if stored.as_ref() != Some(&meta) {
             store::write_json_atomic(&dir.meta(), &meta, "review metadata")?;
         }
+        let archive = Self::open_archive(&dir, &repo, &lock)?;
         drop(lock);
         Ok(Self {
             dir,
             repo,
+            archive,
             meta,
             memo: memo::Memo::default(),
         })
@@ -344,18 +362,28 @@ impl Review {
 
     /// Loads the stored review `key`.
     ///
+    /// The review of a checkout binds its clone's identity as [`Self::open_checkout`] does, so
+    /// a review an earlier version stored stays the clone's.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownReview`] when no such review is stored, and an error when its
-    /// repository cannot be opened.
+    /// Returns [`Error::UnknownReview`] when no such review is stored, the errors of
+    /// [`Self::open`], and an error when its repository cannot be opened.
     pub fn load(data_dir: &Path, key: &ReviewKey) -> Result<Self, Error> {
-        let dir = ReviewDir::new(data_dir, key);
-        let meta: ReviewMeta = store::read_json(&dir.meta())?
+        let meta: ReviewMeta = store::read_json(&ReviewDir::new(data_dir, key).meta())?
             .ok_or_else(|| Error::UnknownReview(key.as_str().to_owned()))?;
         let repo = Repo::discover(&meta.repo)?;
+        let dir = storage(data_dir, key, &repo)?;
+        if matches!(meta.target, ReviewTarget::Checkout { .. }) {
+            clone::ensure_clone_id(dir.data_dir(), &repo)?;
+        }
+        let lock = LockGuard::acquire(&dir.lock())?;
+        let archive = Self::open_archive(&dir, &repo, &lock)?;
+        drop(lock);
         Ok(Self {
             dir,
             repo,
+            archive,
             meta,
             memo: memo::Memo::default(),
         })
@@ -373,10 +401,26 @@ impl Review {
         &self.meta.target
     }
 
-    /// Returns the review's repository.
+    /// Returns the reviewed repository, which the review only reads: its working tree, branches
+    /// and remotes.
     #[must_use]
     pub fn repo(&self) -> &Repo {
         &self.repo
+    }
+
+    /// Returns the review's archive for reading: a private repository with every snapshot
+    /// the review recorded or shows, with all they reach, where reads of a snapshot's objects
+    /// go.
+    #[must_use]
+    pub fn snapshots(&self) -> &Repo {
+        self.archive.repo()
+    }
+
+    /// Returns what git ignores in the checkout the review follows, judged as its captures
+    /// judge it.
+    #[must_use]
+    pub fn ignore_rules(&self) -> IgnoreRules {
+        IgnoreRules::new(self.repo.clone(), self.archive.clone())
     }
 
     /// Keeps every `git` and `gh` command the review runs from now on from prompting; see
@@ -391,10 +435,10 @@ impl Review {
         &self.dir
     }
 
-    /// Returns the ref that pins snapshot `oid` for this review.
+    /// Returns the ref of the archive that pins snapshot `oid` for this review.
     #[must_use]
     pub fn pin_ref(&self, oid: &ObjectId) -> String {
-        format!("refs/code-review/{}/snap/{oid}", self.meta.key.encoded())
+        archive::pin_ref(oid)
     }
 
     /// Resolves the target's current snapshots and records a revision if either changed.
@@ -540,10 +584,10 @@ impl Review {
                 ReviewInfo::PullRequest(Box::new(github::details(&self.repo, &url)?.into()))
             }
             ReviewTarget::Range { base, head } => ReviewInfo::Commits {
-                commits: self.repo.commits(base, head)?,
+                commits: self.repo.commits(Some(base), head)?,
             },
             ReviewTarget::Worktree { base } => ReviewInfo::Commits {
-                commits: self.repo.commits(base, "HEAD")?,
+                commits: self.repo.commits(Some(base), "HEAD")?,
             },
             ReviewTarget::Checkout { .. } => {
                 let observed;
@@ -573,11 +617,8 @@ impl Review {
         let Some(head) = &subject.head else {
             return Ok(Vec::new());
         };
-        let base = match subject.base.commit() {
-            Some(base) => base.clone(),
-            None => self.repo.empty_tree_commit()?,
-        };
-        self.repo.commits(base.as_str(), head.as_str())
+        let base = subject.base.commit().map(ObjectId::as_str);
+        self.repo.commits(base, head.as_str())
     }
 
     /// Returns the view state `front_end` last saved with
@@ -627,7 +668,10 @@ impl Review {
             ReviewTarget::Range { base, head } => {
                 let target = self.repo.resolve_commit(base)?;
                 let head = self.repo.resolve_commit(head)?;
-                let input = self.snapshot_input(target, head, deepen_from)?;
+                self.archive
+                    .import(&self.repo, std::slice::from_ref(&head))?;
+                let merge_bases = self.merge_bases(&target, &head, deepen_from)?;
+                let input = snapshot_input(target, head, merge_bases)?;
                 session.pin(&input)?;
                 self.record_revision_reporting(
                     input,
@@ -641,8 +685,12 @@ impl Review {
                     input,
                     subject,
                     filtered,
-                } = self.confirmed_capture(pull_requests)?;
-                session.pin(&input)?;
+                } = match self.capture(&session, pull_requests, Looks::Twice, &mut || Ok(()))? {
+                    Observed::Captured(captured) => *captured,
+                    Observed::Busy(busy) => return Err(Error::GitBusy(busy)),
+                    Observed::Moved => return Err(Error::Raced("working tree")),
+                    Observed::Replaced => return Err(Error::CloneReplaced),
+                };
                 let meta = RevisionMeta::of(&subject);
                 let mut recorded = self.record_revision_reporting(
                     input,
@@ -664,14 +712,24 @@ impl Review {
                 let info = github::view(&self.repo, &url)?;
                 let parsed = github::parse_url(&info.url)
                     .ok_or_else(|| Error::InvalidTarget(info.url.clone()))?;
-                let fetched = github::fetch(&self.repo, &parsed, &info.base_ref_name)?;
-                let input = self.snapshot_input(
-                    fetched.target.clone(),
-                    fetched.head.clone(),
-                    Some(&fetched.remote),
+                // The fetch lands in a repository of its own with the whole history of both
+                // ends, which only the snapshots outlive.
+                let github::FetchedPullRequest {
+                    head,
+                    target,
+                    repo: fetched,
+                } = github::fetch(
+                    &self.repo,
+                    &self.archive.scratch(),
+                    &parsed,
+                    &info.base_ref_name,
                 )?;
-                session.pin(&input)?;
+                let merge_bases = fetched.repo().merge_bases(&target, &head)?;
+                let input = snapshot_input(target, head, merge_bases)?;
+                self.archive
+                    .import(fetched.repo(), &[input.base.clone(), input.head.clone()])?;
                 drop(fetched);
+                session.pin(&input)?;
                 self.record_revision_reporting(
                     input,
                     RevisionMeta::default(),
@@ -682,35 +740,57 @@ impl Review {
         }
     }
 
-    /// The number of the last recorded revision, or `None` before the first.
+    /// The number of the last recorded revision, or `None` before the first, read from the
+    /// records appended since the history the review last read, which derives nothing.
     fn last_revision(&self) -> Result<Option<RevisionNumber>, Error> {
-        let events = LogTail::new(&self.dir).poll()?;
-        Ok(revision_events(&self.dir.events(), &events, 0)?
-            .last()
-            .map(|revision| revision.number))
+        if self.memo.replaced() {
+            return Err(self.log_replaced());
+        }
+        let replayed = self.memo.replayed();
+        let (mut tail, read) = match &replayed {
+            Some(replayed) => (replayed.tail.clone(), replayed.history.current()),
+            None => (LogTail::new(&self.dir), None),
+        };
+        let events = self.memo.note_replaced(tail.poll())?;
+        let appended = events.iter().rev().find_map(|event| match event {
+            Event::Revision(revision) => Some(revision.number),
+            _ => None,
+        });
+        Ok(appended.or(read))
     }
 
-    /// The revision of `head` against its merge base with `target`.
-    fn snapshot_input(
+    /// Every merge base of `target` and `ancestry`, the commit whose history the head has, best
+    /// first, with the best imported into the archive.
+    ///
+    /// A shallow clone that holds none is deepened from `deepen_from`, when given, in a
+    /// transient repository that starts with the history the clone holds.
+    fn merge_bases(
         &self,
-        target: ObjectId,
-        head: ObjectId,
+        target: &ObjectId,
+        ancestry: &ObjectId,
         deepen_from: Option<&str>,
-    ) -> Result<RevisionInput, Error> {
-        let merge_bases = self.repo.merge_bases(&target, &head, deepen_from)?;
-        let base = merge_bases
-            .first()
-            .cloned()
-            .ok_or_else(|| Error::NoMergeBase {
-                target: target.clone(),
-                head: head.clone(),
-            })?;
-        Ok(RevisionInput {
-            base,
-            head,
-            target: Some(target),
-            merge_bases,
-        })
+    ) -> Result<Vec<ObjectId>, Error> {
+        let found = self.repo.merge_bases(target, ancestry);
+        let deepen = match &found {
+            Err(Error::NoMergeBase { .. }) => deepen_from,
+            _ => None,
+        };
+        let (merge_bases, fetched) = match deepen {
+            Some(remote) if self.repo.is_shallow()? => {
+                let fetched = FetchRepo::new(&self.archive.scratch(), &self.repo)?;
+                fetched.seed(&self.repo, &[target.clone(), ancestry.clone()])?;
+                (
+                    fetched.merge_bases(target, ancestry, remote)?,
+                    Some(fetched),
+                )
+            }
+            _ => (found?, None),
+        };
+        let from = fetched.as_ref().map_or(&self.repo, FetchRepo::repo);
+        if let Some(best) = merge_bases.first() {
+            self.archive.import(from, std::slice::from_ref(best))?;
+        }
+        Ok(merge_bases)
     }
 
     /// Records the revision `(base, head)` as the new current revision, unless it already is the
@@ -744,6 +824,10 @@ impl Review {
         after: After,
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Recorded, Error> {
+        // A capture or a fetch already put both snapshots in the archive; a revision given by
+        // the caller has them in the reviewed repository.
+        self.archive
+            .import(&self.repo, &[input.base.clone(), input.head.clone()])?;
         let analysis = self.analysis(&input.base, &input.head, Publish::UnderLock, progress)?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
         let mut log = self.open_log(&lock, None)?;
@@ -810,23 +894,26 @@ impl Review {
     }
 
     /// Appends `revision` to the log under its lock, the commit point of recording it: pins
-    /// both snapshots and publishes the analysis first, which are idempotent, so a crash before
-    /// the append leaves nothing a later recording does not redo.
+    /// both snapshots in the archive and publishes the analysis first, which are idempotent,
+    /// so a crash before the append leaves nothing a later recording does not redo.
+    ///
+    /// The target is only a label of the revision: nothing reads its objects.
     fn append_revision(
         &self,
         log: &mut LogWriter<'_>,
         revision: RevisionEvent,
         analysis: &Analysis,
     ) -> Result<(), Error> {
-        // The target may lie beyond the merge base, reachable from neither snapshot.
-        let mut pins = vec![
-            (self.pin_ref(&revision.base), revision.base.clone()),
-            (self.pin_ref(&revision.head), revision.head.clone()),
-        ];
-        if let Some(target) = &revision.target {
-            pins.push((self.pin_ref(target), target.clone()));
+        // A revision of no change has one snapshot, which one ref pins.
+        let mut snapshots = vec![&revision.base];
+        if revision.head != revision.base {
+            snapshots.push(&revision.head);
         }
-        self.repo.update_refs(&pins)?;
+        let pins: Vec<(String, ObjectId)> = snapshots
+            .into_iter()
+            .map(|oid| (self.pin_ref(oid), oid.clone()))
+            .collect();
+        self.archive.update_refs(&pins)?;
         let analysis_path = self.dir.analysis(&revision.base, &revision.head);
         if !analysis_path.exists() {
             store::write_json_atomic(&analysis_path, analysis, "analysis")?;
@@ -847,19 +934,13 @@ impl Review {
         if let Some(remembered) = self.memo.analysis(base, head) {
             return Ok(remembered);
         }
-        let path = self.dir.analysis(base, head);
-        // A cache file that fails to decode is recomputed rather than trusted.
-        if let Ok(Some(cached)) = store::read_json::<Analysis>(&path)
-            && cached.format == ANALYSIS_FORMAT
-            && &cached.base == base
-            && &cached.head == head
-        {
+        if let Some(cached) = cached_analysis(&self.dir, base, head) {
             return Ok(Arc::new(cached));
         }
         progress(RefreshStep::Analyzing);
-        let analysis = analyze(&self.repo, base, head)?;
+        let analysis = analyze(self.archive.repo(), base, head)?;
         if publish == Publish::Now {
-            store::write_json_atomic(&path, &analysis, "analysis")?;
+            store::write_json_atomic(&self.dir.analysis(base, head), &analysis, "analysis")?;
         }
         Ok(Arc::new(analysis))
     }
@@ -872,17 +953,14 @@ impl Review {
         newer: &Analysis,
         publish: Publish,
     ) -> Result<Correspondence, Error> {
-        let path = self
-            .dir
-            .correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
-        if let Ok(Some(cached)) = store::read_json::<Correspondence>(&path)
-            && cached.format == CORRESPONDENCE_FORMAT
-            && cached.analysis_format == ANALYSIS_FORMAT
-        {
+        if let Some(cached) = cached_correspondence(&self.dir, older, newer) {
             return Ok(cached);
         }
-        let computed = correspond(&self.repo, older, newer)?;
+        let computed = correspond(self.archive.repo(), older, newer)?;
         if publish == Publish::Now {
+            let path = self
+                .dir
+                .correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
             store::write_json_atomic(&path, &computed, "correspondence")?;
         }
         Ok(computed)
@@ -1026,9 +1104,10 @@ impl Review {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::WrongRevision`] or [`Error::UnknownUnit`] for a unit not in the view and
-    /// [`Error::NotCurrentRevision`] when a newer revision exists, checked under the lock before
-    /// anything is recorded, and an error when the append fails.
+    /// Returns [`Error::WrongRevision`] or [`Error::UnknownUnit`] for a unit not in the view,
+    /// [`Error::NotCurrentRevision`] when a newer revision exists and [`Error::CloneReplaced`]
+    /// when the checkout of a review of a checkout is another clone now, checked under the lock
+    /// before anything is recorded, and an error when the append fails.
     pub fn mark(
         &self,
         view: &RevisionView<'_>,
@@ -1212,6 +1291,70 @@ impl Review {
         self.append(vec![Event::Walkthrough(event)])?;
         Ok(revision)
     }
+}
+
+/// Returns the storage of the review `key` in `data_dir`, as an absolute path, so that git,
+/// which runs elsewhere, finds it too.
+///
+/// # Errors
+///
+/// Returns [`Error::InsideRepository`] when the storage or its archive, followed through any
+/// symbolic link, is inside `repo`, which cr never writes to.
+fn storage(data_dir: &Path, key: &ReviewKey, repo: &Repo) -> Result<ReviewDir, Error> {
+    let data_dir =
+        std::path::absolute(data_dir).map_err(|err| Error::io("resolve", data_dir, err))?;
+    let dir = ReviewDir::new(&data_dir, key);
+    crate::git::refuse_inside(dir.root(), repo)?;
+    crate::git::refuse_inside(&dir.archive(), repo)?;
+    Ok(dir)
+}
+
+/// The analysis of `(base, head)` the cache in `dir` holds, if it holds one this version reads;
+/// a cache file that fails to decode is computed again rather than trusted.
+fn cached_analysis(dir: &ReviewDir, base: &ObjectId, head: &ObjectId) -> Option<Analysis> {
+    store::read_json::<Analysis>(&dir.analysis(base, head))
+        .ok()
+        .flatten()
+        .filter(|cached| {
+            cached.format == ANALYSIS_FORMAT && &cached.base == base && &cached.head == head
+        })
+}
+
+/// The correspondence between `older` and `newer` the cache in `dir` holds, if it holds one
+/// this version reads.
+fn cached_correspondence(
+    dir: &ReviewDir,
+    older: &Analysis,
+    newer: &Analysis,
+) -> Option<Correspondence> {
+    let path = dir.correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
+    store::read_json::<Correspondence>(&path)
+        .ok()
+        .flatten()
+        .filter(|cached| {
+            cached.format == CORRESPONDENCE_FORMAT && cached.analysis_format == ANALYSIS_FORMAT
+        })
+}
+
+/// The revision of `head` against the first of its `merge_bases` with `target`.
+fn snapshot_input(
+    target: ObjectId,
+    head: ObjectId,
+    merge_bases: Vec<ObjectId>,
+) -> Result<RevisionInput, Error> {
+    let base = merge_bases
+        .first()
+        .cloned()
+        .ok_or_else(|| Error::NoMergeBase {
+            target: target.clone(),
+            head: head.clone(),
+        })?;
+    Ok(RevisionInput {
+        base,
+        head,
+        target: Some(target),
+        merge_bases,
+    })
 }
 
 /// Extracts the revision events and checks that they are numbered in log order after the

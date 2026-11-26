@@ -182,12 +182,16 @@ impl Repo {
     }
 
     /// Returns the operation git is in the middle of in this worktree, or `None` when it is
-    /// idle: a lock on the index, a merge, cherry-pick or revert that stopped, a rebase or
-    /// bisect under way, or unmerged paths in the index.
+    /// idle: a lock on the index, a merge, cherry-pick or revert that stopped, or a rebase or
+    /// bisect under way.
+    ///
+    /// Unmerged paths in the index are found by the capture that reads a copy of it, which
+    /// fails with [`Error::GitBusy`] and [`Busy::Unmerged`]; reading the index here would
+    /// date a split index's shared file anew.
     ///
     /// # Errors
     ///
-    /// Returns an error when the git directory or the index cannot be read.
+    /// Returns an error when the git directory cannot be read.
     pub fn busy(&self) -> Result<Option<Busy>, Error> {
         for (marker, busy) in BUSY_MARKERS {
             let path = self.git_dir().join(marker);
@@ -197,11 +201,7 @@ impl Repo {
                 Err(source) => return Err(Error::io("read", path, source)),
             }
         }
-        if self.work_tree().is_none() {
-            return Ok(None);
-        }
-        let unmerged = self.run(["ls-files", "--unmerged", "-z"])?;
-        Ok((!unmerged.stdout.is_empty()).then_some(Busy::Unmerged))
+        Ok(None)
     }
 
     /// Returns the real index's stamp, or `None` when there is no index.

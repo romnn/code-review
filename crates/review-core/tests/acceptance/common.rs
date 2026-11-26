@@ -7,7 +7,7 @@ use color_eyre::eyre::{self, WrapErr as _};
 use indoc::formatdoc;
 use review_core::analysis::{Analysis, Unit};
 use review_core::{
-    History, MarkVerdict, Repo, Review, ReviewTarget, RevisionNumber, UnitId, UnitState,
+    History, MarkVerdict, Recorded, Repo, Review, ReviewTarget, RevisionNumber, UnitId, UnitState,
 };
 use tempfile::TempDir;
 
@@ -49,21 +49,29 @@ impl TestRepo {
 
     /// Runs git in the repository and returns its trimmed standard output.
     pub fn git(&self, args: &[&str]) -> eyre::Result<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(self.path())
-            .args(args)
-            .envs(GIT_ENV)
-            .output()
-            .wrap_err_with(|| format!("failed to run git {}", args.join(" ")))?;
-        if !output.status.success() {
-            eyre::bail!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        git_in(self.path(), args)
+    }
+
+    /// Captures the working tree as a review of it against `HEAD` records it, and returns the
+    /// review, whose snapshots hold the capture, with what it recorded: the capture is its
+    /// head, `HEAD` itself when nothing is beyond it.
+    pub fn capture(&self) -> eyre::Result<(Review, Recorded)> {
+        let review = Review::open(
+            self.data_dir(),
+            Repo::discover(self.path())?,
+            ReviewTarget::Worktree {
+                base: "HEAD".to_owned(),
+            },
+        )?;
+        let recorded = review.refresh()?;
+        Ok((review, recorded))
+    }
+
+    /// Whether a capture records anything beyond `HEAD`: staged or unstaged changes, or
+    /// untracked files that are not ignored.
+    pub fn uncommitted(&self) -> eyre::Result<bool> {
+        let (_, recorded) = self.capture()?;
+        Ok(recorded.head.as_str() != self.git(&["rev-parse", "HEAD"])?)
     }
 
     pub fn write(&self, path: &str, content: &str) -> eyre::Result<()> {
@@ -114,6 +122,55 @@ impl TestRepo {
         };
         Ok(Review::open(self.data_dir(), repo, target)?)
     }
+}
+
+/// Runs git in `directory`, a working tree or a git directory, and returns its trimmed standard
+/// output.
+pub fn git_in(directory: &Path, args: &[&str]) -> eyre::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .envs(GIT_ENV)
+        .output()
+        .wrap_err_with(|| format!("failed to run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        eyre::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+/// Every file and directory below `root`, with what writing to it would change: its kind, its
+/// length and modification time, and a file's bytes; for comparing a git directory before and
+/// after the engine read it.
+pub fn files(root: &Path) -> eyre::Result<Vec<String>> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let modified = metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let name = path.strip_prefix(root)?.display().to_string();
+        if metadata.is_dir() {
+            found.push(format!("{name}/ {modified}"));
+            for entry in std::fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else {
+            let mut digest = std::hash::DefaultHasher::new();
+            std::hash::Hash::hash(&std::fs::read(&path)?, &mut digest);
+            let digest = std::hash::Hasher::finish(&digest);
+            found.push(format!("{name} {} {modified} {digest:x}", metadata.len()));
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// Records the current state of the review's target and returns the revision number.

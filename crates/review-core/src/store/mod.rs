@@ -8,6 +8,11 @@
 //! - `analysis/<base>-<head>--<base>-<head>.json`: content-addressed correspondences.
 //! - `view/<front-end>.json`: each front end's own view state, such as folded folders, written
 //!   atomically and never part of the review's state.
+//! - `archive/`: a private bare git repository with every snapshot the review recorded or shows,
+//!   pinned by its refs, and the sessions' lock files; see [`crate::Review::snapshots`].
+//!
+//! Beside the reviews, `clones/<digest>.json` binds a clone's identity to its common git
+//! directory.
 
 pub mod events;
 pub mod log;
@@ -73,6 +78,12 @@ impl ReviewDir {
     #[must_use]
     pub fn synced(&self) -> PathBuf {
         self.root.join("synced.json")
+    }
+
+    /// Returns the path of the review's archive of snapshots.
+    #[must_use]
+    pub fn archive(&self) -> PathBuf {
+        self.root.join("archive")
     }
 
     /// Returns the metadata file's path.

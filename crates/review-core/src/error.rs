@@ -180,6 +180,22 @@ pub enum Error {
     /// it was not recorded; reading it again records what is there now.
     #[error("the {0} changed while it was read; try again")]
     Raced(&'static str),
+    /// A directory cr would write in is inside the reviewed repository's working tree or git
+    /// directories, which cr never writes to.
+    #[error("{path} is inside the reviewed repository at {repo}; keep cr's data outside it")]
+    InsideRepository {
+        /// The directory cr would write in.
+        path: PathBuf,
+        /// The reviewed repository's directory it is in.
+        repo: PathBuf,
+    },
+    /// The archive a review stored by an earlier version was moved into does not derive the
+    /// same history as the reviewed repository does, so the review was left as it was.
+    #[error("the archive of the review in {path} derives another history than its repository")]
+    ArchiveMismatch {
+        /// The review's directory.
+        path: PathBuf,
+    },
     /// The checkout of a review of a checkout is now another clone, which the review's history
     /// does not belong to.
     #[error("this checkout was replaced by another clone; reopen the review")]

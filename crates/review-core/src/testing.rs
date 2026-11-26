@@ -5,6 +5,8 @@ use std::process::Command;
 
 use color_eyre::eyre;
 
+use crate::git::{PrivateRepo, Repo};
+
 /// Runs git in `dir`, isolated from the user's configuration and with a fixed identity, and
 /// returns its trimmed standard output.
 pub(crate) fn git(dir: &Path, args: &[&str]) -> eyre::Result<String> {
@@ -40,4 +42,11 @@ pub(crate) fn committed(files: &[(&str, &str)]) -> eyre::Result<tempfile::TempDi
         &["commit", "--quiet", "--no-verify", "-m", "base"],
     )?;
     Ok(repo)
+}
+
+/// A private repository for `source` in a directory of its own, with the directory.
+pub(crate) fn private(source: &Repo) -> eyre::Result<(tempfile::TempDir, PrivateRepo)> {
+    let data = tempfile::tempdir()?;
+    let private = PrivateRepo::open(&data.path().join("archive"), source)?;
+    Ok((data, private))
 }

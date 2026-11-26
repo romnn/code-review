@@ -77,7 +77,7 @@ pub(crate) struct Prefix {
 
 impl Prefix {
     /// The prefix that is all of `bytes`.
-    fn of(bytes: &[u8]) -> Self {
+    pub(crate) fn of(bytes: &[u8]) -> Self {
         #[cfg(test)]
         tests::DIGESTS.set(tests::DIGESTS.get() + 1);
         Self {
@@ -194,6 +194,30 @@ impl<'lock> LogWriter<'lock> {
         self.events.push(event);
         Ok(())
     }
+}
+
+/// Reads the log's complete records under `lock`, a writer's, and returns them with their
+/// bytes, changing nothing: an unacknowledged trailing record stays for the next writer to
+/// remove.
+///
+/// # Errors
+///
+/// Returns an error when the log cannot be read or a record is corrupt.
+pub(crate) fn read_complete(
+    path: &Path,
+    _lock: &LockGuard,
+) -> Result<(Vec<Event>, Vec<u8>), Error> {
+    let mut bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(Error::io("read", path, err)),
+    };
+    let complete = bytes
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    bytes.truncate(complete);
+    Ok((parse_records(path, &bytes, 0)?, bytes))
 }
 
 /// Parses complete records; `first_line` is the one-based line number of the first record minus

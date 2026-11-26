@@ -6591,6 +6591,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
