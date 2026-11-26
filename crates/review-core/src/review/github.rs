@@ -1,12 +1,15 @@
-//! GitHub pull request metadata through the `gh` CLI, and fetching into temporary refs.
+//! GitHub pull request metadata through the `gh` CLI, and fetching a pull request into a
+//! transient repository.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::git::fetch::FetchRepo;
 use crate::git::{BranchIdentity, Repo};
 use crate::ids::ObjectId;
 
@@ -362,74 +365,38 @@ fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::Joi
     })
 }
 
-/// Temporary refs that receive a fetch, deleted when dropped.
-pub(crate) struct TemporaryRefs<'a> {
-    repo: &'a Repo,
-    pub head: String,
-    pub target: String,
-}
-
-impl<'a> TemporaryRefs<'a> {
-    pub(crate) fn new(repo: &'a Repo) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let id = format!("{}-{nanos}", std::process::id());
-        Self {
-            repo,
-            head: format!("refs/code-review/tmp/{id}-head"),
-            target: format!("refs/code-review/tmp/{id}-target"),
-        }
-    }
-}
-
-impl Drop for TemporaryRefs<'_> {
-    fn drop(&mut self) {
-        for name in [&self.head, &self.target] {
-            if let Err(err) = self.repo.delete_ref(name) {
-                // A leftover temporary ref only keeps objects alive.
-                drop(err);
-            }
-        }
-    }
-}
-
-/// Fetches a pull request's head and its target branch into temporary refs and returns the
-/// fetched commits; identity comes from the fetched objects, never an earlier observation.
-pub(crate) fn fetch<'a>(
-    repo: &'a Repo,
+/// Fetches a pull request's head and its target branch into a transient repository under
+/// `root` and returns the fetched commits; identity comes from the fetched objects, never an
+/// earlier observation.
+pub(crate) fn fetch(
+    repo: &Repo,
+    root: &Path,
     url: &PullRequestUrl,
     base_ref_name: &str,
-) -> Result<FetchedPullRequest<'a>, Error> {
+) -> Result<FetchedPullRequest, Error> {
     let remote = remote_for(repo, url)?;
-    let refs = TemporaryRefs::new(repo);
-    repo.fetch(
+    let fetched = FetchRepo::new(root, repo)?;
+    fetched.fetch(
         &remote,
         &[
-            format!("+refs/pull/{}/head:{}", url.number, refs.head),
-            format!("+refs/heads/{base_ref_name}:{}", refs.target),
+            format!("+refs/pull/{}/head:refs/code-review/head", url.number),
+            format!("+refs/heads/{base_ref_name}:refs/code-review/target"),
         ],
+        &[],
     )?;
     Ok(FetchedPullRequest {
-        head: repo.resolve_commit(&refs.head)?,
-        target: repo.resolve_commit(&refs.target)?,
-        remote,
-        refs,
+        head: fetched.repo().resolve_commit("refs/code-review/head")?,
+        target: fetched.repo().resolve_commit("refs/code-review/target")?,
+        repo: fetched,
     })
 }
 
-/// The commits fetched for a pull request, kept alive by their temporary refs until pinned.
-pub(crate) struct FetchedPullRequest<'a> {
+/// The commits fetched for a pull request, and the transient repository that holds them with
+/// their history.
+pub(crate) struct FetchedPullRequest {
     pub head: ObjectId,
     pub target: ObjectId,
-    /// The remote name or URL the commits came from, for deepening a shallow clone.
-    pub remote: String,
-    #[expect(
-        dead_code,
-        reason = "the temporary refs keep the fetched objects alive until they are pinned"
-    )]
-    pub refs: TemporaryRefs<'a>,
+    pub repo: FetchRepo,
 }
 
 /// Finds a configured remote for the pull request's repository, or falls back to its URL.
@@ -521,6 +488,58 @@ impl<'a> RemoteLocation<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pull request is fetched into a transient repository that reads the clone's
+    /// configuration, here its remote and the rewrite of the remote's URL to a local forge;
+    /// nothing is written to the clone, and nothing of the fetch is left once it is dropped.
+    #[test]
+    fn a_pull_request_is_fetched_beside_the_clone() -> color_eyre::eyre::Result<()> {
+        use crate::testing::git;
+
+        let forge = crate::testing::committed(&[("a.txt", "a\n")])?;
+        let target = git(forge.path(), &["rev-parse", "HEAD"])?;
+        std::fs::write(forge.path().join("a.txt"), "b\n")?;
+        git(
+            forge.path(),
+            &["commit", "--quiet", "--all", "--no-verify", "-m", "head"],
+        )?;
+        let head = git(forge.path(), &["rev-parse", "HEAD"])?;
+        git(forge.path(), &["update-ref", "refs/pull/7/head", &head])?;
+        git(forge.path(), &["reset", "--quiet", "--hard", &target])?;
+
+        let clone = crate::testing::committed(&[("b.txt", "b\n")])?;
+        let url = "https://example.com/owner/repo.git";
+        git(clone.path(), &["remote", "add", "origin", url])?;
+        let forge_url = format!("file://{}", forge.path().display());
+        git(
+            clone.path(),
+            &["config", &format!("url.{forge_url}.insteadOf"), url],
+        )?;
+        let state = || -> color_eyre::eyre::Result<[String; 2]> {
+            Ok([
+                git(clone.path(), &["for-each-ref"])?,
+                git(clone.path(), &["count-objects", "-v"])?,
+            ])
+        };
+        let before = state()?;
+
+        let repo = Repo::discover(clone.path())?;
+        let scratch = tempfile::tempdir()?;
+        let pull_request = PullRequestUrl {
+            host: "example.com".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            number: 7,
+        };
+        let fetched = fetch(&repo, scratch.path(), &pull_request, "main")?;
+        assert_eq!(fetched.head.as_str(), head);
+        assert_eq!(fetched.target.as_str(), target);
+        assert_eq!(state()?, before);
+        assert!(!clone.path().join(".git/FETCH_HEAD").exists());
+        drop(fetched);
+        assert_eq!(std::fs::read_dir(scratch.path())?.count(), 0);
+        Ok(())
+    }
 
     /// A remote matches a pull request's repository only on its exact host, not on one that
     /// merely contains it.

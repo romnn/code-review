@@ -2,11 +2,10 @@
 
 use std::collections::HashSet;
 
+use crate::common::TestRepo;
 use color_eyre::eyre;
 use indoc::indoc;
-use review_core::Repo;
-
-use crate::common::TestRepo;
+use review_core::{Repo, Review};
 
 /// Ignored paths are those a capture leaves out: matched by a rule and untracked.
 /// A tracked file under an ignored directory is not ignored, and neither is any directory that
@@ -26,9 +25,10 @@ fn ignored_paths_are_untracked_matches() -> eyre::Result<()> {
     std::fs::create_dir_all(test.path().join("target/debug"))?;
     test.git(&["add", ".gitignore", "src/lib.rs"])?;
     test.git(&["add", "--force", "target/kept.txt"])?;
-    let repo = Repo::discover(test.path())?;
+    let review = Review::open_checkout(test.data_dir(), Repo::discover(test.path())?)?;
+    let copy = review.ignore_rules().read()?;
 
-    let ignored = repo.ignored([
+    let ignored = copy.ignored([
         "target/",
         "target/debug/",
         "target/kept.txt",
@@ -42,7 +42,7 @@ fn ignored_paths_are_untracked_matches() -> eyre::Result<()> {
         .map(str::to_owned)
         .collect();
     assert_eq!(ignored, expected);
-    assert!(repo.ignored(["src/lib.rs"])?.is_empty());
-    assert!(repo.ignored(std::iter::empty())?.is_empty());
+    assert!(copy.ignored(["src/lib.rs"])?.is_empty());
+    assert!(copy.ignored(std::iter::empty())?.is_empty());
     Ok(())
 }

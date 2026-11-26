@@ -252,7 +252,7 @@ pub fn abbreviated(commit: &ObjectId) -> &str {
 fn provisional_or_tip_tree(review: &review_core::Review, history: &History) -> Option<ObjectId> {
     let tip = history.current()?;
     let head = history.view(tip).ok()?.record()?.head.clone();
-    review.repo().tree_of(&head).ok()
+    review.snapshots().tree_of(&head).ok()
 }
 
 /// What a wait for the working tree saw, with what waits on for the next wait.
@@ -1275,7 +1275,7 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
             .ok()
             .and_then(|view| view.analysis())
             .ok_or_else(|| missing("the capture has no analysis"))?;
-        correspond(review.repo(), shown, captured)
+        correspond(review.snapshots(), shown, captured)
             .map_err(|err| failed(&err))?
             .links
     };
@@ -1380,7 +1380,7 @@ fn read_new_texts(
     if wanted.is_empty() {
         return texts;
     }
-    let Ok(mut reader) = review.repo().blob_reader() else {
+    let Ok(mut reader) = review.snapshots().blob_reader() else {
         return texts;
     };
     for oid in wanted {

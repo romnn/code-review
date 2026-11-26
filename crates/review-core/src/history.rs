@@ -155,8 +155,7 @@ impl From<&RevisionRecord> for RevisionEvent {
 }
 
 /// The links between two consecutive revisions, by unit on either side.
-#[derive(Debug, Default)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Default, PartialEq)]
 pub(crate) struct Links {
     /// For each unit of the older revision, its links to the newer one.
     successors: Vec<Vec<Link>>,
@@ -185,8 +184,7 @@ impl Links {
 }
 
 /// One revision's data within a [`History`].
-#[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RevisionData {
     pub record: RevisionRecord,
     pub analysis: Arc<Analysis>,
@@ -205,8 +203,7 @@ pub(crate) struct RevisionData {
 /// A history never changes once read.
 /// Histories read one after another share whatever the log's records since left as it was,
 /// and cloning one copies no text.
-#[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, PartialEq)]
 pub struct History {
     revisions: Vec<Arc<RevisionData>>,
     /// The links between each revision and the next.
@@ -619,8 +616,7 @@ fn shared<'a, T>(mine: &'a [Arc<T>], theirs: &'a [Arc<T>]) -> impl Iterator<Item
 }
 
 /// What a reviewer did to a unit.
-#[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, PartialEq)]
 enum Action {
     /// Marked it as a whole.
     Mark(MarkVerdict),

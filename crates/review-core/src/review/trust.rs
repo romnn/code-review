@@ -89,6 +89,9 @@ impl Review {
     /// Returns the tree the checkout's working tree holds now, as a capture would record it,
     /// with every filter driver off, recording and pinning nothing.
     ///
+    /// It takes the capture's path, writing the tree into the archive, where nothing refers to
+    /// it.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::CloneReplaced`] when the checkout of a review of a checkout is another
@@ -100,6 +103,6 @@ impl Review {
         if let Some(busy) = self.repo.busy()? {
             return Err(Error::GitBusy(busy));
         }
-        self.repo.capture_tree()
+        self.archive.capture_tree(&self.repo)
     }
 }

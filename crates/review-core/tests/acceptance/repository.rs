@@ -406,13 +406,12 @@ fn untracked_files_count_whatever_status_shows() -> eyre::Result<()> {
     test.git(&["checkout", "--quiet", "-b", "feature"])?;
     test.git(&["config", "status.showUntrackedFiles", "no"])?;
     test.write("new.rs", "fn new() {}\n")?;
-    let repo = Repo::discover(test.path())?;
-    expect_that!(repo.has_uncommitted_changes()?, eq(true));
+    expect_that!(test.uncommitted()?, eq(true));
 
     // An ignored file is not work to review.
     test.git(&["config", "status.showUntrackedFiles", "normal"])?;
     test.write(".git/info/exclude", "new.rs\n")?;
-    expect_that!(repo.has_uncommitted_changes()?, eq(false));
+    expect_that!(test.uncommitted()?, eq(false));
     Ok(())
 }
 
@@ -448,8 +447,7 @@ fn a_capture_runs_nothing_in_a_submodule() -> eyre::Result<()> {
     // the filter.
     test.write("sub/inner.rs", "fn inner() {}\n")?;
     test.write("lib.rs", "fn lib() { edited(); }\n")?;
-    let repo = Repo::discover(test.path())?;
-    repo.capture_worktree()?;
+    test.capture()?;
     expect_false!(marker.exists());
     Ok(())
 }
@@ -477,8 +475,7 @@ fn dirty_submodule_contents_are_not_uncommitted_work() -> eyre::Result<()> {
     test.commit("base with an embedded repository")?;
     test.git(&["checkout", "--quiet", "-b", "feature"])?;
     test.write("sub/inner.rs", "fn changed() {}\n")?;
-    let repo = Repo::discover(test.path())?;
-    expect_that!(repo.has_uncommitted_changes()?, eq(false));
+    expect_that!(test.uncommitted()?, eq(false));
     Ok(())
 }
 

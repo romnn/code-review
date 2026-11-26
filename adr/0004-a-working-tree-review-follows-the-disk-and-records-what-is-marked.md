@@ -1,6 +1,6 @@
 # 4. A working-tree review follows the disk, and records a capture only when it is marked
 
-**Status:** accepted · **Date:** 2026-11-14
+**Status:** accepted · **Date:** 2026-11-26
 
 ## Context
 
@@ -20,8 +20,97 @@ A watcher of the working tree has its own costs: a recursive inotify watch of a 
 repository also watches `target/` and `node_modules/`, a hundred thousand directories in a
 real monorepo, and every write a build makes there.
 
+Every capture writes objects: the blobs of changed files, their trees and a synthetic commit.
+Written into the reviewed repository, with refs there to pin them, one real review of a branch
+left 442 loose commits of cr's identity in it, 368 of them unpinned, and about 22 MB of trees
+and blobs reachable only from them, before the reviewer marked anything; git also writes while
+it reads an index, dating a split index's shared file anew and writing the trees of a sparse
+index's directories as it expands them.
+The reviewer expects cr to keep its own review state and never to change their repository.
+
 ## Decision
 
+- **cr writes nothing into the reviewed repository**: no object, ref, lock, index file or date.
+  Its snapshots, their pins and its sessions live in the review's archive, a bare repository
+  of cr's own under the review's data (`reviews/<key>/archive/`), and the clone's identity in
+  the data directory too
+  ([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)).
+  The data directory must resolve outside the checkout and its git directories.
+  The one exception is a language server the reviewer trusts, which builds in the checkout as
+  the reviewer's own Cargo does
+  ([ADR 14](0014-only-background-work-reaches-the-engine.md)).
+- **The reviewed repository is only read.**
+  A command that writes runs against a repository cr owns.
+  Every git command drops each `GIT_*` variable cr inherited or an embedder set but those that
+  say how git reaches a remote and, for the reviewed repository's own commands, which
+  configuration files it reads; lazy fetches, replace objects, hooks, the filesystem monitor
+  and external diffs are off.
+  The reviewed repository's commands read no index: git reads one even to compare trees or
+  look up attributes in a commit, and dates a split index's shared file anew as it does.
+  Objects cross from the reviewed repository only by an explicit list in a pack of their own,
+  never through an alternate, through which git dates an object anew whenever it writes one
+  it finds there.
+- **Private commands see the clone's configuration as the clone does.**
+  The clone's effective configuration is read in the clone, includes and conditional includes
+  evaluated there, and passed to every command in a private repository as command-scope
+  configuration, with no global or system file read again where the private repository is.
+  The keys that describe the clone's own repository, its includes, the hooks configuration
+  defines, which `core.hooksPath` does not turn off, its filter drivers, which nothing cr runs
+  may start, and the `core.fsyncObjectFiles` git warns about are left out; cr's own settings
+  come after it, so they win.
+  Every private command runs as `git -C` in the checkout, or the git directory of a bare clone,
+  so a relative path in that configuration, a remote's or an attributes file's, is the same
+  one, while cr starts git from where it runs.
+  The archive takes the clone's `info/attributes` too, so files are classified and renames found
+  as in the clone.
+- **A capture works on private copies.**
+  It works in a git directory of its own: a detached `HEAD`, copies of the index with its date
+  and of the shared index a split one is based on, of the sparse-checkout patterns,
+  `info/exclude` and `info/attributes`, and the archive as its only object database.
+  The objects of `HEAD`, then every object the copied index names, are imported before any
+  command could expand a sparse index: git drops a directory it cannot expand without a word,
+  so the listing tells git to expect files outside the sparse patterns and fails on anything
+  git reports.
+  Then changed files are staged, the tree written and the synthetic commit made in the archive.
+  The watch's ignore queries read such a copy too, one per walk of the tree.
+  The subject, the index's date and size and git's busy state are read before and after, and a
+  capture is discarded when they moved.
+  A capture pins its base and head under its session before it returns them, deriving no
+  history, so whoever builds on it holds snapshots that stay.
+- **The archive holds every snapshot whole.**
+  Each recorded or shown base and head is in it with every tree and blob it reaches, under its
+  own object ID; a gitlink keeps its mode and ID only.
+  A pack shows as a whole and a tree is written only once what it reaches is there, so a
+  snapshot a reader gets is whole; the reviewed repository collecting or losing it afterwards
+  changes nothing.
+  Recorded snapshots are pinned by `refs/snap/<id>` and shown captures by their session's
+  `refs/live/` in the archive.
+  An object the reviewed repository lacks, as in a partial clone or after it collected one
+  during an import, fails the capture or the recording, naming it.
+- **Ancestry comes from the reviewed repository, read only.**
+  A synthetic commit's parent is the `HEAD` it was taken on, so merge bases are found among the
+  reviewed repository's commits; only the first merge base is imported.
+  Pull requests, and a shallow clone that lacks the history to find a merge base, are fetched
+  into a transient repository that reads the clone's configuration
+  ([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)).
+- **Every snapshot the log records is in the archive**, which every open checks under
+  `review.lock` by asking the archive for each snapshot's commit, importing any it lacks from
+  the reviewed repository and verifying it whole, and by listing its pins, pinning any snapshot
+  that has none; a snapshot whose commit is there but not all it reaches is copied whole
+  again.
+  So a review an earlier version kept moves into its archive on its first open, while that
+  version's refs still pin its snapshots, and a revision such a version still running records
+  later moves on the next open.
+  The first move counts only once a replay of the log from the archive alone, with no cache,
+  derives exactly the history the reviewed repository does with the review's cache, the one
+  the reviewer saw: marks, partial approvals, notes, walkthroughs and standings included; then
+  a marker records the cutover.
+  What the archive's commands write, its objects, packs and refs, reaches the disk before git
+  reports it written, so before the marker; commands that only read take none of those
+  settings.
+  Until then the log, its bytes, an unfinished record at its end included, and the reviewed
+  repository stay as they were, and the next open tries again.
+  The key, revision numbers, events and evidence digests never change.
 - **The window follows the working tree.**
   A review of the working tree watches it and captures it when something a capture records
   changes, and shows each capture in place of the snapshot on screen, keeping the reviewer's
@@ -29,7 +118,7 @@ real monorepo, and every write a build makes there.
   `[review] live = false` turns this off.
 - **A capture is provisional until it is marked.**
   It shows as the revision after the last recorded one, but is not recorded: no event, no
-  `snap/` pin, nothing in the caches.
+  `refs/snap/` pin, nothing in the caches.
   Marking it, or noting on it, records it first, under the same `review.lock`, and only when the
   log still ends at the revision it was compared with; otherwise the mark fails as on any
   revision that is no longer current.
@@ -51,9 +140,10 @@ real monorepo, and every write a build makes there.
   and review state is derived again from the earliest revision they add or mark.
   One reducer does all of it, so a history read again is the one read from the start.
   A history never changes once read, so a mark acts on exactly the history its frame showed.
-  A capture reads the log before and after it looks: one during which the review
-  recorded another revision is discarded, one during which a mark was saved shows it, and the
-  window captures again when a capture was read before a mark it saved.
+  A capture reads the log before and after it looks, deriving nothing before it, so it never
+  waits on the history: one during which the review recorded another revision is discarded,
+  one during which a mark was saved shows it, and the window captures again when a capture was
+  read before a mark it saved.
 - **Another log in the review's place ends the review in the window.**
   The log only grows, so replacing it while a window is open, such as restoring a backup, is
   outside its contract; a supported restore happens with the review closed.
@@ -86,10 +176,29 @@ real monorepo, and every write a build makes there.
   checkout of 13,000 files, and its walk, about 0.5 s every 5 minutes; that checkout has 3,500
   watched directories of its 146,000.
 - The log grows with what the reviewer marks, not with what the agent saves.
-- Each shown capture is pinned by a ref of its own under `refs/code-review/<key>/live/`; a
-  capture releases the pins of earlier ones its window no longer shows.
-  Opening the review again releases the pins another window of the same review still uses,
-  which costs that window only the pin, not the objects, which git keeps for two weeks.
+- Each shown capture is pinned by refs of its own under `refs/live/<session>/` in the archive;
+  a capture releases the pins of earlier ones its window no longer shows, and a session that
+  ended leaves its pins for the next session to remove once its lock file is free.
+- The archive only grows in this decision; what it keeps and for how long is the retention
+  decision still to come (#31).
+- A capture imports `HEAD`'s objects once per commit, and the archive keeps one pack per
+  import until retention repacks it; checking which objects of the index it lacks costs a few
+  milliseconds on a checkout of 13,000 files.
+- A pull request's refresh fetches both ends' whole history into a transient repository, which
+  is removed once the snapshots are imported: a cold fetch each time.
+- The first open after the upgrade replays a review's log from the archive without a cache,
+  which takes as long as analyzing every revision once; every later open lists the archive's
+  pins and asks it for the commits of the log's snapshots, two git commands of a few
+  milliseconds.
+  A snapshot whose commit survived a crash but whose trees did not, as in a torn pack, is not
+  found then; the reviewer sees an error naming the missing object.
+  The refs and session files an earlier version left in the reviewed repository stay; the
+  reviewer removes them once every review moved.
+  Windows of older versions are closed when upgrading: one still running records its revisions
+  into the reviewed repository, which the next open of the review moves into the archive, and a
+  window of this version open meanwhile fails on such a revision, naming the object it lacks,
+  until it is opened again; no mark is lost, since the older version's refs still pin the
+  objects.
 - A capture of new code computes the whole analysis of the working tree against its base, about
   0.2 s for a diff of 20,000 lines, and its correspondence with the last recorded revision.
   On a generated review of 70 revisions and 3,654 records, a capture of nothing new spends
@@ -106,14 +215,34 @@ real monorepo, and every write a build makes there.
   and indexes once: before each question it is told the file's text, and a lookup runs only
   while the capture on screen is the code on disk
   ([ADR 14](0014-only-background-work-reaches-the-engine.md)).
+- A storage path whose `..` climbs out of a directory that does not exist yet is refused before
+  anything is made, since where it leads cannot be checked.
 - Changes the watch cannot see show within 30 seconds: a ref moving without the index changing,
   a submodule's commit, `info/exclude` and `core.excludesFile`.
 - Captures keep the copied index's modification time.
   Git rereads a file only when it is as new as the index ("racily clean"), so a copy dated now
   would make a same-size edit from the index's own second invisible to the capture.
+- A private repository reads the clone's configuration as it was when the review opened, and
+  a capture as it is when the capture starts: a change to the clone's diff settings reaches
+  the analysis of a running window only once it opens again.
+- A capture runs three git commands more than one in the reviewed repository did: reading the
+  configuration, listing the index's objects and checking which the archive lacks.
+  On a generated checkout of 13,000 files a capture still takes about 0.12 s, the first one
+  0.8 s while it imports `HEAD`; a walk of the tree takes 0.19 s instead of 0.16 s, and asking
+  what git ignores after a change 15 ms instead of 2 ms, for the copy of the index.
 
 ## Rejected alternatives
 
+- **Capturing into the reviewed repository**, with a temporary index in its git directory and
+  pins under `refs/code-review/`: it piled objects into the reviewer's repository on every
+  capture, left a temporary index behind when killed, and wrote refs and session files the
+  reviewer never asked for.
+- **The reviewed repository as an alternate of a private object database:** git dates an
+  object it finds through an alternate anew whenever a command writes one equal to it, so
+  every capture would still write to the reviewed repository; reading a split index there
+  dates its shared file anew too.
+- **Mirror clones, a cache database or deduplication across reviews:** one archive per review,
+  git's packs and refs, the log and the existing locks suffice.
 - **Reading a replaced log again from the start.** The window orders the histories it gets by
   the log's length, which compares only within one log: a history of another log as long
   passed for the one on screen, so approvals the log no longer holds stayed, and a slow read
@@ -127,7 +256,14 @@ real monorepo, and every write a build makes there.
   (`Review::history`)
 - `crates/review-core/src/history.rs` (`History::extended`, `History::is_provisional`,
   `History::version`)
-- `crates/review-core/src/git/snapshot.rs` (`capture_worktree`, `copy_index`)
+- `crates/review-core/src/git/private.rs` (`PrivateRepo`, `PrivateRepo::import`)
+- `crates/review-core/src/git/mod.rs` (`Repo::clone_context`, `TRANSPORT_ENV`)
+- `crates/review-core/src/git/snapshot.rs` (`PrivateRepo::capture_worktree`),
+  `crates/review-core/src/git/scratch.rs` (`Scratch`), `crates/review-core/src/git/ignore.rs`
+  (`IgnoreRules`)
+- `crates/review-core/src/review/checkout.rs` (`Review::capture`)
+- `crates/review-core/src/git/fetch.rs` (`FetchRepo`)
+- `crates/review-core/src/review/archive.rs` (`Review::open_archive`)
 - `crates/review-ui/src/watch.rs` (`Watch`, `Waiter`)
 - `crates/review-ui/src/model/live.rs`
-- `crates/review-core/tests/acceptance/live.rs`
+- `crates/review-core/tests/acceptance/live.rs`, `isolation.rs`, `migration.rs`

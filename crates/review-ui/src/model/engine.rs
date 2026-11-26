@@ -351,7 +351,7 @@ impl Parts {
     /// Starts watching the working tree, keeping the watch, and returns what waits on it, or
     /// why it cannot be watched.
     pub(super) fn watch(&self) -> Result<Waiting, crate::watch::WatchError> {
-        let (watch, waiter) = Watch::start(self.review.repo().clone())?;
+        let (watch, waiter) = Watch::start(self.review.ignore_rules())?;
         *self.watch.lock() = Some(Arc::new(watch));
         Ok(Waiting(waiter))
     }

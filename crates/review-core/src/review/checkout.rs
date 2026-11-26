@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::github::{self, BranchPullRequest, CheckoutPullRequest, PullRequestState};
-use super::{Review, ReviewTarget, RevisionInput};
+use super::{Review, ReviewTarget, RevisionInput, Session, clone};
 use crate::error::Error;
 use crate::git::{Busy, Head, IndexStamp, Repo};
 use crate::ids::ObjectId;
@@ -201,13 +201,25 @@ pub(super) enum Observed {
     Captured(Box<Captured>),
     /// Git is in the middle of an operation in the working tree.
     Busy(Busy),
-    /// `HEAD`, the base or the index changed while the capture was taken.
+    /// `HEAD`, the base or the index changed while the capture was taken, or two looks
+    /// differed.
     Moved,
+    /// The checkout is another clone now (see [`Review::verify_clone`]).
+    Replaced,
+}
+
+/// How many times a capture looks at the working tree.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Looks {
+    /// Once, for a caller that watches the working tree.
+    Once,
+    /// Twice, keeping the capture only when both looks saw the same.
+    Twice,
 }
 
 /// A capture of the working tree and what it was taken of.
 pub(super) struct Captured {
-    /// The revision to show or record.
+    /// The revision to show or record, whose snapshots [`Review::capture`] pinned.
     pub input: RevisionInput,
     /// What the capture was taken of and compared with.
     pub subject: Subject,
@@ -227,13 +239,19 @@ impl Review {
     /// its working tree holds, on whatever branch, keyed by its working tree and its clone (see
     /// [`ReviewTarget::Checkout`]).
     ///
+    /// The clone's identity is kept in `data_dir`, bound to its common git directory; every
+    /// worktree of the clone shares it, and a clone made anew at the same path gets another,
+    /// and so another review, leaving the old one stored under its key.
+    /// The first open after an earlier version kept the identity in the clone itself keeps it,
+    /// when a review of the clone is stored.
+    ///
     /// Opening records nothing, and a checkout with nothing to review opens all the same.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidTarget`] for a bare repository, which has no working tree, and
-    /// an error when the clone's identity cannot be read or made or the storage cannot be
-    /// created.
+    /// an error when the clone's identity cannot be read or bound, or the review cannot be
+    /// opened, as [`Self::open`] says.
     #[tracing::instrument(skip_all)]
     pub fn open_checkout(data_dir: &Path, repo: Repo) -> Result<Self, Error> {
         if repo.work_tree().is_none() {
@@ -241,8 +259,10 @@ impl Review {
                 "a bare repository has no checkout to review".to_owned(),
             ));
         }
-        let clone = repo.ensure_clone_id()?;
-        Self::open(data_dir, repo, ReviewTarget::Checkout { clone })
+        let data_dir =
+            std::path::absolute(data_dir).map_err(|err| Error::io("resolve", data_dir, err))?;
+        let clone = clone::ensure_clone_id(&data_dir, &repo)?;
+        Self::open(&data_dir, repo, ReviewTarget::Checkout { clone })
     }
 
     /// Returns whether the repository is still the clone the review belongs to, which only a
@@ -251,10 +271,12 @@ impl Review {
     ///
     /// # Errors
     ///
-    /// Returns an error when git cannot run.
+    /// Returns an error when the clone's common git directory or its binding cannot be read.
     pub fn verify_clone(&self) -> Result<bool, Error> {
         match &self.meta.target {
-            ReviewTarget::Checkout { clone } => Ok(self.repo.clone_id()?.as_ref() == Some(clone)),
+            ReviewTarget::Checkout { clone } => {
+                Ok(clone::clone_id(self.dir.data_dir(), &self.repo)?.as_ref() == Some(clone))
+            }
             _ => Ok(true),
         }
     }
@@ -382,15 +404,57 @@ impl Review {
         })
     }
 
-    /// Captures the working tree and the revision it makes against its subject's base, unless
-    /// git is busy in it or something the capture depends on moved while it was taken.
+    /// Captures the working tree of the review's own clone, looking `looks` times, and pins
+    /// the capture's base and head in the archive under `session`, which holds them until it
+    /// releases them or ends; `pull_requests` are as [`Self::subject`] takes them.
+    ///
+    /// The capture derives no history: the pinned revision and what it was taken of stand on
+    /// their own.
+    /// Nothing is captured while git is busy in the working tree, when something the capture
+    /// depends on moved while it was taken, and when the checkout is not the review's clone
+    /// before or after; `captured` runs between the looks and that last check, where a test
+    /// makes something happen meanwhile.
+    pub(super) fn capture(
+        &self,
+        session: &Session,
+        pull_requests: &[CheckoutPullRequest],
+        looks: Looks,
+        captured: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<Observed, Error> {
+        if !self.verify_clone()? {
+            return Ok(Observed::Replaced);
+        }
+        let observed = match looks {
+            Looks::Once => self.look(pull_requests)?,
+            Looks::Twice => self.look_twice(pull_requests)?,
+        };
+        captured()?;
+        let Observed::Captured(capture) = observed else {
+            return Ok(observed);
+        };
+        if !self.verify_clone()? {
+            return Ok(Observed::Replaced);
+        }
+        session.pin(&capture.input)?;
+        Ok(Observed::Captured(capture))
+    }
+
+    /// Looks at the working tree once and returns the revision it makes against its subject's
+    /// base, unless git is busy in it or something the capture depends on moved while it was
+    /// taken.
+    ///
+    /// Both snapshots are in the archive with everything they reach once it returns.
     #[tracing::instrument(skip_all)]
-    pub(super) fn capture(&self, pull_requests: &[CheckoutPullRequest]) -> Result<Observed, Error> {
+    fn look(&self, pull_requests: &[CheckoutPullRequest]) -> Result<Observed, Error> {
         let before = match self.observe(pull_requests)? {
             Ok(before) => before,
             Err(busy) => return Ok(Observed::Busy(busy)),
         };
-        let capture = self.repo.capture_worktree()?;
+        let capture = match self.archive.capture_worktree(&self.repo) {
+            Ok(capture) => capture,
+            Err(Error::GitBusy(busy)) => return Ok(Observed::Busy(busy)),
+            Err(err) => return Err(err),
+        };
         let after = match self.observe(pull_requests)? {
             Ok(after) => after,
             Err(busy) => return Ok(Observed::Busy(busy)),
@@ -410,21 +474,23 @@ impl Review {
             self.repo.default_remote()?
         };
         let compared = match subject.base.commit() {
-            Some(target) => match self.repo.merge_bases(target, &head, deepen_from.as_deref()) {
-                Ok(merge_bases) => Some((target.clone(), merge_bases)),
-                Err(Error::NoMergeBase { .. }) if checkout => {
-                    let name = subject.base.name().map(str::to_owned);
-                    subject.base = match name {
-                        // The shared history may be beyond what a shallow clone holds.
-                        Some(name) if self.repo.is_shallow()? => BaseRef::Shallow { name },
-                        // Work that shares no history with the default branch, such as an
-                        // orphan branch, is all new.
-                        unrelated => BaseRef::Empty { unrelated },
-                    };
-                    None
+            Some(target) => {
+                match self.capture_merge_bases(target, &subject, &head, deepen_from.as_deref()) {
+                    Ok(merge_bases) => Some((target.clone(), merge_bases)),
+                    Err(Error::NoMergeBase { .. }) if checkout => {
+                        let name = subject.base.name().map(str::to_owned);
+                        subject.base = match name {
+                            // The shared history may be beyond what a shallow clone holds.
+                            Some(name) if self.repo.is_shallow()? => BaseRef::Shallow { name },
+                            // Work that shares no history with the default branch, such as an
+                            // orphan branch, is all new.
+                            unrelated => BaseRef::Empty { unrelated },
+                        };
+                        None
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(err) => return Err(err),
-            },
+            }
             None => None,
         };
         let input = match compared {
@@ -441,7 +507,7 @@ impl Review {
                 merge_bases,
             },
             None => RevisionInput {
-                base: self.repo.empty_tree_commit()?,
+                base: self.archive.empty_tree_commit()?,
                 head,
                 target: None,
                 merge_bases: Vec::new(),
@@ -454,25 +520,43 @@ impl Review {
         })))
     }
 
-    /// Captures the working tree twice and returns the second capture when both observed the
+    /// Every merge base of `target` and `head`, the capture of `subject`, as
+    /// [`Self::merge_bases`] finds them.
+    ///
+    /// A capture's history is its `HEAD`'s, which is its parent, so they are found among the
+    /// reviewed repository's commits; a capture on an unborn `HEAD` has none.
+    fn capture_merge_bases(
+        &self,
+        target: &ObjectId,
+        subject: &Subject,
+        head: &ObjectId,
+        deepen_from: Option<&str>,
+    ) -> Result<Vec<ObjectId>, Error> {
+        match &subject.head {
+            Some(ancestry) => self.merge_bases(target, ancestry, deepen_from),
+            None => Err(Error::NoMergeBase {
+                target: target.clone(),
+                head: head.clone(),
+            }),
+        }
+    }
+
+    /// Looks at the working tree twice and returns the second look when both observed the
     /// same: the subject (branch, `HEAD`, pull request and the commit the base resolved to),
     /// the snapshot pair and the filtered paths; when they differ, the capture was
     /// [`Observed::Moved`].
     ///
-    /// Each capture already discards itself when something moved while it ran; the second one
+    /// Each look already discards itself when something moved while it ran; the second one
     /// also catches a change that settled between the reads, such as an editor that saved one
-    /// file of several, which a single capture cannot tell from a finished state.
+    /// file of several, which a single look cannot tell from a finished state.
     /// It stands in for a watch on the working tree, which tells a caller that follows it
     /// about such a change.
-    pub(super) fn capture_twice(
-        &self,
-        pull_requests: &[CheckoutPullRequest],
-    ) -> Result<Observed, Error> {
-        let first = match self.capture(pull_requests)? {
+    fn look_twice(&self, pull_requests: &[CheckoutPullRequest]) -> Result<Observed, Error> {
+        let first = match self.look(pull_requests)? {
             Observed::Captured(first) => first,
             missed => return Ok(missed),
         };
-        let second = match self.capture(pull_requests)? {
+        let second = match self.look(pull_requests)? {
             Observed::Captured(second) => second,
             missed => return Ok(missed),
         };
@@ -484,31 +568,6 @@ impl Review {
         } else {
             Observed::Moved
         })
-    }
-
-    /// Captures the working tree of the review's own clone as [`Self::capture_twice`] does,
-    /// checking the clone before and after.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::GitBusy`] while git is busy, [`Error::CloneReplaced`] when the checkout
-    /// is another clone, and [`Error::Raced`] when a capture was discarded or the two differ.
-    pub(super) fn confirmed_capture(
-        &self,
-        pull_requests: &[CheckoutPullRequest],
-    ) -> Result<Captured, Error> {
-        if !self.verify_clone()? {
-            return Err(Error::CloneReplaced);
-        }
-        let observed = self.capture_twice(pull_requests)?;
-        if !self.verify_clone()? {
-            return Err(Error::CloneReplaced);
-        }
-        match observed {
-            Observed::Captured(captured) => Ok(*captured),
-            Observed::Busy(busy) => Err(Error::GitBusy(busy)),
-            Observed::Moved => Err(Error::Raced("working tree")),
-        }
     }
 
     /// Reads git's state in the working tree, or what it is busy with.

@@ -1,13 +1,11 @@
 //! Sessions: a running app, or one recording, that pins the captures it shows until it is done.
 //!
 //! A capture of a working tree is a synthetic commit no branch reaches, so whoever shows it pins
-//! it, under `refs/code-review/<key>/live/<session>/<capture>/`, where `<capture>` names its
-//! head, base and target. A session holds an exclusive lock on its file
-//! `code-review/sessions/<key>/<id>.lock` in the clone's common git directory for as long as it
-//! runs, so another session can tell a live one from one that died: it removes only its own
-//! pins, and another session's only once that session's file can be locked.
-//! The lock files live with the pins they guard, in the clone, so every process that sees the
-//! pins sees the locks, whatever data directory it keeps the review in.
+//! it, under `refs/live/<session>/<capture>/` in the review's archive, where `<capture>` names
+//! its head, base and target.
+//! A session holds an exclusive lock on its file `sessions/<id>.lock` in the archive for as
+//! long as it runs, so another session can tell a live one from one that died: it removes only
+//! its own pins, and another session's only once that session's file can be locked.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -15,27 +13,26 @@ use std::path::{Path, PathBuf};
 use super::{Review, RevisionInput};
 use crate::analysis::hex_digest;
 use crate::error::Error;
-use crate::git::Repo;
+use crate::git::PrivateRepo;
 use crate::history::RevisionRecord;
 use crate::ids::ObjectId;
 use crate::store;
 
 /// A running app, or one recording, that pins the captures it shows under
-/// `refs/code-review/<key>/live/<session>/<capture>/` for as long as it lives, holding an
-/// exclusive lock on its file `code-review/sessions/<key>/<id>.lock` in the clone's common git
-/// directory meanwhile.
+/// `refs/live/<session>/<capture>/` in the review's archive for as long as it lives, holding an
+/// exclusive lock on its file `sessions/<id>.lock` in the archive meanwhile.
 ///
 /// Dropping it removes its pins and its lock file. Another session removes them only once that
 /// lock is free, which means this one is over.
 #[derive(Debug)]
 pub struct Session {
     id: String,
-    /// The prefix of its pins, `refs/code-review/<key>/live/<id>`.
+    /// The prefix of its pins, `refs/live/<id>`.
     pins: String,
     /// Its lock file, held exclusively through `file`.
     path: PathBuf,
     file: File,
-    repo: Repo,
+    archive: PrivateRepo,
 }
 
 impl Session {
@@ -69,22 +66,22 @@ impl Session {
         &self.path
     }
 
-    /// Pins the base, the head and the target of `input` until [`Self::release`] or the end of
-    /// the session.
+    /// Returns whether the session pins its captures in `archive`.
+    pub(super) fn pins_in(&self, archive: &PrivateRepo) -> bool {
+        self.archive.path() == archive.path()
+    }
+
+    /// Pins the base and the head of `input` until [`Self::release`] or the end of the session.
     pub(super) fn pin(&self, input: &RevisionInput) -> Result<(), Error> {
         let capture = format!(
             "{}/{}",
             self.pins,
             capture_name(&input.base, &input.head, input.target.as_ref())
         );
-        let mut pins = vec![
+        self.archive.update_refs(&[
             (format!("{capture}/base"), input.base.clone()),
             (format!("{capture}/head"), input.head.clone()),
-        ];
-        if let Some(target) = &input.target {
-            pins.push((format!("{capture}/target"), target.clone()));
-        }
-        self.repo.update_refs(&pins)
+        ])
     }
 
     /// Removes the pins of every capture but those `keep` records.
@@ -95,7 +92,8 @@ impl Session {
             .map(|record| capture_name(&record.base, &record.head, record.target.as_ref()))
             .collect();
         let names: Vec<String> = self
-            .repo
+            .archive
+            .repo()
             .refs_under(&prefix)?
             .into_iter()
             .map(|pin| pin.name)
@@ -106,14 +104,17 @@ impl Session {
                 capture.is_none_or(|capture| !kept.iter().any(|kept| kept == capture))
             })
             .collect();
-        self.repo.delete_refs(&names)
+        self.archive.delete_refs(&names)
     }
 }
 
+/// The prefix of every session's pins in a review's archive.
+const LIVE_PINS: &str = "refs/live";
+
 /// The name of a capture's pins: 16 hex digits of a digest of its head, base and target.
 ///
-/// A digest rather than the ids themselves keeps ref paths, which already hold the review
-/// key, within Windows' path length limit.
+/// A digest rather than the ids themselves keeps ref paths, below the review's directory, within
+/// Windows' path length limit.
 fn capture_name(base: &ObjectId, head: &ObjectId, target: Option<&ObjectId>) -> String {
     let joined = match target {
         Some(target) => format!("{head}-{base}-{target}"),
@@ -127,9 +128,9 @@ fn capture_name(base: &ObjectId, head: &ObjectId, target: Option<&ObjectId>) -> 
 impl Drop for Session {
     fn drop(&mut self) {
         // A pin left behind only keeps objects alive, and the next session removes it.
-        if let Ok(pins) = self.repo.refs_under(&format!("{}/", self.pins)) {
+        if let Ok(pins) = self.archive.repo().refs_under(&format!("{}/", self.pins)) {
             let names: Vec<String> = pins.into_iter().map(|pin| pin.name).collect();
-            if let Err(err) = self.repo.delete_refs(&names) {
+            if let Err(err) = self.archive.delete_refs(&names) {
                 drop(err);
             }
         }
@@ -168,11 +169,11 @@ impl Review {
             // session's before the lock was taken; a lock on a removed file guards nothing.
             if path.exists() {
                 break Session {
-                    pins: format!("{}/{id}", self.live_pins()),
+                    pins: format!("{LIVE_PINS}/{id}"),
                     id,
                     path,
                     file,
-                    repo: self.repo.clone(),
+                    archive: self.archive.clone(),
                 };
             }
         };
@@ -180,19 +181,10 @@ impl Review {
         Ok(session)
     }
 
-    /// The prefix of every live pin of this review.
-    pub(super) fn live_pins(&self) -> String {
-        format!("refs/code-review/{}/live", self.meta.key.encoded())
-    }
-
     /// The directory of the lock files of this review's sessions, next to the pins they
-    /// guard: in the clone's common git directory, which every worktree of the clone shares.
+    /// guard, in the archive.
     fn sessions_dir(&self) -> PathBuf {
-        self.repo
-            .common_dir()
-            .join("code-review")
-            .join("sessions")
-            .join(self.meta.key.encoded())
+        self.archive.path().join("sessions")
     }
 
     /// The lock file of session `id`.
@@ -201,12 +193,11 @@ impl Review {
     }
 
     /// Removes the pins and lock files of every session but `mine` whose lock file is not
-    /// held, and pins of the layout before sessions, which no session owns.
+    /// held.
     fn remove_dead_sessions(&self, mine: &str) -> Result<(), Error> {
-        let prefix = format!("{}/", self.live_pins());
+        let prefix = format!("{LIVE_PINS}/");
         let mut by_session: Vec<(String, Vec<String>)> = Vec::new();
-        let mut unowned = Vec::new();
-        for pin in self.repo.refs_under(&prefix)? {
+        for pin in self.archive.repo().refs_under(&prefix)? {
             let Some(rest) = pin.name.strip_prefix(&prefix) else {
                 continue;
             };
@@ -217,14 +208,12 @@ impl Review {
                         None => by_session.push((session.to_owned(), vec![pin.name.clone()])),
                     }
                 }
-                Some(_) => {}
-                None => unowned.push(pin.name.clone()),
+                Some(_) | None => {}
             }
         }
-        self.repo.delete_refs(&unowned)?;
         for (id, names) in by_session {
             if let Some(dead) = self.dead_session(&id)? {
-                self.repo.delete_refs(&names)?;
+                self.archive.delete_refs(&names)?;
                 dead.remove()?;
             }
         }

@@ -288,11 +288,9 @@ fn capture_sees_racily_clean_edits() -> eyre::Result<()> {
     std::fs::write(&file, "bbbb\n")?;
     set_modified(&file)?;
 
-    let git = Repo::discover(repo.path())?;
-    assert_that!(git.has_uncommitted_changes()?, eq(true));
     let review = Review::open(
         repo.data_dir(),
-        git,
+        review_core::Repo::discover(repo.path())?,
         ReviewTarget::Worktree {
             base: "HEAD".to_owned(),
         },
@@ -315,8 +313,11 @@ fn a_directory_replaced_by_a_link_is_captured() -> eyre::Result<()> {
     std::fs::remove_dir_all(repo.path().join("dir"))?;
     std::os::unix::fs::symlink("other", repo.path().join("dir"))?;
 
-    let capture = Repo::discover(repo.path())?.capture_worktree()?;
-    let entries = repo.git(&["ls-tree", "-r", capture.commit.as_str()])?;
+    let (review, recorded) = repo.capture()?;
+    let entries = crate::common::git_in(
+        review.snapshots().git_dir(),
+        &["ls-tree", "-r", recorded.head.as_str()],
+    )?;
     let entries: Vec<&str> = entries.lines().collect();
     assert_that!(
         entries,
@@ -342,9 +343,7 @@ fn capture_reads_a_read_only_index() -> eyre::Result<()> {
     let index = repo.path().join(".git/index");
     std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o444))?;
 
-    let git = Repo::discover(repo.path())?;
-    assert_that!(git.has_uncommitted_changes()?, eq(true));
-    git.capture_worktree()?;
+    assert_that!(repo.uncommitted()?, eq(true));
     Ok(())
 }
 
@@ -389,27 +388,26 @@ fn filters_never_run_and_filtered_files_keep_their_staged_entry() -> eyre::Resul
     repo.write("new.dat", "untracked\n")?;
     repo.write("plain.txt", "two\n")?;
 
-    let git = Repo::discover(repo.path())?;
-    assert_that!(git.has_uncommitted_changes()?, eq(true));
-    let capture = git.capture_worktree()?;
+    let (review, recorded) = repo.capture()?;
     assert_that!(
-        capture.filtered,
+        recorded.filtered,
         elements_are![eq("data.dat"), eq("new.dat")]
     );
-    let commit = capture.commit.as_str();
+    let commit = recorded.head.as_str();
     // The filtered file keeps its staged bytes and the untracked one stays out, while the
     // other changes are captured.
+    let snapshot = |args: &[&str]| crate::common::git_in(review.snapshots().git_dir(), args);
     assert_that!(
-        repo.git(&["cat-file", "-p", &format!("{commit}:data.dat")])?,
+        snapshot(&["cat-file", "-p", &format!("{commit}:data.dat")])?,
         eq("staged")
     );
-    let captured = repo.git(&["ls-tree", "--name-only", commit])?;
+    let captured = snapshot(&["ls-tree", "--name-only", commit])?;
     assert_that!(
         captured.lines().collect::<Vec<_>>(),
         elements_are![eq(&"data.dat"), eq(&"plain.txt")]
     );
     assert_that!(
-        repo.git(&["cat-file", "-p", &format!("{commit}:plain.txt")])?,
+        snapshot(&["cat-file", "-p", &format!("{commit}:plain.txt")])?,
         eq("two")
     );
     assert!(!marker.exists(), "a capture ran the filter");

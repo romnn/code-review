@@ -493,7 +493,7 @@ impl Model {
             self.spawn_with(Subject::Lookup(lookup), move |parts| {
                 let checked = parts
                     .review
-                    .repo()
+                    .snapshots()
                     .tree_of(&head)
                     .map_err(|err| Unanswered::Failed(err.to_string()))
                     .and_then(|shown| on_disk(parts, &shown));
@@ -712,7 +712,7 @@ fn look_up(parts: &Parts, asking: &Asking) -> Result<Definition, Unanswered> {
         .ok_or_else(|| Unanswered::Failed("the repository has no working tree".to_owned()))?;
     let shown = parts
         .review
-        .repo()
+        .snapshots()
         .tree_of(&asking.head)
         .map_err(|err| failed(&err))?;
     on_disk(parts, &shown)?;
@@ -737,12 +737,12 @@ fn as_in_snapshot(
     found: &Definition,
 ) -> Result<(), Unanswered> {
     let failed = |err: review_core::Error| Unanswered::Failed(err.to_string());
-    let files = review.repo().tree_files(head).map_err(failed)?;
+    let snapshots = review.snapshots();
+    let files = snapshots.tree_files(head).map_err(failed)?;
     let Some(file) = files.into_iter().find(|file| file.path == found.path) else {
         return Ok(());
     };
-    match review
-        .repo()
+    match snapshots
         .blob_reader()
         .and_then(|mut reader| reader.read(&file.oid))
     {

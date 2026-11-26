@@ -278,7 +278,11 @@ fn move_refs(repo: &Repo, manifest: &Manifest, revision: RevisionNumber) -> Resu
         ("refs/heads/feature", &spec.head),
     ] {
         let commit = repo.resolve_commit(&format!("refs/demo/{tree}"))?;
-        repo.update_ref(branch, &commit)?;
+        git(
+            repo.git_dir(),
+            &["update-ref", branch, commit.as_str()],
+            None,
+        )?;
     }
     Ok(())
 }

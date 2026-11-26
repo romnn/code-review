@@ -1,6 +1,6 @@
 # 5. Bare `cr` reviews the checkout, whatever is checked out
 
-**Status:** accepted · **Date:** 2026-11-17
+**Status:** accepted · **Date:** 2026-11-26
 
 ## Context
 
@@ -15,15 +15,40 @@ the work has landed.
 ## Decision
 
 - **Bare `cr` opens the checkout review, and nothing else.**
-  There is one per working tree, keyed by its path and a clone id: a random blob that
-  `refs/code-review/clone-id` points to.
-  A clone replaced at the same path gets a new id, and so a new review; a running window that
-  sees its clone replaced stops and says so.
+  There is one per working tree, keyed by its path and a clone id: a random id that cr keeps in
+  its data directory, bound to the clone's common git directory by its resolved path and what
+  the filesystem tells the directory apart by (device, inode and creation time; on Windows the
+  volume and file index).
+  Linked worktrees share their clone's id, and another clone has another.
+  A clone made anew at the same path is another directory to the filesystem, so it gets a new
+  id, and so a new review, which leaves the old one stored under its key; a running window
+  that sees its clone replaced stops and says so.
+  The clone is checked before every capture, save and use of trust, finding the checkout's
+  common git directory anew each time, so a worktree path that another clone's worktree took
+  is another clone even while the first clone is still there.
+  Bindings are made one at a time, so of two first opens at once, the second takes the first's
+  id.
+  A path has one binding: another directory at a bound path gets a new id, which replaces the
+  binding.
+  An earlier version kept the id as a ref in the clone. Only the first binding of a path, one
+  that was never bound, keeps that id, and only when a review of a checkout with it is stored,
+  that review's checkout is still a worktree of this very clone, resolved read-only, and no
+  binding holds the id yet.
+  So a copy of the clone, which carries the ref too, gets an id of its own: at another path
+  whichever is opened first, and with a worktree at the review's own path once the clone was
+  bound; a clone restored at a path bound since never takes the old review back either. The
+  ref itself is only read.
+  Opening that review by its key binds the clone as opening the checkout does.
   Its history holds only captures of the disk, recorded when something is marked
   ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)) or when
   a command prints it.
 - **Pull requests and ranges named explicitly are snapshot reviews:** fetched pushed heads,
   never live, with histories of their own.
+  A pull request is fetched into a transient repository of cr's own that reads the clone's
+  configuration as the clone reads it, running in the checkout, with explicit refspecs, `--no-write-fetch-head --refmap=`, and no tags,
+  submodules or maintenance; its ends are imported into the review's archive and the rest of
+  what it fetched goes with it
+  ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)).
   Commands without `--review` act on the checkout review.
 - **A key is never reopened for a different target.**
   A `--worktree` review is keyed `<checkout>:<base>..WORKTREE`, which a range ending at a branch
@@ -49,8 +74,8 @@ the work has landed.
   revert, a bisect or unmerged entries), and is discarded when `HEAD`, the base or the index
   moved while it ran. A capture the watcher saw change while it ran is never markable.
 - **Nothing runs on the reviewer's behalf without a grant.**
-  Every git command runs with hooks and fsmonitor off; captures run with filters off, and a
-  filtered file keeps its staged version.
+  Every git command runs with hooks and fsmonitor off and writes nothing into the reviewed
+  repository; captures run with filters off, and a filtered file keeps its staged version.
   No checkout is trusted by default. The checkout review holds one grant for its working tree
   and clone, which covers later edits and branch switches until revoked and which the status
   bar shows; a `--worktree` review shares the grant of the clone it opened in, and a named range
@@ -76,8 +101,21 @@ the work has landed.
 - A changed file under a filter, such as LFS, shows only once staged.
 - A collision-proof key format would make `KeyConflict` impossible by construction, but needs a
   migration of stored keys; the runtime check is enough for a branch literally named `WORKTREE`.
+- A clone moved to another path, or copied, is another clone.
+  A filesystem that keeps no creation time may give a clone made anew the inode of the one it
+  replaced, and FAT may give it the directory entry of the one it replaced; then the review,
+  and the trust it holds, continue on it.
+  Its snapshots are in the archive, and marks carry only along correspondences.
+  A mount that changes the device number makes the same clone another, and so a new review,
+  once the earlier version's ref is gone.
+- The `refs/code-review/clone-id` an earlier version wrote stays in the clone until the
+  reviewer removes it.
 
 ## Rejected alternatives
+
+- **The clone id as a ref in the clone**, `refs/code-review/clone-id`, created once: every
+  worktree saw it and a new clone lacked it, but making it wrote a blob and a ref into the
+  reviewed repository, which cr no longer writes to.
 
 - **Choosing a review once, when `cr` opens:** the review last opened for this checkout and
   branch, else the branch's open pull request, else, on a branch with uncommitted changes, the
@@ -95,5 +133,6 @@ the work has landed.
   `Review::subject`)
 - `crates/review-core/src/review/live.rs` (`Review::live_history`, `Capture`, sessions)
 - `crates/review-core/src/correspond.rs` (the carry rules)
-- `crates/review-core/src/git/` (the command boundary, filters, `Repo::busy`, the clone id)
+- `crates/review-core/src/review/clone.rs` (the clone id)
+- `crates/review-core/src/git/` (the command boundary, filters, `Repo::busy`, `FetchRepo`)
 - `crates/review-core/tests/acceptance/checkout.rs`

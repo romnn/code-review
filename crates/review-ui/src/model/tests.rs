@@ -4663,15 +4663,18 @@ fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
     trust(&mut host);
 }
 
-/// The lock files of the sessions running in the clone at `repo`, each pinning what a window
-/// shows.
+/// The lock files of the sessions running for the reviews of the clone at `repo`, which keep
+/// them in their archives in the data directory beside it, each pinning what a window shows.
 #[cfg(target_os = "linux")]
 fn session_locks(repo: &Path) -> usize {
-    walk(&repo.join(".git/code-review/sessions"))
+    walk(&repo.with_file_name("data"))
         .iter()
         .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "lock")
+                && path
+                    .parent()
+                    .is_some_and(|parent| parent.ends_with("archive/sessions"))
         })
         .count()
 }
@@ -5805,7 +5808,8 @@ fn a_busy_checkout_keeps_the_view_and_takes_marks() {
 fn a_replaced_checkout_stops_and_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = checkout_host(dir.path());
-    git_in(&repo, &["update-ref", "-d", "refs/code-review/clone-id"]);
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
     host.update(Model::changed);
     host.settle();
     let model = host.model();

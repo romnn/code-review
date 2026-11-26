@@ -1,12 +1,13 @@
-//! Synthetic snapshot commits capturing the working tree.
+//! Synthetic snapshot commits capturing the working tree, written into a private repository.
+//!
+//! A capture reads the reviewed repository's working tree and index and writes nothing there:
+//! it stages a copy of the index in a [`Scratch`] directory, with the private repository as the
+//! only object database, after importing the objects of `HEAD` and of the index it lacks.
 
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::Repo;
+use super::scratch::Scratch;
+use super::{Busy, PrivateRepo, Repo, durable};
 use crate::error::Error;
 use crate::ids::ObjectId;
 
@@ -20,44 +21,6 @@ const SNAPSHOT_ENV: [(&str, &str); 6] = [
     ("GIT_COMMITTER_EMAIL", "code-review@localhost"),
     ("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+0000"),
 ];
-
-/// Deletes the temporary index file (and a leftover lock) when dropped.
-struct TemporaryIndex {
-    path: PathBuf,
-}
-
-impl Drop for TemporaryIndex {
-    fn drop(&mut self) {
-        for path in [self.path.clone(), self.path.with_extension("lock")] {
-            if let Err(err) = std::fs::remove_file(&path)
-                && err.kind() != std::io::ErrorKind::NotFound
-            {
-                // A stale temporary index in the git directory is harmless.
-                drop(err);
-            }
-        }
-    }
-}
-
-/// Copies the user's index at `from` to a new, writable file at `to`, dated as the original.
-///
-/// Git trusts a cached stat only for files older than the index, and rereads those modified in
-/// the same second as it ("racily clean").
-/// A copy dated now would make such a file look older, so an edit that kept its size would be
-/// missed.
-/// The bytes and the date come from one open handle: git replaces the index by renaming a new
-/// file over it, and a date read by path afterwards could belong to a newer index than the bytes.
-fn copy_index(from: &Path, to: &Path) -> Result<(), Error> {
-    let mut source = File::open(from).map_err(|source| Error::io("open", from, source))?;
-    let modified = source
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-        .map_err(|source| Error::io("read", from, source))?;
-    let mut copy = File::create(to).map_err(|source| Error::io("create", to, source))?;
-    std::io::copy(&mut source, &mut copy).map_err(|source| Error::io("copy", from, source))?;
-    copy.set_modified(modified)
-        .map_err(|source| Error::io("write", to, source))
-}
 
 /// The tree a working-tree capture records, and the `HEAD` it was taken on.
 struct WorktreeTree {
@@ -85,13 +48,14 @@ pub struct WorktreeCapture {
     pub filtered: Vec<String>,
 }
 
-impl Repo {
-    /// Captures the working tree, staged and unstaged changes and untracked files that are not
-    /// ignored, as a synthetic commit whose parent is `HEAD`, or as `HEAD` itself when nothing
-    /// is beyond it.
+impl PrivateRepo {
+    /// Captures `source`'s working tree, staged and unstaged changes and untracked files that
+    /// are not ignored, as a synthetic commit in this repository whose parent is `HEAD`, or as
+    /// `HEAD` itself when nothing is beyond it.
     ///
-    /// The user's index is never touched: the capture works on a copy of it through
-    /// `GIT_INDEX_FILE`.
+    /// The capture writes nothing to `source`: it works on a copy of the index in a directory
+    /// of this repository's, with this repository as its only object
+    /// database, and imports the objects of `HEAD` and the index this repository lacks first.
     /// Starting from the copy keeps git's stat cache, so unchanged files are not rehashed, and
     /// keeps sparse-checkout entries that are absent from disk.
     ///
@@ -101,18 +65,19 @@ impl Repo {
     ///
     /// # Errors
     ///
-    /// Returns an error for a bare repository or when any git step fails.
-    pub fn capture_worktree(&self) -> Result<WorktreeCapture, Error> {
+    /// Returns [`Error::GitBusy`] with [`Busy::Unmerged`] when the index has unmerged paths,
+    /// [`Error::MissingObject`] when `source` lacks an object its index or `HEAD` names, an
+    /// error for a bare repository, and an error when any git step fails.
+    pub(crate) fn capture_worktree(&self, source: &Repo) -> Result<WorktreeCapture, Error> {
         let WorktreeTree {
             tree,
             head,
             filtered,
-        } = self.worktree_tree()?;
+        } = self.worktree_tree(source)?;
         // A working tree with nothing beyond `HEAD` is `HEAD`, so a capture of committed work
         // is the commit itself and deduplicates with a revision that recorded it.
         if let Some(head) = &head
-            && self.run_text(["rev-parse", &format!("{}^{{tree}}", head.as_str())])?
-                == tree.as_str()
+            && self.repo().tree_of(head)? == tree
         {
             return Ok(WorktreeCapture {
                 commit: head.clone(),
@@ -136,30 +101,17 @@ impl Repo {
     /// # Errors
     ///
     /// Returns an error when git cannot write the tree or the commit.
-    pub fn empty_tree_commit(&self) -> Result<ObjectId, Error> {
-        let tree = Self::run_command_with_input(
-            self.command(),
+    pub(crate) fn empty_tree_commit(&self) -> Result<ObjectId, Error> {
+        let mut hash_object = self.repo().command();
+        durable(&mut hash_object);
+        let tree = Repo::run_command_with_input(
+            hash_object,
             &["hash-object", "-w", "-t", "tree", "--stdin"],
             Vec::new(),
             &[0],
         )?;
         let tree = ObjectId::parse(String::from_utf8_lossy(&tree.stdout).trim())?;
         self.snapshot_commit(&tree, None, "code-review empty tree")
-    }
-
-    /// Returns the tree of `commit`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `commit` is not a commit in the repository.
-    pub fn tree_of(&self, commit: &ObjectId) -> Result<ObjectId, Error> {
-        let text = self.run_text([
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{commit}^{{tree}}"),
-        ])?;
-        Ok(ObjectId::parse(&text)?)
     }
 
     /// Writes a commit of `tree` with the fixed identity and date of snapshots, whose parent is
@@ -170,7 +122,8 @@ impl Repo {
         parent: Option<&ObjectId>,
         message: &str,
     ) -> Result<ObjectId, Error> {
-        let mut commit_tree = self.command();
+        let mut commit_tree = self.repo().command();
+        durable(&mut commit_tree);
         commit_tree.envs(SNAPSHOT_ENV);
         let mut args = vec![
             "-c".to_owned(),
@@ -183,90 +136,46 @@ impl Repo {
         if let Some(parent) = parent {
             args.extend(["-p".to_owned(), parent.as_str().to_owned()]);
         }
-        let commit = Self::run_command(commit_tree, args)?;
+        let commit = Repo::run_command(commit_tree, args)?;
         Ok(ObjectId::parse(
             String::from_utf8_lossy(&commit.stdout).trim(),
         )?)
     }
 
-    /// Returns the tree a [`capture_worktree`](Self::capture_worktree) would record now, writing
-    /// no commit.
+    /// Returns the tree a [`capture_worktree`](Self::capture_worktree) of `source` would record
+    /// now, writing no commit.
     ///
     /// # Errors
     ///
-    /// Returns an error for a bare repository or when any git step fails.
-    pub(crate) fn capture_tree(&self) -> Result<ObjectId, Error> {
-        Ok(self.worktree_tree()?.tree)
+    /// Returns the errors of [`Self::capture_worktree`].
+    pub(crate) fn capture_tree(&self, source: &Repo) -> Result<ObjectId, Error> {
+        Ok(self.worktree_tree(source)?.tree)
     }
 
-    /// Returns whether [`capture_worktree`](Self::capture_worktree) would record anything beyond
-    /// `HEAD`: staged or unstaged changes, or untracked files that are not ignored.
-    ///
-    /// It compares the tree a capture records with `HEAD`'s, so it agrees with the capture by
-    /// construction, whatever git's status settings say; changes inside a submodule's checkout,
-    /// for example, do not count, because a capture records only the submodule's commit.
-    /// Like a capture, it leaves the user's index untouched.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a bare repository or when any git step fails.
-    pub fn has_uncommitted_changes(&self) -> Result<bool, Error> {
-        let WorktreeTree { tree, head, .. } = self.worktree_tree()?;
-        let committed = match head {
-            Some(head) => self.run_text(["rev-parse", &format!("{}^{{tree}}", head.as_str())])?,
-            // An unborn `HEAD` has the empty tree, in the repository's hash algorithm.
-            None => self.run_text(["hash-object", "-t", "tree", "--stdin"])?,
-        };
-        Ok(tree.as_str() != committed)
-    }
-
-    /// Writes the tree a capture records, from a copy of the user's index updated with every
-    /// change in the working tree but those of filtered paths, with every filter driver off.
-    fn worktree_tree(&self) -> Result<WorktreeTree, Error> {
-        self.worktree_tree_with(&mut || Ok(()))
+    /// Writes the tree a capture of `source` records, from a copy of its index updated with
+    /// every change in the working tree but those of filtered paths, with every filter driver
+    /// off.
+    fn worktree_tree(&self, source: &Repo) -> Result<WorktreeTree, Error> {
+        self.worktree_tree_with(source, &mut || Ok(()))
     }
 
     /// See [`Self::worktree_tree`]; `scanned` runs once the changed paths are known and before
     /// they are staged, where a test changes the working tree meanwhile.
     fn worktree_tree_with(
         &self,
+        source: &Repo,
         scanned: &mut dyn FnMut() -> Result<(), Error>,
     ) -> Result<WorktreeTree, Error> {
-        if self.work_tree().is_none() {
-            return Err(Error::InvalidTarget(
-                "--worktree in a bare repository".to_owned(),
-            ));
+        let scratch = Scratch::new(self, source)?;
+        if scratch.unmerged() {
+            return Err(Error::GitBusy(Busy::Unmerged));
         }
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let index = TemporaryIndex {
-            path: self
-                .git_dir()
-                .join(format!("code-review-index-{}-{nanos}", std::process::id())),
-        };
-        let head = self.resolve_commit("HEAD").ok();
-        let filters = self.filters_off()?;
+        let head = scratch.head().cloned();
         // Every command below reads the working tree or the copied index, and refreshing a
-        // cached stat could run a clean filter on any tracked file, so all run without filters.
-        let command = || {
-            let mut command = filters.command(self);
-            command.env("GIT_INDEX_FILE", &index.path);
-            command
-        };
-        let user_index = self.git_dir().join("index");
-        if user_index.exists() {
-            copy_index(&user_index, &index.path)?;
-        } else {
-            match &head {
-                Some(head) => Self::run_command(command(), ["read-tree", head.as_str()])?,
-                None => Self::run_command(command(), ["read-tree", "--empty"])?,
-            };
-        }
-
-        let Changed { paths, deleted } = changed_paths(&command)?;
-        let filtered = filtered_paths(&command, head.as_ref(), &paths)?;
+        // cached stat could run a clean filter on any tracked file; none can, since the
+        // scratch's commands know no filter driver.
+        let Changed { paths, deleted } = changed_paths(&scratch)?;
+        let filtered = filtered_paths(&scratch, head.as_ref(), &paths)?;
         scanned()?;
         // Only the paths the scan found changed and unfiltered are staged, by name: a path that
         // changed since, maybe one under a filter driver, waits for the next capture rather
@@ -280,8 +189,8 @@ impl Repo {
             .map(Vec::as_slice)
             .collect();
         if !removed.is_empty() {
-            Self::run_command_with_paths(
-                command(),
+            Repo::run_command_with_paths(
+                scratch.command(),
                 &["update-index", "--force-remove", "-z", "--stdin"],
                 removed,
                 &[0],
@@ -289,7 +198,7 @@ impl Repo {
         }
         // A path gone since the scan is removed, and one that turned from a file into a
         // directory, or back, replaces what was there.
-        let staged: Vec<&[u8]> = paths
+        let added: Vec<&[u8]> = paths
             .iter()
             .filter(unfiltered)
             .filter(|path| !deleted.contains(*path))
@@ -297,9 +206,9 @@ impl Repo {
             // as its commit.
             .map(|path| path.strip_suffix(b"/").unwrap_or(path))
             .collect();
-        if !staged.is_empty() {
-            Self::run_command_with_paths(
-                command(),
+        if !added.is_empty() {
+            Repo::run_command_with_paths(
+                scratch.command(),
                 &[
                     "update-index",
                     "--add",
@@ -308,12 +217,14 @@ impl Repo {
                     "-z",
                     "--stdin",
                 ],
-                staged,
+                added,
                 &[0],
             )?;
         }
 
-        let tree = Self::run_command(command(), ["write-tree"])?;
+        // Every object the index names is here, so writing the tree checks that the tree has
+        // all it reaches.
+        let tree = Repo::run_command(scratch.command(), ["write-tree"])?;
         let tree = ObjectId::parse(String::from_utf8_lossy(&tree.stdout).trim())?;
         Ok(WorktreeTree {
             tree,
@@ -326,15 +237,15 @@ impl Repo {
     }
 }
 
-/// Lists the paths that differ in the working tree from the index `command` uses: modified,
+/// Lists the paths that differ in the working tree from the index `scratch` holds: modified,
 /// deleted and untracked paths that are not ignored.
 ///
 /// A submodule counts only when its commit moved, which is all a capture records of it; git
 /// never runs in its checkout to see whether it is dirty, since a filter driver configured
 /// only there would run.
-fn changed_paths(command: &dyn Fn() -> Command) -> Result<Changed, Error> {
+fn changed_paths(scratch: &Scratch) -> Result<Changed, Error> {
     let modified = Repo::run_command(
-        command(),
+        scratch.command(),
         [
             "diff-files",
             "-z",
@@ -343,7 +254,7 @@ fn changed_paths(command: &dyn Fn() -> Command) -> Result<Changed, Error> {
         ],
     )?;
     let untracked = Repo::run_command(
-        command(),
+        scratch.command(),
         [
             "ls-files",
             "-z",
@@ -391,7 +302,7 @@ struct Changed {
 /// Returns those of `paths` whose `filter` attribute is set in the working tree's, the
 /// index's or `HEAD`'s attributes, sorted.
 fn filtered_paths(
-    command: &dyn Fn() -> Command,
+    scratch: &Scratch,
     head: Option<&ObjectId>,
     paths: &[Vec<u8>],
 ) -> Result<BTreeSet<Vec<u8>>, Error> {
@@ -409,8 +320,12 @@ fn filtered_paths(
             .chain(source)
             .chain(["filter"])
             .collect();
-        let output =
-            Repo::run_command_with_paths(command(), &args, paths.iter().map(Vec::as_slice), &[0])?;
+        let output = Repo::run_command_with_paths(
+            scratch.command(),
+            &args,
+            paths.iter().map(Vec::as_slice),
+            &[0],
+        )?;
         let fields: Vec<&[u8]> = output.stdout.split(|&byte| byte == 0).collect();
         let (records, _) = fields.as_chunks::<3>();
         for [path, _, value] in records {
@@ -442,23 +357,22 @@ mod tests {
         testing::git(repo.path(), &["config", "filter.crypt.clean", "cat"])?;
         std::fs::write(repo.path().join("a.rs"), "fn a() { edited(); }\n")?;
         let git = Repo::discover(repo.path())?;
+        let (_data, private) = testing::private(&git)?;
         let staged = testing::git(repo.path(), &["rev-parse", "HEAD:secret"])?;
 
-        let captured = git.worktree_tree_with(&mut || {
+        let captured = private.worktree_tree_with(&git, &mut || {
             std::fs::write(repo.path().join("secret"), "plaintext\n")
                 .map_err(|source| Error::io("write", repo.path().join("secret"), source))
         })?;
         let tree = captured.tree.as_str();
-        expect_blob(repo.path(), &format!("{tree}:secret"), &staged)?;
-        let edited = testing::git(repo.path(), &["rev-parse", &format!("{tree}:a.rs")])?;
+        let blob = |spec: &str| testing::git(private.path(), &["rev-parse", spec]);
+        assert_eq!(blob(&format!("{tree}:secret"))?, staged);
         let committed = testing::git(repo.path(), &["rev-parse", "HEAD:a.rs"])?;
-        assert_ne!(edited, committed, "the edit the scan found is captured");
-        Ok(())
-    }
-
-    /// Asserts that `spec` names the blob `expected`.
-    fn expect_blob(dir: &Path, spec: &str, expected: &str) -> eyre::Result<()> {
-        assert_eq!(testing::git(dir, &["rev-parse", spec])?, expected, "{spec}");
+        assert_ne!(
+            blob(&format!("{tree}:a.rs"))?,
+            committed,
+            "the edit the scan found is captured"
+        );
         Ok(())
     }
 }

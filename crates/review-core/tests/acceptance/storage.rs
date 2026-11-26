@@ -13,7 +13,7 @@ use review_core::{
     ObjectId, Repo, Review, ReviewKey, ReviewTarget, RevisionInput, RevisionNumber, UnitIndex,
 };
 
-use crate::common::{TestRepo, refresh, rust_functions};
+use crate::common::{TestRepo, git_in, refresh, rust_functions};
 
 /// Environment variables that turn [`record_revision_child`] into a worker.
 const CHILD_REPO: &str = "REVIEW_CORE_TEST_CHILD_REPO";
@@ -117,8 +117,8 @@ fn concurrent_processes_get_distinct_revisions() -> eyre::Result<()> {
     assert_that!(recorded, eq(&expected));
     for oid in heads.iter().chain([&base]) {
         let oid = ObjectId::parse(oid)?;
-        let pinned = repo.git(&["rev-parse", "--verify", &review.pin_ref(&oid)])?;
-        assert_that!(pinned.as_str(), eq(oid.as_str()));
+        let pinned = review.snapshots().ref_target(&review.pin_ref(&oid))?;
+        assert_that!(pinned, some(eq(&oid)));
     }
     Ok(())
 }
@@ -300,10 +300,16 @@ fn crash_after_pinning_recovers() -> eyre::Result<()> {
     let head = repo.commit("edit")?;
     let review = repo.review()?;
 
-    // The crashed attempt pinned both snapshots and left a half-written analysis temporary
-    // and an empty log, but never appended its event.
+    // The crashed attempt imported and pinned both snapshots and left a half-written analysis
+    // temporary and an empty log, but never appended its event.
+    let archive = review.snapshots().git_dir();
+    let source = repo.path().display().to_string();
+    git_in(archive, &["fetch", "--quiet", &source, "main", "feature"])?;
     for oid in [&base, &head] {
-        repo.git(&["update-ref", &review.pin_ref(&ObjectId::parse(oid)?), oid])?;
+        git_in(
+            archive,
+            &["update-ref", &review.pin_ref(&ObjectId::parse(oid)?), oid],
+        )?;
     }
     let analysis_dir = review.dir().root().join("analysis");
     std::fs::create_dir_all(&analysis_dir)?;

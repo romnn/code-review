@@ -1276,7 +1276,7 @@ impl Model {
         self.spawn_with(Subject::Always(Because::Content), move |parts| {
             let _reading = tracing::info_span!("read_texts", blobs = wanted.len()).entered();
             let mut texts = HashMap::new();
-            if let Ok(mut reader) = parts.review.repo().blob_reader() {
+            if let Ok(mut reader) = parts.review.snapshots().blob_reader() {
                 for oid in wanted {
                     if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
                         && is_text(&bytes)
@@ -1435,7 +1435,7 @@ fn highlight_sides(
     let cancelled = || cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
     let mut resolved = HashMap::new();
     let mut syntax = HashMap::new();
-    let mut reader = review.repo().blob_reader().ok();
+    let mut reader = review.snapshots().blob_reader().ok();
     for side in sides {
         if cancelled() {
             break;
@@ -1631,7 +1631,7 @@ fn read_texts(
     else {
         return texts;
     };
-    let Ok(mut reader) = review.repo().blob_reader() else {
+    let Ok(mut reader) = review.snapshots().blob_reader() else {
         return texts;
     };
     for side in analysis

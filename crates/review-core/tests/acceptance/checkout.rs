@@ -13,7 +13,7 @@ use review_core::{
     UnitState,
 };
 
-use crate::common::{GIT_ENV, TestRepo, find, summaries};
+use crate::common::{GIT_ENV, TestRepo, find, git_in, summaries};
 
 /// Three functions apart from each other, with the bodies given.
 fn three_functions(a: &str, b: &str, c: &str) -> String {
@@ -431,10 +431,17 @@ fn the_tree_on_disk_is_what_a_capture_records() -> eyre::Result<()> {
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     test.write("new.rs", "fn new() {}\n")?;
     let review = open(&test)?;
-    let captured = review.repo().capture_worktree()?;
+    let captured = capture(&review, &review.start_session()?)?;
+    let head = captured
+        .history
+        .revisions()
+        .last()
+        .ok_or_else(|| eyre::eyre!("no capture"))?
+        .head
+        .clone();
     expect_that!(
         review.tree_on_disk()?,
-        eq(&review.repo().tree_of(&captured.commit)?)
+        eq(&review.snapshots().tree_of(&head)?)
     );
 
     std::fs::write(test.path().join(".git/MERGE_HEAD"), "")?;
@@ -461,11 +468,13 @@ fn sessions_remove_only_the_pins_of_sessions_that_are_over() -> eyre::Result<()>
         .ok_or_else(|| eyre::eyre!("no capture"))?
         .head
         .clone();
+    let archive = review.snapshots().git_dir();
     let pins = |prefix: &str| -> eyre::Result<usize> {
-        Ok(test
-            .git(&["for-each-ref", "--format=%(refname)", prefix])?
-            .lines()
-            .count())
+        Ok(
+            git_in(archive, &["for-each-ref", "--format=%(refname)", prefix])?
+                .lines()
+                .count(),
+        )
     };
     expect_that!(pins(live.pins())?, gt(0));
 
@@ -476,7 +485,10 @@ fn sessions_remove_only_the_pins_of_sessions_that_are_over() -> eyre::Result<()>
         .map(|(root, _)| root.to_owned())
         .ok_or_else(|| eyre::eyre!("no live root"))?;
     let dead = format!("{live_root}/0123456789abcdef");
-    test.git(&["update-ref", &format!("{dead}/{head}/head"), head.as_str()])?;
+    git_in(
+        archive,
+        &["update-ref", &format!("{dead}/{head}/head"), head.as_str()],
+    )?;
     let dead_lock = live.lock_file().with_file_name("0123456789abcdef.lock");
     std::fs::write(&dead_lock, "")?;
 
@@ -492,32 +504,6 @@ fn sessions_remove_only_the_pins_of_sessions_that_are_over() -> eyre::Result<()>
     drop(other);
     expect_that!(pins(&other_pins)?, eq(0));
     expect_that!(pins(live.pins())?, gt(0));
-    Ok(())
-}
-
-/// Sessions of one checkout see each other whatever data directory each keeps the review in,
-/// since they share the pins: a session starting never takes a live one's.
-#[gtest]
-fn sessions_of_one_checkout_see_each_other_across_data_directories() -> eyre::Result<()> {
-    let (test, _forge) = with_remote()?;
-    test.write("lib.rs", &three_functions("one();", "", ""))?;
-    let review = open(&test)?;
-    let live = review.start_session()?;
-    capture(&review, &live)?;
-    let pins = || -> eyre::Result<usize> {
-        Ok(test
-            .git(&["for-each-ref", "--format=%(refname)", live.pins()])?
-            .lines()
-            .count())
-    };
-    expect_that!(pins()?, gt(0));
-
-    let elsewhere = tempfile::tempdir()?;
-    let other = Review::open_checkout(elsewhere.path(), Repo::discover(test.path())?)?;
-    let other_session = other.start_session()?;
-    expect_that!(pins()?, gt(0));
-    drop(other_session);
-    expect_that!(pins()?, gt(0));
     Ok(())
 }
 

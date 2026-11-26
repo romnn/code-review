@@ -8,9 +8,10 @@
 //! made, renamed or removed, loose or in `packed-refs`, which a branch switch, a commit, a push
 //! and a fetch all do.
 //! A directory's own times and permissions never count, since git records neither.
-//! Reads never count, so a capture, which reads the files it hashes, never wakes the watch.
-//! The git directory's other files never count either: the capture's own temporary index, and
-//! the refs under `refs/code-review/` that pin what a capture shows.
+//! Reads never count, so a capture, which reads the files it hashes and writes only into the
+//! review's archive, never wakes the watch.
+//! The git directory's other files never count either, such as refs under `refs/code-review/`
+//! that earlier versions pinned captures with.
 //!
 //! On Linux and the BSDs every directory git does not ignore gets a watch of its own, found by
 //! walking the tree level by level and asking git about each level's directories: a recursive
@@ -34,7 +35,7 @@ use notify::event::{
 };
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
 use parking_lot::Mutex;
-use review_core::Repo;
+use review_core::git::IgnoreRules;
 
 /// How long the working tree must stay quiet before a burst of changes counts as one.
 const QUIET: Duration = Duration::from_millis(150);
@@ -93,7 +94,8 @@ pub struct Waiter {
     events: Receiver<notify::Result<Event>>,
     shared: Weak<Shared>,
     places: Places,
-    repo: Repo,
+    /// What git ignores in the working tree.
+    rules: IgnoreRules,
     /// Why the watch may have missed changes since the last wait, such as a refused watch.
     problem: Option<String>,
     /// The branches and remote-tracking branches `packed-refs` held when last read, so a
@@ -112,7 +114,8 @@ struct Shared {
     /// The directories watched on their own, on a per-directory platform.
     watched: Mutex<HashSet<PathBuf>>,
     places: Places,
-    repo: Repo,
+    /// What git ignores in the working tree.
+    rules: IgnoreRules,
 }
 
 /// Where the working tree and the git directories are, in the spelling the watches report.
@@ -142,8 +145,8 @@ const BUSY_MARKERS: [&str; 6] = [
 const REF_DIRECTORIES: [&str; 2] = ["refs/heads", "refs/remotes"];
 
 impl Watch {
-    /// Starts watching `repo`'s working tree, and returns the watch with the waiter that waits
-    /// on it.
+    /// Starts watching the working tree `rules` judge, and returns the watch with the waiter
+    /// that waits on it.
     ///
     /// Changes start counting once this returns, so a capture taken afterwards misses nothing.
     ///
@@ -151,7 +154,8 @@ impl Watch {
     ///
     /// Returns an error for a repository without a working tree, when the system refuses a
     /// watch, and when git cannot say which directories it ignores.
-    pub fn start(repo: Repo) -> Result<(Self, Waiter), WatchError> {
+    pub fn start(rules: IgnoreRules) -> Result<(Self, Waiter), WatchError> {
+        let repo = rules.repo();
         let work_tree = repo.work_tree().ok_or(WatchError::NoWorkTree)?;
         let places = Places {
             work_tree: spelled(work_tree)?,
@@ -165,7 +169,7 @@ impl Watch {
             incomplete: AtomicBool::new(false),
             watched: Mutex::new(HashSet::new()),
             places: places.clone(),
-            repo: repo.clone(),
+            rules: rules.clone(),
         });
         shared.watch_all()?;
         let waiter = Waiter {
@@ -173,7 +177,7 @@ impl Watch {
             events,
             shared: Arc::downgrade(&shared),
             places,
-            repo,
+            rules,
             problem: None,
             stirred: None,
         };
@@ -364,7 +368,11 @@ impl Waiter {
             }
         }
         if !paths.is_empty() {
-            match self.repo.ignored(paths.iter().map(String::as_str)) {
+            let ignored = self
+                .rules
+                .read()
+                .and_then(|copy| copy.ignored(paths.iter().map(String::as_str)));
+            match ignored {
                 Ok(ignored) => {
                     counts |= paths.iter().any(|path| !ignored.contains(path));
                     made.retain(|directory| !ignored.contains(&format!("{directory}/")));
@@ -498,7 +506,7 @@ impl Shared {
     /// Watches `directory`, relative to the working tree (empty for its root), and every
     /// directory under it that git does not ignore.
     fn watch_under(&self, directory: &str) -> Result<(), WatchError> {
-        let found = walk(&self.repo, &self.places.work_tree, directory)?;
+        let found = walk(&self.rules, &self.places.work_tree, directory)?;
         let mut watcher = self.watcher.lock();
         let mut directories = self.watched.lock();
         for path in found {
@@ -526,7 +534,7 @@ impl Shared {
         if !PER_DIRECTORY {
             return Ok(());
         }
-        let found: HashSet<PathBuf> = walk(&self.repo, &self.places.work_tree, "")?
+        let found: HashSet<PathBuf> = walk(&self.rules, &self.places.work_tree, "")?
             .into_iter()
             .collect();
         let mut watcher = self.watcher.lock();
@@ -668,11 +676,13 @@ fn is_plain_directory(path: &Path) -> bool {
 }
 
 /// Every directory at or under `start`, relative to `work_tree` (empty for its root), that git
-/// does not ignore, as absolute paths: one `git check-ignore` per level of the tree.
+/// does not ignore, as absolute paths: one `git check-ignore` per level of the tree, all on one
+/// reading of the index.
 ///
 /// Symbolic links are not followed, since git records the link itself; nested repositories
 /// and submodules are left out, since a capture records only their commit.
-fn walk(repo: &Repo, work_tree: &Path, start: &str) -> Result<Vec<PathBuf>, WatchError> {
+fn walk(rules: &IgnoreRules, work_tree: &Path, start: &str) -> Result<Vec<PathBuf>, WatchError> {
+    let copy = rules.read()?;
     let mut found = vec![work_tree.join(start)];
     let mut level = vec![start.to_owned()];
     while !level.is_empty() {
@@ -705,7 +715,7 @@ fn walk(repo: &Repo, work_tree: &Path, start: &str) -> Result<Vec<PathBuf>, Watc
             }
         }
         let asked: Vec<String> = children.iter().map(|child| format!("{child}/")).collect();
-        let ignored = repo.ignored(asked.iter().map(String::as_str))?;
+        let ignored = copy.ignored(asked.iter().map(String::as_str))?;
         level = children
             .into_iter()
             .filter(|child| !ignored.contains(&format!("{child}/")))
@@ -744,6 +754,8 @@ mod tests {
     use std::io::Write as _;
     use std::process::Command;
 
+    use review_core::{Repo, Review};
+
     use super::*;
 
     /// Long enough for any platform to deliver an event; a wait that should wake does so well
@@ -755,6 +767,8 @@ mod tests {
 
     struct Tree {
         dir: tempfile::TempDir,
+        /// Where the private repository lives, outside the tree.
+        data: tempfile::TempDir,
     }
 
     impl Tree {
@@ -762,6 +776,7 @@ mod tests {
         fn new() -> Self {
             let tree = Self {
                 dir: tempfile::tempdir().unwrap(),
+                data: tempfile::tempdir().unwrap(),
             };
             tree.git(&["init", "--quiet", "--initial-branch=main"]);
             tree.write(
@@ -813,9 +828,14 @@ mod tests {
             assert!(status.success(), "git {args:?}");
         }
 
+        /// A review of the tree's checkout, stored outside the tree.
+        fn review(&self) -> Review {
+            Review::open_checkout(self.data.path(), Repo::discover(self.dir.path()).unwrap())
+                .unwrap()
+        }
+
         fn watch(&self) -> (Watch, Waiter) {
-            let repo = Repo::discover(self.dir.path()).unwrap();
-            let (watch, mut waiter) = Watch::start(repo).unwrap();
+            let (watch, mut waiter) = Watch::start(self.review().ignore_rules()).unwrap();
             settle(&mut waiter);
             (watch, waiter)
         }
@@ -973,8 +993,8 @@ mod tests {
         assert!(!watch.covers_all());
     }
 
-    /// A capture reads the working tree and writes objects and a temporary index into the git
-    /// directory, none of which wakes the wait, so a capture never triggers the next.
+    /// A capture reads the working tree and the index, and writes only into a private
+    /// repository, so it never wakes the wait and never triggers the next.
     #[test]
     fn a_capture_never_wakes_the_wait() {
         let tree = Tree::new();
@@ -982,9 +1002,9 @@ mod tests {
         tree.write("src/untracked.rs", "\n");
         let (_watch, mut waiter) = tree.watch();
         let (_recorder, reported) = record(&tree);
-        let repo = Repo::discover(tree.dir.path()).unwrap();
-        repo.capture_worktree().unwrap();
-        repo.capture_worktree().unwrap();
+        let review = tree.review();
+        review.refresh().unwrap();
+        review.refresh().unwrap();
         assert_eq!(
             waiter.wait_for(SILENT),
             None,

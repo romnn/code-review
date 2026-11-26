@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::checkout::{self, Observed};
+use super::checkout::{self, Looks, Observed};
 use super::github::CheckoutPullRequest;
 use super::{Review, ReviewTarget, RevisionMeta, Session, Subject, revision_events};
 use crate::error::Error;
@@ -53,11 +53,12 @@ impl Review {
     /// (see [`Self::subject`]).
     ///
     /// Nothing is recorded: the log, the review's pinned snapshots and the caches stay as they
-    /// are. The capture's base, head and target are pinned under `session` before it is
-    /// analyzed, so its objects stay while it shows although no revision records it; first,
-    /// `session`'s pins of every capture but those in `keep`, the ones the caller still shows
-    /// or holds for later, go. A session captures one at a time, so none of its other pins can
-    /// be in use.
+    /// are, and the reviewed repository is only read.
+    /// The capture's objects go into the review's archive, and its base and head are pinned
+    /// there under `session` before it is analyzed, so they stay while it shows although no
+    /// revision records it; first, `session`'s pins of every capture but those in `keep`, the
+    /// ones the caller still shows or holds for later, go.
+    /// A session captures one at a time, so none of its other pins can be in use.
     /// [`Self::mark`] records a provisional revision before its marks; see
     /// [`History::is_provisional`].
     ///
@@ -100,8 +101,8 @@ impl Review {
         self.live_history_with(session, keep, pull_requests, Looks::Twice, &mut || Ok(()))
     }
 
-    /// See [`Self::live_history`]; `captured` runs between the capture and its checks, where a
-    /// test makes something happen meanwhile.
+    /// See [`Self::live_history`]; `captured` runs as [`Self::capture`] says, where a test makes
+    /// something happen meanwhile.
     #[tracing::instrument(name = "live_history", skip_all, fields(?looks))]
     fn live_history_with(
         &self,
@@ -119,38 +120,25 @@ impl Review {
                 "only a review of a working tree follows it".to_owned(),
             ));
         }
-        if !session
-            .pins()
-            .starts_with(&format!("{}/", self.live_pins()))
-        {
+        if !session.pins_in(&self.archive) {
             return Err(Error::InvalidTarget(
                 "the session belongs to another review".to_owned(),
             ));
         }
-        if !self.verify_clone()? {
-            return Ok(Capture::Replaced);
-        }
         session.release(keep)?;
-        // The revision the capture follows is the last one recorded before it was taken.
-        let expected = self.history()?.current();
-        let observed = match looks {
-            Looks::Once => self.capture(pull_requests)?,
-            Looks::Twice => self.capture_twice(pull_requests)?,
-        };
-        captured()?;
+        // The revision the capture follows is the last one recorded before it was taken, read
+        // without deriving anything, so the capture waits on nothing the history needs.
+        let expected = self.last_revision()?;
         let checkout::Captured {
             input,
             subject,
             filtered,
-        } = match observed {
+        } = match self.capture(session, pull_requests, looks, captured)? {
             Observed::Captured(captured) => *captured,
             Observed::Busy(busy) => return Ok(Capture::Busy(busy)),
             Observed::Moved => return Ok(Capture::Moved),
+            Observed::Replaced => return Ok(Capture::Replaced),
         };
-        if !self.verify_clone()? {
-            return Ok(Capture::Replaced);
-        }
-        session.pin(&input)?;
         let recorded = self.history()?;
         if recorded.current() != expected {
             return Ok(Capture::Moved);
@@ -238,16 +226,21 @@ impl Review {
     /// as `view`'s history has it, and none when the log already ends at it, as when an
     /// earlier mark recorded it; anything else means the review moved on since `view` was
     /// read.
+    /// Nothing is saved for a checkout that is another clone now.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotCurrentRevision`] when the log moved on.
+    /// Returns [`Error::CloneReplaced`] when the checkout of a review of a checkout is another
+    /// clone now, and [`Error::NotCurrentRevision`] when the log moved on.
     pub(super) fn unsettled(
         &self,
         log: &LogWriter<'_>,
         view: &RevisionView<'_>,
         tip: bool,
     ) -> Result<Option<RevisionEvent>, Error> {
+        if !self.verify_clone()? {
+            return Err(Error::CloneReplaced);
+        }
         let revisions = revision_events(&self.dir.events(), log.events(), 0)?;
         let last = revisions.last();
         let moved_on = || Error::NotCurrentRevision {
@@ -282,15 +275,6 @@ impl Review {
             ..RevisionEvent::from(record)
         }))
     }
-}
-
-/// How many times a capture looks at the working tree.
-#[derive(Debug, Clone, Copy)]
-enum Looks {
-    /// Once, for a caller that watches the working tree.
-    Once,
-    /// Twice, keeping the capture only when both looks saw the same.
-    Twice,
 }
 
 /// Whether the recorded `event` is the revision `record`: the same number and snapshots.
@@ -452,7 +436,8 @@ mod tests {
         let (_repo, _data, review) = edited_checkout()?;
         let session = review.start_session()?;
         let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
-            review.repo().delete_ref("refs/code-review/clone-id")
+            let clones = review.dir.data_dir().join("clones");
+            std::fs::remove_dir_all(&clones).map_err(|err| Error::io("remove", clones, err))
         })?;
         assert!(matches!(captured, Capture::Replaced));
         Ok(())

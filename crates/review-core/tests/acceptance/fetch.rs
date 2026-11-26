@@ -1,4 +1,5 @@
-//! Fetch isolation: the engine never updates refs outside `refs/code-review/*` or `FETCH_HEAD`.
+//! Fetch isolation: a fetch lands in a transient repository of cr's own, and the reviewed
+//! repository is never written.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -8,7 +9,7 @@ use color_eyre::eyre;
 use googletest::prelude::*;
 use review_core::{Error, ObjectId, Repo, Review, ReviewTarget};
 
-use crate::common::{GIT_ENV, TestRepo};
+use crate::common::{GIT_ENV, TestRepo, files};
 
 fn git(directory: &Path, args: &[&str]) -> eyre::Result<String> {
     let output = Command::new("git")
@@ -24,18 +25,6 @@ fn git(directory: &Path, args: &[&str]) -> eyre::Result<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-}
-
-/// Every ref with its target, plus the content of `FETCH_HEAD`.
-fn ref_state(directory: &Path) -> eyre::Result<Vec<String>> {
-    let refs = git(
-        directory,
-        &["for-each-ref", "--format=%(refname) %(objectname)"],
-    )?;
-    let mut state: Vec<String> = refs.lines().map(str::to_owned).collect();
-    let fetch_head = std::fs::read_to_string(directory.join(".git/FETCH_HEAD")).unwrap_or_default();
-    state.push(format!("FETCH_HEAD {fetch_head}"));
-    Ok(state)
 }
 
 /// A remote with `main` and `feature` sharing an early base, ten commits deep each.
@@ -67,74 +56,9 @@ fn clone(remote: &TestRepo, extra: &[&str]) -> eyre::Result<tempfile::TempDir> {
     Ok(local)
 }
 
-/// Assert that between two ref states only refs under `refs/code-review/` changed.
-fn assert_only_review_refs_changed(before: &[String], after: &[String]) {
-    let outside = |state: &[String]| -> Vec<String> {
-        state
-            .iter()
-            .filter(|line| !line.starts_with("refs/code-review/"))
-            .cloned()
-            .collect()
-    };
-    assert_that!(outside(after), eq(&outside(before)));
-}
-
-/// Fetching into temporary refs leaves remote-tracking refs and `FETCH_HEAD` alone, although
-/// `origin` has the usual configured fetch refspec.
-#[test]
-fn fetch_updates_only_review_refs() -> eyre::Result<()> {
-    let remote = remote_with_history()?;
-    let local = clone(&remote, &[])?;
-    remote.write("main.txt", "moved on\n")?;
-    let moved = remote.commit("main moves on")?;
-
-    let before = ref_state(local.path())?;
-    let repo = Repo::discover(local.path())?;
-    repo.fetch(
-        "origin",
-        &[
-            "+refs/heads/main:refs/code-review/tmp/test-target".to_owned(),
-            "+refs/heads/feature:refs/code-review/tmp/test-head".to_owned(),
-        ],
-    )?;
-    let after = ref_state(local.path())?;
-    assert_only_review_refs_changed(&before, &after);
-    assert_that!(
-        repo.resolve_commit("refs/code-review/tmp/test-target")?
-            .as_str(),
-        eq(moved.as_str())
-    );
-    Ok(())
-}
-
-/// Deepening a shallow clone to find the merge base changes no ref and no `FETCH_HEAD`.
-#[test]
-fn shallow_deepening_updates_no_refs() -> eyre::Result<()> {
-    let remote = remote_with_history()?;
-    let local = clone(&remote, &["--depth=1", "--no-single-branch"])?;
-    let target = ObjectId::parse(&git(local.path(), &["rev-parse", "origin/main"])?)?;
-    let head = ObjectId::parse(&git(local.path(), &["rev-parse", "origin/feature"])?)?;
-    remote.write("main.txt", "moved on\n")?;
-    remote.commit("main moves on")?;
-
-    let before = ref_state(local.path())?;
-    let repo = Repo::discover(local.path())?;
-    let bases = repo.merge_bases(&target, &head, Some("origin"))?;
-    let expected = git(
-        remote.path(),
-        &["merge-base", target.as_str(), head.as_str()],
-    )?;
-    assert_that!(
-        bases.first().map(ObjectId::as_str),
-        some(eq(expected.as_str()))
-    );
-    assert_that!(ref_state(local.path())?, eq(&before));
-    Ok(())
-}
-
 /// Opens a review of `target` in a depth-1 clone checked out on `feature`, after `prepare`
-/// changes the clone, and checks that the merge base was found by deepening without touching
-/// refs outside `refs/code-review/*`.
+/// changes the clone, and checks that the merge base was found by deepening, writing nothing to
+/// the clone.
 fn review_in_shallow_clone(
     target: ReviewTarget,
     prepare: impl Fn(&Path) -> eyre::Result<()>,
@@ -146,13 +70,13 @@ fn review_in_shallow_clone(
     )?;
     prepare(local.path())?;
     let expected = git(remote.path(), &["merge-base", "main", "feature"])?;
-    let before = ref_state(local.path())?;
+    let before = files(&local.path().join(".git"))?;
 
     let data = tempfile::tempdir()?;
     let review = Review::open(data.path(), Repo::discover(local.path())?, target)?;
     let recorded = review.refresh()?;
     assert_that!(recorded.base.as_str(), eq(expected.as_str()));
-    assert_only_review_refs_changed(&before, &ref_state(local.path())?);
+    assert_that!(files(&local.path().join(".git"))?, eq(&before));
     Ok(())
 }
 
@@ -185,9 +109,31 @@ fn shallow_review_with_unpublished_head_finds_merge_base() -> eyre::Result<()> {
     )
 }
 
-/// Only an explicit fetch reaches a remote, even for a git that would fetch what a partial clone
-/// lacks: reading a missing blob and detecting a rename across missing blobs fail, and fetch
-/// nothing, while a fetch still fetches, over the transports the user allows.
+/// The transient repository a shallow clone's history is deepened in reaches the remote as the
+/// clone does: the clone's configuration forbidding the remote's transport forbids the fetch.
+#[test]
+fn deepening_follows_the_clones_configuration() -> eyre::Result<()> {
+    let remote = remote_with_history()?;
+    let local = clone(
+        &remote,
+        &["--depth=1", "--no-single-branch", "--branch", "feature"],
+    )?;
+    git(local.path(), &["config", "protocol.file.allow", "never"])?;
+    let target = ReviewTarget::Range {
+        base: "origin/main".to_owned(),
+        head: "feature".to_owned(),
+    };
+    let data = tempfile::tempdir()?;
+    let review = Review::open(data.path(), Repo::discover(local.path())?, target)?;
+    assert_that!(
+        review.refresh(),
+        err(matches_pattern!(Error::NoMergeBase { .. }))
+    );
+    Ok(())
+}
+
+/// Nothing reaches a remote but a fetch, whatever variables an embedder sets: reading a missing
+/// blob and detecting a rename across missing blobs fail, and fetch nothing.
 #[test]
 fn a_partial_clone_reaches_its_remote_only_to_fetch() -> eyre::Result<()> {
     let origin = TestRepo::new()?;
@@ -214,12 +160,14 @@ fn a_partial_clone_reaches_its_remote_only_to_fetch() -> eyre::Result<()> {
     };
     assert_that!(missing()?, eq(2));
 
-    // As a git without `GIT_NO_LAZY_FETCH` would, with `git config` reading another file.
+    // Variables that would have git fetch what is missing, read the origin, which has it, or
+    // read another configuration file reach no git.
     let elsewhere = local.path().join("elsewhere.gitconfig");
     std::fs::write(&elsewhere, "")?;
     let mut repo = Repo::discover(clone)?;
     repo.set_command_env([
         ("GIT_NO_LAZY_FETCH", "0".into()),
+        ("GIT_DIR", origin.path().join(".git").into_os_string()),
         ("GIT_CONFIG", elsewhere.into_os_string()),
     ]);
     let read = repo.blob_reader()?.read(&blob);
@@ -229,15 +177,6 @@ fn a_partial_clone_reaches_its_remote_only_to_fetch() -> eyre::Result<()> {
         "the rename was found"
     );
     assert_that!(missing()?, eq(2));
-
-    // A fetch reaches the remote, unless the user's configuration forbids its transport.
-    let refspec = "+refs/heads/main:refs/code-review/test/main".to_owned();
-    repo.fetch("origin", std::slice::from_ref(&refspec))?;
-    git(clone, &["config", "protocol.file.allow", "never"])?;
-    assert!(
-        repo.fetch("origin", &[refspec]).is_err(),
-        "file:// was used"
-    );
     Ok(())
 }
 

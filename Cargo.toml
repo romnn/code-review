@@ -61,6 +61,9 @@ sha1_smol = "1.0.1"
 # Kills a timed-out git with its helpers, as one process group, and runs review-core's fetches in
 # a session of its own, without the terminal.
 rustix = { version = "1.1", default-features = false, features = ["process", "std"] }
+# Reads a directory's volume and file index on Windows, which tells a clone made anew at the same
+# path from the old one.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 # Front-end dependencies: gpui and gpui-component for review-gui, the rest for review-ui and
 # review-tui.
