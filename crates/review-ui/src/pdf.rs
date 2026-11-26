@@ -399,16 +399,17 @@ fn moved(old: &str, new: &str, chunks: &[Chunk]) -> Option<Vec<MovedPassage>> {
 }
 
 /// `text`, with no line breaks, as rows to read, a sentence a row: a row ends after `.`, `!`
-/// or `?` before a space, which it takes. Nothing else changes, so two texts have the same rows
-/// exactly when they are the same, and the rows draw characters that never show as the code
-/// rows do.
+/// or `?` before a space and more text, and takes that space. Nothing else changes, so two texts
+/// have the same rows exactly when they are the same, and the rows draw characters that never
+/// show as the code rows do.
 fn rows(text: &str) -> String {
     let mut rows = String::new();
     let mut chars = text.chars().peekable();
     while let Some(char) = chars.next() {
         rows.push(char);
         if matches!(char, '.' | '!' | '?') && chars.next_if_eq(&' ').is_some() {
-            rows.push('\n');
+            // A space the text ends on stays, so `A. ` never reads as `A.`.
+            rows.push(if chars.peek().is_some() { '\n' } else { ' ' });
         }
     }
     if !rows.is_empty() && !rows.ends_with('\n') {
@@ -750,6 +751,8 @@ mod tests {
             // Whitespace other than a line break shows.
             (lines(&["A B"]), lines(&["A  B"])),
             (lines(&["A\tB"]), lines(&["A B"])),
+            // A space after the last sentence is text too.
+            (lines(&["A."]), lines(&["A. "])),
         ] {
             let (kind, rows) = compared(&old, &new);
             assert_eq!(kind, PageKind::Changed, "{old:?} → {new:?}");
