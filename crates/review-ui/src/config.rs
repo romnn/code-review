@@ -175,8 +175,9 @@ struct File {
     review: ReviewSection,
     #[serde(default)]
     lsp: LspSection,
-    #[serde(default)]
-    tui: TuiSection,
+    /// Read leniently, so a mistake in review-tui's settings leaves review-gui's standing; see
+    /// [`Config::tui_mouse`].
+    tui: Option<toml::Value>,
     /// Read only to say that `[mouse]` moved to `[tui.mouse]`, rather than reject an older file
     /// whole.
     mouse: Option<serde::de::IgnoredAny>,
@@ -267,7 +268,7 @@ struct LspSection {
     enabled: Option<bool>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TuiSection {
     #[serde(default)]
@@ -610,8 +611,9 @@ pub struct Config {
     pub language_servers: bool,
     /// Whether a review of the working tree follows it as it changes.
     pub live: bool,
-    /// What the mouse may do in review-tui; see [`crate::front_end::FrontEnd::mouse`].
-    pub tui_mouse: Mouse,
+    /// What the mouse may do in review-tui, or what is wrong with `[tui]`, which only review-tui
+    /// reports; see [`crate::front_end::FrontEnd::mouse`].
+    pub tui_mouse: Result<Mouse, String>,
     /// The pane widths.
     pub layout: LayoutConfig,
     /// Key overrides: an action's name and the keys that replace its defaults.
@@ -645,7 +647,7 @@ impl Default for Config {
             auto_approve_formatting: true,
             language_servers: true,
             live: true,
-            tui_mouse: Mouse::default(),
+            tui_mouse: Ok(Mouse::default()),
             layout: LayoutConfig::default(),
             keys: BTreeMap::new(),
             styles: BTreeMap::new(),
@@ -1007,7 +1009,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             .unwrap_or(defaults.auto_approve_formatting),
         language_servers: file.lsp.enabled.unwrap_or(defaults.language_servers),
         live: file.review.live.unwrap_or(defaults.live),
-        tui_mouse: Mouse::of(&file.tui.mouse),
+        tui_mouse: parse_tui(file.tui),
         layout: LayoutConfig {
             sidebar: sidebar_width("sidebar", file.layout.sidebar)?,
             tui_sidebar: sidebar_width("tui_sidebar", file.layout.tui_sidebar)?,
@@ -1041,6 +1043,17 @@ fn sidebar_width(key: &str, setting: Option<WidthSetting>) -> Result<SidebarWidt
         )),
         _ => Ok(SidebarWidth::Fit),
     }
+}
+
+/// What review-tui's mouse may do as `[tui]` sets it, or what is wrong with it.
+fn parse_tui(value: Option<toml::Value>) -> Result<Mouse, String> {
+    let Some(value) = value else {
+        return Ok(Mouse::default());
+    };
+    let tui: TuiSection = value
+        .try_into()
+        .map_err(|err: toml::de::Error| format!("[tui] cannot be used: {}", err.message()))?;
+    Ok(Mouse::of(&tui.mouse))
 }
 
 /// A `[styles.<name>]` table, or what is wrong with it.
@@ -1698,7 +1711,7 @@ NextHunk = [\"j\"]
             navigate = false
         "})
         .unwrap();
-        assert_eq!(config.tui_mouse, Mouse::default());
+        assert_eq!(config.tui_mouse, Ok(Mouse::default()));
         assert_eq!(
             config.problems,
             ["[mouse] moved to [tui.mouse], which sets review-tui's mouse only"]
@@ -1729,7 +1742,7 @@ NextHunk = [\"j\"]
     /// copy-on-select needs selecting.
     #[test]
     fn the_mouse_parts_go_off_one_by_one_or_all_at_once() {
-        let mouse = |text: &str| parse(text).unwrap().tui_mouse;
+        let mouse = |text: &str| parse(text).unwrap().tui_mouse.unwrap();
         assert_eq!(mouse(""), Mouse::default());
         assert!(Mouse::default().any() && !Mouse::default().copy_on_select);
         assert_eq!(

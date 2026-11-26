@@ -1180,18 +1180,10 @@ impl Model {
         self.layout.sidebar = crate::panes::SidebarWidth::Set(width);
     }
 
-    /// Sets the comparison's height in logical pixels as its edge is dragged; see
-    /// [`Self::remember_comparison_height`].
-    pub fn set_comparison_height(&mut self, height: f32) {
+    /// Sets the comparison's height in logical pixels, as a drag of its edge left it, and
+    /// writes it to the configuration file in the background, for the next launch.
+    pub fn remember_comparison_height(&mut self, height: f32) {
         self.layout.comparison = Some(height);
-    }
-
-    /// Writes the comparison's height to the configuration file in the background, for the
-    /// next launch.
-    pub fn remember_comparison_height(&mut self) {
-        let Some(height) = self.layout.comparison else {
-            return;
-        };
         #[expect(
             clippy::cast_possible_truncation,
             reason = "a height in logical pixels, clamped far below i64's range"

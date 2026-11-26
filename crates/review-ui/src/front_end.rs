@@ -47,11 +47,14 @@ impl FrontEnd {
 
     /// What the mouse may do in the front end: in a window everything, whatever `config` says,
     /// and in a terminal what its `[tui.mouse]` allows.
-    #[must_use]
-    pub fn mouse(self, config: &Config) -> Mouse {
+    ///
+    /// # Errors
+    ///
+    /// In a terminal, says what is wrong with `[tui]`; a window never reads it.
+    pub fn mouse(self, config: &Config) -> Result<Mouse, String> {
         match self {
-            Self::Window => Mouse::default(),
-            Self::Terminal => config.tui_mouse,
+            Self::Window => Ok(Mouse::default()),
+            Self::Terminal => config.tui_mouse.clone(),
         }
     }
 

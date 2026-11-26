@@ -102,6 +102,9 @@ pub struct Fonts {
     pub advance: f32,
 }
 
+/// The rows of the diff the comparison above it always leaves.
+const COMPARISON_DIFF_ROWS: f32 = 3.0;
+
 /// The sizes of the window at one code size and density, in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sizes {
@@ -163,6 +166,18 @@ impl Sizes {
     /// size: the pane header and the two bottom bars.
     fn list_chrome(&self) -> f32 {
         self.bar() + 2.0 * self.strip()
+    }
+
+    /// The most the comparison above the diff may take in a window `window` pixels high, with
+    /// the title bar when `title_bar`: what the bars and the find bar leave, less the diff's
+    /// [`COMPARISON_DIFF_ROWS`] rows, so a short window never squeezes the diff away.
+    pub fn comparison_most(&self, window: f32, title_bar: bool) -> f32 {
+        let title = if title_bar {
+            super::chrome::HEIGHT
+        } else {
+            0.0
+        };
+        window - title - self.list_chrome() - self.bar() - COMPARISON_DIFF_ROWS * self.row_height()
     }
 
     /// The same for the tree, whose pane has its two progress lines above it instead of a
@@ -337,6 +352,18 @@ mod tests {
         assert_eq!(predicted.buffer, None);
         let same = geometry.grid(&scale, &at(before.code_size)).viewports;
         assert_eq!(same.diff, Some(876.0 / 28.0));
+    }
+
+    /// In a window 400 pixels high the largest comparison still leaves the diff three rows
+    /// under it, the find bar open too.
+    #[test]
+    fn a_short_window_keeps_rows_under_the_comparison() {
+        let sizes = Sizes::new(&at(17.333_334), 0.6);
+        let most = sizes.comparison_most(400.0, true);
+        let height = review_ui::panes::comparison_height(Some(1000.0), 400.0, most, sizes.bar());
+        let chrome = super::super::chrome::HEIGHT + sizes.list_chrome() + sizes.bar();
+        assert!(height > 0.0);
+        assert_eq!(400.0 - chrome - height, 3.0 * sizes.row_height());
     }
 
     /// The settings panel's sizes follow the code size it opened with, as its text does.

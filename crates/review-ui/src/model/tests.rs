@@ -277,7 +277,7 @@ fn settings() -> Settings {
         code_size: 17.0,
         context: config.context,
         shorten_chains: config.shorten_chains,
-        mouse: config.tui_mouse,
+        mouse: crate::config::Mouse::default(),
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -2722,8 +2722,7 @@ fn a_dragged_comparison_height_is_remembered_keeping_the_file() {
     let mut host = Host::open(demo(dir.path()));
     host.update(|model| model.settings.config_path = Some(config.clone()));
 
-    host.update(|model| model.set_comparison_height(512.4));
-    host.update(Model::remember_comparison_height);
+    host.update(|model| model.remember_comparison_height(512.4));
     assert_eq!(host.model().layout.comparison, Some(512.4));
     host.settle();
     assert_eq!(

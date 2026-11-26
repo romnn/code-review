@@ -95,8 +95,6 @@ fn whole_cells(width: f32) -> u16 {
 
 /// The comparison's share of the window's height until its edge is dragged.
 const COMPARISON_SHARE: f32 = 0.45;
-/// The tallest comparison's share of the window's height, so the rows below keep the rest.
-const COMPARISON_MAX_SHARE: f32 = 0.75;
 /// The least room the comparison's images get between its labels and its status line.
 const COMPARISON_IMAGES_MIN: f32 = 96.0;
 
@@ -104,12 +102,12 @@ const COMPARISON_IMAGES_MIN: f32 = 96.0;
 /// label and status bars are `bar` high: `height` when the reviewer dragged its edge, or else
 /// its share of the window.
 ///
-/// It is at most three quarters of the window, and within that tall enough for both bars and
-/// [`COMPARISON_IMAGES_MIN`] of images. It depends on nothing the comparison shows, so the rows
-/// below never move when its images land.
+/// It is at most `most`, what the window's other bars and the diff's least rows leave it, and
+/// within that tall enough for both bars and [`COMPARISON_IMAGES_MIN`] of images. It depends on
+/// nothing the comparison shows, so the rows below never move when its images land.
 #[must_use]
-pub fn comparison_height(height: Option<f32>, window: f32, bar: f32) -> f32 {
-    let max = (window * COMPARISON_MAX_SHARE).max(0.0);
+pub fn comparison_height(height: Option<f32>, window: f32, most: f32, bar: f32) -> f32 {
+    let max = most.max(0.0);
     let min = (bar * 2.0 + COMPARISON_IMAGES_MIN).min(max);
     match height {
         Some(height) if !height.is_nan() => height.clamp(min, max),
@@ -194,17 +192,21 @@ mod tests {
     }
 
     /// The comparison takes its share of the window until its edge is dragged, and a dragged
-    /// height stays between room for its bars and images and three quarters of the window.
+    /// height stays between room for its bars and images and the most the window leaves it.
     #[test]
     fn comparison_heights_stay_within_limits() {
-        assert_eq!(comparison_height(None, 1000.0, 30.0), 450.0);
-        assert_eq!(comparison_height(Some(600.0), 1000.0, 30.0), 600.0);
-        assert_eq!(comparison_height(Some(900.0), 1000.0, 30.0), 750.0);
-        assert_eq!(comparison_height(Some(20.0), 1000.0, 30.0), 156.0);
-        assert_eq!(comparison_height(Some(f32::NAN), 1000.0, 30.0), 450.0);
-        // A window too low for the least comparison gives it three quarters.
-        assert_eq!(comparison_height(Some(20.0), 160.0, 30.0), 120.0);
-        assert_eq!(comparison_height(None, 160.0, 30.0), 120.0);
+        assert_eq!(comparison_height(None, 1000.0, 750.0, 30.0), 450.0);
+        assert_eq!(comparison_height(Some(600.0), 1000.0, 750.0, 30.0), 600.0);
+        assert_eq!(comparison_height(Some(900.0), 1000.0, 750.0, 30.0), 750.0);
+        assert_eq!(comparison_height(Some(20.0), 1000.0, 750.0, 30.0), 156.0);
+        assert_eq!(
+            comparison_height(Some(f32::NAN), 1000.0, 750.0, 30.0),
+            450.0
+        );
+        // A window too low for the least comparison gives it what it leaves, if anything.
+        assert_eq!(comparison_height(Some(20.0), 400.0, 120.0, 30.0), 120.0);
+        assert_eq!(comparison_height(None, 400.0, 120.0, 30.0), 120.0);
+        assert_eq!(comparison_height(None, 200.0, -10.0, 30.0), 0.0);
     }
 
     /// A large font widens the narrowest sidebar, so its names keep room.

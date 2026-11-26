@@ -20,11 +20,31 @@ use super::{ReviewApp, scroll};
 pub(super) enum Edge {
     /// The divider between the files and the diff.
     Divider,
-    /// The edge under the comparison, whose top is at `top` in the window.
+    /// The edge under the comparison, which shows at `height` while it drags and is remembered
+    /// only once it ends away from the height it started at.
     Comparison {
         /// Where the comparison starts, in logical pixels from the window's top.
         top: f32,
+        /// The comparison's height when the drag started.
+        pressed: f32,
+        /// Its height now.
+        height: f32,
     },
+}
+
+impl Edge {
+    /// The comparison height to remember once the drag ends: none when the comparison ends
+    /// up as high as it started, to the whole pixel remembered, as when a drag only moves
+    /// sideways or a short window holds it at its largest, so a height remembered for a taller
+    /// window stays.
+    fn changed_height(self) -> Option<f32> {
+        match self {
+            Self::Comparison {
+                pressed, height, ..
+            } if (height - pressed).abs() >= 0.5 => Some(height),
+            _ => None,
+        }
+    }
 }
 
 impl ReviewApp {
@@ -143,24 +163,25 @@ impl ReviewApp {
                 self.update_model(window, cx, |model| remember(model, edge));
                 return;
             }
-            let viewport = window.viewport_size();
             match edge {
                 Edge::Divider => {
                     let width = review_ui::panes::sidebar_width(
                         review_ui::panes::SidebarWidth::Set(f32::from(event.position.x)),
                         0.0,
-                        f32::from(viewport.width),
+                        f32::from(window.viewport_size().width),
                         self.sidebar_cell(),
                     );
                     self.update_model(window, cx, |model| model.set_sidebar_width(width));
                 }
-                Edge::Comparison { top } => {
-                    let height = review_ui::panes::comparison_height(
-                        Some(f32::from(event.position.y) - top),
-                        f32::from(viewport.height),
-                        self.sizes().bar(),
-                    );
-                    self.update_model(window, cx, |model| model.set_comparison_height(height));
+                Edge::Comparison { top, pressed, .. } => {
+                    let height =
+                        self.comparison_height(Some(f32::from(event.position.y) - top), window);
+                    self.resizing = Some(Edge::Comparison {
+                        top,
+                        pressed,
+                        height,
+                    });
+                    cx.notify();
                 }
             }
             return;
@@ -229,8 +250,25 @@ impl ReviewApp {
     /// Starts dragging the edge under the comparison, pressed at `y` in the window while the
     /// comparison is `height` high.
     pub(super) fn press_comparison_edge(&mut self, y: f32, height: f32, cx: &mut Context<Self>) {
-        self.resizing = Some(Edge::Comparison { top: y - height });
+        self.resizing = Some(Edge::Comparison {
+            top: y - height,
+            pressed: height,
+            height,
+        });
         cx.notify();
+    }
+
+    /// The comparison's height in `window`: `wanted` when its edge was dragged, or else its
+    /// share of the window, within what the window leaves it beside the diff's least rows.
+    pub(super) fn comparison_height(&self, wanted: Option<f32>, window: &Window) -> f32 {
+        let height = f32::from(window.viewport_size().height);
+        let sizes = self.sizes();
+        review_ui::panes::comparison_height(
+            wanted,
+            height,
+            sizes.comparison_most(height, self.client_decorated),
+            sizes.bar(),
+        )
     }
 }
 
@@ -238,6 +276,30 @@ impl ReviewApp {
 fn remember(model: &mut Model, edge: Edge) {
     match edge {
         Edge::Divider => model.remember_layout(),
-        Edge::Comparison { .. } => model.remember_comparison_height(),
+        Edge::Comparison { .. } => {
+            if let Some(height) = edge.changed_height() {
+                model.remember_comparison_height(height);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A drag of the comparison's edge is remembered only when it changed the height, so one
+    /// that a short window held at its largest keeps the taller height remembered before.
+    #[test]
+    fn only_a_changed_comparison_height_is_remembered() {
+        let drag = |pressed, height| Edge::Comparison {
+            top: 67.0,
+            pressed,
+            height,
+        };
+        assert_eq!(drag(450.0, 450.0).changed_height(), None);
+        assert_eq!(drag(450.0, 450.2).changed_height(), None);
+        assert_eq!(drag(450.0, 520.0).changed_height(), Some(520.0));
+        assert_eq!(Edge::Divider.changed_height(), None);
     }
 }

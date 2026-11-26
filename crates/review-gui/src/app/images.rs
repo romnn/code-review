@@ -187,13 +187,12 @@ impl ReviewApp {
         let shown = images::comparison(self, &colors)?;
         let bar = self.sizes().bar();
         let gap = GRID * 3.0;
-        let height = review_ui::panes::comparison_height(
-            self.driver.model().layout.comparison,
-            f32::from(window.viewport_size().height),
-            bar,
-        );
+        let (wanted, active) = match self.resizing {
+            Some(Edge::Comparison { height, .. }) => (Some(height), true),
+            _ => (self.driver.model().layout.comparison, false),
+        };
+        let height = self.comparison_height(wanted, window);
         let accent = to_gpui(colors.accent);
-        let active = matches!(self.resizing, Some(Edge::Comparison { .. }));
         // The bottom edge: a hairline with a wider grip, which lights while it drags.
         let edge = div()
             .id("comparison-edge")
@@ -248,6 +247,7 @@ impl ReviewApp {
                 .w_full()
                 .px(px(gap))
                 .h(px(height))
+                .overflow_hidden()
                 .bg(to_gpui(colors.surface))
                 .text_size(px(self.sizes().ui_size()))
                 .child(
@@ -260,7 +260,7 @@ impl ReviewApp {
                 // The images take what the bars and the hairline leave.
                 .child(
                     h_flex()
-                        .h(px(height - bar * 2.0 - 1.0))
+                        .h(px((height - bar * 2.0 - 1.0).max(0.0)))
                         .gap(px(gap))
                         .child(base)
                         .child(head),

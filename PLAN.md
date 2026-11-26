@@ -1356,8 +1356,9 @@ it, muted, so it never reads as code.
   the frame that selects a file that may be an image, its comparison is pending, with its
   labels, and takes 45% of the window or the list whatever its images, so the rows below never
   move when it lands (in review-gui, dragging its bottom edge sets another height, between room
-  for its bars and 96 px of images and three quarters of the window, remembered as `[layout]
-  comparison` in logical pixels), or move once when the file turns out not to be an image; it says
+  for its bars and 96 px of images and what leaves the diff three rows under the window's bars
+  and the find bar, remembered as `[layout] comparison` in logical pixels once a drag changes
+  it), or move once when the file turns out not to be an image; it says
   "decoding…" only after 100 ms, on the model's timer, so a quick decode never flashes. An
   image draws only for the comparison on screen, never under another file's header. The front
   end says whether
