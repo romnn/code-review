@@ -18,6 +18,9 @@ use crate::text::{self, generic_tokens, split_lines};
 /// Git's binary detection window: a NUL byte in the first 8000 bytes means binary.
 const BINARY_PROBE_BYTES: usize = 8000;
 
+/// How a PDF starts.
+const PDF_HEADER: &[u8] = b"%PDF-";
+
 /// Lines of context on each side that identify a chunk among identical changes.
 pub(crate) const CONTEXT_LINES: usize = 3;
 
@@ -317,6 +320,12 @@ fn content_change(
         (Some(Opaque(unit)), _) | (_, Some(Opaque(unit))) => opaque(unit),
         (None, Some(Text(new))) if new.is_empty() => ContentChange::Unit(FileUnit::EmptyAdded),
         (Some(Text(old)), None) if old.is_empty() => ContentChange::Unit(FileUnit::EmptyDeleted),
+        // A PDF is one document, so a change that would show one's bytes as lines of text is
+        // one binary unit instead. Only such a change is classified anew: every other outcome
+        // stays what earlier formats made it, so its review state carries.
+        (old, new) if oids_differ && [old.as_ref(), new.as_ref()].into_iter().any(is_pdf_text) => {
+            ContentChange::Unit(FileUnit::Binary)
+        }
         (old, new) if oids_differ => {
             let text = |content: Option<SideContent>| match content {
                 Some(Text(text)) => Some(text),
@@ -329,6 +338,11 @@ fn content_change(
         }
         _ => ContentChange::None,
     }
+}
+
+/// Whether `content` is the text of a PDF.
+fn is_pdf_text(content: Option<&SideContent>) -> bool {
+    matches!(content, Some(SideContent::Text(text)) if text.as_bytes().starts_with(PDF_HEADER))
 }
 
 struct FileChunks {

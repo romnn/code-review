@@ -25,6 +25,11 @@ clap.workspace = true
 # The keymap tests bind keys the way the app does, which takes an `App`.
 gpui = { workspace = true, features = ["test-support"] }
 
+[features]
+default = ["pdf"]
+# A changed PDF's page diff; see review-ui's `pdf`.
+pdf = ["review-ui/pdf"]
+
 [lints]
 workspace = true
 
@@ -35,3 +40,5 @@ workspace = true
 # Windows test jobs still build and test it natively.
 # Every other crate, review-ui and review-tui included, has no gpui and keeps all three targets.
 targets = ["x86_64-unknown-linux-gnu"]
+# `default` enables exactly `pdf`, so the `default` row already covers it.
+exclude_features = ["pdf"]

@@ -59,6 +59,7 @@ mod layout;
 mod live;
 mod marks;
 pub mod overview;
+mod pages;
 pub mod picker;
 pub mod present;
 mod preview;
@@ -546,6 +547,8 @@ pub struct Model {
     highlights: highlights::Highlights,
     /// The selected file's comparison, when its versions are images.
     images: compare::Images,
+    /// The selected file's pages, when it is a PDF.
+    pdfs: pages::Pdfs,
     /// Whether language servers may run in the checkout; see the `trust` module.
     pub trust: Trust,
     /// The trust epoch, which lookups check as they start a server; see the `trust` module.
@@ -653,6 +656,7 @@ impl Model {
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
             // A window shows images; a terminal says when it does.
             images: compare::Images::new(settings.front_end == FrontEnd::Window),
+            pdfs: pages::Pdfs::default(),
             trust: Trust::Denied,
             trust_epoch: Arc::default(),
             guarding: false,
@@ -762,6 +766,7 @@ impl Model {
             || self.highlighting > 0
             || self.highlights.running()
             || self.images.busy()
+            || self.pdfs.busy()
             || self.picker.as_ref().is_some_and(picker::Picker::busy)
             || self.refreshing
             || self.live.as_ref().is_some_and(live::Live::capturing)
@@ -1096,7 +1101,12 @@ impl Model {
             let syntax = self.blobs.file_syntax(view, file);
             self.folds.syntax.insert(path.clone(), Arc::new(syntax));
         }
-        rows::present(rows::build(view, &units, &self.folds), self.presented)
+        // The PDF's page rows belong to this layout alone, of the pair read for this view: no
+        // other layout, such as a folder's, keeps them.
+        self.folds.pdf = self.pdf_rows(&path);
+        let layout = rows::build(view, &units, &self.folds);
+        self.folds.pdf = None;
+        rows::present(layout, self.presented)
     }
 
     /// The units of the selected hunk.
@@ -1246,7 +1256,7 @@ impl Model {
             if let Ok(mut reader) = parts.review.repo().blob_reader() {
                 for oid in wanted {
                     if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
-                        && !bytes.contains(&0)
+                        && is_text(&bytes)
                     {
                         texts.insert(
                             oid,
@@ -1608,7 +1618,7 @@ fn read_texts(
         .filter(|side| is_regular(side))
     {
         if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&side.oid)
-            && !bytes.contains(&0)
+            && is_text(&bytes)
         {
             texts.insert(
                 side.oid.clone(),
@@ -1617,6 +1627,12 @@ fn read_texts(
         }
     }
     texts
+}
+
+/// Whether a blob's `bytes` are text to show lines of: no NUL, and no PDF, which the engine
+/// makes one unit whatever its bytes.
+fn is_text(bytes: &[u8]) -> bool {
+    !bytes.contains(&0) && !crate::pdf::is_pdf(bytes)
 }
 
 /// Whether a tree entry is a regular file, whose blob is text to show; a symlink's blob is its

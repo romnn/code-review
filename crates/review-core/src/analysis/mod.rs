@@ -23,8 +23,8 @@ use crate::syntax::Language;
 /// The version of the analysis format and algorithm; cached analyses of another version are
 /// recomputed.
 ///
-/// Version 13 keeps each chunk's edit script in place of its highlighted ranges.
-pub const ANALYSIS_FORMAT: u32 = 13;
+/// Version 14 makes a PDF that earlier versions read as text one binary unit.
+pub const ANALYSIS_FORMAT: u32 = 14;
 
 /// Units within this many lines of each other are shown together as one hunk.
 pub const HUNK_MERGE_DISTANCE: usize = 3;
@@ -174,6 +174,32 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    /// The chunks that turn `old` into `new`, two texts in no file, diffed line by line as a
+    /// file's text is, each with its edit script over plain words and punctuation.
+    #[must_use]
+    pub fn between(old: &str, new: &str) -> Vec<Self> {
+        let (old_lines, new_lines) = (crate::text::split_lines(old), crate::text::split_lines(new));
+        let join =
+            |lines: &[&str], range: Range<usize>| lines.get(range).unwrap_or_default().concat();
+        crate::text::diff_lines(&old_lines, &new_lines)
+            .into_iter()
+            .map(|hunk| {
+                Self::of_lines(
+                    LineRange {
+                        start: hunk.before.start,
+                        len: hunk.before.len(),
+                    },
+                    LineRange {
+                        start: hunk.after.start,
+                        len: hunk.after.len(),
+                    },
+                    join(&old_lines, hunk.before),
+                    join(&new_lines, hunk.after),
+                )
+            })
+            .collect()
+    }
+
     /// The change from lines `removed` at `old` of one text to lines `added` at `new` of
     /// another, each line with its terminator, with an edit script over plain words and
     /// punctuation: no language proves a whitespace change means nothing, so every one shows.

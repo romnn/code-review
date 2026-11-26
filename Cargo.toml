@@ -13,8 +13,10 @@ publish = false
 review-core = { path = "crates/review-core" }
 review-grammar-sources = { path = "crates/review-grammar-sources" }
 review-languages = { path = "crates/review-languages" }
-review-ui = { path = "crates/review-ui" }
-review-tui = { path = "crates/review-tui" }
+# Each front end turns on the default features it forwards, `pdf` among them, so
+# `--no-default-features` on any of them drops pdfium all the way down.
+review-ui = { path = "crates/review-ui", default-features = false }
+review-tui = { path = "crates/review-tui", default-features = false }
 
 # Engine dependencies.
 imara-diff = { version = "0.2", default-features = false }
@@ -95,6 +97,10 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 # Decodes a changed image's versions for its comparison in review-ui, which each front end draws;
 # only the formats review-ui names, the version gpui links.
 image = { version = "0.25.10", default-features = false }
+# Reads a changed PDF's page text and renders its pages, with the pdfium library embedded at build
+# time, for review-ui's `pdf` feature. Not on crates.io yet, so pinned to the owner's merge commit
+# that reports encrypted documents and bounds page text.
+pdfium-embed = { git = "https://github.com/romnn/pdfium-embed", rev = "1cc7d39cdc429b048b4e2564f189dae2acc135b8" }
 # Display widths of code lines, which set how far the views scroll sideways, in the grapheme
 # clusters ratatui's buffer draws.
 unicode-segmentation = "1.13"

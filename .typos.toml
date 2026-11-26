@@ -5,6 +5,7 @@ extend-exclude = [
   "LICENSE-*",
   "crates/*/LICENSE",
   "THIRD-PARTY-SYNTAXES",
+  "THIRD-PARTY-PDFIUM",
 ]
 
 [default]

@@ -3,6 +3,10 @@
 
 use std::time::Instant;
 
+use review_core::analysis::FileUnit;
+
+use crate::images::Version;
+
 use super::display::display_width;
 use super::{Bar, Palette, Piece, Room, Weight, split_path};
 use crate::config::DiffLayout;
@@ -296,6 +300,22 @@ pub fn no_file(model: &Model) -> Option<&'static str> {
     matches!(model.phase, Phase::Ready).then_some("No file selected")
 }
 
+/// The format of the selected file's versions as images, such as `PNG`, once its comparison
+/// decoded or sized one, the head's before the base's; `None` for a PDF's pages.
+fn image_format(model: &Model) -> Option<String> {
+    let compared = model
+        .comparison()
+        .filter(|compared| compared.pair.page.is_none())?;
+    let comparison = &compared.comparison;
+    [&comparison.head, &comparison.base]
+        .into_iter()
+        .find_map(|version| match version {
+            Version::Image(picture) => Some(picture.size.format.clone()),
+            Version::TooManyPixels(size) => Some(size.format.clone()),
+            _ => None,
+        })
+}
+
 /// What the file header says about `section` after its path: a rename, entry changes, what
 /// kind of change it is, and why side by side shows unified.
 fn file_details(model: &Model, section: &FileSection) -> Vec<String> {
@@ -304,12 +324,18 @@ fn file_details(model: &Model, section: &FileSection) -> Vec<String> {
         details.push(format!("renamed from {old}"));
     }
     if let Some(change) = &section.change {
-        details.extend(
-            change
-                .entry_changes
-                .iter()
-                .map(|unit| format!("{unit:?}").to_lowercase()),
-        );
+        // A PDF whose pages were read is a PDF, and an image its comparison decoded is its
+        // format, whatever unit its bytes made it.
+        let format = image_format(model);
+        details.extend(change.entry_changes.iter().map(|unit| match unit {
+            FileUnit::Binary | FileUnit::NotUtf8 | FileUnit::Oversized if model.shows_pdf() => {
+                "PDF".to_owned()
+            }
+            FileUnit::Binary | FileUnit::NotUtf8 | FileUnit::Oversized if format.is_some() => {
+                format.clone().unwrap_or_default()
+            }
+            unit => format!("{unit:?}").to_lowercase(),
+        }));
         if change.formatting_only {
             details.push("reformatted only".to_owned());
         }

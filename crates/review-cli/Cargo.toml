@@ -27,5 +27,14 @@ color-eyre.workspace = true
 indoc.workspace = true
 tempfile.workspace = true
 
+[features]
+default = ["pdf"]
+# A changed PDF's page diff; see review-ui's `pdf`. The static Linux release builds without it.
+pdf = ["review-tui/pdf"]
+
 [lints]
 workspace = true
+
+[package.metadata.cargo-fc]
+# `default` enables exactly `pdf`, so the `default` row already covers it.
+exclude_features = ["pdf"]

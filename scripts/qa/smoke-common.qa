@@ -15,6 +15,26 @@ key v
 state
 expect "view":"hunks","effective_view":"hunks"
 
+# A changed PDF is one unit that diffs its pages' text: its first changed page pair shows under
+# a page navigator, rendered side by side above it; } steps to the next pair, an added page
+# whose base says so. P hides the pages and shows them again.
+file web/manual.pdf
+state
+expect "pages":"Base 2/6 → Head 2/7 · text changed"
+expect "text":"Base 2/6 → Head 2/7 · text changed · \} next page · \{ previous · P hides the page
+expect "comparison":\{"base":\{"detail":"PDF page 2 · 298 × 420 pt","note":null
+action NextPage
+action NextPage
+state
+expect "pages":"Head 4/7 · added page"
+expect "comparison":\{"base":\{"detail":"","note":"none: the page is new"
+action TogglePages
+state
+expect "comparison":null
+action TogglePages
+state
+expect "comparison":\{"base":\{"detail":"","note":"none: the page is new"
+
 # A binary file that is no image keeps its binary line, with no image comparison above it.
 file assets/logo.bin
 state

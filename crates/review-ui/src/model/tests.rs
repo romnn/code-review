@@ -8228,6 +8228,15 @@ fn a_changed_image_compares_its_versions() {
     );
     let plain = shown.head.raster.clone().unwrap();
     assert_eq!(*plain, head);
+    // The file header says what the file is.
+    let palette = crate::paint::Palette::of(host.model());
+    let room = crate::paint::Room {
+        budget: 200.0,
+        cell: 1.0,
+        gap: 1.0,
+    };
+    let header = crate::paint::header::file_header(host.model(), &palette, room, 1.0).unwrap();
+    assert_eq!(header.details.text, "PNG");
 
     // The toggle draws the head with its changed pixels tinted, and draws it plain again.
     host.dispatch(Action::ToggleChangedPixels);
@@ -8373,16 +8382,23 @@ fn only_the_shown_file_takes_its_comparison() {
     );
     let a = pair_of(&host);
 
-    // b.png's comparison starts, and a.png's no longer shows under it.
+    // b.png's comparison starts, in the job that also finds it is no PDF, and a.png's no
+    // longer shows under it.
     host.update(|model| model.show_file("b.png"));
-    assert!(host.model().images.busy());
+    let busy = |host: &Host| host.model().images.busy() || host.model().pdfs.busy();
+    assert!(busy(&host));
     assert_eq!(pair_of(&host), None);
     // c.png shows while b.png's job runs, which no second job joins.
     host.update(|model| model.show_file("c.png"));
     let waiting: Vec<Completion> = host.jobs.drain(..).map(Job::run).collect();
     let comparing = waiting
         .iter()
-        .filter(|completion| matches!(*completion.outcome, Outcome::Compared(_)))
+        .filter(|completion| {
+            matches!(
+                *completion.outcome,
+                Outcome::Compared(_) | Outcome::PdfRead(_)
+            )
+        })
         .count();
     assert_eq!(comparing, 1, "one comparison at a time");
     // b.png's comparison lands for a file no longer shown, and never shows under c.png.
@@ -8393,7 +8409,7 @@ fn only_the_shown_file_takes_its_comparison() {
     host.settle();
     let c = pair_of(&host).expect("c.png compares");
     assert_ne!(Some(&c), a.as_ref());
-    assert!(!host.model().images.busy());
+    assert!(!busy(&host));
 
     // The one comparison kept is c.png's: a.png compares again.
     host.update(|model| model.show_file("a.png"));
@@ -8552,4 +8568,367 @@ fn a_pending_comparison_keeps_its_place_and_shows_no_other_image() {
         (shade(&landed.base), shade(&landed.head)),
         (Some(3), Some(4))
     );
+}
+
+/// The rows of the shown diff as their texts, and each header's tag after it.
+fn row_texts(host: &Host) -> Vec<String> {
+    host.model()
+        .rows
+        .rows
+        .iter()
+        .map(|row| match &row.body {
+            rows::Body::Note(note) => match &note.tag {
+                Some(tag) => format!("{} [{tag}]", note.text),
+                None => note.text.clone(),
+            },
+            _ => row.text().to_owned(),
+        })
+        .collect()
+}
+
+/// The page pair the shown comparison renders, one-based.
+#[cfg(feature = "pdf")]
+fn compared_page(host: &Host) -> Option<(Option<u32>, Option<u32>)> {
+    let page = host.model().comparison()?.pair.page?;
+    Some((
+        page.base.map(|page| page + 1),
+        page.head.map(|page| page + 1),
+    ))
+}
+
+/// A changed PDF, one with a page whose text changed and an inserted page.
+#[cfg(feature = "pdf")]
+fn pdf_review(dir: &Path) -> Review {
+    use crate::pdf::testing::pdf;
+    review_of(
+        dir,
+        &[("doc.pdf", pdf(&["Cover", "Terms one", "Middle", "End"]))],
+        &[(
+            "doc.pdf",
+            pdf(&["Cover", "Terms two", "Middle", "Inserted", "End"]),
+        )],
+    )
+}
+
+/// A changed PDF is one unit that approves the whole PDF, shows the text diff of its first
+/// changed page pair under a navigator, and renders that pair for the comparison; the
+/// navigator steps through every page, and a page only the head has says so.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_changed_pdf_shows_its_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(pdf_review(dir.path()));
+    host.update(|model| model.show_file("doc.pdf"));
+    host.settle();
+    assert_eq!(
+        host.model().view().unwrap().units_of_file("doc.pdf").len(),
+        1
+    );
+    let texts = row_texts(&host);
+    assert!(
+        texts.iter().any(|text| text.starts_with("PDF")),
+        "{texts:#?}"
+    );
+    assert!(
+        texts.contains(
+            &"Base 2/4 → Head 2/5 · text changed · } next page · { previous · P hides the pages"
+                .to_owned()
+        ),
+        "{texts:#?}"
+    );
+    // The changed line once, its old word struck out before its new one.
+    assert!(texts.contains(&"Terms onetwo".to_owned()), "{texts:#?}");
+    // The file header says what the file is.
+    let palette = crate::paint::Palette::of(host.model());
+    let room = crate::paint::Room {
+        budget: 200.0,
+        cell: 1.0,
+        gap: 1.0,
+    };
+    let header = crate::paint::header::file_header(host.model(), &palette, room, 1.0).unwrap();
+    assert_eq!(header.details.text, "PDF");
+    // The page pair renders above the text.
+    assert_eq!(compared_page(&host), Some((Some(2), Some(2))));
+    let shown =
+        crate::paint::images::comparison(host.model(), &crate::paint::Palette::of(host.model()))
+            .unwrap();
+    assert_eq!(shown.head.detail.text, "PDF page 2 · 200 × 280 pt");
+    assert!(
+        line_of(&shown.status).contains("pixels changed"),
+        "{:?}",
+        line_of(&shown.status)
+    );
+
+    for _ in 0..2 {
+        host.dispatch(Action::NextPage);
+    }
+    host.settle();
+    assert_eq!(
+        host.model().page_navigator().as_deref(),
+        Some("Head 4/5 · added page")
+    );
+    assert_eq!(compared_page(&host), Some((None, Some(4))));
+    let shown =
+        crate::paint::images::comparison(host.model(), &crate::paint::Palette::of(host.model()))
+            .unwrap();
+    assert_eq!(
+        shown.base.note.as_ref().map(|note| note.text.as_str()),
+        Some("none: the page is new")
+    );
+    host.dispatch(Action::NextPage);
+    host.dispatch(Action::NextPage);
+    assert_eq!(host.model().status, "This is the last page.");
+
+    // In the diff, the PDF's one unit is the whole PDF, whatever page shows.
+    host.dispatch(Action::FocusDiff);
+    assert!(host.model().approves_pdf());
+    host.dispatch(Action::ToggleApprove);
+    host.settle();
+    let view = host.model().view().unwrap();
+    let unit = view.units_of_file("doc.pdf")[0];
+    assert!(view.standing(unit).unwrap().is_approved());
+}
+
+/// Pages switched fast while a page renders never show a page late: the render for a page left
+/// lands under no other page, and the page shown now renders next.
+#[cfg(feature = "pdf")]
+#[test]
+fn fast_page_switches_show_no_stale_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(pdf_review(dir.path()));
+    host.update(|model| model.show_file("doc.pdf"));
+    host.settle();
+    assert_eq!(compared_page(&host), Some((Some(2), Some(2))));
+
+    host.dispatch(Action::NextPage);
+    let rendering = host.run_job();
+    host.dispatch(Action::NextPage);
+    host.dispatch(Action::NextPage);
+    assert!(host.jobs.is_empty(), "a second render joined the first");
+    host.complete(rendering);
+    assert_eq!(
+        compared_page(&host),
+        None,
+        "page 3's render showed under another"
+    );
+    host.settle();
+    assert_eq!(compared_page(&host), Some((Some(4), Some(5))));
+    assert_eq!(
+        host.model().page_navigator().as_deref(),
+        Some("Base 4/4 → Head 5/5 · extracted text identical")
+    );
+}
+
+/// An encrypted PDF and one too large to read show as binary files whose header says why,
+/// with no pages and no comparison.
+#[cfg(feature = "pdf")]
+#[test]
+fn unreadable_pdfs_say_why_on_their_binary_line() {
+    use crate::pdf::testing::{encrypted, pdf};
+    let dir = tempfile::tempdir().unwrap();
+    let mut large = b"%PDF-1.4\n".to_vec();
+    large.resize(usize::try_from(crate::images::MAX_BYTES).unwrap() + 1, b'%');
+    let review = review_of(
+        dir.path(),
+        &[
+            ("locked.pdf", pdf(&["open"])),
+            ("large.pdf", pdf(&["small"])),
+        ],
+        &[
+            ("locked.pdf", encrypted(&["closed"])),
+            ("large.pdf", large.clone()),
+            // One new blob too large to read, named a PDF and not.
+            ("big.pdf", large.clone()),
+            ("big.bin", large),
+        ],
+    );
+    let mut host = Host::open(review);
+    for (path, why) in [
+        ("locked.pdf", "binary content changed [head is encrypted]"),
+        ("large.pdf", "[head too large to read (8.3 MB)]"),
+    ] {
+        host.update(|model| model.show_file(path));
+        host.settle();
+        let texts = row_texts(&host);
+        assert!(texts.iter().any(|text| text.ends_with(why)), "{texts:#?}");
+        assert_eq!(host.model().page_navigator(), None);
+        assert!(host.model().comparison().is_none());
+    }
+    // Only its name makes a blob too large to read a PDF: read once for both paths, it says
+    // so under the PDF's name alone.
+    for (path, pdf) in [("big.pdf", true), ("big.bin", false), ("big.pdf", true)] {
+        host.update(|model| model.show_file(path));
+        host.settle();
+        let texts = row_texts(&host);
+        let says = texts
+            .iter()
+            .any(|text| text.ends_with("[head too large to read (8.3 MB)]"));
+        assert_eq!(says, pdf, "{path}: {texts:#?}");
+    }
+}
+
+/// Built without the `pdf` feature, a changed PDF is a binary file as any other.
+#[cfg(not(feature = "pdf"))]
+#[test]
+fn without_pdf_support_a_pdf_is_a_binary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[("doc.pdf", b"%PDF-1.4\n% one\n".as_slice())],
+        &[("doc.pdf", b"%PDF-1.4\n% two\n".as_slice())],
+    );
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file("doc.pdf"));
+    host.settle();
+    assert_eq!(host.model().page_navigator(), None);
+    let texts = row_texts(&host);
+    assert!(
+        texts.contains(&"binary content changed".to_owned()),
+        "{texts:#?}"
+    );
+    host.dispatch(Action::NextPage);
+    assert_eq!(
+        host.model().status,
+        "Only a changed PDF has pages to step through."
+    );
+}
+
+/// A folder's diff shows a PDF's unit without the page rows of its file's own diff, which
+/// belong to the pair that diff read.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_folder_shows_no_page_rows() {
+    use crate::pdf::testing::pdf;
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[
+            ("docs/doc.pdf", pdf(&["One", "Old"])),
+            ("docs/a.txt", b"a\n".to_vec()),
+        ],
+        &[
+            ("docs/doc.pdf", pdf(&["One", "New"])),
+            ("docs/a.txt", b"b\n".to_vec()),
+        ],
+    );
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file("docs/doc.pdf"));
+    host.settle();
+    assert!(
+        row_texts(&host)
+            .iter()
+            .any(|text| text.starts_with("Base 2/2"))
+    );
+    let docs = folder_at(host.model(), "docs");
+    host.update(|model| model.tree_move_to(docs));
+    host.settle();
+    assert_eq!(host.model().folder(), Some("docs"));
+    let texts = row_texts(&host);
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.starts_with("Base") || text == "New"),
+        "{texts:#?}"
+    );
+}
+
+/// A PDF's rendered pages show until the reviewer hides them, and nothing renders while they
+/// are hidden; the choice holds for every PDF, and an image shows its comparison whatever it
+/// is, from the read that found it is no PDF.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_pdf_renders_its_pages_until_they_are_hidden() {
+    use crate::pdf::testing::pdf;
+    let dir = tempfile::tempdir().unwrap();
+    let png = |shade| {
+        image_file(
+            &filled(2, 2, [shade, shade, shade, 255]),
+            image::ImageFormat::Png,
+        )
+    };
+    let review = review_of(
+        dir.path(),
+        &[
+            ("a.pdf", pdf(&["One", "Two"])),
+            ("b.pdf", pdf(&["Three"])),
+            ("c.png", png(1)),
+        ],
+        &[
+            ("a.pdf", pdf(&["One", "2"])),
+            ("b.pdf", pdf(&["3"])),
+            ("c.png", png(2)),
+        ],
+    );
+    let mut host = Host::open(review);
+    let renders = |host: &mut Host| {
+        let completions: Vec<Completion> = host.jobs.drain(..).map(Job::run).collect();
+        let rendered = completions
+            .iter()
+            .filter(|completion| matches!(*completion.outcome, Outcome::Compared(_)))
+            .count();
+        for completion in completions {
+            host.complete(completion);
+        }
+        rendered
+    };
+    host.update(|model| model.show_file("a.pdf"));
+    host.settle();
+    assert_eq!(compared_page(&host), Some((Some(2), Some(2))));
+
+    host.dispatch(Action::TogglePages);
+    assert!(host.model().comparison().is_none());
+    assert!(host.model().pending_comparison().is_none());
+    host.dispatch(Action::PreviousPage);
+    assert_eq!(renders(&mut host), 0, "a page rendered while hidden");
+    // The choice holds for another PDF, which shows its text alone too.
+    host.update(|model| model.show_file("b.pdf"));
+    for _ in 0..3 {
+        assert_eq!(renders(&mut host), 0, "a page rendered while hidden");
+    }
+    host.dispatch(Action::TogglePages);
+    host.settle();
+    assert_eq!(compared_page(&host), Some((Some(1), Some(1))));
+    // An image shows its comparison, decoded by the one read of its blobs.
+    host.dispatch(Action::TogglePages);
+    host.update(|model| model.show_file("c.png"));
+    assert_eq!(renders(&mut host), 0, "the image was read twice");
+    host.settle();
+    assert!(host.model().comparison().is_some());
+}
+
+/// Coming back to an image after a PDF reads the image again to learn it is no PDF, but keeps
+/// the comparison it has rather than decoding it again.
+#[cfg(feature = "pdf")]
+#[test]
+fn an_image_compared_before_is_not_decoded_again() {
+    use crate::pdf::testing::pdf;
+    let dir = tempfile::tempdir().unwrap();
+    let png = |shade| {
+        image_file(
+            &filled(2, 2, [shade, shade, shade, 255]),
+            image::ImageFormat::Png,
+        )
+    };
+    let review = review_of(
+        dir.path(),
+        &[("a.png", png(1)), ("b.pdf", pdf(&["One"]))],
+        &[("a.png", png(2)), ("b.pdf", pdf(&["Two"]))],
+    );
+    let mut host = Host::open(review);
+    assert!(comparison_of(&mut host, "a.png").is_some());
+    // A PDF read as its text alone: its pages hidden before their render lands.
+    host.update(|model| model.show_file("b.pdf"));
+    let read = host.run_job();
+    host.complete(read);
+    host.dispatch(Action::TogglePages);
+    host.settle();
+    host.update(|model| model.show_file("a.png"));
+    let read = host.run_job();
+    let Outcome::PdfRead(found) = &*read.outcome else {
+        panic!("no read of a.png");
+    };
+    assert!(found.comparison.is_none(), "a.png was decoded again");
+    host.complete(read);
+    host.settle();
+    assert!(host.model().comparison().is_some());
 }

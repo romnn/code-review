@@ -14,7 +14,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{Context, Div, ObjectFit, RenderImage, Window, div, img, px};
 use gpui_component::{h_flex, v_flex};
-use review_ui::images::Raster;
+use review_ui::images::{DISPLAY_EDGE, Raster};
 use review_ui::model::Model;
 use review_ui::paint::Palette;
 use review_ui::paint::images::{self, VersionPaint};
@@ -150,9 +150,22 @@ impl Images {
     }
 }
 
-/// `raster` as gpui draws it, with its red and blue swapped.
+/// `raster` as gpui draws it: a small one grown by a whole number of pixels for each, as large
+/// as fits the display edge, so gpui, which samples smoothly, only scales it
+/// down and its pixels stay sharp; and its red and blue swapped.
 fn bgra(raster: &Raster) -> Arc<RenderImage> {
-    let mut pixels = (**raster).clone();
+    let (width, height) = raster.dimensions();
+    let factor = (DISPLAY_EDGE / width.max(height).max(1)).max(1);
+    let mut pixels = if factor > 1 {
+        image::imageops::resize(
+            &**raster,
+            width * factor,
+            height * factor,
+            image::imageops::FilterType::Nearest,
+        )
+    } else {
+        (**raster).clone()
+    };
     let (rgba, _) = pixels.as_chunks_mut::<4>();
     for [red, _, blue, _] in rgba {
         std::mem::swap(red, blue);
@@ -224,7 +237,8 @@ impl ReviewApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(to_gpui(colors.background));
+            // The hairline's tone, so a white page or image stands out in a light theme too.
+            .bg(to_gpui(colors.hairline));
         match (&version.raster, &version.note) {
             // Empty until the raster's conversion lands.
             (Some(raster), _) => half.children(
@@ -272,5 +286,25 @@ mod tests {
         assert_eq!(released.len(), 1);
         assert!(released.iter().all(|image| Arc::ptr_eq(image, &first)));
         assert!(matches!(images.find(&next), Found::Converting));
+    }
+
+    /// A small raster grows by whole pixels, each a sharp block of its color, up to the display
+    /// edge.
+    #[test]
+    fn a_small_raster_grows_sharp() {
+        let mut raster = RgbaImage::new(2, 1);
+        raster.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        raster.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        let grown = bgra(&Arc::new(raster));
+        let frame = grown.as_bytes(0).unwrap();
+        let factor = DISPLAY_EDGE / 2;
+        assert_eq!(grown.size(0).width.0, i32::try_from(2 * factor).unwrap());
+        // BGRA: the last pixel of the red block and the first of the blue one.
+        let pixel = |x: u32| {
+            let at = usize::try_from(x * 4).unwrap();
+            frame.get(at..at + 4).unwrap().to_vec()
+        };
+        assert_eq!(pixel(factor - 1), [0, 0, 255, 255]);
+        assert_eq!(pixel(factor), [255, 0, 0, 255]);
     }
 }

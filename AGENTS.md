@@ -88,6 +88,12 @@ widening a related one.
   `crates/review-languages`, points at prepared sources instead
   (`task grammars:fetch -- --into <dir>`). `task grammars:sync -- <helix commit>` moves the
   pins and the queries to another Helix commit, and `task grammars:sync:check` tests it.
+- review-ui's default `pdf` feature embeds pdfium through `pdfium-embed`, whose build script
+  downloads the prebuilt library for the target, so that build needs network too.
+  `PDFIUM_LIB_DIR` names a directory holding the library of the `chromium/7881` release of
+  pdfium-binaries for the target instead (`lib/`, `bin/` on Windows), copied unchecked, so set
+  it per target; `CARGO_NET_OFFLINE` alone does not stop the download. `--no-default-features`
+  on `cr`, review-gui or review-tui drops pdfium, and a changed PDF is a binary file.
 - Never build Rust under `/tmp`; separate build trees go on disk outside it.
 - Tests that need repositories create small temporary git repos with the `git` CLI.
 - review-gui builds gpui for Wayland only and links only libxkbcommon and fontconfig; at run

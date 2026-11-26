@@ -490,6 +490,51 @@ pub struct Folds {
     pub expanded: HashSet<UnitId>,
     /// Both versions' highlights and scopes, by display path, once they are computed.
     pub syntax: HashMap<String, Arc<FileSyntax>>,
+    /// What the selected changed PDF's unit shows, once its pages are read.
+    pub pdf: Option<PdfRows>,
+}
+
+/// What a changed PDF's opaque unit shows: its page navigator and the text diff of the page
+/// pair it selects, or why it shows as a binary file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfRows {
+    /// The PDF's display path.
+    pub path: String,
+    /// What its unit shows.
+    pub shows: PdfShows,
+}
+
+/// What the rows of a PDF's page pair show.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageRows {
+    /// The changes from the base page's text to the head page's, in order.
+    Edits(Arc<Vec<Chunk>>),
+    /// Passages that only moved, at their places in the head page.
+    Moved(Arc<Vec<MovedPassage>>),
+}
+
+/// A passage of a PDF page that moved unchanged, as one of [`PageRows::Moved`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovedPassage {
+    /// The passage arriving at its place in the head page's rows.
+    pub chunk: Chunk,
+    /// Its first row in the base page's rows, zero-based.
+    pub from: usize,
+}
+
+/// What a changed PDF's unit shows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PdfShows {
+    /// The navigator's line and what the selected page pair's rows show, whose lines are in
+    /// no file.
+    Page {
+        /// The navigator's line, such as `Base 2/8 → Head 4/9 · reordered`.
+        navigator: String,
+        /// What its rows show.
+        rows: PageRows,
+    },
+    /// Why the PDF shows as a binary file, such as `head is encrypted`.
+    Binary(String),
 }
 
 impl Folds {
@@ -533,6 +578,7 @@ impl Default for Folds {
             pending: HashMap::new(),
             expanded: HashSet::new(),
             syntax: HashMap::new(),
+            pdf: None,
         }
     }
 }
@@ -1226,13 +1272,35 @@ fn hunk_note(
         Some(line) => head_scope(&section.path, line, folds),
         None => unit_scope(view, &section.path, unit, folds),
     });
+    let mut text = header(view, unit, hunk.lines().as_ref());
+    let mut tag = header_tag(view, unit);
+    match pdf_of(view, unit, folds) {
+        Some(PdfShows::Page { .. }) => "PDF".clone_into(&mut text),
+        Some(PdfShows::Binary(why)) => {
+            tag = Some(tag.map_or_else(|| why.clone(), |tag| format!("{why} · {tag}")));
+        }
+        None => {}
+    }
     Note {
         badge: view.standing(unit).ok().map(Badge::of),
-        tag: header_tag(view, unit),
+        tag,
         scope,
         folded: folds.is_folded(view, unit),
-        ..Note::plain(RowKind::Header, header(view, unit, hunk.lines().as_ref()))
+        ..Note::plain(RowKind::Header, text)
     }
+}
+
+/// What `unit` shows as a changed PDF's opaque unit, when it is one whose pages were read.
+fn pdf_of<'f>(view: &RevisionView<'_>, unit: UnitId, folds: &'f Folds) -> Option<&'f PdfShows> {
+    let pdf = folds.pdf.as_ref()?;
+    let opaque = matches!(
+        view.unit(unit).map(|record| &record.kind),
+        Ok(UnitKind::File(
+            FileUnit::Binary | FileUnit::NotUtf8 | FileUnit::Oversized
+        ))
+    );
+    let path = view.file(unit).ok()?.display_path();
+    (opaque && path == pdf.path).then_some(&pdf.shows)
 }
 
 /// The scopes around head line `line` of the file at `path`, once its syntax is known.
@@ -1597,9 +1665,37 @@ fn unit_body(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId, fol
                 pusher.push(RowKind::Info, format!("before  {old}"));
                 pusher.push(RowKind::Info, format!("after   {new}"));
             }
+            // A PDF's page text is in no file, so its lines have no numbers.
+            if let Some(PdfShows::Page { navigator, rows }) = pdf_of(view, unit, folds) {
+                pdf_page(pusher, navigator, rows);
+            }
         }
     }
     move_notes(pusher, &moves, &described);
+}
+
+/// Pushes a PDF page pair's navigator line and its rows, whose lines are in no file: its changes
+/// in order, or each passage that moved where it is now, under a note of where it was.
+fn pdf_page(pusher: &mut Pusher<'_>, navigator: &str, rows: &PageRows) {
+    pusher.push(RowKind::Info, navigator.to_owned());
+    match rows {
+        PageRows::Edits(chunks) => {
+            for chunk in chunks.iter() {
+                pusher.edited_chunk(chunk, None, &OldLines::Nowhere);
+            }
+        }
+        PageRows::Moved(passages) => {
+            for passage in passages.iter() {
+                pusher.add_note(Note::plain(
+                    RowKind::Moved,
+                    format!("↙ moved from row {} of the base page", passage.from + 1),
+                ));
+                pusher.moved = true;
+                pusher.edited_chunk(&passage.chunk, None, &OldLines::Nowhere);
+                pusher.moved = false;
+            }
+        }
+    }
 }
 
 /// Pushes a linked note for each of `moves` not among `described`.

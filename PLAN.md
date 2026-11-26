@@ -1362,6 +1362,45 @@ it, muted, so it never reads as code.
   it shows images, and nothing is read or decoded while it
   does not: review-tui shows them only where the terminal is known to (see review-tui's
   "Images"), and elsewhere the file keeps the binary line it always had.
+- **Changed PDFs.** The engine makes a PDF, known by its `%PDF-` header, that would otherwise be
+  text one opaque binary unit, with or without PDF support (analysis format 14); a PDF that was
+  already binary or not UTF-8 keeps that unit, so its review state carries. With
+  review-ui's `pdf` feature, on by default, a job reads each version's page text through
+  pdfium (the `pdfium-embed` crate, which embeds the library at build time and loads it from a
+  temporary directory the first time a PDF is read, never at startup), pairs the pages and diffs
+  each pair's text with the engine's line and token diff (`Chunk::between`). Equality is
+  decided on the text as extracted, in order, with only its line-break encodings made one:
+  nothing is dropped, joined or reordered first, so different extracts never compare equal
+  ("extracted text identical", or "no text extracted" for two blank pages). The same words in
+  the same order with a line break where the other has a space say "only the line breaks
+  differ", with no rows; any other difference shows, a line break that splits a word or a
+  token included. The changes read a sentence a row (split at `.`, `!` or `?`, for display
+  only), the words that changed marked, characters that never show written out, such as
+  `⟨U+200C⟩`. A page whose sentences only moved, each exactly once and unambiguously, says
+  "same text, different order" and shows them in the move style where they are now, with the
+  base row they came from; anything ambiguous shows as ordered edits. The PDF's unit,
+  headed `PDF`, shows a page navigator, such as `Base 2/8 → Head 4/9 · reordered`, and the text
+  diff of the pair it selects in the normal unified or split rows, with wrapping, find and copy,
+  but no line numbers or locations: the text is in no file. `}` and `{` step through every page
+  pair, from the top of its rows. Pages pair by their text: a text on exactly one page of each
+  version, exactly as extracted and not blank, anchors the two, and a pair whose order
+  reverses against another's is
+  reordered; between anchors in order, the pages left pair by position when both versions have
+  as many, show as added or removed when only one has any, and as unmatched otherwise. Blank
+  pages, such as scanned ones, and duplicated pages never anchor, and every page stays
+  reachable. The first changed pair shows first. Where the front end shows images, the
+  selected pair renders into the image comparison above its text, and `P` hides or shows it
+  again for the rest of the session; nothing renders while it is hidden. A job renders it, keyed by both page
+  indices next to both blobs, labeled with each page's size in points, with "none: the page is
+  new" or "is removed" for a page one version lacks; pixels are compared only between pages of
+  one size, compared exactly, never rounded. The read that finds a file is no PDF decodes it
+  for the image comparison, unless that comparison is kept already, so no blob is read twice. Terminals without graphics show the text diff alone. Review state stays the file's: the one unit is approved as
+  "Approve PDF", any blob change reopens it, and the page rows are for reading. Bounds: the
+  blob's 8 MiB ceiling before it is read, 500 pages, 100,000 characters a page and a million a
+  version, checked before the text is copied; a PDF over them, encrypted (even one that opens
+  without a password), unreadable, or pdfium failing to load, shows as a binary file whose
+  header says why. Out of scope: a PDF viewer, OCR, fuzzy matching of moved pages, page-level
+  review state, prefetching and a persistent cache.
 - **Settings.** `T` or `,` opens a keyboard-first settings list in the files pane's place (over the
   left of the diff when the files pane is hidden or narrower than 260 px), so the diff keeps its
   exact geometry: themes, diff styles, density, layout, token emphasis, approved hunks (folded or
@@ -1790,7 +1829,8 @@ changes and adds units; revision 3 returns one hunk to its revision-1 form), a w
 few marks. It covers every feature the front ends render: formatting-only files, a re-wrap with a
 real edit, a plain move and a move with edits, a rename with edits, mode, symlink and binary
 changes, changed images (pixels changed at one size, a resize, an added image, and a still image
-that became an animation), deletion-only chunks and noise. `--demo` rebuilds it and opens revision 1, and
+that became an animation), a changed PDF (a page whose text changed, an inserted page and two
+pages that swapped), deletion-only chunks and noise. `--demo` rebuilds it and opens revision 1, and
 `--demo-revision N` advances to revision N keeping marks, in `cr`, review-gui and review-tui
 alike. It is the shared fixture for every front end.
 

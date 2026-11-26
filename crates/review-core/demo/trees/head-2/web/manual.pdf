@@ -1,0 +1,144 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R 9 0 R 11 0 R 13 0 R 15 0 R 17 0 R] /Count 7 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 226 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Ledger) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(A small multi-language project.) Tj T*
+(This manual covers version 1.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 242 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Installing) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(Install ledger with your package manager,) Tj T*
+(or put the binary on your PATH.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 10 0 R >>
+endobj
+10 0 obj
+<< /Length 228 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Configuring) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(Settings live in ledger.toml.) Tj T*
+(Every setting has a default.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 12 0 R >>
+endobj
+12 0 obj
+<< /Length 240 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Upgrading) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(Version 2 reads version 1 ledgers.) Tj T*
+(Back up your ledger before upgrading.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 14 0 R >>
+endobj
+14 0 obj
+<< /Length 231 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Using ledger) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(ledger add records an entry.) Tj T*
+(ledger report sums the entries.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 16 0 R >>
+endobj
+16 0 obj
+<< /Length 211 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Questions) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(Is ledger free? Yes.) Tj T*
+(Does it sync? Not yet.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+17 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 298 420] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 18 0 R >>
+endobj
+18 0 obj
+<< /Length 240 >>
+stream
+0.2 0.4 0.7 rg 24 372 250 3 re f 0 g
+BT /F2 18 Tf 24 384 Td (Troubleshooting) Tj ET
+BT /F1 11 Tf 16 TL 24 340 Td
+(Run ledger check to find broken) Tj T*
+(entries and the lines they are on.) Tj T*
+ET
+BT /F1 9 Tf 140 24 Td (Demo manual) Tj ET
+endstream
+endobj
+xref
+0 19
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000155 00000 n 
+0000000225 00000 n 
+0000000300 00000 n 
+0000000436 00000 n 
+0000000713 00000 n 
+0000000849 00000 n 
+0000001142 00000 n 
+0000001279 00000 n 
+0000001559 00000 n 
+0000001697 00000 n 
+0000001989 00000 n 
+0000002127 00000 n 
+0000002410 00000 n 
+0000002548 00000 n 
+0000002811 00000 n 
+0000002949 00000 n 
+trailer
+<< /Size 19 /Root 1 0 R >>
+startxref
+3241
+%%EOF

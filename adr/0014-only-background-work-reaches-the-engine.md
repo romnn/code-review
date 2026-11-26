@@ -1,6 +1,6 @@
 # 14. Only background work reaches the engine
 
-**Status:** accepted · **Date:** 2026-11-25
+**Status:** accepted · **Date:** 2026-11-26
 
 ## Context
 
@@ -20,6 +20,11 @@ writes were safe because they were synchronous: a revocation stopped the servers
 launch holds while it reads the stored grant. Moving trust off the UI thread must keep that: no
 server starts on code the reviewer did not trust, and none keeps running once the window says a
 revocation took effect.
+
+Previews read and process whole files. A changed image is decoded and fitted, and a changed PDF
+has each version's page text extracted and diffed and one page pair rendered, through pdfium, a
+C++ library that is not thread-safe and is loaded only when needed. Each takes far longer than a
+frame on a large file, and the reviewer keeps moving between files and pages meanwhile.
 
 Where a server runs decides what it can do and what a grant means. It needs the code on disk.
 The reviewer reviews the checkout, a branch's working tree against its base, with their own and
@@ -52,6 +57,19 @@ state.
   so no key, click, scroll or layout acts and nothing it would change goes unsaved; no capture
   shows either. Jobs' and timers' completions keep landing through `Driver::complete`, which is
   how the engine's stop lands and the app quits.
+- **Previews are jobs too, keyed by what they read.** One job reads both versions of a changed opaque
+  file: a PDF's page text, paired and diffed, or else, where the front end shows images, both
+  images decoded and fitted for their comparison. Another renders the one page pair the
+  navigator selects into the image comparison's rasters, only while the reviewer shows the
+  pages. Each is keyed by both blobs, a render by both page indices as well, and lands only
+  while its key is still what the selected file shows, so a late result never shows under
+  another file or page. One job of each kind runs at a time and one result of each is kept; the
+  key shown when a job ends starts next. Every bound holds before the memory it guards is taken:
+  a blob's size before it is read, a PDF's page count before any page and each page's characters
+  before its text is copied. pdfium is loaded by the first PDF job, never at startup, and holds
+  its one lock only while it reads or renders, never while the job diffs. A PDF the job cannot
+  read, too large, encrypted or broken, or pdfium failing to load, shows as a binary file whose
+  header says why.
 - **Language servers run only in the checkout, on the code on disk.** A server runs in the
   checkout's working tree, its current directory and workspace root, with rust-analyzer's builds
   on and the project's own target directory. Go to definition runs only where what shows is the
@@ -138,6 +156,9 @@ state.
 - No code on the UI thread compiles that blocks on the engine or runs a job in place; the module
   boundary and the opaque job are the checks, the latter with a `compile_fail` doctest.
 - Quitting waits for one more job, which stops the servers and the session.
+- A changed binary file is read once, to learn whether it is a PDF and, if not, to decode it,
+  and a PDF's text diff needs no image support, so terminals without graphics show it too. Stepping through pages renders each pair only when it shows; nothing is prefetched or
+  cached beyond the last result.
 - review-gui runs jobs on threads of their own as review-tui does, rather than on gpui's
   background executor; the model bounds how many run at once, highlighting included.
 - A front end changes the model only through `Driver::update`, whose value is `None` once the
@@ -197,6 +218,9 @@ state.
   that reuse rewrites drew a race in two review rounds running: a process from before a denial
   survived it once a lookup reused it, and a late retirement stopped a server started after a new
   grant. Stopping the servers in the operation that finds the denial leaves nothing to run late.
+- **Prefetching the pages around the one shown, or caching renders across files.** Each render
+  takes a moment the reviewer barely notices, while memory for every page of a large PDF would
+  not be bounded by the one comparison shown.
 - **A closed `Input` enum that every reviewer action goes through.** Gating the driver, already
   the only way a front end changes the model, covers every present and future input the same,
   without moving every input method behind an enum.
@@ -212,3 +236,5 @@ state.
   `Review::tree_on_disk`)
 - `crates/review-ui/src/model/quit.rs`
 - `crates/review-ui/src/model/marks.rs` (`Save`)
+- `crates/review-ui/src/model/compare.rs`, `crates/review-ui/src/model/pages.rs`,
+  `crates/review-ui/src/images/mod.rs`, `crates/review-ui/src/pdf.rs`

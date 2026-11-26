@@ -61,33 +61,38 @@ pub fn comparison(model: &Model, palette: &Palette) -> Option<ComparisonPaint> {
         });
     };
     let comparison = &compared.comparison;
+    let pages = compared.pair.page.is_some();
     let tinted = match &comparison.changes {
         Changes::Pixels {
             tinted, changed, ..
         } if *changed > 0 && model.changed_pixels_shown() => Some(tinted),
         _ => None,
     };
-    let mut head = version("head", &comparison.head, palette);
+    let mut head = version("head", &comparison.head, pages, palette);
     if let Some(tinted) = tinted {
         head.raster = Some(std::sync::Arc::clone(tinted));
     }
     Some(ComparisonPaint {
-        base: version("base", &comparison.base, palette),
+        base: version("base", &comparison.base, pages, palette),
         head,
         tinted: tinted.is_some(),
-        status: status(model, comparison, palette),
+        status: status(model, comparison, pages, palette),
     })
 }
 
-/// The label and raster of `version`, named `name`.
-fn version(name: &str, version: &Version, palette: &Palette) -> VersionPaint {
-    let described = |size: &Size| format!("{} · {} × {}", size.format, size.width, size.height);
+/// The label and raster of `version`, named `name`, a PDF's page when `pages`.
+fn version(name: &str, version: &Version, pages: bool, palette: &Palette) -> VersionPaint {
+    // A page's size is in points, an image's in pixels.
+    let unit = if pages { " pt" } else { "" };
+    let described =
+        |size: &Size| format!("{} · {} × {}{unit}", size.format, size.width, size.height);
     let (detail, raster, note) = match version {
         Version::Absent => {
-            let note = if name == "base" {
-                "none: the file is new"
-            } else {
-                "none: the file is deleted"
+            let note = match (name == "base", pages) {
+                (true, false) => "none: the file is new",
+                (false, false) => "none: the file is deleted",
+                (true, true) => "none: the page is new",
+                (false, true) => "none: the page is removed",
             };
             (String::new(), None, Some(note.to_owned()))
         }
@@ -125,14 +130,17 @@ fn version(name: &str, version: &Version, palette: &Palette) -> VersionPaint {
 }
 
 /// The line under the comparison: what was compared and how many of its pixels changed, with
-/// the key that shows them over the head, or why no pixels are compared.
-fn status(model: &Model, comparison: &Comparison, palette: &Palette) -> Vec<Piece> {
+/// the key that shows them over the head, or why no pixels are compared; a PDF's rendered
+/// pages when `pages`.
+fn status(model: &Model, comparison: &Comparison, pages: bool, palette: &Palette) -> Vec<Piece> {
     // Only an animation's first frame is decoded, so only first frames are compared.
     let first_frames = [&comparison.base, &comparison.head]
         .into_iter()
         .any(|version| matches!(version, Version::Image(picture) if picture.first_frame));
     let compared = if first_frames {
         "the first frames"
+    } else if pages {
+        "the rendered pages"
     } else {
         "the decoded images"
     };

@@ -129,3 +129,22 @@ expect "revision":"2"
 expect "hunk_badges":\["Changed"\]
 expect "tag":"note · revision 1"
 shot revision-2
+
+# A changed image beside its base, with the pixels that changed tinted. review-tui renders off
+# screen as text, without its images, so README shows review-gui's.
+launch --demo --config target/screenshots/config/folded.toml
+file web/images/chart.png
+action ToggleChangedPixels
+state
+expect "tinted":true
+shot image-compare
+
+# A changed PDF on its first changed page pair: both pages rendered side by side above the diff
+# of their extracted text, its changed words marked.
+launch --demo --config target/screenshots/config/folded.toml
+file web/manual.pdf
+key 0
+state
+expect "pages":"Base 2/6 → Head 2/7 · text changed"
+expect "comparison":\{"base":\{"detail":"PDF page 2
+shot pdf-compare

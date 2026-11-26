@@ -52,7 +52,10 @@ cargo install --locked --git https://github.com/romnn/code-review review-cli
 ```
 
 The build fetches the tree-sitter grammars and Helix queries it highlights with from upstream, at
-the commits Helix pins, so it needs `git`, a C and C++ compiler, and network.
+the commits Helix pins, and the prebuilt [pdfium](https://github.com/bblanchon/pdfium-binaries)
+it reads changed PDFs with, so it needs `git`, a C and C++ compiler, and network. To build
+offline, set `PDFIUM_LIB_DIR` to the directory holding that pdfium release's library for the
+target (`lib/`, `bin/` on Windows), or build without PDF support with `--no-default-features`.
 
 The desktop app, `review-gui`, is not released yet. Build it from source with
 `cargo install --locked --git https://github.com/romnn/code-review review-gui`; on Linux it needs
@@ -91,6 +94,7 @@ shows within a second, keeping your place, and only what you mark is recorded.
 | `f`, `v` | The whole file around its changes, or each hunk apart |
 | `w` | Wrap long lines, or cut them and pan sideways |
 | `o` | On a changed image, tint the pixels that changed |
+| `}`, `{`, `P` | On a changed PDF, the next or previous page, and hide or show the rendered pages |
 | `\|`, `S` | Side by side or unified, next diff style |
 | `T` | Settings: themes, diff styles, density, layout |
 | `i` | Pull request overview |
@@ -98,9 +102,12 @@ shows within a second, keeping your place, and only what you mark is recorded.
 
 ## The terminal app
 
-`cr` runs anywhere a terminal does, over SSH included, as a single static binary. In kitty,
-Ghostty and WezTerm, and in tmux with `allow-passthrough` in kitty and Ghostty, a changed image
-shows its two versions side by side, as in the desktop app.
+`cr` runs anywhere a terminal does, over SSH included, as a single binary. A changed PDF shows
+the extracted text of one page pair at a time, compared exactly and in order, under a page
+navigator that `}` and `{` step through. In kitty, Ghostty and WezTerm, and in tmux with
+`allow-passthrough` in kitty and Ghostty, a changed image shows its two versions side by side,
+as in the desktop app, and so does a PDF's page pair, which `P` hides.
+The Linux release is a static binary built without PDF support, where a PDF is a binary file.
 
 <p align="center">
   <br>
@@ -125,6 +132,33 @@ shows its two versions side by side, as in the desktop app.
   </picture>
   <br>
   The desktop app (<code>review-gui</code>) showing a diff side by side.
+  <br><br>
+</p>
+
+A changed image shows its base and head side by side, and `o` tints the pixels that changed.
+A changed PDF shows its selected page pair rendered the same way above the diff of the pages'
+extracted text, its changed words marked; `}` and `{` step through the pages, and `P` hides the
+rendered pair. Both are one unit to approve.
+
+<p align="center">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/image-compare-light.png">
+    <img width="90%" alt="review-gui comparing a changed PNG chart: base and head side by side, the bar that grew tinted magenta over the head, and the count of changed pixels under them" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/image-compare.png">
+  </picture>
+  <br>
+  A changed image, its changed pixels tinted.
+  <br><br>
+</p>
+
+<p align="center">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/pdf-compare-light.png">
+    <img width="90%" alt="review-gui on a changed PDF: page 2 of base and head rendered side by side, the page navigator, and the changed sentence removed and added with its changed words marked" src="https://raw.githubusercontent.com/romnn/code-review/main/docs/screenshots/gui/pdf-compare.png">
+  </picture>
+  <br>
+  A changed PDF on its changed page pair.
   <br><br>
 </p>
 
@@ -157,4 +191,5 @@ grammars, the tree-sitter queries of [Helix](https://github.com/helix-editor/hel
 embedded unmodified at the commit `crates/review-languages/languages.toml` names, Jinja queries
 derived from the Jinja grammar's (Apache-2.0), and the syntaxes the
 [bat](https://github.com/sharkdp/bat) project curates. Their notices are collected in
-[THIRD-PARTY-SYNTAXES](THIRD-PARTY-SYNTAXES), which release archives ship next to `cr`.
+[THIRD-PARTY-SYNTAXES](THIRD-PARTY-SYNTAXES), which release archives ship next to `cr`. The macOS
+and Windows releases embed pdfium, whose notices are in [THIRD-PARTY-PDFIUM](THIRD-PARTY-PDFIUM).
