@@ -4,6 +4,9 @@ dist: goreleaser-dist
 
 # review-gui is not built here: gpui cannot be cross-compiled from Linux, since its macOS build
 # needs Xcode's Metal compiler and the system frameworks, and its Windows build needs windres.
+# macOS and Windows embed pdfium for changed PDFs (review-cli's default `pdf` feature). Linux
+# builds without it: pdfium is a shared object a static musl binary cannot load, and cr stays a
+# single static binary there (ADR 1).
 builds:
     - id: &cli cr
       builder: rust
@@ -11,32 +14,54 @@ builds:
       tool: cargo
       command: zigbuild
       targets:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
           - x86_64-apple-darwin
           - aarch64-apple-darwin
           - x86_64-pc-windows-gnu
           - aarch64-pc-windows-gnullvm
       flags: ["--release", "--package=review-cli"]
+      # pdfium-render, which pdfium-embed wraps, is also a cdylib, which zig links for gnullvm
+      # without the unwinder Rust's panics need.
+      env:
+          - CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_RUSTFLAGS=-C link-arg=-lunwind
+    - id: &static cr-static
+      builder: rust
+      binary: cr
+      tool: cargo
+      command: zigbuild
+      targets:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+      flags: ["--release", "--package=review-cli", "--no-default-features"]
 
 archives:
     - id: &archive code-review
       ids: [*cli]
       formats: ["tar.gz"]
-      name_template: "code-review_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+      name_template: &name "code-review_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
       # cr is GPL-3.0-or-later, for the terminal app it contains; the engine inside it is
       # MIT OR Apache-2.0.
       # THIRD-PARTY-SYNTAXES holds the notices of the grammars, Helix queries and bat syntaxes it
-      # embeds.
+      # embeds, and THIRD-PARTY-PDFIUM those of the pdfium it embeds here.
       files:
-          - src: crates/review-cli/LICENSE
+          - &gpl
+            src: crates/review-cli/LICENSE
             dst: LICENSE-GPL-3.0
           - LICENSE-MIT
           - LICENSE-APACHE
           - THIRD-PARTY-SYNTAXES
+          - THIRD-PARTY-PDFIUM
       format_overrides:
           - goos: windows
             formats: ["zip"]
+    - id: &static-archive code-review-static
+      ids: [*static]
+      formats: ["tar.gz"]
+      name_template: *name
+      files:
+          - *gpl
+          - LICENSE-MIT
+          - LICENSE-APACHE
+          - THIRD-PARTY-SYNTAXES
 
 checksum:
     name_template: "checksums.txt"
@@ -48,7 +73,7 @@ changelog:
 
 homebrew_casks:
     - name: code-review
-      ids: [*archive]
+      ids: [*archive, *static-archive]
       binaries: [cr]
       description: "Review large diffs and GitHub pull requests hunk by hunk, keeping review state across revisions."
       homepage: "https://github.com/romnn/code-review"

@@ -285,6 +285,8 @@ pub fn bar_hints(
     let style = model.look().style.name.clone();
     let label = |hint: &keymap::Hint| match hint.action {
         "ToggleDiffStyle" => style.clone(),
+        // A PDF is one unit, whatever page shows.
+        "ToggleApprove" if model.approves_pdf() => "approve PDF".to_owned(),
         "ToggleView" => match model.look().view {
             crate::config::DiffView::File => "hunks".to_owned(),
             crate::config::DiffView::Hunks => "whole file".to_owned(),

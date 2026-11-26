@@ -4,7 +4,9 @@ use color_eyre::eyre;
 use googletest::prelude::*;
 use indoc::indoc;
 use review_core::analysis::{FileUnit, NoiseCategory, UnitKind};
-use review_core::{ChangeKind, FileTone, MarkVerdict, Repo, Review, ReviewTarget, UnitState};
+use review_core::{
+    ChangeKind, FileTone, MarkVerdict, Repo, Review, ReviewTarget, RevisionNumber, UnitState,
+};
 
 use crate::common::{TestRepo, latest_analysis, mark_all, refresh, rust_functions, summaries};
 
@@ -708,5 +710,199 @@ fn files_carry_their_change_kind() -> eyre::Result<()> {
             "tools/stats.py"
         ])
     );
+    Ok(())
+}
+
+/// A PDF is one binary unit even when its bytes are all ASCII, and a mark made while an
+/// analysis of the format before read it as lines of text reopens once it is analyzed again.
+#[test]
+fn an_ascii_pdf_is_one_unit_and_a_mark_on_its_text_reopens() -> eyre::Result<()> {
+    let old = indoc! {"
+        %PDF-1.4
+        % one
+    "};
+    let new = indoc! {"
+        %PDF-1.4
+        % two
+    "};
+    let repo = TestRepo::new()?;
+    repo.write("doc.pdf", old)?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    repo.write("doc.pdf", new)?;
+    repo.commit("change")?;
+    let review = repo.review()?;
+    let revision = refresh(&review)?;
+    assert_that!(
+        file_units(&latest_analysis(&review)?),
+        elements_are![eq(&FileUnit::Binary)]
+    );
+
+    // The cached analysis as the format before wrote it: the PDF's lines, one chunk.
+    let cached = cached_analyses(&review)?
+        .pop()
+        .ok_or_else(|| eyre::eyre!("no cached analysis"))?;
+    let mut analysis: serde_json::Value = serde_json::from_slice(&std::fs::read(&cached)?)?;
+    let chunk = review_core::analysis::Chunk::between(old, new)
+        .pop()
+        .ok_or_else(|| eyre::eyre!("no chunk"))?;
+    analysis["units"][0]["kind"] = serde_json::to_value(UnitKind::Chunk(chunk))?;
+    std::fs::write(&cached, serde_json::to_vec(&analysis)?)?;
+    let review = repo.review()?;
+    mark_all(&review, revision, MarkVerdict::Seen)?;
+    assert!(
+        summaries(&review.history()?, revision)?[0]
+            .state
+            .is_reviewed()
+    );
+
+    // An older format's analysis is computed again, and the mark on its text has no unit.
+    analysis["format"] = (review_core::analysis::ANALYSIS_FORMAT - 1).into();
+    std::fs::write(&cached, serde_json::to_vec(&analysis)?)?;
+    let units = summaries(&repo.review()?.history()?, revision)?;
+    assert_that!(units.len(), eq(1));
+    assert_that!(units[0].unit.kind, eq(&UnitKind::File(FileUnit::Binary)));
+    assert_that!(units[0].state, eq(UnitState::New));
+    Ok(())
+}
+
+/// Every analysis and correspondence the review caches.
+fn cached_analyses(review: &Review) -> eyre::Result<Vec<std::path::PathBuf>> {
+    let mut cached = Vec::new();
+    for entry in std::fs::read_dir(review.dir().root().join("analysis"))? {
+        cached.push(entry?.path());
+    }
+    Ok(cached)
+}
+
+/// Every mark, partial approval and note recorded while analyses had the format before carries
+/// exactly once they are computed again: a format bump analyzes again and changes no review
+/// state, a binary PDF's, a PDF's that is not UTF-8 and an image's included, each PDF keeping
+/// the unit the format before gave it, also where only one version would have been text.
+#[test]
+fn review_state_survives_an_analysis_format_bump() -> eyre::Result<()> {
+    // A PDF whose header comment is not UTF-8, with no NUL: not UTF-8 to every format.
+    let latin = |version: &str| {
+        let comment: &[u8] = &[b'%', 0xe2, 0xe3, 0xcf, 0xd3];
+        [b"%PDF-1.4 ".as_slice(), comment, version.as_bytes()].concat()
+    };
+    let repo = TestRepo::new()?;
+    let base = rust_functions(20);
+    repo.write("src/lib.rs", &base)?;
+    repo.write("image.bin", "\0PNG one")?;
+    repo.write("scan.pdf", &["%PDF-1.4", "\0one"].join("\n"))?;
+    std::fs::write(repo.path().join("latin.pdf"), latin("one"))?;
+    // PDFs whose base is text and whose head is not UTF-8, or too large to read: opaque to
+    // every format, as the head makes them.
+    let ascii = |version: &str| ["%PDF-1.4", version].join(" ");
+    repo.write("mixed.pdf", &ascii("one"))?;
+    repo.write("grown.pdf", &ascii("one"))?;
+    repo.commit("base")?;
+    repo.branch_at("feature", "main")?;
+    let edited = base
+        .replace("let value = 3;", "let value = 30;")
+        .replace("let value = 12;", "let value = 120;");
+    repo.write("src/lib.rs", &edited)?;
+    repo.write("image.bin", "\0PNG two")?;
+    repo.write("scan.pdf", &["%PDF-1.4", "\0two"].join("\n"))?;
+    std::fs::write(repo.path().join("latin.pdf"), latin("two"))?;
+    std::fs::write(repo.path().join("mixed.pdf"), latin("two"))?;
+    let mut grown = ascii("two").into_bytes();
+    grown.resize(
+        usize::try_from(review_core::git::MAX_TEXT_BLOB_BYTES)? + 1,
+        b' ',
+    );
+    std::fs::write(repo.path().join("grown.pdf"), grown)?;
+    repo.commit("edit")?;
+    let review = repo.review()?;
+    let first = refresh(&review)?;
+    assert_that!(
+        file_units(&latest_analysis(&review)?),
+        unordered_elements_are![
+            eq(&FileUnit::Binary),
+            eq(&FileUnit::Binary),
+            eq(&FileUnit::NotUtf8),
+            eq(&FileUnit::NotUtf8),
+            eq(&FileUnit::Oversized)
+        ]
+    );
+    let history = review.history()?;
+    let units = summaries(&history, first)?;
+    let view = history.view(first)?;
+    // One of the file's two chunks, the image and the PDF approved, the other chunk noted.
+    let chunks: Vec<_> = units
+        .iter()
+        .filter(|unit| unit.unit.chunk().is_some())
+        .collect();
+    assert_that!(chunks.len(), eq(2));
+    let marked: Vec<_> = units
+        .iter()
+        .filter(|unit| unit.unit.chunk().is_none() || unit.id == chunks[0].id)
+        .map(|unit| unit.id)
+        .collect();
+    review.mark(&view, &marked, MarkVerdict::Seen)?;
+    review.note(&view, chunks[1].id, "why 120?")?;
+    for path in ["latin.pdf", "mixed.pdf", "grown.pdf"] {
+        let unit = units
+            .iter()
+            .find(|unit| unit.path == path)
+            .ok_or_else(|| eyre::eyre!("no unit of {path}"))?;
+        review.note(&view, unit.id, &format!("a note on {path}"))?;
+    }
+    // A second revision the marks carry into.
+    repo.write(
+        "src/lib.rs",
+        &edited.replace("let value = 17;", "let value = 170;"),
+    )?;
+    repo.commit("more")?;
+    let second = refresh(&review)?;
+
+    let state = |review: &Review| review_state(review, &[first, second]);
+    let before = state(&review)?;
+    assert!(before.iter().any(|line| line.contains("why 120?")));
+    for path in ["latin.pdf", "mixed.pdf", "grown.pdf"] {
+        assert!(
+            before
+                .iter()
+                .any(|line| line.contains(&format!("a note on {path}")))
+        );
+    }
+
+    format_before(&review)?;
+    assert_that!(state(&repo.review()?)?, eq(&before));
+    Ok(())
+}
+
+/// Every unit's state and every note of `revisions`, and the warnings, a line each.
+fn review_state(review: &Review, revisions: &[RevisionNumber]) -> eyre::Result<Vec<String>> {
+    let history = review.history()?;
+    let mut state = Vec::new();
+    for &revision in revisions {
+        for unit in summaries(&history, revision)? {
+            state.push(format!("{} {} {:?}", unit.id, unit.path, unit.state));
+        }
+        for note in history.view(revision)?.notes() {
+            state.push(format!("{note:?}"));
+        }
+    }
+    state.extend(history.warnings().iter().cloned());
+    Ok(state)
+}
+
+/// Rewrites every analysis and correspondence `review` caches as the format before wrote them.
+fn format_before(review: &Review) -> eyre::Result<()> {
+    let older = review_core::analysis::ANALYSIS_FORMAT - 1;
+    for cached in cached_analyses(review)? {
+        let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&cached)?)?;
+        let field = if json.get("analysis_format").is_some() {
+            "analysis_format"
+        } else {
+            "format"
+        };
+        *json
+            .get_mut(field)
+            .ok_or_else(|| eyre::eyre!("no {field} in {}", cached.display()))? = older.into();
+        std::fs::write(&cached, serde_json::to_vec(&json)?)?;
+    }
     Ok(())
 }

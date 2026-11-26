@@ -76,9 +76,9 @@ pub enum Version {
 pub struct Size {
     /// The format, such as `PNG`.
     pub format: String,
-    /// The width in pixels.
+    /// The width: in pixels, or a PDF page's in points.
     pub width: u32,
-    /// The height in pixels.
+    /// The height, in the width's unit.
     pub height: u32,
 }
 
@@ -129,10 +129,17 @@ impl Comparison {
     /// Compares `base` with `head`, decoding each within the bounds; runs in the background.
     #[must_use]
     pub fn of(base: Encoded, head: Encoded) -> Self {
-        let base = decode(base);
-        let head = decode(head);
+        Self::between(decode(base), decode(head))
+    }
+
+    /// Compares two versions already decoded, or each the version it shows instead, as a
+    /// rendered PDF page is; runs in the background.
+    pub(crate) fn between(base: Result<Decoded, Version>, head: Result<Decoded, Version>) -> Self {
         let changes = match (&base, &head) {
-            (Ok(base), Ok(head)) if base.image.dimensions() == head.image.dimensions() => {
+            (Ok(base), Ok(head))
+                if base.image.dimensions() == head.image.dimensions()
+                    && base.extent.map(f64::to_bits) == head.extent.map(f64::to_bits) =>
+            {
                 let (tinted, changed) = tint(&base.image, &head.image);
                 let (width, height) = head.image.dimensions();
                 Changes::Pixels {
@@ -182,13 +189,37 @@ impl Comparison {
 }
 
 /// A version decoded at its full size, before it is fitted.
-struct Decoded {
+pub(crate) struct Decoded {
     size: Size,
     image: RgbaImage,
     first_frame: bool,
+    /// The version's size exactly, which `size` rounds for its label: pixels for an image,
+    /// points for a PDF page.
+    extent: [f64; 2],
 }
 
 impl Decoded {
+    /// `image`, a still raster in the format `format` names, within the decoding bounds, of
+    /// a document whose size, such as a page's in points, is `[width, height]`.
+    pub(crate) fn sized(format: String, image: RgbaImage, [width, height]: [f32; 2]) -> Self {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a document's size, rounded for its label, positive and far below u32::MAX"
+        )]
+        let rounded = |side: f32| side.round().max(0.0) as u32;
+        Self {
+            size: Size {
+                format,
+                width: rounded(width),
+                height: rounded(height),
+            },
+            image,
+            first_frame: false,
+            extent: [f64::from(width), f64::from(height)],
+        }
+    }
+
     /// The version as the comparison shows it, fitted within [`DISPLAY_EDGE`].
     fn shown(self) -> Version {
         Version::Image(Picture {
@@ -267,6 +298,7 @@ fn decode(encoded: Encoded) -> Result<Decoded, Version> {
         },
         image,
         first_frame,
+        extent: [f64::from(width), f64::from(height)],
     })
 }
 

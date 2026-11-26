@@ -29,8 +29,9 @@ use review_core::{ObjectId, Review, RevisionView};
 
 use super::Model;
 use super::effects::{Because, Outcome, Subject};
+use super::pages::Read;
 use super::sync::Tick;
-use crate::images::{Changes, Comparison, Encoded, MAX_BYTES};
+use crate::images::{Changes, Comparison, Encoded, MAX_BYTES, Version};
 
 /// The blobs of a changed file's base and head, in that order; either is absent for an
 /// addition or a deletion.
@@ -40,6 +41,18 @@ pub struct Pair {
     pub base: Option<ObjectId>,
     /// The head's blob.
     pub head: Option<ObjectId>,
+    /// For a PDF, the page of each version rendered and compared; none for an image.
+    pub page: Option<Page>,
+}
+
+/// The page of each version of a PDF that its comparison renders, zero-based; either is
+/// absent for a page only one version has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    /// The base's page.
+    pub base: Option<u32>,
+    /// The head's page.
+    pub head: Option<u32>,
 }
 
 /// How long a comparison may take before its place says it is decoding.
@@ -74,6 +87,9 @@ pub(super) struct Images {
     comparing: Option<Pair>,
     /// Whether the changed pixels show over the head.
     changes: bool,
+    /// Whether a PDF's selected page pair renders and shows, as the reviewer chose for the
+    /// session; it does until they hide it.
+    pages: bool,
     /// How many times the wanted pair changed, by which a timer knows its pair still waits.
     waits: u64,
     /// Whether the wanted pair has waited longer than [`DECODING`].
@@ -89,6 +105,7 @@ impl Images {
             compared: None,
             comparing: None,
             changes: false,
+            pages: true,
             waits: 0,
             slow: false,
         }
@@ -97,6 +114,13 @@ impl Images {
     /// Whether a job compares a pair now.
     pub(super) fn busy(&self) -> bool {
         self.comparing.is_some()
+    }
+
+    /// Whether the comparison kept is `pair`'s.
+    pub(super) fn holds(&self, pair: &Pair) -> bool {
+        self.compared
+            .as_ref()
+            .is_some_and(|compared| compared.pair == *pair)
     }
 
     /// Notes that the job comparing a pair ended, whether or not what it found lands.
@@ -141,6 +165,17 @@ impl Model {
         }
     }
 
+    /// Whether a changed PDF's rendered page pair shows, as the reviewer chose.
+    #[must_use]
+    pub fn pages_shown(&self) -> bool {
+        self.images.pages
+    }
+
+    /// Shows a changed PDF's rendered page pair from now on, or hides it.
+    pub(super) fn flip_pages(&mut self) {
+        self.images.pages = !self.images.pages;
+    }
+
     /// Whether the changed pixels show over the head's image, where the versions have them.
     #[must_use]
     pub fn changed_pixels_shown(&self) -> bool {
@@ -150,10 +185,21 @@ impl Model {
     /// Follows the selected file's pair in `view`, as its rows are laid out, and starts
     /// comparing it unless it is compared or another pair is being compared.
     pub(super) fn follow_comparison(&mut self, view: &RevisionView<'_>) {
-        let wanted = match (&self.folder, &self.selected) {
+        let opaque = match (&self.folder, &self.selected) {
             (None, Some(path)) => opaque_pair(view, path),
             _ => None,
         };
+        self.follow_pdf(opaque.as_ref());
+        // A PDF compares its selected page pair once its pages are read, and one that shows
+        // as a binary file compares nothing.
+        let wanted = opaque.and_then(|pair| match self.read_pdf(&pair) {
+            Some(Read::Pages(_)) => self.images.pages.then(|| Pair {
+                page: self.selected_page(),
+                ..pair
+            }),
+            Some(Read::Binary(_) | Read::TooLarge(_)) => None,
+            Some(Read::NotPdf) | None => Some(pair),
+        });
         if wanted != self.images.wanted {
             self.images.wanted = wanted;
             self.wait();
@@ -194,7 +240,9 @@ impl Model {
             .compared
             .as_ref()
             .is_some_and(|compared| compared.pair == pair);
-        if done || self.images.comparing.is_some() {
+        // Whether a file is a PDF is known only once its pages are read.
+        let unread = pair.page.is_none() && self.read_pdf(&pair).is_none();
+        if done || unread || self.images.comparing.is_some() {
             return;
         }
         self.images.comparing = Some(pair.clone());
@@ -226,6 +274,15 @@ impl Model {
             }
             Some(Changes::Pixels { .. }) => "The compared images show no pixel differences.",
             Some(Changes::Sizes) => "The versions differ in size, so no pixels are compared.",
+            Some(Changes::None)
+                if self
+                    .images
+                    .wanted
+                    .as_ref()
+                    .is_some_and(|pair| pair.page.is_some()) =>
+            {
+                "The page is in one version only, so no pixels are compared."
+            }
             Some(Changes::None) => "Only one version is an image, so no pixels are compared.",
             None if !self.images.shown => {
                 "This terminal shows no images, so a changed image shows as a binary file."
@@ -256,15 +313,38 @@ fn opaque_pair(view: &RevisionView<'_>, path: &str) -> Option<Pair> {
     (opaque && regular).then(|| Pair {
         base: file.old.as_ref().map(|side| side.oid.clone()),
         head: file.new.as_ref().map(|side| side.oid.clone()),
+        page: None,
     })
 }
 
-/// Reads and compares `pair`'s versions; runs in the background.
+/// Reads and compares `pair`'s versions, or renders and compares a PDF's pages; runs in the
+/// background.
+#[tracing::instrument(skip_all)]
+fn compare(review: &Review, pair: Pair) -> Compared {
+    let (base, head) = read(review, &pair);
+    let comparison = match pair.page {
+        None => Comparison::of(base, head),
+        Some(page) => {
+            let render = |encoded: Encoded, page: Option<u32>| {
+                let page = page.ok_or(Version::Absent)?;
+                match encoded {
+                    Encoded::Bytes(bytes) => crate::pdf::render(&bytes, page),
+                    Encoded::TooLarge(size) => Err(Version::TooLarge(size)),
+                    Encoded::Unreadable => Err(Version::Unreadable(None)),
+                    Encoded::Absent => Err(Version::Absent),
+                }
+            };
+            Comparison::between(render(base, page.base), render(head, page.head))
+        }
+    };
+    Compared { pair, comparison }
+}
+
+/// Reads `pair`'s versions within the comparison's bounds; runs in the background.
 ///
 /// Each blob's size is looked up before it is read, since a reader streams a blob past its
 /// ceiling through its pipe to skip it.
-#[tracing::instrument(skip_all)]
-fn compare(review: &Review, pair: Pair) -> Compared {
+pub(super) fn read(review: &Review, pair: &Pair) -> (Encoded, Encoded) {
     let repo = review.repo();
     let mut reader = repo.blob_reader().ok();
     let mut read = |oid: Option<&ObjectId>| {
@@ -281,10 +361,5 @@ fn compare(review: &Review, pair: Pair) -> Compared {
             Err(_) => Encoded::Unreadable,
         }
     };
-    let base = read(pair.base.as_ref());
-    let head = read(pair.head.as_ref());
-    Compared {
-        comparison: Comparison::of(base, head),
-        pair,
-    }
+    (read(pair.base.as_ref()), read(pair.head.as_ref()))
 }

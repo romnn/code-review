@@ -1,6 +1,6 @@
 # 1. `cr` is the one released binary, and runs the terminal app
 
-**Status:** accepted · **Date:** 2026-11-13
+**Status:** accepted · **Date:** 2026-11-26
 
 ## Context
 
@@ -35,6 +35,11 @@ The alternatives considered were:
   refused without one rather than ignored.
 - `review-tui` is a library that `cr` runs in its own process (`review_tui::run`).
   Its `review-tui` binary stays for the QA scripts and is not released.
+- The Linux releases are static musl binaries built without the `pdf` feature, so a changed PDF
+  shows there as a binary file. pdfium is a shared object, which a static musl binary cannot
+  load, and a dynamically linked `cr` would need a musl loader even for reviewers who never open
+  a PDF. The macOS and Windows releases embed pdfium, load it only when the first PDF shows, and
+  ship its notices in `THIRD-PARTY-PDFIUM`.
 - `review-cli`, the crate of `cr`, is GPL-3.0-or-later.
   `review-core` stays MIT OR Apache-2.0, so the engine remains embeddable under a permissive
   license.
@@ -45,6 +50,8 @@ The alternatives considered were:
 - `cr` carries the terminal stack (ratatui, crossterm and the highlighting grammars), so it is
   larger and slower to build than a bare engine CLI.
 - Release archives ship the GPL license next to the MIT and Apache licenses of the engine inside.
+- Release builds download pdfium for macOS and Windows; a build from source on Linux embeds it
+  too, unless built with `--no-default-features`.
 - review-gui is out of scope here.
   It needs its own packaging (an `.app` on macOS, its own binary on Linux) and is not released
   yet.
@@ -53,5 +60,6 @@ The alternatives considered were:
 
 - `crates/review-cli/src/main.rs` (`Cli`, `AppOptions`), `crates/review-cli/src/app.rs`
 - `crates/review-tui/src/lib.rs` (`Options`, `run`), `crates/review-tui/src/main.rs`
-- `.goreleaser.yaml` (one build, one archive, `binaries: [cr]`)
+- `.goreleaser.yaml` (a build and an archive with pdfium for macOS and Windows, a static one
+  without it for Linux, `binaries: [cr]`)
 - PLAN.md, "Workspace layout" and "CLI (MVP)"

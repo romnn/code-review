@@ -52,6 +52,14 @@ that image, so only first frames are compared and they show no difference, as ea
 every other directory's files but `web/`'s, so the tree rows the QA scripts click stay where they
 are.
 
+`web/manual.pdf` is a changed PDF, a few kilobytes of uncompressed PDF written out by a script,
+Helvetica text and a blue rule on each page, no metadata: the head rewrites the text of page 2,
+inserts a page 4, and swaps the last two pages, so the page navigator shows a text change, an
+added page and two reordered pages, while the other pages read "extracted text identical". Its
+bytes are all ASCII, which the engine still makes one binary unit, as it does any PDF that would
+otherwise be text. It sorts with `web/`'s files,
+after the ones the QA scripts click.
+
 Snapshots duplicate the files a commit does not change, but each one reads and edits as plain
 files. A file the pull request adds is therefore in every `head-*` tree. Edit its copies in
 `head-2` and `head-3` only where those revisions should change it.

@@ -208,6 +208,12 @@ actions! {
     ToggleWrap,
     /// Shows or hides the pixels that changed over a changed image's head.
     ToggleChangedPixels,
+    /// Shows or hides a changed PDF's rendered page pair.
+    TogglePages,
+    /// Shows the next page pair of a changed PDF.
+    NextPage,
+    /// Shows the previous page pair of a changed PDF.
+    PreviousPage,
     /// Moves the settings cursor down, previewing the entry.
     SettingsNext,
     /// Moves the settings cursor up, previewing the entry.
@@ -336,6 +342,7 @@ impl Model {
             Action::ToggleView => self.toggle_view(),
             Action::ToggleWrap => self.apply_wrap(!self.settings.appearance.applied.wrap),
             Action::ToggleChangedPixels => self.toggle_changed_pixels(),
+            Action::TogglePages | Action::NextPage | Action::PreviousPage => self.page_key(action),
             Action::ToggleScrollMode => self.toggle_scroll_mode(),
             Action::SettingsNext => self.settings_step(true),
             Action::SettingsPrevious => self.settings_step(false),

@@ -425,8 +425,8 @@ fn stale_analysis_cache_format_is_replaced() -> eyre::Result<()> {
         rewritten["format"],
         eq(&serde_json::json!(review_core::analysis::ANALYSIS_FORMAT))
     );
-    // Format 13 left behind the analyses that kept highlighted ranges rather than edit scripts.
-    assert_that!(review_core::analysis::ANALYSIS_FORMAT, eq(13));
+    // Format 14 left behind the analyses that read an all-ASCII PDF as lines of text.
+    assert_that!(review_core::analysis::ANALYSIS_FORMAT, eq(14));
     assert_that!(rewritten["units"].as_array().map(Vec::len), some(eq(1)));
     Ok(())
 }

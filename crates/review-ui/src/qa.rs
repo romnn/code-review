@@ -59,6 +59,7 @@ pub fn state(model: &Model, screen: &dyn Screen) -> Value {
     answer.extend(screen.text());
     answer.insert("status".to_owned(), json!(model.status));
     answer.insert("comparison".to_owned(), comparison(model));
+    answer.insert("pages".to_owned(), json!(model.page_navigator()));
     answer.insert(
         "progress".to_owned(),
         json!({

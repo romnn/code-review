@@ -5,11 +5,11 @@ launch --demo
 file src/compat.rs
 key 0
 state
-expect "progress":\{"files":\[6,58\],"hunks":\[15,296\],"auto_approved":6\}
+expect "progress":\{"files":\[6,59\],"hunks":\[15,297\],"auto_approved":6\}
 rapid key space space space q
 exited
 launch --demo-revision 1
-expect "progress":\{"files":\[7,58\],"hunks":\[18,296\],"auto_approved":6\}
+expect "progress":\{"files":\[7,59\],"hunks":\[18,297\],"auto_approved":6\}
 # The review opens where the reviewer quit.
 state
 expect "selected":"src/compat.rs"
@@ -21,8 +21,8 @@ expect "hunk":2,"hunks"
 file src/generated/schema.rs
 key 0
 state
-expect "progress":\{"files":\[7,58\],"hunks":\[18,296\],"auto_approved":6\}
+expect "progress":\{"files":\[7,59\],"hunks":\[18,297\],"auto_approved":6\}
 rapid key space space q space q
 exited
 launch --demo-revision 1
-expect "progress":\{"files":\[8,58\],"hunks":\[20,296\],"auto_approved":6\}
+expect "progress":\{"files":\[8,59\],"hunks":\[20,297\],"auto_approved":6\}

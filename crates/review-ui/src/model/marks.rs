@@ -85,10 +85,13 @@ impl Model {
                 if units.is_empty() {
                     return Err(nothing());
                 }
-                Ok((
-                    units,
-                    format!("hunk {} of {}", self.hunk + 1, self.rows.hunks.len()),
-                ))
+                // A PDF's one unit is the whole PDF, whatever page shows.
+                let what = if self.approves_pdf() {
+                    "the PDF".to_owned()
+                } else {
+                    format!("hunk {} of {}", self.hunk + 1, self.rows.hunks.len())
+                };
+                Ok((units, what))
             }
             Mode::Buffer => {
                 let hunk = self.buffer_hunk().ok_or_else(nothing)?;

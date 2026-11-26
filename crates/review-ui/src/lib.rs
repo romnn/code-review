@@ -49,6 +49,7 @@ pub mod markdown;
 pub mod model;
 pub mod paint;
 pub mod panes;
+mod pdf;
 pub mod qa;
 pub mod rows;
 pub mod scroll;

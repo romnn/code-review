@@ -16,6 +16,7 @@ image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 nucleo-matcher.workspace = true
 notify.workspace = true
 parking_lot.workspace = true
+pdfium-embed = { workspace = true, optional = true }
 regex.workspace = true
 review-core.workspace = true
 review-languages.workspace = true
@@ -50,5 +51,15 @@ indoc.workspace = true
 png.workspace = true
 tempfile.workspace = true
 
+[features]
+default = ["pdf"]
+# A changed PDF's page-by-page text diff and rendered pages, through the pdfium library the
+# build embeds; without it a changed PDF is a binary file.
+pdf = ["dep:pdfium-embed"]
+
 [lints]
 workspace = true
+
+[package.metadata.cargo-fc]
+# `default` enables exactly `pdf`, so the `default` row already covers it.
+exclude_features = ["pdf"]

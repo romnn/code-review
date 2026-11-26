@@ -36,8 +36,15 @@ review-core.workspace = true
 tempfile.workspace = true
 
 [features]
+default = ["pdf"]
+# A changed PDF's page diff; see review-ui's `pdf`.
+pdf = ["review-ui/pdf"]
 # `--trace-output`, a Perfetto trace of the app's spans for profiling.
 trace = ["dep:tracing-perfetto", "dep:tracing-subscriber"]
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-fc]
+# `default` enables exactly `pdf`, so the `default` row already covers it.
+exclude_features = ["pdf"]
