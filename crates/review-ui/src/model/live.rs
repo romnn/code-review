@@ -91,6 +91,9 @@ pub(crate) struct Live {
     again: Option<bool>,
     /// The newest capture that waits for the reviewer.
     waiting: Option<Box<Captured>>,
+    /// Whether the window said cr's data is full since the last capture that showed, so it
+    /// says so once.
+    full: bool,
     /// Whether the watch's trouble was logged already, so it is logged once.
     troubled: bool,
     /// When the watched tree was last walked, by the watch's start or a periodic capture.
@@ -294,6 +297,8 @@ pub(super) struct Captured {
 pub(super) enum Missed {
     /// Git is busy in the checkout.
     Busy(Busy),
+    /// cr's data is full, so nothing was captured; the message says to drop reviews.
+    Full(String),
     /// What the review was read from was replaced.
     Replaced(Replaced),
     /// The capture failed, for this reason.
@@ -342,18 +347,10 @@ pub(super) fn replaced_log(err: &review_core::Error) -> bool {
 
 impl Model {
     /// Starts following the working tree under the session the engine holds, when the review
-    /// `follows` it, saying why it cannot otherwise; `opening` is what the checkout's opening
-    /// capture saw.
-    pub(super) fn start_live(&mut self, follows: Result<bool, String>, opening: Option<Opening>) {
-        match follows {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(err) => {
-                self.effect(Effect::Log(format!(
-                    "cannot follow the working tree: {err}"
-                )));
-                return;
-            }
+    /// `follows` it; `opening` is what the checkout's opening capture saw.
+    pub(super) fn start_live(&mut self, follows: bool, opening: Option<Opening>) {
+        if !follows {
+            return;
         }
         let mut live = Live::default();
         let mut association = None;
@@ -668,6 +665,7 @@ impl Model {
                 let Some(live) = &mut self.live else {
                     return;
                 };
+                live.full = false;
                 if live.stirring {
                     // The capture of the burst follows once it settles.
                     live.updating = true;
@@ -681,6 +679,12 @@ impl Model {
             }
             // The overview says what git is doing; what shows stays, and takes marks.
             Err(Missed::Busy(busy)) => live.busy = Some(busy),
+            // What shows stays, and the status line says why nothing new does, once.
+            Err(Missed::Full(full)) => {
+                if !std::mem::replace(&mut live.full, true) {
+                    self.fail(full);
+                }
+            }
             Err(Missed::Replaced(replaced)) => {
                 again = None;
                 self.stop(replaced, false);
@@ -1336,6 +1340,8 @@ fn live_capture(
         .map_err(|err| {
             if replaced_log(&err) {
                 Missed::Replaced(Replaced::Log)
+            } else if matches!(err, review_core::Error::StorageFull { .. }) {
+                Missed::Full(err.to_string())
             } else {
                 Missed::Failed(causes(&err))
             }

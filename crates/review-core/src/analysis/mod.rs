@@ -16,6 +16,7 @@ use sha2::{Digest as _, Sha256};
 pub use build::analyze;
 pub use noise::NoiseCategory;
 
+use crate::error::Error;
 use crate::git::{ChangeStatus, FileMode};
 use crate::ids::{ObjectId, UnitIndex};
 use crate::syntax::Language;
@@ -44,6 +45,11 @@ pub struct Analysis {
     pub units: Vec<Unit>,
     /// Detected moves, as a presentation over the units.
     pub moves: Vec<Move>,
+    /// A digest of the rest of the analysis, which a correspondence records of the analyses
+    /// whose units it links, so it never links the units of another analysis of the same
+    /// snapshots; see [`Analysis::sealed`].
+    #[serde(default)]
+    pub digest: String,
 }
 
 /// One side of a changed tree entry.
@@ -409,6 +415,21 @@ enum EvidenceChange<'a> {
 }
 
 impl Analysis {
+    /// Returns the analysis with its [`digest`](Self::digest) of everything else in it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] when the analysis cannot be encoded.
+    pub fn sealed(mut self) -> Result<Self, Error> {
+        self.digest = String::new();
+        let bytes = serde_json::to_vec(&self).map_err(|source| Error::Encode {
+            what: "analysis",
+            source,
+        })?;
+        self.digest = hex_digest(&bytes);
+        Ok(self)
+    }
+
     /// Returns the unit at `index`, if it exists.
     #[must_use]
     pub fn unit(&self, index: UnitIndex) -> Option<&Unit> {

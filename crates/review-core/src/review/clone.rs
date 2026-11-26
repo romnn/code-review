@@ -123,7 +123,12 @@ fn held(clones: &Path, id: &ObjectId) -> bool {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "json"))
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .any(|entry| {
             store::read_json::<Binding>(&entry.path())
                 .is_ok_and(|bound| bound.is_some_and(|bound| &bound.id == id))

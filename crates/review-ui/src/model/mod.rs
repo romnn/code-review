@@ -1507,9 +1507,8 @@ pub(super) struct Opened {
     found: Option<String>,
     /// Whether tools may run in the checkout.
     trust: Trust,
-    /// Whether the review follows the working tree, under a session the engine holds, or why
-    /// it cannot.
-    follows: Result<bool, String>,
+    /// Whether the review follows the working tree, under a session the engine holds.
+    follows: bool,
     /// For a review of the checkout, what its opening capture saw.
     following: Option<live::Opening>,
     info: Option<review_core::ReviewInfo>,
@@ -1549,14 +1548,7 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
         ReviewTarget::Worktree { .. } => live,
         ReviewTarget::PullRequest { .. } | ReviewTarget::Range { .. } => false,
     };
-    let session = match session {
-        Some(session) => Ok(Some(session)),
-        None if wanted => review
-            .start_session()
-            .map(Some)
-            .map_err(|err| live::causes(&err)),
-        None => Ok(None),
-    };
+    let session = session.or_else(|| wanted.then(|| review.start_session()));
     let info = review.info().ok().flatten();
     let synced = review.synced().ok().flatten();
     let history = Arc::new(history);
@@ -1574,9 +1566,9 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
             .to_path_buf(),
         target: review.target().clone(),
     };
-    let follows = session.as_ref().map(Option::is_some).map_err(String::clone);
+    let follows = session.is_some();
     Ok(Opened {
-        engine: engine::Engine::new(review, checkout, session.ok().flatten()),
+        engine: engine::Engine::new(review, checkout, session),
         meta,
         view_state,
         ignored,

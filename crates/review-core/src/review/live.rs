@@ -76,7 +76,9 @@ impl Review {
     /// # Errors
     ///
     /// Returns [`Error::InvalidTarget`] for a review that is not of a working tree or a
-    /// `session` of another review, and an error when the capture, git or the log fails.
+    /// `session` of another review, [`Error::StorageFull`] while the data directory retains
+    /// more than its limit, so nothing is captured, and an error when the capture, git or the
+    /// log fails.
     pub fn live_history(
         &self,
         session: &Session,
@@ -128,7 +130,7 @@ impl Review {
         session.release(keep)?;
         // The revision the capture follows is the last one recorded before it was taken, read
         // without deriving anything, so the capture waits on nothing the history needs.
-        let expected = self.last_revision()?;
+        let expected = self.last_revision()?.map(|last| last.number);
         let checkout::Captured {
             input,
             subject,
@@ -196,6 +198,7 @@ impl Review {
 
     /// Makes sure `view`'s revision is recorded before events that refer to it are appended to
     /// `log`, under its lock; with `tip`, it must also be the last revision recorded.
+    /// Returns whether it recorded it, so its analysis is published once the lock goes.
     ///
     /// See [`Self::unsettled`] for what it records.
     ///
@@ -208,14 +211,12 @@ impl Review {
         log: &mut LogWriter<'_>,
         view: &RevisionView<'_>,
         tip: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let Some(revision) = self.unsettled(log, view, tip)? else {
-            return Ok(());
+            return Ok(false);
         };
-        let analysis = view
-            .analysis()
-            .ok_or(Error::UnknownRevision(view.number()))?;
-        self.append_revision(log, revision, analysis)
+        self.append_revision(log, revision)?;
+        Ok(true)
     }
 
     /// Returns the revision event [`Self::settle`] would record for `view` in `log`, under its
@@ -226,12 +227,14 @@ impl Review {
     /// as `view`'s history has it, and none when the log already ends at it, as when an
     /// earlier mark recorded it; anything else means the review moved on since `view` was
     /// read.
-    /// Nothing is saved for a checkout that is another clone now.
+    /// Nothing is saved for a checkout that is another clone now, nor while the data directory
+    /// retains more than its limit, which a revision the log has already never meets.
     ///
     /// # Errors
     ///
     /// Returns [`Error::CloneReplaced`] when the checkout of a review of a checkout is another
-    /// clone now, and [`Error::NotCurrentRevision`] when the log moved on.
+    /// clone now, [`Error::NotCurrentRevision`] when the log moved on, and
+    /// [`Error::StorageFull`] when the data directory retains more than its limit.
     pub(super) fn unsettled(
         &self,
         log: &LogWriter<'_>,
@@ -270,6 +273,7 @@ impl Review {
         if !follows {
             return Err(moved_on());
         }
+        self.admit()?;
         Ok(Some(RevisionEvent {
             recorded_at: store::now_seconds(),
             ..RevisionEvent::from(record)
@@ -420,7 +424,7 @@ mod tests {
     #[test]
     fn a_capture_is_discarded_when_a_revision_is_recorded_meanwhile() -> eyre::Result<()> {
         let (_repo, _data, review) = edited_checkout()?;
-        let session = review.start_session()?;
+        let session = review.start_session();
         // An earlier capture leaves its history in the memo, which the next one starts from.
         capture(&review, &session, &[])?;
         let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
@@ -434,7 +438,7 @@ mod tests {
     #[test]
     fn a_capture_is_discarded_when_the_clone_is_replaced_meanwhile() -> eyre::Result<()> {
         let (_repo, _data, review) = edited_checkout()?;
-        let session = review.start_session()?;
+        let session = review.start_session();
         let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
             let clones = review.dir.data_dir().join("clones");
             std::fs::remove_dir_all(&clones).map_err(|err| Error::io("remove", clones, err))
@@ -451,7 +455,7 @@ mod tests {
         let checkout = Checkout::recorded_twice()?;
         let review = &checkout.review;
         let other = checkout.another()?;
-        let session = review.start_session()?;
+        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
         let before = capture(review, &session, &[])?;
         let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
@@ -481,7 +485,7 @@ mod tests {
     fn a_capture_of_nothing_new_is_the_last_capture_again() -> eyre::Result<()> {
         let checkout = Checkout::recorded_twice()?;
         let review = &checkout.review;
-        let session = review.start_session()?;
+        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
         let first = capture(review, &session, &[])?;
         let again = capture(review, &session, &[])?;
@@ -497,7 +501,7 @@ mod tests {
     fn a_new_capture_proves_only_its_own_link() -> eyre::Result<()> {
         let checkout = Checkout::recorded_twice()?;
         let review = &checkout.review;
-        let session = review.start_session()?;
+        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
         let first = capture(review, &session, &[])?;
         checkout.write(&[4; VALUES])?;
@@ -553,7 +557,7 @@ mod tests {
         let noted = review.history()?;
         assert!(review.history()?.shares_text(&noted));
 
-        let session = review.start_session()?;
+        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
         let first = capture(review, &session, &[])?;
         let again = capture(review, &session, &[])?;
@@ -648,7 +652,7 @@ mod tests {
 
         std::fs::write(review.dir.events(), log)?;
         assert!(replaced(&review.clone().history()));
-        let session = review.start_session()?;
+        let session = review.start_session();
         assert!(replaced(&review.live_history(&session, &[], &[])));
         Ok(())
     }
@@ -758,7 +762,7 @@ mod tests {
         let checkout = Checkout::new()?;
         let review = &checkout.review;
         let other = checkout.another()?;
-        let session = review.start_session()?;
+        let session = review.start_session();
         let mut choices = Choices(seed);
         let mut values = [1; VALUES];
         checkout.write(&values)?;

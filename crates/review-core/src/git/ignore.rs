@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use super::scratch::Scratch;
+use super::scratch::{Objects, Scratch};
 use super::{PrivateRepo, Repo};
 use crate::error::Error;
 
@@ -16,6 +16,9 @@ pub struct IgnoreRules {
 
 /// What git ignores in a reviewed checkout as its index and rules were when this was read; see
 /// [`IgnoreRules::read`].
+///
+/// What its copy of the index needs from the reviewed repository it keeps in an object
+/// database of its own, which goes with it, so asking adds nothing to the archive.
 #[derive(Debug)]
 pub struct Ignores {
     scratch: Scratch,
@@ -41,7 +44,7 @@ impl IgnoreRules {
     /// Returns an error for a repository without a working tree, and when git fails.
     pub fn read(&self) -> Result<Ignores, Error> {
         Ok(Ignores {
-            scratch: Scratch::new(&self.archive, &self.source)?,
+            scratch: Scratch::new(&self.archive, &self.source, Objects::Disposable)?,
         })
     }
 }

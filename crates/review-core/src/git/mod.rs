@@ -9,6 +9,7 @@
 //! a pack of their own, and reads the reviewed clone's configuration as the clone reads it.
 
 mod blobs;
+mod compact;
 mod diff_tree;
 pub(crate) mod fetch;
 mod ignore;
@@ -25,6 +26,8 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 pub use blobs::{Blob, BlobReader, MAX_TEXT_BLOB_BYTES};
+#[cfg(test)]
+pub(crate) use compact::Step;
 pub use diff_tree::{ChangeStatus, EntryType, FileMode, RawChange, RawSide};
 pub use ignore::{IgnoreRules, Ignores};
 pub(crate) use private::{PrivateRepo, refuse_inside};
@@ -34,6 +37,7 @@ pub use state::{BranchIdentity, Busy, Head};
 
 use crate::error::Error;
 use crate::ids::ObjectId;
+use crate::store::InUse;
 
 /// Configuration every git command the engine runs gets, as `-c` options.
 ///
@@ -71,6 +75,9 @@ const DURABLE_CONFIG: [&str; 4] = [
     "-c",
     "core.fsyncMethod=batch",
 ];
+
+/// How many files rename detection compares at most, fixed rather than `diff.renameLimit`.
+const RENAME_LIMIT: &str = "-l1000";
 
 /// Environment every git command the engine runs gets.
 ///
@@ -176,6 +183,9 @@ pub struct Repo {
     /// For a private repository, what its commands take of the clone it serves; see
     /// [`Self::clone_context`].
     clone: Option<Arc<CloneContext>>,
+    /// For a review's archive, the review held open, which every reader of it holds too, so
+    /// the review is not dropped while it reads.
+    lease: Option<InUse>,
 }
 
 /// What a private repository's commands take of the reviewed clone they serve: its
@@ -271,6 +281,7 @@ impl Repo {
             env: Vec::new(),
             no_prompts: false,
             clone: None,
+            lease: None,
         };
         let git_dir = probe.run_text(["rev-parse", "--absolute-git-dir"])?;
         let common_dir =
@@ -290,6 +301,7 @@ impl Repo {
             env: Vec::new(),
             no_prompts: false,
             clone: None,
+            lease: None,
         })
     }
 
@@ -691,17 +703,35 @@ impl Repo {
     ///
     /// Returns an error when git fails or prints output the engine cannot parse.
     pub fn diff_tree(&self, base: &ObjectId, head: &ObjectId) -> Result<Vec<RawChange>, Error> {
-        let output = self.run([
-            "diff-tree",
-            "-r",
-            "-z",
-            "--raw",
-            "-M",
-            "--no-abbrev",
-            "--no-ext-diff",
-            base.as_str(),
-            head.as_str(),
-        ])?;
+        self.diff_tree_with(base, head, &[])
+    }
+
+    /// Lists the changed entries between two commits, as [`Self::diff_tree`] does, with rename
+    /// detection that no configuration changes, so links between revisions computed again
+    /// follow the renames they followed before.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::diff_tree`].
+    pub(crate) fn diff_tree_fixed(
+        &self,
+        base: &ObjectId,
+        head: &ObjectId,
+    ) -> Result<Vec<RawChange>, Error> {
+        self.diff_tree_with(base, head, &[RENAME_LIMIT])
+    }
+
+    /// Lists the changed entries between two commits with the diff options `options`.
+    fn diff_tree_with(
+        &self,
+        base: &ObjectId,
+        head: &ObjectId,
+        options: &[&str],
+    ) -> Result<Vec<RawChange>, Error> {
+        let mut args = vec!["diff-tree", "-r", "-z", "--raw", "-M"];
+        args.extend(options);
+        args.extend(["--no-abbrev", "--no-ext-diff", base.as_str(), head.as_str()]);
+        let output = self.run(args)?;
         diff_tree::parse(&output.stdout)
     }
 

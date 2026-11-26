@@ -7,6 +7,7 @@ use std::process::Stdio;
 use super::Repo;
 use crate::error::Error;
 use crate::ids::ObjectId;
+use crate::store::InUse;
 
 /// A bare repository cr owns in its data directory, the only kind of repository a git command
 /// that writes runs against.
@@ -44,6 +45,7 @@ impl PrivateRepo {
                 env: source.env.clone(),
                 no_prompts: source.no_prompts,
                 clone: Some(source.clone_context()?),
+                lease: None,
             },
             format: source.object_format()?,
         };
@@ -75,6 +77,13 @@ impl PrivateRepo {
             Err(err) => return Err(Error::io("read", attributes, err)),
         }
         Ok(private)
+    }
+
+    /// The repository, holding the review it is the archive of open with `lease`, which every
+    /// clone of it and every reader of its objects holds too.
+    pub(crate) fn leased(mut self, lease: InUse) -> Self {
+        self.repo.lease = Some(lease);
+        self
     }
 
     /// Returns the repository for reading: its objects, refs and snapshots.
@@ -115,7 +124,7 @@ impl PrivateRepo {
     /// Returns [`Error::MissingObject`] when `from` lacks an object, as after a garbage
     /// collection or in a partial clone, and an error when git fails.
     pub(crate) fn import(&self, from: &Repo, roots: &[ObjectId]) -> Result<(), Error> {
-        self.restore(from, &self.repo.missing(roots)?)
+        import(&self.repo, from, roots)
     }
 
     /// Makes everything `roots` reach but a commit's parents present, as [`Self::import`] does,
@@ -126,11 +135,7 @@ impl PrivateRepo {
     ///
     /// Returns the errors of [`Self::import`].
     pub(crate) fn restore(&self, from: &Repo, roots: &[ObjectId]) -> Result<(), Error> {
-        let objects = self.repo.missing(&from.closure(roots)?)?;
-        if objects.is_empty() {
-            return Ok(());
-        }
-        copy_pack(from, &self.repo, &[], super::object_lines(&objects))
+        restore(&self.repo, from, roots)
     }
 
     /// Checks that `roots` and everything they reach but a commit's parents are here.
@@ -142,6 +147,22 @@ impl PrivateRepo {
     pub(crate) fn verify(&self, roots: &[ObjectId]) -> Result<(), Error> {
         self.repo.closure(roots).map(drop)
     }
+}
+
+/// Makes `roots` and everything they reach but a commit's parents present in `to`, copying what
+/// is missing from `from` in one pack; see [`PrivateRepo::import`].
+pub(super) fn import(to: &Repo, from: &Repo, roots: &[ObjectId]) -> Result<(), Error> {
+    restore(to, from, &to.missing(roots)?)
+}
+
+/// Makes everything `roots` reach but a commit's parents present in `to`, whether the roots are
+/// there or not; see [`PrivateRepo::restore`].
+fn restore(to: &Repo, from: &Repo, roots: &[ObjectId]) -> Result<(), Error> {
+    let objects = to.missing(&from.closure(roots)?)?;
+    if objects.is_empty() {
+        return Ok(());
+    }
+    copy_pack(from, to, &[], super::object_lines(&objects))
 }
 
 /// Packs what `input` lists in `from`, as `git pack-objects` reads it with the options `options`,

@@ -9,15 +9,20 @@
 //! - `view/<front-end>.json`: each front end's own view state, such as folded folders, written
 //!   atomically and never part of the review's state.
 //! - `archive/`: a private bare git repository with every snapshot the review recorded or shows,
-//!   pinned by its refs, and the sessions' lock files; see [`crate::Review::snapshots`].
+//!   pinned by its refs; see [`crate::Review::snapshots`].
 //!
 //! Beside the reviews, `clones/<digest>.json` binds a clone's identity to its common git
-//! directory.
+//! directory, `locks/<digest>.lock` is each review's lease, which everything that has it open
+//! holds shared ([`InUse`]), `dropped/` holds what a dropped review left when removing it was
+//! cut short, and `cache.lock` serializes writing to the analysis caches and keeping them within
+//! their budget.
 
 pub mod events;
 pub mod log;
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -41,6 +46,15 @@ impl ReviewDir {
         Self {
             data: data_dir.to_path_buf(),
             root: data_dir.join("reviews").join(key.encoded()),
+        }
+    }
+
+    /// Returns the directory `root` of a review under `data_dir`, as listed there.
+    #[cfg(test)]
+    pub(crate) fn listed(data_dir: &Path, root: PathBuf) -> Self {
+        Self {
+            data: data_dir.to_path_buf(),
+            root,
         }
     }
 
@@ -128,6 +142,94 @@ impl ReviewDir {
     }
 }
 
+/// A review held open: a shared lock on its lease, a file in `locks/` of the data directory that
+/// is never moved or removed, which every clone of the review, its sessions, probes and its
+/// archive's readers hold until the last one goes.
+///
+/// Only a holder of the lease alone, exclusively, changes what others may be using: an open
+/// maintaining the review's storage, and [`crate::Review::remove`].
+#[derive(Debug, Clone)]
+pub(crate) struct InUse {
+    #[expect(
+        dead_code,
+        reason = "the open file holds the lock for as long as anything holds the review open"
+    )]
+    lock: Arc<File>,
+}
+
+/// A review's lease file, open and not locked yet; see [`InUse`].
+pub(crate) struct Lease {
+    file: File,
+    path: PathBuf,
+}
+
+impl Lease {
+    /// Opens the lease file of the review in `dir`, creating it, or returns `None` when the
+    /// review's directory does not exist.
+    ///
+    /// The file is `locks/<digest>.lock` in the data directory, named for a digest of the name
+    /// of the directory a symbolic link leads to, if one does, which is the key encoded in
+    /// ASCII, in lowercase, so a link to a review and two spellings of a key that a filesystem
+    /// ignoring case takes for one directory share one lease.
+    /// On a filesystem that tells case apart, two reviews whose keys differ only in case share
+    /// one too, which only keeps a drop or maintenance of one waiting for the other.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be resolved, a symbolic link leads the lease
+    /// out of the data directory, or the file cannot be opened.
+    pub(crate) fn open(dir: &ReviewDir) -> Result<Option<Self>, Error> {
+        let resolved = match std::fs::canonicalize(&dir.root) {
+            Ok(resolved) => resolved,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(Error::io("resolve", &dir.root, source)),
+        };
+        let name = resolved.file_name().unwrap_or_default().to_string_lossy();
+        let digest = crate::analysis::hex_digest(name.to_ascii_lowercase().as_bytes());
+        let path = dir.data.join("locks").join(format!("{digest}.lock"));
+        if !contained(&dir.data, &path) {
+            let leads_out =
+                std::io::Error::other("a symbolic link leads out of the data directory");
+            return Err(Error::io("open", path, leads_out));
+        }
+        if let Some(locks) = path.parent() {
+            create_dir(locks)?;
+        }
+        let file = open_lock(&path)?;
+        Ok(Some(Self { file, path }))
+    }
+
+    /// Takes the lease exclusively unless anything holds it, and returns whether it did.
+    pub(crate) fn try_exclusive(&self) -> Result<bool, Error> {
+        match self.file.try_lock() {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(source)) => Err(Error::io("lock", &self.path, source)),
+        }
+    }
+
+    /// Holds the review open with the lease, once a shared lock on it is taken, waiting while
+    /// an exclusive holder has it.
+    pub(crate) fn shared(self) -> Result<InUse, Error> {
+        self.file
+            .lock_shared()
+            .map_err(|source| Error::io("lock", &self.path, source))?;
+        Ok(InUse {
+            lock: Arc::new(self.file),
+        })
+    }
+}
+
+/// Opens the lock file at `path`, creating it.
+pub(crate) fn open_lock(path: &Path) -> Result<File, Error> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|source| Error::io("open", path, source))
+}
+
 /// Returns the default configuration file the front ends and `cr` share,
 /// `$XDG_CONFIG_HOME/code-review/config.toml` or `$HOME/.config/code-review/config.toml`, from
 /// those variables' values, which the caller reads at its process boundary.
@@ -160,6 +262,44 @@ pub fn default_data_dir(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Op
 #[must_use]
 pub fn encode_component(text: &str) -> String {
     crate::ids::encode_component(text)
+}
+
+/// Whether `path`, under `data_dir`, stays in it: no part of it below `data_dir` that exists is
+/// a symbolic link, which could lead maintenance to remove or rewrite what is not cr's.
+pub(crate) fn contained(data_dir: &Path, path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(data_dir) else {
+        return false;
+    };
+    let mut at = data_dir.to_path_buf();
+    for part in rest.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return false;
+        }
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(metadata) if metadata.is_symlink() => return false,
+            Ok(_) => {}
+            // What does not exist yet leads nowhere.
+            Err(_) => return true,
+        }
+    }
+    true
+}
+
+/// The entries of the directory at `path`, or none when it does not exist.
+pub(crate) fn entries(path: &Path) -> Result<Vec<PathBuf>, Error> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(Error::io("read", path, source)),
+    };
+    entries
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|source| Error::io("read", path, source))
+        })
+        .collect()
 }
 
 /// Creates `path` and its parents.
@@ -212,25 +352,31 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     result
 }
 
-/// Removes the directory at `path` and everything below it, giving the owner the write
-/// permission first wherever it lacks it; a missing directory is no error.
+/// Removes the file or the directory at `path`, and everything below it, giving the owner the
+/// write permission first wherever it lacks it; a symbolic link is removed, never followed, and
+/// a missing path is no error.
 ///
-/// Older versions wrote read-only copies of the reviewed files into a review's data, which a
-/// plain removal cannot remove: on Unix their directories refuse to lose entries, and on Windows
-/// a read-only file refuses to be deleted.
+/// Older versions wrote read-only copies of the reviewed files into a review's data, and git
+/// writes its packs read-only, which a plain removal cannot remove: on Unix their directories
+/// refuse to lose entries, and on Windows a read-only file refuses to be deleted.
 pub(crate) fn remove_read_only(path: &Path) -> Result<(), Error> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => {}
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(Error::io("read", path, source)),
-    }
+    };
     make_writable(path)?;
-    std::fs::remove_dir_all(path).map_err(|source| Error::io("remove", path, source))
+    let removed = if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    removed.map_err(|source| Error::io("remove", path, source))
 }
 
 /// Gives the owner the write permission on `path` and everything below it, without following
 /// symbolic links.
-fn make_writable(path: &Path) -> Result<(), Error> {
+pub(crate) fn make_writable(path: &Path) -> Result<(), Error> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|source| Error::io("read", path, source))?;
     if metadata.is_symlink() {

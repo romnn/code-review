@@ -238,6 +238,64 @@ fn every_command_works_with_json() -> eyre::Result<()> {
     Ok(())
 }
 
+/// `cr drop` removes a review by its key once its checkout is gone, after which the key names
+/// no review, and refuses a key that names none.
+#[test]
+fn drop_removes_a_review_whose_checkout_is_gone() -> eyre::Result<()> {
+    let repo_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let elsewhere = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    git(repo, &["init", "--quiet", "--initial-branch=main"])?;
+    std::fs::write(repo.join("lib.rs"), BASE_LIB)?;
+    git(repo, &["add", "--all"])?;
+    git(repo, &["commit", "--quiet", "-m", "base"])?;
+    git(repo, &["checkout", "--quiet", "-b", "feature"])?;
+    std::fs::write(repo.join("lib.rs"), FEATURE_LIB)?;
+    git(repo, &["commit", "--quiet", "--all", "-m", "feature"])?;
+    let key = open_range(repo, data)?;
+    drop(repo_dir);
+
+    let dropped = cr_json(elsewhere.path(), data, &["drop", &key])?;
+    assert_eq!(dropped["dropped"], key.as_str());
+    let refused = cr_fails(elsewhere.path(), data, &["status", "--review", &key])?;
+    assert!(refused.contains("no review"), "{refused}");
+    let refused = cr_fails(elsewhere.path(), data, &["drop", &key])?;
+    assert!(refused.contains("no review"), "{refused}");
+    Ok(())
+}
+
+/// At its limit, cr's data takes no capture, and `cr show` on the checkout shows the last
+/// recorded revision, saying so, rather than failing.
+#[cfg(unix)]
+#[test]
+fn show_at_the_limit_shows_the_recorded_revision() -> eyre::Result<()> {
+    let repo_dir = repo_with_change(&[("lib.rs", BASE_LIB)], &[("lib.rs", FEATURE_LIB)])?;
+    let data_dir = tempfile::tempdir()?;
+    let (repo, data) = (repo_dir.path(), data_dir.path());
+    let recorded = cr_json(repo, data, &["status"])?;
+    // A sparse file as large as the limit counts, though it takes no space on disk.
+    std::fs::File::create(data.join("filler"))?.set_len(10 << 30)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cr"))
+        .args(["status", "--json", "-C"])
+        .arg(repo)
+        .env("CR_DATA_DIR", data)
+        .env("XDG_CONFIG_HOME", config_home(data))
+        .env_remove("CODE_REVIEW_CONFIG")
+        .envs(GIT_ENV)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("showing the last recorded revision"),
+        "{stderr}"
+    );
+    let shown: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(shown["revision"], recorded["revision"]);
+    Ok(())
+}
+
 /// Creates a repository with `base` files on `main` and `changed` files on `feature`.
 fn repo_with_change(
     files: &[(&str, &str)],

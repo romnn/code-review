@@ -6,6 +6,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use super::Repo;
 use crate::error::Error;
 use crate::ids::ObjectId;
+use crate::store::InUse;
 
 /// Blobs larger than this are treated as opaque content instead of being diffed.
 pub const MAX_TEXT_BLOB_BYTES: u64 = 8 * 1024 * 1024;
@@ -30,6 +31,11 @@ pub struct BlobReader {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
+    #[expect(
+        dead_code,
+        reason = "it holds the review whose archive it reads open for as long as it reads"
+    )]
+    lease: Option<InUse>,
 }
 
 impl BlobReader {
@@ -61,6 +67,7 @@ impl BlobReader {
             child,
             stdin,
             stdout,
+            lease: repo.lease.clone(),
         })
     }
 

@@ -110,11 +110,26 @@ impl Context {
     /// Loads the review to show, as [`Self::load`] does, and when it is the review of a
     /// checkout shown at its current revision (no `revision`), records what the checkout holds
     /// now first: what a command prints, others refer to, so it has to be a revision (ADR 4).
+    ///
+    /// While cr's data is at its limit, nothing is recorded and the last recorded revision
+    /// shows, as in the windows, saying so.
     fn load_shown(&self, revision: Option<&RevisionReference>) -> eyre::Result<Shown> {
         let review = self.load()?;
         let recorded = match review.target() {
             ReviewTarget::Checkout { .. } if revision.is_none() => {
-                Some(record(&review, &mut PullRequestLookup::default())?)
+                match record(&review, &mut PullRequestLookup::default()) {
+                    Ok(recorded) => Some(recorded),
+                    Err(err)
+                        if matches!(
+                            err.downcast_ref(),
+                            Some(review_core::Error::StorageFull { .. })
+                        ) =>
+                    {
+                        eprintln!("cr: showing the last recorded revision: {err:#}");
+                        None
+                    }
+                    Err(err) => return Err(err),
+                }
             }
             _ => None,
         };
@@ -516,6 +531,16 @@ pub fn note(context: &Context, unit: &str, text: &str) -> eyre::Result<()> {
         return print_json(&serde_json::json!({ "unit": unit, "note": text }));
     }
     println!("noted {unit}");
+    Ok(())
+}
+
+pub fn drop_review(context: &Context, review: &str) -> eyre::Result<()> {
+    let key = ReviewKey::parse(review.trim())?;
+    Review::remove(&context.data_dir, &key)?;
+    if context.json {
+        return print_json(&serde_json::json!({ "dropped": key }));
+    }
+    println!("dropped {key}");
     Ok(())
 }
 

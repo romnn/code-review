@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::analysis::Analysis;
-use crate::correspond::{Correspondence, Link, LinkKind};
+use crate::correspond::{Link, LinkKind};
 use crate::error::Error;
 use crate::ids::{ObjectId, RevisionNumber, UnitId, UnitIndex};
 use crate::standing::ReviewPolicy;
@@ -164,14 +164,14 @@ pub(crate) struct Links {
 }
 
 impl Links {
-    /// Indexes `correspondence` between a revision of `older` units and one of `newer` units,
-    /// dropping each end of a link that names a unit out of range.
-    pub(crate) fn new(correspondence: &Correspondence, older: usize, newer: usize) -> Self {
+    /// Indexes `correspondence`, the links between a revision of `older` units and one of
+    /// `newer` units, dropping each end of a link that names a unit out of range.
+    pub(crate) fn new(correspondence: &[Link], older: usize, newer: usize) -> Self {
         let mut links = Self {
             successors: vec![Vec::new(); older],
             predecessors: vec![Vec::new(); newer],
         };
-        for link in &correspondence.links {
+        for link in correspondence {
             if let Some(entry) = links.successors.get_mut(link.older.get()) {
                 entry.push(*link);
             }
@@ -565,8 +565,11 @@ impl History {
     /// Returns the links between a revision analyzed as `older` and the next one, analyzed as
     /// `newer`, if the history has two such.
     pub(crate) fn links_between(&self, older: &Analysis, newer: &Analysis) -> Option<&Arc<Links>> {
+        // Links index the units of the very analyses they were proven between.
         let same = |revision: &RevisionData, analysis: &Analysis| {
-            revision.analysis.base == analysis.base && revision.analysis.head == analysis.head
+            revision.analysis.base == analysis.base
+                && revision.analysis.head == analysis.head
+                && revision.analysis.digest == analysis.digest
         };
         self.revisions
             .windows(2)
@@ -745,6 +748,7 @@ mod tests {
                 files: Vec::new(),
                 units: Vec::new(),
                 moves: Vec::new(),
+                digest: String::new(),
             }))
         };
         let links = |revision: &RevisionEvent, older: &Analysis, newer: &Analysis| {

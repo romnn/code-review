@@ -20,6 +20,16 @@ use super::{PrivateRepo, Repo};
 use crate::error::Error;
 use crate::ids::ObjectId;
 
+/// Where the commands of a [`Scratch`] keep the objects they import and write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Objects {
+    /// In the private repository, for a capture whose snapshot it keeps.
+    Private,
+    /// In an object database of the directory's own, removed with it, that reads the private
+    /// repository's as an alternate, for a probe that keeps nothing.
+    Disposable,
+}
+
 /// A private git directory standing in for a worktree's own, removed when dropped.
 #[derive(Debug)]
 pub(crate) struct Scratch {
@@ -37,8 +47,8 @@ pub(crate) struct Scratch {
 impl Scratch {
     /// Makes a private git directory under `private`'s with a copy of `source`'s index, or a
     /// fresh one from `HEAD` when it has none, and of the other files of its git directories
-    /// that commands reading the index read; `HEAD` and every object the index names are in
-    /// `private` once it returns.
+    /// that commands reading the index read; `HEAD` and every object the index names are where
+    /// `objects` says once it returns.
     ///
     /// The objects are listed before any command can expand a sparse index: git drops a
     /// directory it cannot expand without a word, and then a capture would miss it.
@@ -47,14 +57,15 @@ impl Scratch {
     ///
     /// Returns [`Error::MissingObject`] when `source` lacks an object its index or `HEAD`
     /// names, and an error for a bare repository or when git fails.
-    pub(crate) fn new(private: &PrivateRepo, source: &Repo) -> Result<Self, Error> {
+    pub(crate) fn new(
+        private: &PrivateRepo,
+        source: &Repo,
+        objects: Objects,
+    ) -> Result<Self, Error> {
         let work_tree = source.work_tree().ok_or_else(|| {
             Error::InvalidTarget("a bare repository has no working tree".to_owned())
         })?;
         let head = source.resolve_commit("HEAD").ok();
-        if let Some(head) = &head {
-            private.import(source, std::slice::from_ref(head))?;
-        }
         let clone = source.clone_context()?;
         let dir = private.scratch().join(crate::random::hex(12));
         let mut scratch = Self {
@@ -65,14 +76,27 @@ impl Scratch {
                 env: source.env.clone(),
                 no_prompts: source.no_prompts,
                 clone: Some(clone),
+                lease: private.repo().lease.clone(),
             },
             work_tree: work_tree.to_path_buf(),
-            objects: private.objects(),
+            objects: match objects {
+                Objects::Private => private.objects(),
+                Objects::Disposable => dir.join("objects"),
+            },
             head,
             unmerged: false,
         };
         crate::store::create_dir(&dir.join("info"))?;
         crate::store::create_dir(&dir.join("refs"))?;
+        if objects == Objects::Disposable {
+            crate::store::create_dir(&scratch.objects.join("pack"))?;
+            crate::store::create_dir(&scratch.objects.join("info"))?;
+            let alternate = format!("{}\n", private.objects().display());
+            write(
+                &scratch.objects.join("info/alternates"),
+                alternate.as_bytes(),
+            )?;
+        }
         let config = formatdoc! {"
             [core]
             repositoryformatversion = 1
@@ -86,6 +110,13 @@ impl Scratch {
             .as_ref()
             .map_or_else(|| "ref: refs/heads/unborn".to_owned(), ToString::to_string);
         write(&dir.join("HEAD"), format!("{head}\n").as_bytes())?;
+        let into = match objects {
+            Objects::Private => private.repo(),
+            Objects::Disposable => &scratch.repo,
+        };
+        if let Some(head) = &scratch.head {
+            super::private::import(into, source, std::slice::from_ref(head))?;
+        }
         for (from, name) in [
             (source.git_dir(), "info/sparse-checkout"),
             (source.common_dir(), "info/exclude"),
@@ -107,7 +138,11 @@ impl Scratch {
             };
         }
         let staged = scratch.index_objects()?;
-        private.import(source, &staged)?;
+        let into = match objects {
+            Objects::Private => private.repo(),
+            Objects::Disposable => &scratch.repo,
+        };
+        super::private::import(into, source, &staged)?;
         Ok(scratch)
     }
 

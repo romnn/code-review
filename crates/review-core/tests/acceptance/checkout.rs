@@ -133,7 +133,7 @@ fn accept_all(review: &Review, captured: &LiveCapture) -> eyre::Result<()> {
 fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<()> {
     let (test, forge) = with_remote()?;
     let review = open(&test)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
 
     // A clean default branch level with its remote has nothing to review, and says so.
     let clean = capture(&review, &session)?;
@@ -238,7 +238,7 @@ fn an_unborn_branch_is_reviewed_against_the_empty_tree() -> eyre::Result<()> {
     let test = TestRepo::new()?;
     test.write("lib.rs", "fn first() {}\n")?;
     let review = open(&test)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let captured = capture(&review, &session)?;
     expect_that!(captured.subject.head, none());
     expect_that!(captured.subject.branch.as_deref(), some(eq("main")));
@@ -265,7 +265,7 @@ fn no_default_branch_compares_with_the_empty_tree() -> eyre::Result<()> {
     test.commit("first")?;
     test.git(&["branch", "--move", "main", "trunk"])?;
     let review = open(&test)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let captured = capture(&review, &session)?;
     expect_that!(
         captured.subject.base,
@@ -304,7 +304,7 @@ fn a_shallow_clone_says_its_history_is_shallow() -> eyre::Result<()> {
 
     let data = tempfile::tempdir()?;
     let review = Review::open_checkout(data.path(), Repo::discover(&clone)?)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let captured = capture(&review, &session)?;
     expect_that!(
         captured.subject.base,
@@ -329,7 +329,7 @@ fn nothing_is_captured_while_git_is_busy() -> eyre::Result<()> {
     let (test, _forge) = with_remote()?;
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     let review = open(&test)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     for (marker, busy) in [
         ("MERGE_HEAD", Busy::Merge),
         ("index.lock", Busy::IndexLocked),
@@ -366,7 +366,7 @@ fn another_clone_at_the_same_path_is_another_review() -> eyre::Result<()> {
     let second = open(&test)?;
     expect_that!(second.key(), not(eq(first.key())));
     expect_false!(first.verify_clone()?);
-    let session = first.start_session()?;
+    let session = first.start_session();
     let captured = first.live_history(&session, &[], &[])?;
     expect_true!(matches!(captured, Capture::Replaced));
     expect_that!(first.refresh(), err(matches_pattern!(Error::CloneReplaced)));
@@ -431,7 +431,7 @@ fn the_tree_on_disk_is_what_a_capture_records() -> eyre::Result<()> {
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     test.write("new.rs", "fn new() {}\n")?;
     let review = open(&test)?;
-    let captured = capture(&review, &review.start_session()?)?;
+    let captured = capture(&review, &review.start_session())?;
     let head = captured
         .history
         .revisions()
@@ -453,13 +453,14 @@ fn the_tree_on_disk_is_what_a_capture_records() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A session removes only its own pins, and another session's only once that session is over.
+/// A session removes only its own pins as it ends, and the pins of one that died go with the
+/// next open that has the review to itself, never while anything has it open.
 #[gtest]
-fn sessions_remove_only_the_pins_of_sessions_that_are_over() -> eyre::Result<()> {
+fn sessions_remove_only_their_own_pins() -> eyre::Result<()> {
     let (test, _forge) = with_remote()?;
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     let review = open(&test)?;
-    let live = review.start_session()?;
+    let live = review.start_session();
     let captured = capture(&review, &live)?;
     let head = captured
         .history
@@ -468,17 +469,17 @@ fn sessions_remove_only_the_pins_of_sessions_that_are_over() -> eyre::Result<()>
         .ok_or_else(|| eyre::eyre!("no capture"))?
         .head
         .clone();
-    let archive = review.snapshots().git_dir();
+    let archive = review.snapshots().git_dir().to_path_buf();
     let pins = |prefix: &str| -> eyre::Result<usize> {
         Ok(
-            git_in(archive, &["for-each-ref", "--format=%(refname)", prefix])?
+            git_in(&archive, &["for-each-ref", "--format=%(refname)", prefix])?
                 .lines()
                 .count(),
         )
     };
     expect_that!(pins(live.pins())?, gt(0));
 
-    // A session that ended without removing its pins: a lock file nobody holds.
+    // A session that died without removing its pins.
     let live_root = live
         .pins()
         .rsplit_once('/')
@@ -486,24 +487,24 @@ fn sessions_remove_only_the_pins_of_sessions_that_are_over() -> eyre::Result<()>
         .ok_or_else(|| eyre::eyre!("no live root"))?;
     let dead = format!("{live_root}/0123456789abcdef");
     git_in(
-        archive,
+        &archive,
         &["update-ref", &format!("{dead}/{head}/head"), head.as_str()],
     )?;
-    let dead_lock = live.lock_file().with_file_name("0123456789abcdef.lock");
-    std::fs::write(&dead_lock, "")?;
+    open(&test)?;
+    expect_that!(pins(&dead)?, gt(0));
 
-    let other = review.start_session()?;
-    expect_that!(pins(&dead)?, eq(0));
-    expect_false!(dead_lock.exists());
-    expect_that!(pins(live.pins())?, gt(0));
-
-    // An ending session removes its own pins, never a live one's.
+    // An ending session removes its own pins, never another's.
+    let other = review.start_session();
     capture(&review, &other)?;
     expect_that!(pins(other.pins())?, gt(0));
     let other_pins = other.pins().to_owned();
     drop(other);
     expect_that!(pins(&other_pins)?, eq(0));
     expect_that!(pins(live.pins())?, gt(0));
+
+    drop((live, review));
+    open(&test)?;
+    expect_that!(pins(&live_root)?, eq(0));
     Ok(())
 }
 
@@ -515,7 +516,7 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
     test.git(&["checkout", "--quiet", "-b", "feature"])?;
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     let review = open(&test)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let mut found = BranchPullRequest {
         number: 7,
         url: "https://example.invalid/owner/repo/pull/7".to_owned(),

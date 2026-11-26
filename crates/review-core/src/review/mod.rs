@@ -10,12 +10,14 @@
 //! directory too.
 
 mod archive;
+mod cache;
 mod checkout;
 mod clone;
 pub mod github;
 mod info;
 mod live;
 mod memo;
+mod retention;
 mod session;
 mod trust;
 
@@ -36,7 +38,7 @@ use crate::correspond::{CORRESPONDENCE_FORMAT, Correspondence, correspond};
 use crate::error::Error;
 use crate::git::fetch::FetchRepo;
 use crate::git::{IgnoreRules, PrivateRepo, Repo};
-use crate::history::{History, HistoryInput, Links};
+use crate::history::{History, HistoryInput, Links, RevisionRecord};
 use crate::ids::{MoveId, ObjectId, ReviewKey, RevisionNumber, UnitId};
 use crate::store::events::{
     Event, MarkEvent, MarkVerdict, NoteEvent, PartialApprovalEvent, RevisionEvent,
@@ -258,9 +260,9 @@ pub enum RefreshStep {
 /// Who writes a freshly computed analysis or correspondence to the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Publish {
-    /// The caller publishes it under the lock, as part of recording a revision; for a
+    /// The caller publishes it once it recorded the revision, after the log's lock; for a
     /// provisional revision, that happens only if it is recorded.
-    UnderLock,
+    Recorded,
     /// Write it right away.
     Now,
 }
@@ -314,6 +316,9 @@ pub struct Review {
     archive: PrivateRepo,
     meta: ReviewMeta,
     memo: memo::Memo,
+    /// How many bytes the data directory may retain before additions are refused; see
+    /// [`Self::admit`].
+    limit: u64,
 }
 
 impl Review {
@@ -330,34 +335,56 @@ impl Review {
     /// of moving a stored review into its archive, such as [`Error::MissingObject`], and an
     /// error when the storage cannot be created.
     pub fn open(data_dir: &Path, repo: Repo, target: ReviewTarget) -> Result<Self, Error> {
+        Self::open_with(data_dir, repo, target, &mut || {})
+    }
+
+    /// See [`Self::open`]; `between` runs where an open that maintained the review lets go of
+    /// its lease and before it takes it shared, where a test drops the review meanwhile.
+    fn open_with(
+        data_dir: &Path,
+        repo: Repo,
+        target: ReviewTarget,
+        between: &mut dyn FnMut(),
+    ) -> Result<Self, Error> {
         let key = target.key(&repo)?;
         let dir = storage(data_dir, &key, &repo)?;
+        let stored = dir.clone();
         let meta = ReviewMeta {
             key,
             repo: repo.work_tree().unwrap_or(repo.git_dir()).to_path_buf(),
             target,
         };
-        store::create_dir(dir.root())?;
-        // Two first opens of colliding targets must not both find no metadata and both write.
-        let lock = LockGuard::acquire(&dir.lock())?;
-        let stored = store::read_json::<ReviewMeta>(&dir.meta())?;
-        if let Some(stored) = &stored
-            && stored.target != meta.target
-        {
-            return Err(Error::KeyConflict(meta.key.as_str().to_owned()));
+        let open = move || {
+            // Two first opens of colliding targets must not both find no metadata and both
+            // write.
+            let lock = LockGuard::acquire(&dir.lock())?;
+            let stored = store::read_json::<ReviewMeta>(&dir.meta())?;
+            if let Some(stored) = &stored
+                && stored.target != meta.target
+            {
+                return Err(Error::KeyConflict(meta.key.as_str().to_owned()));
+            }
+            if stored.as_ref() != Some(&meta) {
+                store::write_json_atomic(&dir.meta(), &meta, "review metadata")?;
+            }
+            let archive = Self::open_archive(&dir, &repo, &lock)?;
+            drop(lock);
+            Ok(Self {
+                dir: dir.clone(),
+                repo: repo.clone(),
+                archive,
+                meta: meta.clone(),
+                memo: memo::Memo::default(),
+                limit: retention::RETAINED_LIMIT,
+            })
+        };
+        // A review a drop takes meanwhile is made anew.
+        loop {
+            store::create_dir(stored.root())?;
+            if let Some(review) = Self::under_lease(&stored, between, &open)? {
+                return Ok(review);
+            }
         }
-        if stored.as_ref() != Some(&meta) {
-            store::write_json_atomic(&dir.meta(), &meta, "review metadata")?;
-        }
-        let archive = Self::open_archive(&dir, &repo, &lock)?;
-        drop(lock);
-        Ok(Self {
-            dir,
-            repo,
-            archive,
-            meta,
-            memo: memo::Memo::default(),
-        })
     }
 
     /// Loads the stored review `key`.
@@ -370,23 +397,43 @@ impl Review {
     /// Returns [`Error::UnknownReview`] when no such review is stored, the errors of
     /// [`Self::open`], and an error when its repository cannot be opened.
     pub fn load(data_dir: &Path, key: &ReviewKey) -> Result<Self, Error> {
-        let meta: ReviewMeta = store::read_json(&ReviewDir::new(data_dir, key).meta())?
-            .ok_or_else(|| Error::UnknownReview(key.as_str().to_owned()))?;
-        let repo = Repo::discover(&meta.repo)?;
-        let dir = storage(data_dir, key, &repo)?;
-        if matches!(meta.target, ReviewTarget::Checkout { .. }) {
-            clone::ensure_clone_id(dir.data_dir(), &repo)?;
+        Self::load_with(data_dir, key, &mut || {})
+    }
+
+    /// See [`Self::load`] and, for `between`, [`Self::open_with`].
+    fn load_with(
+        data_dir: &Path,
+        key: &ReviewKey,
+        between: &mut dyn FnMut(),
+    ) -> Result<Self, Error> {
+        let unknown = || Error::UnknownReview(key.as_str().to_owned());
+        let stored = ReviewDir::new(
+            &std::path::absolute(data_dir).map_err(|err| Error::io("resolve", data_dir, err))?,
+            key,
+        );
+        let load = || {
+            let meta: ReviewMeta = store::read_json(&stored.meta())?.ok_or_else(unknown)?;
+            let repo = Repo::discover(&meta.repo)?;
+            let dir = storage(data_dir, key, &repo)?;
+            if matches!(meta.target, ReviewTarget::Checkout { .. }) {
+                clone::ensure_clone_id(dir.data_dir(), &repo)?;
+            }
+            let lock = LockGuard::acquire(&dir.lock())?;
+            let archive = Self::open_archive(&dir, &repo, &lock)?;
+            drop(lock);
+            Ok(Self {
+                dir,
+                repo,
+                archive,
+                meta,
+                memo: memo::Memo::default(),
+                limit: retention::RETAINED_LIMIT,
+            })
+        };
+        if !stored.meta().exists() {
+            return Err(unknown());
         }
-        let lock = LockGuard::acquire(&dir.lock())?;
-        let archive = Self::open_archive(&dir, &repo, &lock)?;
-        drop(lock);
-        Ok(Self {
-            dir,
-            repo,
-            archive,
-            meta,
-            memo: memo::Memo::default(),
-        })
+        Self::under_lease(&stored, between, &load)?.ok_or_else(unknown)
     }
 
     /// Returns the review's key.
@@ -660,17 +707,30 @@ impl Review {
         pull_requests: &[github::CheckoutPullRequest],
         progress: &mut dyn FnMut(RefreshStep),
     ) -> Result<Recorded, Error> {
-        let observed = self.last_revision()?;
-        let session = self.start_session()?;
+        let last = self.last_revision()?;
+        let observed = last.as_ref().map(|last| last.number);
+        // Importing the target's snapshots adds to the archive, unless they are the last
+        // revision's.
+        let admit = |base: &ObjectId, head: &ObjectId| {
+            if last
+                .as_ref()
+                .is_none_or(|last| &last.base != base || &last.head != head)
+            {
+                self.admit()?;
+            }
+            Ok(())
+        };
+        let session = self.start_session();
         let remote = self.repo.default_remote()?;
         let deepen_from = remote.as_deref();
         match &self.meta.target {
             ReviewTarget::Range { base, head } => {
                 let target = self.repo.resolve_commit(base)?;
                 let head = self.repo.resolve_commit(head)?;
+                let merge_bases =
+                    self.merge_bases(&target, &head, deepen_from, &|base| admit(base, &head))?;
                 self.archive
                     .import(&self.repo, std::slice::from_ref(&head))?;
-                let merge_bases = self.merge_bases(&target, &head, deepen_from)?;
                 let input = snapshot_input(target, head, merge_bases)?;
                 session.pin(&input)?;
                 self.record_revision_reporting(
@@ -726,6 +786,7 @@ impl Review {
                 )?;
                 let merge_bases = fetched.repo().merge_bases(&target, &head)?;
                 let input = snapshot_input(target, head, merge_bases)?;
+                admit(&input.base, &input.head)?;
                 self.archive
                     .import(fetched.repo(), &[input.base.clone(), input.head.clone()])?;
                 drop(fetched);
@@ -740,27 +801,34 @@ impl Review {
         }
     }
 
-    /// The number of the last recorded revision, or `None` before the first, read from the
-    /// records appended since the history the review last read, which derives nothing.
-    fn last_revision(&self) -> Result<Option<RevisionNumber>, Error> {
+    /// The last recorded revision, or `None` before the first, read from the records appended
+    /// since the history the review last read, which derives nothing.
+    fn last_revision(&self) -> Result<Option<RevisionRecord>, Error> {
         if self.memo.replaced() {
             return Err(self.log_replaced());
         }
         let replayed = self.memo.replayed();
         let (mut tail, read) = match &replayed {
-            Some(replayed) => (replayed.tail.clone(), replayed.history.current()),
+            Some(replayed) => (
+                replayed.tail.clone(),
+                replayed
+                    .history
+                    .revisions()
+                    .last()
+                    .map(|&last| last.clone()),
+            ),
             None => (LogTail::new(&self.dir), None),
         };
         let events = self.memo.note_replaced(tail.poll())?;
         let appended = events.iter().rev().find_map(|event| match event {
-            Event::Revision(revision) => Some(revision.number),
+            Event::Revision(revision) => Some(RevisionRecord::from(revision)),
             _ => None,
         });
         Ok(appended.or(read))
     }
 
     /// Every merge base of `target` and `ancestry`, the commit whose history the head has, best
-    /// first, with the best imported into the archive.
+    /// first, with the best imported into the archive once `admit` lets it through.
     ///
     /// A shallow clone that holds none is deepened from `deepen_from`, when given, in a
     /// transient repository that starts with the history the clone holds.
@@ -769,6 +837,7 @@ impl Review {
         target: &ObjectId,
         ancestry: &ObjectId,
         deepen_from: Option<&str>,
+        admit: &dyn Fn(&ObjectId) -> Result<(), Error>,
     ) -> Result<Vec<ObjectId>, Error> {
         let found = self.repo.merge_bases(target, ancestry);
         let deepen = match &found {
@@ -788,6 +857,7 @@ impl Review {
         };
         let from = fetched.as_ref().map_or(&self.repo, FetchRepo::repo);
         if let Some(best) = merge_bases.first() {
+            admit(best)?;
             self.archive.import(from, std::slice::from_ref(best))?;
         }
         Ok(merge_bases)
@@ -801,16 +871,28 @@ impl Review {
     /// from the cache.
     /// Review state therefore always flows forward in time.
     ///
+    /// A revision that is not the current one already is an addition, which the data
+    /// directory's limit may refuse; see [`Error::StorageFull`].
+    ///
     /// The analysis is computed first; it is content-addressed, so it needs no lock.
     /// Then, under `review.lock`, the log is reread and compared with the current `(base, head)`,
-    /// both snapshots are pinned, the analysis is published, and the revision event is appended.
-    /// The event is the commit point: a crash before it leaves only idempotent pins and a cache
-    /// file.
+    /// both snapshots are pinned, the revision event is appended, and the analysis is published
+    /// to the cache.
+    /// The event is the commit point: a crash before it leaves only idempotent pins, which the
+    /// archive's next compaction removes.
     ///
     /// # Errors
     ///
-    /// Returns an error when analysis, pinning or the log append fails.
+    /// Returns [`Error::StorageFull`] when the data directory retains more than its limit, and
+    /// an error when analysis, pinning or the log append fails.
     pub fn record_revision(&self, input: RevisionInput) -> Result<Recorded, Error> {
+        // Recording the current revision again adds nothing.
+        if self
+            .last_revision()?
+            .is_none_or(|last| last.base != input.base || last.head != input.head)
+        {
+            self.admit()?;
+        }
         self.record_revision_reporting(input, RevisionMeta::default(), After::Anything, &mut |_| {})
     }
 
@@ -828,7 +910,7 @@ impl Review {
         // the caller has them in the reviewed repository.
         self.archive
             .import(&self.repo, &[input.base.clone(), input.head.clone()])?;
-        let analysis = self.analysis(&input.base, &input.head, Publish::UnderLock, progress)?;
+        let analysis = self.analysis(&input.base, &input.head, Publish::Recorded, progress)?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
         let mut log = self.open_log(&lock, None)?;
         let revisions = revision_events(&self.dir.events(), log.events(), 0)?;
@@ -867,8 +949,10 @@ impl Review {
                 head_commit: meta.head_commit,
                 pull_request: meta.pull_request,
             },
-            &analysis,
         )?;
+        drop(log);
+        drop(lock);
+        self.publish(&analysis);
         Ok(Recorded {
             number,
             created: true,
@@ -894,15 +978,16 @@ impl Review {
     }
 
     /// Appends `revision` to the log under its lock, the commit point of recording it: pins
-    /// both snapshots in the archive and publishes the analysis first, which are idempotent,
-    /// so a crash before the append leaves nothing a later recording does not redo.
+    /// both snapshots in the archive first, which is idempotent, so a crash before the append
+    /// leaves nothing a later recording does not redo.
     ///
+    /// The caller publishes the revision's analysis once it let go of the log's lock (see
+    /// [`Self::publish`]).
     /// The target is only a label of the revision: nothing reads its objects.
     fn append_revision(
         &self,
         log: &mut LogWriter<'_>,
         revision: RevisionEvent,
-        analysis: &Analysis,
     ) -> Result<(), Error> {
         // A revision of no change has one snapshot, which one ref pins.
         let mut snapshots = vec![&revision.base];
@@ -914,11 +999,16 @@ impl Review {
             .map(|oid| (self.pin_ref(oid), oid.clone()))
             .collect();
         self.archive.update_refs(&pins)?;
-        let analysis_path = self.dir.analysis(&revision.base, &revision.head);
-        if !analysis_path.exists() {
-            store::write_json_atomic(&analysis_path, analysis, "analysis")?;
-        }
         log.append(Event::Revision(revision))
+    }
+
+    /// Publishes `analysis`, of a revision just recorded, to the cache unless it holds one,
+    /// which only saves computing it again.
+    fn publish(&self, analysis: &Analysis) {
+        let path = self.dir.analysis(&analysis.base, &analysis.head);
+        if !path.exists() {
+            cache::install(&self.dir, &path, analysis);
+        }
     }
 
     /// Loads the analysis of `(base, head)` from the memo or the cache, or computes it,
@@ -940,7 +1030,7 @@ impl Review {
         progress(RefreshStep::Analyzing);
         let analysis = analyze(self.archive.repo(), base, head)?;
         if publish == Publish::Now {
-            store::write_json_atomic(&self.dir.analysis(base, head), &analysis, "analysis")?;
+            cache::install(&self.dir, &self.dir.analysis(base, head), &analysis);
         }
         Ok(Arc::new(analysis))
     }
@@ -961,7 +1051,7 @@ impl Review {
             let path = self
                 .dir
                 .correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
-            store::write_json_atomic(&path, &computed, "correspondence")?;
+            cache::install(&self.dir, &path, &computed);
         }
         Ok(computed)
     }
@@ -1042,7 +1132,7 @@ impl Review {
         revision_events(&self.dir.events(), &events, history.revisions().len())?;
         let publish = |revision: &RevisionEvent| {
             if Some(revision.number) == provisional {
-                Publish::UnderLock
+                Publish::Recorded
             } else {
                 Publish::Now
             }
@@ -1081,7 +1171,7 @@ impl Review {
         }
         let correspondence = self.correspondence(older, newer, publish)?;
         Ok(Arc::new(Links::new(
-            &correspondence,
+            &correspondence.links,
             older.units.len(),
             newer.units.len(),
         )))
@@ -1107,7 +1197,8 @@ impl Review {
     /// Returns [`Error::WrongRevision`] or [`Error::UnknownUnit`] for a unit not in the view,
     /// [`Error::NotCurrentRevision`] when a newer revision exists and [`Error::CloneReplaced`]
     /// when the checkout of a review of a checkout is another clone now, checked under the lock
-    /// before anything is recorded, and an error when the append fails.
+    /// before anything is recorded, [`Error::StorageFull`] when a provisional revision cannot
+    /// be recorded for want of space, and an error when the append fails.
     pub fn mark(
         &self,
         view: &RevisionView<'_>,
@@ -1129,10 +1220,13 @@ impl Review {
             .collect::<Result<Vec<_>, Error>>()?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
         let mut log = self.open_log(&lock, Some(view.history()))?;
-        self.settle(&mut log, view, true)?;
+        let recorded = self.settle(&mut log, view, true)?;
         for event in events {
             log.append(event)?;
         }
+        drop(log);
+        drop(lock);
+        self.published(view, recorded);
         Ok(())
     }
 
@@ -1185,11 +1279,9 @@ impl Review {
             .find(|run| run.is(shown))
             .ok_or_else(changed)?;
         let approved = delta.approving(&run);
+        let recorded = capture.is_some();
         if let Some(capture) = capture {
-            let analysis = view
-                .analysis()
-                .ok_or(Error::UnknownRevision(view.number()))?;
-            self.append_revision(&mut log, capture, analysis)?;
+            self.append_revision(&mut log, capture)?;
         }
         let at = store::now_seconds();
         let event = if approved == delta.after.added {
@@ -1209,7 +1301,11 @@ impl Review {
                 text: approved,
             })
         };
-        log.append(event)
+        log.append(event)?;
+        drop(log);
+        drop(lock);
+        self.published(view, recorded);
+        Ok(())
     }
 
     /// Marks every unit of the files at `paths` (or below them, for directories) in `view`'s
@@ -1258,7 +1354,8 @@ impl Review {
     /// # Errors
     ///
     /// Returns [`Error::EmptyNote`] for blank text, the unit errors of [`RevisionView::unit`],
-    /// and an error when the append fails.
+    /// [`Error::StorageFull`] when the provisional revision it would record cannot be for want
+    /// of space, and an error when the append fails.
     pub fn note(&self, view: &RevisionView<'_>, unit: UnitId, text: &str) -> Result<(), Error> {
         if text.trim().is_empty() {
             return Err(Error::EmptyNote);
@@ -1272,21 +1369,38 @@ impl Review {
         });
         let lock = LockGuard::acquire(&self.dir.lock())?;
         let mut log = self.open_log(&lock, Some(view.history()))?;
-        self.settle(&mut log, view, false)?;
-        log.append(event)
+        let recorded = self.settle(&mut log, view, false)?;
+        log.append(event)?;
+        drop(log);
+        drop(lock);
+        self.published(view, recorded);
+        Ok(())
+    }
+
+    /// Publishes the analysis of `view`'s revision to the cache when it was `recorded` just now,
+    /// as a capture a mark, an approval or a note recorded; see [`Self::publish`].
+    fn published(&self, view: &RevisionView<'_>, recorded: bool) {
+        if recorded && let Some(analysis) = view.analysis() {
+            self.publish(analysis);
+        }
     }
 
     /// Validates and stores a walkthrough document.
     ///
+    /// A walkthrough adds text of any length to the log, which the data directory's limit may
+    /// refuse.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Walkthrough`] when validation fails, and an error when the append fails.
+    /// Returns [`Error::Walkthrough`] when validation fails, [`Error::StorageFull`] when the
+    /// data directory retains more than its limit, and an error when the append fails.
     pub fn import_walkthrough(
         &self,
         history: &History,
         json: &str,
     ) -> Result<RevisionNumber, Error> {
         let event = walkthrough::validate(history, self.key(), json)?;
+        self.admit()?;
         let revision = event.revision;
         self.append(vec![Event::Walkthrough(event)])?;
         Ok(revision)
@@ -1311,29 +1425,33 @@ fn storage(data_dir: &Path, key: &ReviewKey, repo: &Repo) -> Result<ReviewDir, E
 
 /// The analysis of `(base, head)` the cache in `dir` holds, if it holds one this version reads;
 /// a cache file that fails to decode is computed again rather than trusted.
+///
+/// One an earlier version wrote without its digest gets it now.
 fn cached_analysis(dir: &ReviewDir, base: &ObjectId, head: &ObjectId) -> Option<Analysis> {
-    store::read_json::<Analysis>(&dir.analysis(base, head))
-        .ok()
-        .flatten()
-        .filter(|cached| {
-            cached.format == ANALYSIS_FORMAT && &cached.base == base && &cached.head == head
-        })
+    let cached = cache::read(dir, &dir.analysis(base, head), |cached: &Analysis| {
+        cached.format == ANALYSIS_FORMAT && &cached.base == base && &cached.head == head
+    })?;
+    if cached.digest.is_empty() {
+        cached.sealed().ok()
+    } else {
+        Some(cached)
+    }
 }
 
 /// The correspondence between `older` and `newer` the cache in `dir` holds, if it holds one
-/// this version reads.
+/// this version reads that was computed between these very analyses, so its links index their
+/// units even after one was computed again.
 fn cached_correspondence(
     dir: &ReviewDir,
     older: &Analysis,
     newer: &Analysis,
 ) -> Option<Correspondence> {
     let path = dir.correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
-    store::read_json::<Correspondence>(&path)
-        .ok()
-        .flatten()
-        .filter(|cached| {
-            cached.format == CORRESPONDENCE_FORMAT && cached.analysis_format == ANALYSIS_FORMAT
-        })
+    cache::read(dir, &path, |cached: &Correspondence| {
+        cached.format == CORRESPONDENCE_FORMAT
+            && cached.older == older.digest
+            && cached.newer == newer.digest
+    })
 }
 
 /// The revision of `head` against the first of its `merge_bases` with `target`.

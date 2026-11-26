@@ -181,6 +181,7 @@ cr mark u1-0003@3fa2b1c0 accepted   # seen, accepted, flagged or unseen
 cr note u1-0003@3fa2b1c0 "Why 250?"
 cr mark --file src --revision 1@3fa2b1c0 seen   # every unit below src in the revision shown
 cr export            # flagged, accepted and annotated units, for an agent
+cr drop <key>        # remove a review you are done with, also once its checkout is gone
 ```
 
 ## License

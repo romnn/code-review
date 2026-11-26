@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use super::scratch::Scratch;
+use super::scratch::{Objects, Scratch};
 use super::{Busy, PrivateRepo, Repo, durable};
 use crate::error::Error;
 use crate::ids::ObjectId;
@@ -73,7 +73,7 @@ impl PrivateRepo {
             tree,
             head,
             filtered,
-        } = self.worktree_tree(source)?;
+        } = self.worktree_tree(source, Objects::Private)?;
         // A working tree with nothing beyond `HEAD` is `HEAD`, so a capture of committed work
         // is the commit itself and deduplicates with a revision that recorded it.
         if let Some(head) = &head
@@ -143,20 +143,21 @@ impl PrivateRepo {
     }
 
     /// Returns the tree a [`capture_worktree`](Self::capture_worktree) of `source` would record
-    /// now, writing no commit.
+    /// now, writing no commit and nothing into this repository: what it imports and writes goes
+    /// with the directory it works in.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Self::capture_worktree`].
     pub(crate) fn capture_tree(&self, source: &Repo) -> Result<ObjectId, Error> {
-        Ok(self.worktree_tree(source)?.tree)
+        Ok(self.worktree_tree(source, Objects::Disposable)?.tree)
     }
 
     /// Writes the tree a capture of `source` records, from a copy of its index updated with
     /// every change in the working tree but those of filtered paths, with every filter driver
-    /// off.
-    fn worktree_tree(&self, source: &Repo) -> Result<WorktreeTree, Error> {
-        self.worktree_tree_with(source, &mut || Ok(()))
+    /// off, keeping what it imports and writes where `objects` says.
+    fn worktree_tree(&self, source: &Repo, objects: Objects) -> Result<WorktreeTree, Error> {
+        self.worktree_tree_with(source, objects, &mut || Ok(()))
     }
 
     /// See [`Self::worktree_tree`]; `scanned` runs once the changed paths are known and before
@@ -164,9 +165,10 @@ impl PrivateRepo {
     fn worktree_tree_with(
         &self,
         source: &Repo,
+        objects: Objects,
         scanned: &mut dyn FnMut() -> Result<(), Error>,
     ) -> Result<WorktreeTree, Error> {
-        let scratch = Scratch::new(self, source)?;
+        let scratch = Scratch::new(self, source, objects)?;
         if scratch.unmerged() {
             return Err(Error::GitBusy(Busy::Unmerged));
         }
@@ -360,7 +362,7 @@ mod tests {
         let (_data, private) = testing::private(&git)?;
         let staged = testing::git(repo.path(), &["rev-parse", "HEAD:secret"])?;
 
-        let captured = private.worktree_tree_with(&git, &mut || {
+        let captured = private.worktree_tree_with(&git, Objects::Private, &mut || {
             std::fs::write(repo.path().join("secret"), "plaintext\n")
                 .map_err(|source| Error::io("write", repo.path().join("secret"), source))
         })?;
