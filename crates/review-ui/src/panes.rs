@@ -98,20 +98,37 @@ const COMPARISON_SHARE: f32 = 0.45;
 /// The least room the comparison's images get between its labels and its status line.
 const COMPARISON_IMAGES_MIN: f32 = 96.0;
 
-/// The height of the comparison above the diff in a window `window` logical pixels high, whose
-/// label and status bars are `bar` high: `height` when the reviewer dragged its edge, or else
-/// its share of the window.
+/// The least and most height of the comparison above the diff, out of `room`, the height the
+/// window leaves the comparison and the diff together, with the comparison's label and status
+/// bars `bar` high and the diff's least rows `rows` high.
 ///
-/// It is at most `most`, what the window's other bars and the diff's least rows leave it, and
-/// within that tall enough for both bars and [`COMPARISON_IMAGES_MIN`] of images. It depends on
-/// nothing the comparison shows, so the rows below never move when its images land.
+/// The comparison gets at least both bars and [`COMPARISON_IMAGES_MIN`] of images, and the diff
+/// its least rows.
+/// When `room` holds less than both least heights, it is shared in their proportion, so neither
+/// disappears, and the least and the most are the same: there is nothing left to drag.
 #[must_use]
-pub fn comparison_height(height: Option<f32>, window: f32, most: f32, bar: f32) -> f32 {
-    let max = most.max(0.0);
-    let min = (bar * 2.0 + COMPARISON_IMAGES_MIN).min(max);
+pub fn comparison_bounds(room: f32, bar: f32, rows: f32) -> (f32, f32) {
+    let room = room.max(0.0);
+    let least = bar * 2.0 + COMPARISON_IMAGES_MIN;
+    if least + rows > room {
+        let shared = room * least / (least + rows);
+        return (shared, shared);
+    }
+    (least, room - rows)
+}
+
+/// The height of the comparison above the diff in a window `window` logical pixels high: `height`
+/// when the reviewer dragged its edge, or else its share of the window, within
+/// [`comparison_bounds`] of `room`, `bar` and `rows`.
+///
+/// It depends on nothing the comparison shows, so the rows below never move when its images
+/// land.
+#[must_use]
+pub fn comparison_height(height: Option<f32>, window: f32, room: f32, bar: f32, rows: f32) -> f32 {
+    let (least, most) = comparison_bounds(room, bar, rows);
     match height {
-        Some(height) if !height.is_nan() => height.clamp(min, max),
-        _ => (window * COMPARISON_SHARE).clamp(min, max),
+        Some(height) if !height.is_nan() => height.clamp(least, most),
+        _ => (window * COMPARISON_SHARE).clamp(least, most),
     }
 }
 
@@ -195,18 +212,39 @@ mod tests {
     /// height stays between room for its bars and images and the most the window leaves it.
     #[test]
     fn comparison_heights_stay_within_limits() {
-        assert_eq!(comparison_height(None, 1000.0, 750.0, 30.0), 450.0);
-        assert_eq!(comparison_height(Some(600.0), 1000.0, 750.0, 30.0), 600.0);
-        assert_eq!(comparison_height(Some(900.0), 1000.0, 750.0, 30.0), 750.0);
-        assert_eq!(comparison_height(Some(20.0), 1000.0, 750.0, 30.0), 156.0);
+        // 900 of room, 30 high bars and 90 of rows: between 156 and 810.
+        assert_eq!(comparison_height(None, 1000.0, 900.0, 30.0, 90.0), 450.0);
         assert_eq!(
-            comparison_height(Some(f32::NAN), 1000.0, 750.0, 30.0),
+            comparison_height(Some(600.0), 1000.0, 900.0, 30.0, 90.0),
+            600.0
+        );
+        assert_eq!(
+            comparison_height(Some(900.0), 1000.0, 900.0, 30.0, 90.0),
+            810.0
+        );
+        assert_eq!(
+            comparison_height(Some(20.0), 1000.0, 900.0, 30.0, 90.0),
+            156.0
+        );
+        assert_eq!(
+            comparison_height(Some(f32::NAN), 1000.0, 900.0, 30.0, 90.0),
             450.0
         );
-        // A window too low for the least comparison gives it what it leaves, if anything.
-        assert_eq!(comparison_height(Some(20.0), 400.0, 120.0, 30.0), 120.0);
-        assert_eq!(comparison_height(None, 400.0, 120.0, 30.0), 120.0);
-        assert_eq!(comparison_height(None, 200.0, -10.0, 30.0), 0.0);
+        assert_eq!(comparison_bounds(900.0, 30.0, 90.0), (156.0, 810.0));
+    }
+
+    /// A window too low for both least heights shares what it has in their proportion, so the
+    /// comparison and the diff both keep some, and nothing is left to drag.
+    #[test]
+    fn a_low_window_shares_its_room() {
+        // Least heights of 156 and 90 in 123 of room: half each of what a whole would need.
+        assert_eq!(comparison_bounds(123.0, 30.0, 90.0), (78.0, 78.0));
+        assert_eq!(
+            comparison_height(Some(900.0), 400.0, 123.0, 30.0, 90.0),
+            78.0
+        );
+        assert_eq!(comparison_height(None, 400.0, 123.0, 30.0, 90.0), 78.0);
+        assert_eq!(comparison_bounds(-10.0, 30.0, 90.0), (0.0, 0.0));
     }
 
     /// A large font widens the narrowest sidebar, so its names keep room.

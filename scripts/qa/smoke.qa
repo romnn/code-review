@@ -652,11 +652,12 @@ launch --demo
 file web/images/chart.png
 state
 expect "viewport":\[[0-9.]+,618\.0,
-# A short window keeps the diff rows under the comparison, and the drag remembered for a taller
-# one stays for when it grows again.
+# A window too short for both the comparison's and the diff's least heights shares its room
+# between them, so both keep some, and the drag remembered for a taller one stays for when it
+# grows again.
 resize 1600x400
 state
-expect "viewport":\[[0-9.]+,222\.0,[0-9.]+,122\.0\]
+expect "viewport":\[[0-9.]+,224\.0,[0-9.]+,120\.0\]
 resize 1600x1000
 state
 expect "viewport":\[[0-9.]+,618\.0,

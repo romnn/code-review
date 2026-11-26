@@ -266,9 +266,23 @@ impl ReviewApp {
         review_ui::panes::comparison_height(
             wanted,
             height,
-            sizes.comparison_most(height, self.client_decorated),
+            sizes.comparison_room(height, self.client_decorated),
             sizes.bar(),
+            sizes.comparison_rows(),
         )
+    }
+
+    /// Whether the comparison's edge has anywhere to go in `window`: not when the window leaves
+    /// the comparison and the diff only their least heights.
+    pub(super) fn comparison_drags(&self, window: &Window) -> bool {
+        let height = f32::from(window.viewport_size().height);
+        let sizes = self.sizes();
+        let (least, most) = review_ui::panes::comparison_bounds(
+            sizes.comparison_room(height, self.client_decorated),
+            sizes.bar(),
+            sizes.comparison_rows(),
+        );
+        most - least >= 1.0
     }
 }
 

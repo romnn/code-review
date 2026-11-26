@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::prelude::*;
 use gpui::{
     Context, Div, MouseButton, MouseDownEvent, ObjectFit, RenderImage, Window, div, img, px,
@@ -193,7 +194,20 @@ impl ReviewApp {
         };
         let height = self.comparison_height(wanted, window);
         let accent = to_gpui(colors.accent);
-        // The bottom edge: a hairline with a wider grip, which lights while it drags.
+        // The bottom edge: a hairline with a wider grip, which lights while it drags; a window
+        // with no room to move it gets the hairline alone.
+        let drags = self.comparison_drags(window);
+        let line = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(1.0))
+            .bg(if active {
+                accent
+            } else {
+                to_gpui(colors.hairline)
+            });
         let edge = div()
             .id("comparison-edge")
             .group("comparison-edge")
@@ -202,29 +216,22 @@ impl ReviewApp {
             .right_0()
             .bottom_0()
             .h(px(GRID + 1.0))
-            .cursor(gpui::CursorStyle::ResizeUpDown)
-            .child(self.regions.mark("comparison-edge", "ns-resize"))
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(1.0))
-                    .bg(if active {
-                        accent
-                    } else {
-                        to_gpui(colors.hairline)
-                    })
-                    .group_hover("comparison-edge", |line| line.bg(accent)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.press_comparison_edge(f32::from(event.position.y), height, cx);
-                }),
-            );
+            .child(if drags {
+                line.group_hover("comparison-edge", |line| line.bg(accent))
+            } else {
+                line
+            })
+            .when(drags, |edge| {
+                edge.cursor(gpui::CursorStyle::ResizeUpDown)
+                    .child(self.regions.mark("comparison-edge", "ns-resize"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.press_comparison_edge(f32::from(event.position.y), height, cx);
+                        }),
+                    )
+            });
         let base = self.comparison_half(&shown.base, &colors, cx);
         let head = self.comparison_half(&shown.head, &colors, cx);
         let status = h_flex()
