@@ -505,6 +505,7 @@ mod tests {
     fn panes(width: u16) -> Panes {
         let layout = PaneLayout {
             sidebar: review_ui::panes::SidebarWidth::Fit,
+            comparison: None,
             sidebar_visible: false,
         };
         let mut panes = Panes::lay_out(Rect::new(0, 0, width, 50), layout, 0, false, false);

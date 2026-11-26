@@ -179,7 +179,7 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
         styles,
         context: config.context,
         shorten_chains: config.shorten_chains,
-        mouse: config.mouse,
+        mouse: front_end.mouse(&config),
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -190,6 +190,7 @@ pub fn settings(configured: Configured, front_end: FrontEnd) -> Result<Settings,
         added: config.added,
         layout: PaneLayout {
             sidebar: front_end.sidebar_width(&config.layout),
+            comparison: config.layout.comparison,
             sidebar_visible: config.layout.sidebar_visible,
         },
         keymap,
@@ -429,11 +430,17 @@ mod tests {
     use super::*;
 
     /// A front end without a code size or a window of its own gets no keys for them, while
-    /// review-gui keeps every key, and each reads its own pane width.
+    /// review-gui keeps every key, each reads its own pane width, and only review-tui reads
+    /// `[tui.mouse]`: review-gui always has the whole mouse.
     #[test]
     fn settings_follow_the_front_end() {
         let configured = || Configured {
-            config: Config::default(),
+            config: config::parse(indoc::indoc! {"
+                [tui.mouse]
+                navigate = false
+                copy_on_select = true
+            "})
+            .unwrap(),
             path: None,
             problems: Vec::new(),
         };
@@ -457,6 +464,8 @@ mod tests {
         );
         assert_eq!(window.layout.sidebar, crate::panes::SidebarWidth::Fit);
         assert_eq!(terminal.layout.sidebar, crate::panes::SidebarWidth::Fit);
+        assert_eq!(window.mouse, config::Mouse::default());
+        assert!(!terminal.mouse.navigate && terminal.mouse.select && terminal.mouse.copy_on_select);
     }
 
     /// An error's causes follow it, as a report prints them.

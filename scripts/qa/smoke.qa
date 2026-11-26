@@ -636,6 +636,23 @@ state
 expect "selected":"src/engine.rs"
 expect "hunk":2,"hunks"
 
+# The edge under an image's comparison drags its height, which the rows below follow and the
+# next launch keeps; only that edge shows the resize pointer.
+file web/images/chart.png
+state
+expect "viewport":\[[0-9.]+,518\.0,
+hit 900 515
+expect "region":"comparison-edge","cursor":"ns-resize"
+hit 900 505
+expect "region":null
+drag 900 515 900 615
+state
+expect "viewport":\[[0-9.]+,618\.0,
+launch --demo
+file web/images/chart.png
+state
+expect "viewport":\[[0-9.]+,618\.0,
+
 # A mistake in one diff style costs only that style, and the window says so where the reviewer
 # looks, not only on stderr.
 launch --demo --config scripts/qa/broken-style.toml

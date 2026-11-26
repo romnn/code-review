@@ -454,6 +454,7 @@ mod tests {
     fn layout(sidebar: f32) -> PaneLayout {
         PaneLayout {
             sidebar: panes::SidebarWidth::Set(sidebar),
+            comparison: None,
             sidebar_visible: true,
         }
     }
@@ -486,6 +487,7 @@ mod tests {
         let area = Rect::new(0, 0, 160, 50);
         let fitted = PaneLayout {
             sidebar: panes::SidebarWidth::Fit,
+            comparison: None,
             sidebar_visible: true,
         };
         let panes = Panes::lay_out(area, fitted, 37, true, false);

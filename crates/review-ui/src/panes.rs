@@ -1,6 +1,6 @@
 //! The files pane's width: as wide as its tree needs unless the reviewer dragged its divider,
 //! within limits that never squeeze the diff away, in a window's logical pixels and in a
-//! terminal's cells.
+//! terminal's cells; and the height of review-gui's image and PDF comparison, likewise.
 
 /// How wide the files pane is, as the reviewer left it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,6 +93,30 @@ fn whole_cells(width: f32) -> u16 {
     width
 }
 
+/// The comparison's share of the window's height until its edge is dragged.
+const COMPARISON_SHARE: f32 = 0.45;
+/// The tallest comparison's share of the window's height, so the rows below keep the rest.
+const COMPARISON_MAX_SHARE: f32 = 0.75;
+/// The least room the comparison's images get between its labels and its status line.
+const COMPARISON_IMAGES_MIN: f32 = 96.0;
+
+/// The height of the comparison above the diff in a window `window` logical pixels high, whose
+/// label and status bars are `bar` high: `height` when the reviewer dragged its edge, or else
+/// its share of the window.
+///
+/// It is at most three quarters of the window, and within that tall enough for both bars and
+/// [`COMPARISON_IMAGES_MIN`] of images. It depends on nothing the comparison shows, so the rows
+/// below never move when its images land.
+#[must_use]
+pub fn comparison_height(height: Option<f32>, window: f32, bar: f32) -> f32 {
+    let max = (window * COMPARISON_MAX_SHARE).max(0.0);
+    let min = (bar * 2.0 + COMPARISON_IMAGES_MIN).min(max);
+    match height {
+        Some(height) if !height.is_nan() => height.clamp(min, max),
+        _ => (window * COMPARISON_SHARE).clamp(min, max),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +191,20 @@ mod tests {
         // A quarter of 50 columns is less than the narrowest sidebar, and wins.
         assert_eq!(sidebar_cells(fit, 30, 50), 12);
         assert_eq!(sidebar_cells(fit, 30, 24), 6);
+    }
+
+    /// The comparison takes its share of the window until its edge is dragged, and a dragged
+    /// height stays between room for its bars and images and three quarters of the window.
+    #[test]
+    fn comparison_heights_stay_within_limits() {
+        assert_eq!(comparison_height(None, 1000.0, 30.0), 450.0);
+        assert_eq!(comparison_height(Some(600.0), 1000.0, 30.0), 600.0);
+        assert_eq!(comparison_height(Some(900.0), 1000.0, 30.0), 750.0);
+        assert_eq!(comparison_height(Some(20.0), 1000.0, 30.0), 156.0);
+        assert_eq!(comparison_height(Some(f32::NAN), 1000.0, 30.0), 450.0);
+        // A window too low for the least comparison gives it three quarters.
+        assert_eq!(comparison_height(Some(20.0), 160.0, 30.0), 120.0);
+        assert_eq!(comparison_height(None, 160.0, 30.0), 120.0);
     }
 
     /// A large font widens the narrowest sidebar, so its names keep room.

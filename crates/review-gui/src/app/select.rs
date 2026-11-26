@@ -1,5 +1,6 @@
 //! The mouse over text: finding the text under the pointer in the diff and the buffer for the
-//! model's selection, and dragging the divider between the files and the diff.
+//! model's selection, and dragging the divider between the files and the diff and the edge under
+//! the comparison.
 
 use std::time::Instant;
 
@@ -13,6 +14,18 @@ use review_ui::text::{Column, Pane, TextPos};
 
 use super::measure::{DIVIDER, FRAME};
 use super::{ReviewApp, scroll};
+
+/// An edge the mouse drags to resize a pane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Edge {
+    /// The divider between the files and the diff.
+    Divider,
+    /// The edge under the comparison, whose top is at `top` in the window.
+    Comparison {
+        /// Where the comparison starts, in logical pixels from the window's top.
+        top: f32,
+    },
+}
 
 impl ReviewApp {
     /// The column of the diff at window position `x`: a half of the side-by-side diff, or the
@@ -117,25 +130,38 @@ impl ReviewApp {
         self.update_model(window, cx, |model| model.press_text(press));
     }
 
-    /// Drags the divider, or extends a drag selection, scrolling when the mouse leaves the pane.
+    /// Drags an edge, or extends a drag selection, scrolling when the mouse leaves the pane.
     pub(super) fn mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.resizing {
-            if event.pressed_button == Some(MouseButton::Left) {
-                let width = review_ui::panes::sidebar_width(
-                    review_ui::panes::SidebarWidth::Set(f32::from(event.position.x)),
-                    0.0,
-                    f32::from(window.viewport_size().width),
-                    self.sidebar_cell(),
-                );
-                self.update_model(window, cx, |model| model.set_sidebar_width(width));
-            } else {
-                self.resizing = false;
-                self.update_model(window, cx, Model::remember_layout);
+        if let Some(edge) = self.resizing {
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.resizing = None;
+                self.update_model(window, cx, |model| remember(model, edge));
+                return;
+            }
+            let viewport = window.viewport_size();
+            match edge {
+                Edge::Divider => {
+                    let width = review_ui::panes::sidebar_width(
+                        review_ui::panes::SidebarWidth::Set(f32::from(event.position.x)),
+                        0.0,
+                        f32::from(viewport.width),
+                        self.sidebar_cell(),
+                    );
+                    self.update_model(window, cx, |model| model.set_sidebar_width(width));
+                }
+                Edge::Comparison { top } => {
+                    let height = review_ui::panes::comparison_height(
+                        Some(f32::from(event.position.y) - top),
+                        f32::from(viewport.height),
+                        self.sizes().bar(),
+                    );
+                    self.update_model(window, cx, |model| model.set_comparison_height(height));
+                }
             }
             return;
         }
@@ -171,13 +197,13 @@ impl ReviewApp {
         }
     }
 
-    /// The button came up: a divider drag is remembered, and a dragged selection ends.
+    /// The button came up: an edge's drag is remembered, and a dragged selection ends.
     pub(super) fn mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let resized = std::mem::take(&mut self.resizing);
-        if resized || self.dragging.is_some() {
+        let resized = self.resizing.take();
+        if resized.is_some() || self.dragging.is_some() {
             self.update_model(window, cx, |model| {
-                if resized {
-                    model.remember_layout();
+                if let Some(edge) = resized {
+                    remember(model, edge);
                 }
                 model.release_text();
             });
@@ -191,15 +217,27 @@ impl ReviewApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.settings.mouse.navigate {
-            return;
-        }
         if click_count >= 2 {
-            self.resizing = false;
+            self.resizing = None;
             self.update_model(window, cx, Model::reset_sidebar_width);
         } else {
-            self.resizing = true;
+            self.resizing = Some(Edge::Divider);
             cx.notify();
         }
+    }
+
+    /// Starts dragging the edge under the comparison, pressed at `y` in the window while the
+    /// comparison is `height` high.
+    pub(super) fn press_comparison_edge(&mut self, y: f32, height: f32, cx: &mut Context<Self>) {
+        self.resizing = Some(Edge::Comparison { top: y - height });
+        cx.notify();
+    }
+}
+
+/// Remembers the size `edge` set, once its drag ends.
+fn remember(model: &mut Model, edge: Edge) {
+    match edge {
+        Edge::Divider => model.remember_layout(),
+        Edge::Comparison { .. } => model.remember_comparison_height(),
     }
 }

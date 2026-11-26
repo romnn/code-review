@@ -277,7 +277,7 @@ fn settings() -> Settings {
         code_size: 17.0,
         context: config.context,
         shorten_chains: config.shorten_chains,
-        mouse: config.mouse,
+        mouse: config.tui_mouse,
         approved: config.approved,
         policy: review_core::ReviewPolicy {
             auto_approve_formatting: config.auto_approve_formatting,
@@ -306,6 +306,7 @@ fn settings() -> Settings {
         styles,
         layout: PaneLayout {
             sidebar: config.layout.sidebar,
+            comparison: config.layout.comparison,
             sidebar_visible: config.layout.sidebar_visible,
         },
         keymap,
@@ -1651,7 +1652,7 @@ fn selections_reach_the_clipboards() {
     assert_eq!(host.copied.len(), 1);
 }
 
-/// With `[mouse] copy_on_select`, ending a drag copies what it selected, as `y` does.
+/// With `[tui.mouse] copy_on_select`, ending a drag copies what it selected, as `y` does.
 #[test]
 fn copy_on_select_copies_when_a_drag_ends() {
     let dir = tempfile::tempdir().unwrap();
@@ -1667,7 +1668,7 @@ fn copy_on_select_copies_when_a_drag_ends() {
     assert_eq!(host.model().status, "Copied 1 line.");
 }
 
-/// With `[mouse] navigate` off, a press in the diff still selects text but neither selects its
+/// With `[tui.mouse] navigate` off, a press in the diff still selects text but neither selects its
 /// hunk nor opens a gap, and a click in the files moves nothing; the keys still do.
 #[test]
 fn without_navigate_a_press_only_selects() {
@@ -1703,7 +1704,7 @@ fn without_navigate_a_press_only_selects() {
     assert_ne!(host.model().tree_cursor, cursor, "the keys still move");
 }
 
-/// With `[mouse] select` off, a press starts no selection, so a drag selects nothing and a
+/// With `[tui.mouse] select` off, a press starts no selection, so a drag selects nothing and a
 /// right click has nothing to copy, while the press still selects the hunk under it.
 #[test]
 fn without_select_a_press_only_navigates() {
@@ -1728,7 +1729,7 @@ fn without_select_a_press_only_navigates() {
     assert_eq!(host.model().hunk, hunk);
 }
 
-/// With `[mouse] scroll` off, the wheel and a sideways turn move nothing, while the scroll and
+/// With `[tui.mouse] scroll` off, the wheel and a sideways turn move nothing, while the scroll and
 /// pan keys still do.
 #[test]
 fn without_scroll_the_wheel_moves_nothing() {
@@ -2697,6 +2698,44 @@ fn a_dragged_width_and_fitting_again_are_remembered() {
         std::fs::read_to_string(&config)
             .unwrap()
             .contains("sidebar = \"fit\"")
+    );
+}
+
+/// Dragging the comparison's edge sets its height, which is remembered as a number in
+/// `[layout]`, keeping the rest of the file: its comments, the files pane's width and
+/// `[tui.mouse]`.
+#[test]
+fn a_dragged_comparison_height_is_remembered_keeping_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        indoc! {"
+            # Mine.
+            [layout]
+            sidebar = 320 # dragged
+            [tui.mouse]
+            navigate = false
+        "},
+    )
+    .unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.update(|model| model.settings.config_path = Some(config.clone()));
+
+    host.update(|model| model.set_comparison_height(512.4));
+    host.update(Model::remember_comparison_height);
+    assert_eq!(host.model().layout.comparison, Some(512.4));
+    host.settle();
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        indoc! {"
+            # Mine.
+            [layout]
+            sidebar = 320 # dragged
+            comparison = 512
+            [tui.mouse]
+            navigate = false
+        "}
     );
 }
 

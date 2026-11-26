@@ -172,8 +172,8 @@ pub struct ReviewApp {
     /// What the model gave the keyboard at the last update; focus moves only when the model
     /// moves it, so a click that focused something else stays in effect until then.
     focused: Focus,
-    /// Whether the sidebar divider is being dragged.
-    resizing: bool,
+    /// The edge being dragged, if any.
+    resizing: Option<select::Edge>,
     /// Named hit regions and window operations, for the title bar and QA mode.
     regions: Rc<chrome::Regions>,
     client_decorated: bool,
@@ -252,7 +252,7 @@ impl ReviewApp {
             overview_scroll: ScrollHandle::new(),
             help_scroll: ScrollHandle::new(),
             inputs: Vec::new(),
-            resizing: false,
+            resizing: None,
             regions: Rc::new(chrome::Regions::default()),
             client_decorated: false,
             painted: PaintedRows::default(),
