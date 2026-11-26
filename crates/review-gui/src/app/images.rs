@@ -150,19 +150,12 @@ impl Images {
     }
 }
 
-/// The most pixels a raster grows to: as many as a square at the display edge has.
-const MAX_GROWN: u64 = 2048 * 2048;
-
 /// `raster` as gpui draws it: a small one grown by a whole number of pixels for each, as large
-/// as fits the display edge and [`MAX_GROWN`], so gpui, which samples smoothly, only scales it
+/// as fits the display edge, so gpui, which samples smoothly, only scales it
 /// down and its pixels stay sharp; and its red and blue swapped.
 fn bgra(raster: &Raster) -> Arc<RenderImage> {
     let (width, height) = raster.dimensions();
-    let by_edge = DISPLAY_EDGE / width.max(height).max(1);
-    let by_pixels = (MAX_GROWN / (u64::from(width) * u64::from(height)).max(1)).isqrt();
-    let factor = by_edge
-        .min(u32::try_from(by_pixels).unwrap_or(u32::MAX))
-        .max(1);
+    let factor = (DISPLAY_EDGE / width.max(height).max(1)).max(1);
     let mut pixels = if factor > 1 {
         image::imageops::resize(
             &**raster,

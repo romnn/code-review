@@ -11,9 +11,10 @@
 //! one: nothing else is dropped, joined or reordered before deciding whether two pages say the
 //! same, so different extracts never compare equal. Its words are then aligned in order, and the
 //! changes read a sentence a row, with the words that changed marked and characters that never
-//! show written out, such as `⟨U+200C⟩`. Pages whose words and their order are the same, with a
-//! line break on one side where the other has a space, say only their line breaks differ; pages
-//! whose sentences only moved, each exactly once, show the moved sentences where they are now.
+//! show written out as the code rows write them. Pages that differ only in a line break on one
+//! side where the other has a space say only their line breaks differ; every other whitespace
+//! shows. Pages whose sentences only moved, each exactly once, show the moved sentences where
+//! they are now.
 //!
 //! Pages pair by their text: a text that is on exactly one page of each version, and not
 //! blank, anchors those two pages to each other, and a pair whose order reverses against
@@ -22,7 +23,6 @@
 //! unmatched otherwise. Duplicated and blank pages, such as scanned ones, never anchor.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use review_core::analysis::Chunk;
@@ -349,11 +349,13 @@ fn compare(old: &str, new: &str) -> (PageKind, PageRows) {
     if old == new {
         return (PageKind::Same, none());
     }
-    // A space and a line break between the same two words are the same boundary.
-    if old.split_whitespace().eq(new.split_whitespace()) {
+    // A line break where the other has a space is the only difference passed over; every other
+    // whitespace shows, as extracted.
+    let (old, new) = (old.replace('\n', " "), new.replace('\n', " "));
+    if old == new {
         return (PageKind::LineBreaks, none());
     }
-    let (old, new) = (rows(old), rows(new));
+    let (old, new) = (rows(&old), rows(&new));
     let chunks = Chunk::between(&old, &new);
     match moved(&old, &new, &chunks) {
         Some(passages) => (PageKind::Moved, PageRows::Moved(Arc::new(passages))),
@@ -396,43 +398,23 @@ fn moved(old: &str, new: &str, chunks: &[Chunk]) -> Option<Vec<MovedPassage>> {
         .collect()
 }
 
-/// `text` as rows to read: its words, a sentence a row, each ending at `.`, `!` or `?`, with
-/// every character that never shows written out as its code point.
+/// `text`, with no line breaks, as rows to read, a sentence a row: a row ends after `.`, `!`
+/// or `?` before a space, which it takes. Nothing else changes, so two texts have the same rows
+/// exactly when they are the same, and the rows draw characters that never show as the code
+/// rows do.
 fn rows(text: &str) -> String {
     let mut rows = String::new();
-    let mut row = String::new();
-    for word in text.split_whitespace() {
-        if !row.is_empty() {
-            row.push(' ');
-        }
-        for char in word.chars() {
-            if shows(char) {
-                row.push(char);
-            } else {
-                write!(row, "⟨U+{:04X}⟩", u32::from(char)).ok();
-            }
-        }
-        if word.ends_with(['.', '!', '?']) {
-            rows.push_str(&row);
+    let mut chars = text.chars().peekable();
+    while let Some(char) = chars.next() {
+        rows.push(char);
+        if matches!(char, '.' | '!' | '?') && chars.next_if_eq(&' ').is_some() {
             rows.push('\n');
-            row.clear();
         }
     }
-    if !row.is_empty() {
-        rows.push_str(&row);
+    if !rows.is_empty() && !rows.ends_with('\n') {
         rows.push('\n');
     }
     rows
-}
-
-/// Whether `char` shows as itself: no control, format character or soft hyphen, which a page
-/// carries without showing them.
-fn shows(char: char) -> bool {
-    !(char.is_control()
-        || matches!(
-            char,
-            '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{2060}'..='\u{2064}' | '\u{feff}' | '\u{fffe}'
-        ))
 }
 
 /// The text of each page of the PDF `bytes` as pdfium extracts it, within the bounds; runs in
@@ -763,14 +745,19 @@ mod tests {
                 lines(&["From", "Rome", "To", "Paris"]),
             ),
             (lines(&["ab"]), lines(&["a\u{200c}b"])),
+            // A joiner and the same written out are other text.
+            (lines(&["a\u{200c}b"]), lines(&["a⟨U+200C⟩b"])),
+            // Whitespace other than a line break shows.
+            (lines(&["A B"]), lines(&["A  B"])),
+            (lines(&["A\tB"]), lines(&["A B"])),
         ] {
             let (kind, rows) = compared(&old, &new);
             assert_eq!(kind, PageKind::Changed, "{old:?} → {new:?}");
             assert!(!edits(&rows).is_empty(), "{old:?} → {new:?}");
         }
-        // The joiner shows written out, never dropped.
+        // The joiner is kept, for the rows to write out, never dropped.
         let (_, rows) = compared("ab", "a\u{200c}b");
-        assert_eq!(edits(&rows)[0].added, "a⟨U+200C⟩b\n");
+        assert_eq!(edits(&rows)[0].added, "a\u{200c}b\n");
     }
 
     /// Identical text, text with nothing on it, and text wrapped onto other lines show no rows,
@@ -809,7 +796,7 @@ mod tests {
     /// where it is now, with where it was.
     #[test]
     fn swapped_paragraphs_are_moved() {
-        let paragraphs = |first: &str, second: &str| [first, second].join("\n\n");
+        let paragraphs = |first: &str, second: &str| [first, second].join("\n");
         let (kind, rows) = compared(
             &paragraphs("A one.", "B two."),
             &paragraphs("B two.", "A one."),
@@ -823,6 +810,13 @@ mod tests {
             (passages[0].chunk.added.as_str(), passages[0].from),
             ("A one.\n", 0)
         );
+        // A space more in the moved paragraph is an edit, never a move alone.
+        let (kind, rows) = compared(
+            &paragraphs("A one.", "B two."),
+            &paragraphs("B two.", "A  one."),
+        );
+        assert_eq!(kind, PageKind::Changed);
+        assert!(edits(&rows).iter().any(|chunk| chunk.added == "A  one.\n"));
         // A sentence that is there twice makes the move ambiguous: ordered edits instead.
         let (kind, _) = compared("A. B. A.", "B. A. A. C.");
         assert_eq!(kind, PageKind::Changed);
@@ -854,7 +848,7 @@ mod tests {
     /// An added or deleted PDF is all added or removed pages, each its whole text.
     #[test]
     fn a_new_pdf_is_all_added_pages() {
-        let pages = Pages::of(None, Some(&texts(&["one\n", "two\n"])));
+        let pages = Pages::of(None, Some(&texts(&["one", "two"])));
         assert_eq!(pages.base, 0);
         assert!(pages.pairs.iter().all(|pair| pair.kind == PageKind::Added));
         assert_eq!(edits(&pages.pairs[1].rows)[0].added, "two\n");
