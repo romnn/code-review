@@ -112,6 +112,10 @@ pub(super) enum Subject {
     Shown(u64),
     /// A reading of trust in the trust epoch this was, while it lasts; see the `trust` module.
     Trust(u64),
+    /// The watch on the working tree, a watch that started or a change it saw, while the
+    /// review goes on in the window: neither its log nor its checkout replaced, nor the engine
+    /// stopping, so a late one arms no wait and no capture.
+    Watch,
 }
 
 /// Why an outcome lands whatever changed while its job ran.
@@ -129,9 +133,9 @@ pub(super) enum Because {
     /// It only marks the passing of time, for what shows how long ago something happened or
     /// that something runs.
     Clock,
-    /// It follows the working tree: a watch that started, a change, a capture, or the time for
-    /// the next capture; a capture checks for itself which snapshot it was compared with, and
-    /// a lookup of the pull request which branch it asked about.
+    /// It follows the working tree: a capture, the time for the next one, a lookup of the
+    /// branch's pull request, or the end of the watch; a capture checks for itself which
+    /// snapshot it was compared with, and a lookup which branch it asked about.
     Live,
     /// It stops the engine as the app quits, which quitting waits for.
     Stop,
@@ -446,6 +450,7 @@ impl Model {
             }
             Subject::Shown(generation) => self.snapshot.is_some() && self.shown == generation,
             Subject::Trust(epoch) => self.epoch() == epoch,
+            Subject::Watch => self.replaced.is_none() && !self.quitting.over(),
         };
         if current {
             Freshness::Current

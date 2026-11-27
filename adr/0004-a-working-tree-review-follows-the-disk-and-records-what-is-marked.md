@@ -333,6 +333,8 @@ processes left behind.
 - Reading trust after each capture reads the whole log.
 - A mark, an approval or a note digests the log up to what its history was read from, under
   the lock, besides reading the whole log as it did.
+  A partial approval digests the log's complete records once more, for the history it derives
+  from them; no writer keeps the log's bytes past opening it.
 - A log replaced in place by one as long, ending in the same 64 bytes, on a platform that does
   not tell files apart, still shows until a mark is attempted on it.
 - Go to definition runs a language server in the checkout itself, which outlives the captures

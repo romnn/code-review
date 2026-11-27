@@ -51,11 +51,45 @@ pub(super) struct Parts {
     /// working tree, until the engine stops; a capture holds it too while it runs, and it ends
     /// once the last holder lets go.
     pub(super) session: Mutex<Option<Arc<Session>>>,
-    /// The watch on the working tree, once it started, until the checkout is another clone or
-    /// the engine stops; a capture holds it too while it walks the tree again.
-    pub(super) watch: Mutex<Option<Arc<Watch>>>,
+    /// The watch on the working tree; a capture holds it too while it walks the tree again.
+    pub(super) watch: Mutex<WatchSlot>,
     /// The running language servers.
     pub(super) servers: Servers,
+}
+
+/// Where the engine's watch on the working tree is.
+///
+/// The watch starts outside the lock and is installed under it, and it closes under the same
+/// lock, for good, as the review ends in the window or the engine stops, so a watch that
+/// finishes starting after that is dropped rather than kept.
+#[derive(Default)]
+pub(super) enum WatchSlot {
+    /// No watch started yet, or none can.
+    #[default]
+    Unstarted,
+    /// The watch that started.
+    Started(Arc<Watch>),
+    /// The review ended in the window or the engine stopped: no watch is ever kept again.
+    Closed,
+}
+
+impl WatchSlot {
+    /// The watch that started, while it is kept.
+    pub(super) fn started(&self) -> Option<&Arc<Watch>> {
+        match self {
+            Self::Started(watch) => Some(watch),
+            Self::Unstarted | Self::Closed => None,
+        }
+    }
+
+    /// Closes the slot for good and returns the watch it kept, for the caller to drop outside
+    /// the lock.
+    fn close(&mut self) -> Option<Arc<Watch>> {
+        match std::mem::replace(self, Self::Closed) {
+            Self::Started(watch) => Some(watch),
+            Self::Unstarted | Self::Closed => None,
+        }
+    }
 }
 
 /// What waits for the watch to see a change, handed from one wait to the next.
@@ -260,7 +294,7 @@ impl Engine {
                 review,
                 checkout,
                 session: Mutex::new(session.map(Arc::new)),
-                watch: Mutex::new(None),
+                watch: Mutex::default(),
                 servers: Servers::default(),
             }),
         }
@@ -270,7 +304,7 @@ impl Engine {
 impl Drop for Parts {
     fn drop(&mut self) {
         let servers = std::mem::take(&mut self.servers.0.get_mut().running);
-        let watch = self.watch.get_mut().take();
+        let watch = self.watch.get_mut().close();
         let session = self.session.get_mut().take();
         // Stopping a server waits for its process, the watch for its thread and the session
         // for git, and the last holder of the parts may be the UI thread.
@@ -306,7 +340,7 @@ impl Model {
         self.effect(Effect::Spawn(Job::waiting(move || {
             let seen = waiter.wait();
             Completion {
-                subject: Subject::Always(Because::Live),
+                subject: Subject::Watch,
                 outcome: Box::new(Outcome::Waited(Box::new(WaitedFor {
                     waited: seen,
                     problem: waiter.take_problem(),
@@ -321,7 +355,7 @@ impl Model {
     /// more.
     pub(super) fn unwatch(&mut self) {
         self.spawn_with(Subject::Always(Because::Live), |parts| {
-            drop(parts.watch.lock().take());
+            parts.close_watch();
             parts.servers.stop();
             Outcome::Unwatched
         });
@@ -339,7 +373,7 @@ impl Model {
         self.next_epoch();
         self.spawn(Subject::Always(Because::Stop), move || {
             parts.servers.stop();
-            drop(parts.watch.lock().take());
+            parts.close_watch();
             drop(parts.session.lock().take());
             Outcome::Disposed
         });
@@ -348,12 +382,32 @@ impl Model {
 }
 
 impl Parts {
-    /// Starts watching the working tree, keeping the watch, and returns what waits on it, or
-    /// why it cannot be watched.
+    /// Starts watching the working tree, keeping the watch unless the slot closed meanwhile,
+    /// and returns what waits on it, which sees the watch closed if it was not kept, or why
+    /// the tree cannot be watched.
     pub(super) fn watch(&self) -> Result<Waiting, crate::watch::WatchError> {
         let (watch, waiter) = Watch::start(self.review.ignore_rules())?;
-        *self.watch.lock() = Some(Arc::new(watch));
+        self.install(watch);
         Ok(Waiting(waiter))
+    }
+
+    /// Keeps `watch`, which started outside the lock, unless the slot closed meanwhile, when
+    /// it is dropped here, on the job's thread.
+    pub(super) fn install(&self, watch: Watch) {
+        let mut slot = self.watch.lock();
+        if matches!(*slot, WatchSlot::Closed) {
+            drop(slot);
+            drop(watch);
+            return;
+        }
+        *slot = WatchSlot::Started(Arc::new(watch));
+    }
+
+    /// Closes the watch slot for good, as the review ends in the window or the engine stops,
+    /// and drops the watch it kept outside the lock, on the job's thread.
+    fn close_watch(&self) {
+        let watch = self.watch.lock().close();
+        drop(watch);
     }
 }
 

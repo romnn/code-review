@@ -4217,7 +4217,7 @@ fn a_watch_short_of_the_tree_confirms_its_captures() {
             .parts()
             .watch
             .lock()
-            .as_ref()
+            .started()
             .is_some_and(|watch| watch.covers_all())
     };
     assert!(covers_all(&host));
@@ -4543,6 +4543,131 @@ fn a_wait_for_the_working_tree_never_keeps_the_engine() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// The window over a live review of `a.rs`, as [`live_host`] opens it, with the completion of
+/// the job that started the watch, which kept the watch, held back before it lands.
+fn live_host_holding_the_watch(dir: &Path) -> (Host, Completion) {
+    let (review, _) = worktree_review_of(
+        dir,
+        &[("a.rs", &two_hunks("1", "2"))],
+        &[("a.rs", &two_hunks("one", "two"))],
+    );
+    let mut host = Host::opening(loaded(review), settings());
+    loop {
+        if let Some(job) = host.jobs.pop_front() {
+            let completion = job.run();
+            if matches!(*completion.outcome, Outcome::Watching(Ok(_))) {
+                return (host, completion);
+            }
+            host.complete(completion);
+        } else if !host.timers.is_empty() {
+            host.fire(0);
+        } else {
+            assert!(host.model().publishes(), "the watch starts");
+            host.draw();
+        }
+    }
+}
+
+/// How many periodic captures of the working tree are armed.
+fn reconciles(host: &Host) -> usize {
+    host.clocks
+        .iter()
+        .filter(|clock| matches!(*clock.outcome, Outcome::Tick(super::sync::Tick::Reconcile)))
+        .count()
+}
+
+/// A watch that finishes starting after the review ended in the window is dropped rather
+/// than kept: the engine's slot for it stays closed, and what waits on it sees it closed.
+#[test]
+fn a_watch_that_starts_after_the_review_ended_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (review, _) = worktree_review_of(
+        dir.path(),
+        &[("a.rs", &two_hunks("1", "2"))],
+        &[("a.rs", &two_hunks("one", "two"))],
+    );
+    // Without `[review] live` no watch starts, so the test starts one, as the job does before
+    // it installs it.
+    let mut host = Host::open_with(
+        review,
+        Settings {
+            live: false,
+            ..settings()
+        },
+    );
+    let (watch, mut waiter) =
+        crate::watch::Watch::start(host.model().parts().review.ignore_rules()).unwrap();
+
+    host.update(|model| model.stop(Replaced::Log, false));
+    host.settle();
+    host.model().parts().install(watch);
+    assert!(matches!(
+        *host.model().parts().watch.lock(),
+        super::engine::WatchSlot::Closed
+    ));
+    assert_eq!(waiter.wait(), crate::watch::Waited::Closed);
+}
+
+/// A watch that started before the review ended in the window, and whose start lands after,
+/// arms nothing: no wait for changes and no periodic capture; the job that ends the review
+/// drops the watch it kept.
+#[test]
+fn a_watch_that_lands_after_the_review_ended_arms_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, started) = live_host_holding_the_watch(dir.path());
+    assert!(host.model().parts().watch.lock().started().is_some());
+
+    // The start lands before the job that ends the review runs.
+    host.update(|model| model.stop(Replaced::Log, false));
+    host.complete(started);
+    assert!(host.waits.is_empty(), "no wait for changes");
+    assert_eq!(reconciles(&host), 0, "no periodic capture");
+
+    host.settle();
+    assert!(matches!(
+        *host.model().parts().watch.lock(),
+        super::engine::WatchSlot::Closed
+    ));
+}
+
+/// Quitting closes the watch as the end of the review does: a change the watch saw that lands
+/// while the engine stops arms no next wait, and the watch is gone once the app quits.
+#[test]
+fn a_change_that_lands_while_quitting_arms_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    let watch = Arc::downgrade(host.model().parts().watch.lock().started().unwrap());
+    let armed = reconciles(&host);
+
+    // The wait sees a change start, and its result is held back.
+    std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
+    let wait = host.waits.pop().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(wait.run()).ok());
+    let stirred = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the watch sees the change");
+    assert!(matches!(
+        &*stirred.outcome,
+        Outcome::Waited(waited) if waited.waited == crate::watch::Waited::Stirred
+    ));
+
+    // Everything is saved and the job that stops the engine waits to run when the change
+    // lands.
+    host.update(|model| model.quit(QuitKind::Interactive));
+    while !host.model().quitting.over() {
+        let completion = host.run_job();
+        host.complete(completion);
+    }
+    host.complete(stirred);
+    assert!(host.waits.is_empty(), "no next wait for changes");
+    assert_eq!(reconciles(&host), armed, "no other periodic capture");
+
+    host.settle();
+    assert_eq!(host.quits, 1);
+    assert!(watch.upgrade().is_none(), "the watch stopped");
 }
 
 /// Once everything is saved for quitting and the engine stops, no input acts and no capture
@@ -5982,7 +6107,10 @@ fn a_mark_on_a_replaced_log_writes_nothing_and_stops_the_review() {
     );
     assert!(model.pending.is_empty() && model.saves.is_empty());
     assert!(
-        model.parts().watch.lock().is_none(),
+        matches!(
+            *model.parts().watch.lock(),
+            super::engine::WatchSlot::Closed
+        ),
         "the working tree is not watched any more"
     );
     assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{first}\n"));
