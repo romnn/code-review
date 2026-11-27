@@ -3,16 +3,15 @@
 //!
 //! Only an open that holds the review's lease alone removes anything: nothing else has the
 //! review open then, so nothing reads or writes what it removes (see [`store::InUse`]).
-//! It removes what captures, probes, fetches, sessions and drops left, compacts the review's
-//! archive when it is due or the data directory is over its limit, and only then lets others
-//! in; an open that finds the review open elsewhere leaves all of that for a later one.
+//! It removes what captures, probes, fetches, older versions and drops left, compacts the
+//! review's archive when it is due or the data directory is over its limit, and only then lets
+//! others in; an open that finds the review open elsewhere leaves all of that for a later one.
 //! What would grow what the data directory retains, a capture, a new revision or a walkthrough,
 //! is refused while it retains more than its limit.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::session::LIVE_PINS;
 use super::{Review, cache, revision_events};
 use crate::error::Error;
 use crate::git::PrivateRepo;
@@ -38,7 +37,9 @@ impl Review {
         between: &mut dyn FnMut(),
         open: &dyn Fn() -> Result<Self, Error>,
     ) -> Result<Option<Self>, Error> {
-        if let Err(err) = cache::evict(dir.data_dir(), cache::BUDGET) {
+        let evicted = tracing::info_span!("evict_caches")
+            .in_scope(|| cache::evict(dir.data_dir(), cache::BUDGET));
+        if let Err(err) = evicted {
             drop(err);
         }
         let Some(mut lease) = Lease::open(dir)? else {
@@ -56,7 +57,7 @@ impl Review {
             };
             lease = reopened;
         }
-        let in_use = lease.shared()?;
+        let in_use = tracing::info_span!("lease").in_scope(|| lease.shared())?;
         // A drop that held the lease took the directory with it.
         if !dir.root().exists() {
             return Ok(None);
@@ -74,6 +75,7 @@ impl Review {
 /// directory retains more than `limit`.
 ///
 /// It removes nothing a symbolic link leads it to, and runs no git where one leads.
+#[tracing::instrument(skip_all)]
 fn maintain(dir: &ReviewDir, archive: &PrivateRepo, limit: u64) -> Result<(), Error> {
     let data_dir = dir.data_dir();
     let contained = |path: &Path| store::contained(data_dir, path);
@@ -111,9 +113,10 @@ fn maintain(dir: &ReviewDir, archive: &PrivateRepo, limit: u64) -> Result<(), Er
             store::remove_read_only(&file)?;
         }
     }
+    // The pins of the captures windows of older versions showed.
     let live: Vec<String> = archive
         .repo()
-        .refs_under(&format!("{LIVE_PINS}/"))?
+        .refs_under("refs/live/")?
         .into_iter()
         .map(|pin| pin.name)
         .collect();
@@ -282,7 +285,7 @@ pub(super) mod tests {
 
     use super::*;
     use crate::git::{Repo, Step};
-    use crate::history::{History, RevisionRecord};
+    use crate::history::History;
     use crate::review::{Capture, ReviewTarget};
     use crate::store::events::MarkVerdict;
     use crate::testing::{self, git};
@@ -562,9 +565,9 @@ pub(super) mod tests {
 
     /// An open while anything else has the review open, here a blob reader, removes nothing
     /// and compacts nothing; the next open that has the review to itself removes the pins of
-    /// sessions that are over and of a recording that died, what captures, fetches and repacks
-    /// cut short left, read-only copies older versions made and what a drop could not remove,
-    /// and compacts the archive.
+    /// captures older versions showed and of a recording that died, what captures, fetches and
+    /// repacks cut short left, read-only copies older versions made and what a drop could not
+    /// remove, and compacts the archive.
     #[test]
     fn only_an_open_that_has_the_review_to_itself_maintains_it() -> eyre::Result<()> {
         let recorded = Recorded::new(2)?;
@@ -755,23 +758,17 @@ pub(super) mod tests {
         std::fs::write(repo.path().join("a.rs"), "fn a() { edited(); }\n")?;
         let data = tempfile::tempdir()?;
         let review = Review::open_checkout(data.path(), Repo::discover(repo.path())?)?;
-        let session = review.start_session();
-        let capture = |review: &Review, keep: &[RevisionRecord]| match review.live_history(
-            &session,
-            keep,
-            &[],
-        )? {
+        let capture = |review: &Review| match review.live_history(&[])? {
             Capture::Captured(captured) => Ok(captured.history),
             _ => eyre::bail!("nothing was captured"),
         };
-        let shown = capture(&review, &[])?;
+        let shown = capture(&review)?;
         let view = shown.current_view()?;
         assert!(view.is_provisional());
-        let keep: Vec<RevisionRecord> = view.record().into_iter().cloned().collect();
 
         let full = review.clone().with_limit(0);
         assert!(matches!(
-            full.live_history(&session, &keep, &[]),
+            full.live_history(&[]),
             Err(Error::StorageFull { .. })
         ));
         assert!(matches!(
@@ -779,7 +776,7 @@ pub(super) mod tests {
             Err(Error::StorageFull { .. })
         ));
         assert_eq!(std::fs::read(review.dir.events()).unwrap_or_default(), b"");
-        assert_eq!(capture(&review, &keep)?, shown);
+        assert_eq!(capture(&review)?, shown);
 
         // Another window records the capture; this one's mark then records nothing.
         let other = Review::open_checkout(data.path(), Repo::discover(repo.path())?)?;
@@ -788,8 +785,8 @@ pub(super) mod tests {
         Ok(())
     }
 
-    /// A review is dropped by its key once nothing has it open, a session, an ignore query or
-    /// a blob reader that outlived it included, and opening its target then makes a new one;
+    /// A review is dropped by its key once nothing has it open, an ignore query or a blob
+    /// reader that outlived it included, and opening its target then makes a new one;
     /// a symbolic link in it is removed, never followed.
     #[test]
     fn a_review_is_dropped_once_nothing_has_it_open() -> eyre::Result<()> {
@@ -803,13 +800,10 @@ pub(super) mod tests {
         std::os::unix::fs::symlink(outside.path(), root.join("link"))?;
         let in_use = || matches!(Review::remove(&data, &key), Err(Error::ReviewInUse(_)));
 
-        let session = recorded.review.start_session();
         let rules = recorded.review.ignore_rules();
         let reader = recorded.review.snapshots().blob_reader()?;
         assert!(in_use());
         drop(recorded.review);
-        assert!(in_use());
-        drop(session);
         assert!(in_use());
         drop(rules);
         assert!(in_use());

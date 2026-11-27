@@ -721,6 +721,20 @@ impl Repo {
         self.diff_tree_with(base, head, &[RENAME_LIMIT])
     }
 
+    /// Lists the changed entries between two commits without finding renames, which only
+    /// compares the trees: a renamed file is a deletion and an addition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::diff_tree`].
+    pub fn diff_tree_unrenamed(
+        &self,
+        base: &ObjectId,
+        head: &ObjectId,
+    ) -> Result<Vec<RawChange>, Error> {
+        self.diff_tree_with(base, head, &["--no-renames"])
+    }
+
     /// Lists the changed entries between two commits with the diff options `options`.
     fn diff_tree_with(
         &self,

@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::github::{self, BranchPullRequest, CheckoutPullRequest, PullRequestState};
-use super::{Review, ReviewTarget, RevisionInput, Session, clone};
+use super::{Review, ReviewTarget, RevisionInput, clone};
 use crate::error::Error;
 use crate::git::{Busy, Head, IndexStamp, Repo};
 use crate::ids::ObjectId;
@@ -404,12 +404,13 @@ impl Review {
         })
     }
 
-    /// Captures the working tree of the review's own clone, looking `looks` times, and pins
-    /// the capture's base and head in the archive under `session`, which holds them until it
-    /// releases them or ends; `pull_requests` are as [`Self::subject`] takes them.
+    /// Captures the working tree of the review's own clone, looking `looks` times, into the
+    /// archive; `pull_requests` are as [`Self::subject`] takes them.
     ///
-    /// The capture derives no history: the pinned revision and what it was taken of stand on
-    /// their own.
+    /// The capture derives no history: the revision and what it was taken of stand on their
+    /// own.
+    /// Its objects stay in the archive for as long as anything holds the review, which only an
+    /// open that has it to itself compacts.
     /// Nothing is captured while git is busy in the working tree, when something the capture
     /// depends on moved while it was taken, when the checkout is not the review's clone
     /// before or after, and while the data directory retains more than its limit
@@ -417,7 +418,6 @@ impl Review {
     /// test makes something happen meanwhile.
     pub(super) fn capture(
         &self,
-        session: &Session,
         pull_requests: &[CheckoutPullRequest],
         looks: Looks,
         captured: &mut dyn FnMut() -> Result<(), Error>,
@@ -438,7 +438,6 @@ impl Review {
         if !self.verify_clone()? {
             return Ok(Observed::Replaced);
         }
-        session.pin(&capture.input)?;
         Ok(Observed::Captured(capture))
     }
 

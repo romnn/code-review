@@ -1,6 +1,6 @@
 # 13. The opened review and each capture show with the next frame, and a key acts on what the last frame showed
 
-**Status:** accepted · **Date:** 2026-11-24
+**Status:** accepted · **Date:** 2026-11-27
 
 ## Context
 
@@ -15,27 +15,69 @@ seconds: finding the repository, its locks, a confirmed capture and the whole hi
 opened review lands as a job's outcome, just as a capture does, and review-tui handles it in
 the same batch as the keys typed while it opened.
 
+Reading the whole history is what makes opening slow: every revision's analysis and the
+correspondences between them, decoded from the cache, or computed again after the analysis
+format changed. A checkout review of 100 revisions took about 3 s to show, and about a minute
+after a format bump, while its file list and the changes of the revision on screen need one
+snapshot pair. Carried marks, notes and partial approvals need the whole chain, so until it is
+read no unit may show as reviewed.
+
 ## Decision
 
-- **The opened review and each capture show only in the turn that draws the next frame.** The
-  opened review, or why it could not be opened, waits in the model, and a capture in the live
-  view's one waiting slot, until then: review-tui shows them as it lays out a frame, after
-  handling the input that came since the last one, and review-gui in gpui's next-frame callback,
-  which runs right before gpui draws. So no key acts on a review or a capture before a frame
-  showed it: one handled before the review's first frame acts on the loading view, where
-  nothing is to review. A key's own effects, such as Space moving on to the next change, apply
-  at once, so quick taps keep working, and so do the outcomes of the reviewer's own actions,
-  such as a save.
+- **The checkout's review shows its last recorded revision at once, its review state pending.**
+  The pending view reads nothing derived: the log's last complete revision record, and that
+  revision's analysis when the cache holds it in this version's format, or else the files one
+  comparison of its trees in the archive finds, renames not looked for, while a job analyzes the
+  revision. It shows the actual files, restores the selection saved with the review, and shows
+  each file's changes in full once they are analyzed; the files pane says "Last recorded
+  revision · checking review state". The file it shows first comes with its text, read with
+  the analysis, and a file whose text is still being read shows nothing until it lands, so
+  every diff lays out once, with its context. It withholds everything review state decides: reviewed
+  totals, automatic approval, folds by review state and what changed since a review. A review
+  without a recorded revision opens as before, its panes empty while its first capture runs.
+- **Only the verified review takes marks.** The pending view is a display of its own, never a
+  `Snapshot`, and only a snapshot has a view of the review's history, which the review keys'
+  target lookup needs, so keys, clicks and the buffer alike find nothing to mark there and say
+  the review state is still being checked; `R` records nothing either. A key on the pending view
+  records nothing and is never replayed once the review shows, and a key held down from it acts
+  on nothing the verified review shows until it is pressed again.
+- **One job verifies the review behind it.** It takes the confirmed capture and reads the
+  history, as opening did before; the history reads on from what the pending view read of the
+  log, so records appended meanwhile show and a log replaced meanwhile ends the review over the
+  pending view. After a cache miss it starts once the revision's analysis landed, which the
+  history takes rather than reading or computing it again. While git is busy in the checkout or
+  cr's data is full, it verifies the last recorded revision, which then takes marks. One that
+  fails says why over the pending view, which stays.
+- **The opened review and each capture show only in the turn that draws the next frame,** and so
+  do the pending view's analysis and the verified review, each keeping the selected file. The
+  opened review, or why it could not be opened, waits in the model, what a job brought for the
+  pending view in it, and a capture in the live view's one waiting slot, until then: review-tui
+  shows them as it lays out a frame, after handling the input that came since the last one, and
+  review-gui in gpui's next-frame callback, which runs right before gpui draws. So no key acts on
+  a review, its verification or a capture before a frame showed it: one handled before the
+  review's first frame acts on the empty panes, where nothing is to review, and one before the
+  verified review's on the pending view, where nothing is to mark. A key's own effects, such as
+  Space moving on to the next change, apply at once, so quick taps keep working, and so do the
+  outcomes of the reviewer's own actions, such as a save.
 - **The opened review shows whatever the reviewer is in the middle of,** since before it no
-  rows showed that it could pull from under them; a capture waits while marks are saved or an
-  overlay, a picker, a drag or a search being typed is under way. A review that opens after the
+  rows showed that it could pull from under them; what the pending view waits for, and a
+  capture, waits while marks are saved or an overlay, a picker, a drag or a search being typed
+  is under way. A review that opens after the
   app closed never shows, and its engine stops on a thread of its own as it is dropped
   ([ADR 14](0014-only-background-work-reaches-the-engine.md)).
-- **Before the review shows, nothing of it shows.** The loading view is the card saying the
-  review opens, the status line and the key that quits: no files pane, no file header and no
-  review keys, which do nothing yet. An overlay opened meanwhile, such as the settings, shows
-  its own keys. A review that could not be opened shows why the same way, and review-tui exits
-  with an error once the reviewer quits; quitting while the review still opens is no failure.
+- **The panes are there from the first frame, and fill as the review lands.** The first frame
+  lays out the files pane and the diff pane with their headers, empty, where the review will
+  show: the files pane's progress lines only their labels, the file header without a file.
+  The file tree fills in when the review opens, then the diff; no card stands in for them,
+  neither while the review opens nor while the pending view waits for its analysis, since
+  opening is quick enough that a card only flashes. What goes on is on the status line, in
+  text of one width beside a spinner: "Opening the review…", then the pending view's
+  "checking review state". Only the key that quits shows before the review does, as review
+  keys do nothing yet; an overlay opened meanwhile, such as the settings, shows its own keys.
+  The cards that say something stay: a review that could not be opened, a checkout or log
+  replaced, nothing to review and a file to pick. review-tui exits with an error once the
+  reviewer quits a review that could not be opened; quitting while the review still opens is
+  no failure.
   Nothing on the way holds a key or a frame back for the terminal: review-tui asks it nothing
   ([ADR 12](0012-every-key-a-terminal-sends-is-a-press.md)).
 - **No timer and no busy git refuses a review key.** A capture on screen takes marks while the
@@ -53,15 +95,38 @@ the same batch as the keys typed while it opened.
 
 ## Consequences
 
-- Saves, watch events and timers land as soon as they finish; only the opened review and a
-  capture wait for a frame.
+- Saves, watch events and timers land as soon as they finish; only the opened review, what the
+  pending view waits for and a capture wait for a frame.
+- On a scratch review of 100 revisions over 200 files and 3,313 units, the first frame that can
+  be navigated shows 50 ms after start, warm or after a change of the analysis format, where
+  the review used to show after 0.6 s warm and 24 s after a format change; after the format
+  change the selected file's changes show at 0.35 s. The verified review takes as long as the
+  whole review used to.
+- Opening still maintains the review when nothing else has it open, compacting the archive
+  when due, and moves a review an earlier version kept into its archive, before the pending
+  view shows.
+- While the review state is checked, the whole file opens as in the verified review, but the
+  overview, the pickers and go to definition read the verified review and say they wait for it.
+  A whole file open when the verified review shows opens again from it, or the diff shows
+  while it has not read the file; a verified review with nothing to review clears the pending
+  view's rows.
 - A front end must show what waits where it draws, and the model tests draw a frame in `settle`.
-- The files pane appears with the first frame of the review, so that frame lays the panes out
-  anew, as when the reviewer shows the files again.
+- The panes keep their places from the first frame on, a width set by the reviewer included;
+  a files pane fitted to its tree, the default, widens once when the tree lands if its names
+  need more than the narrowest fit.
 - Marks on a capture another one replaced are still refused by the engine, which records marks
   only on the current revision; that changes separately.
 
 ## Rejected alternatives
+
+- **A history of the last recorded revision alone, its units new, as the pending view.** It
+  gave pending units real-looking states that counted and folded as review state does, and a
+  `Snapshot` whose view reached the writer: its empty log prefix matched every log, and
+  recording a mark on a recorded revision checks only that it is the last one. A list of
+  actions the pending view refused had to name every action that could reach a write.
+- **A persisted summary of the standings, read at opening.** It would have to be invalidated by
+  the exact log prefix and both proof formats, and a format bump would invalidate it exactly
+  when opening needs it.
 
 - **Refusing review keys on a hunk that changed in the last capture,** for a second and while a
   key pressed before the change keeps repeating, **and every mark while git is busy in the
@@ -74,6 +139,12 @@ the same batch as the keys typed while it opened.
 - `crates/review-ui/src/model/live.rs` (`offer`, `publish`, `publishes`, `live_refusal`)
 - `crates/review-ui/src/model/mod.rs` (`Model::offer_opened`, `Model::show_opened`,
   `Model::sidebar_shown`)
+- `crates/review-ui/src/model/pending.rs` (`Pending`, `verify`, `Model::show_arrived`),
+  `crates/review-ui/src/model/marks.rs` (`review_target`), `crates/review-ui/src/rows/mod.rs`
+  (`Source`)
+- `crates/review-core/src/review/mod.rs` (`Review::last_recorded`, `Review::cached_analysis`,
+  `Review::analyze_recorded`, `Review::changed_files`), `crates/review-core/src/view.rs`
+  (`Changes`)
 - `crates/review-ui/src/paint/bars.rs` (`bar_hints`), `crates/review-ui/src/paint/header.rs`
   (`no_file`)
 - `crates/review-tui/src/app.rs` (`App::render`), `crates/review-tui/tests/terminal.rs`

@@ -134,7 +134,7 @@ pub fn frame(buffer: &mut Buffer, colors: Colors, model: &Model, scene: Scene<'_
     if model.mode == Mode::Buffer && model.buffer.is_some() {
         buffer::draw(&mut painter, model, &palette, panes);
     } else {
-        diff::draw(&mut painter, model, &palette, panes, now);
+        diff::draw(&mut painter, model, &palette, panes);
         if let Some((shown, placed)) = compared {
             compare::draw(&mut painter, &palette, shown, &placed);
         }

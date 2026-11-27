@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::history::{History, Links};
 use crate::ids::ObjectId;
 use crate::store::ReviewDir;
+use crate::store::events::Event;
 use crate::store::log::LogTail;
 
 /// A history of the recorded revisions, with the reader of the log just past the last record
@@ -29,10 +30,25 @@ impl Replayed {
     }
 }
 
+/// The log's records read before any history was derived from them, with the reader of the log
+/// just past them.
+#[derive(Debug, Clone)]
+pub(super) struct Read {
+    pub events: Vec<Event>,
+    pub tail: LogTail,
+}
+
 /// What the memo keeps.
 #[derive(Debug, Clone, Default)]
 struct Kept {
     replayed: Option<Arc<Replayed>>,
+    /// What was read of the log before any history was, as a window's first view reads it; the
+    /// history read next starts from it rather than from the log's start, so it finds the log
+    /// replaced since.
+    read: Option<Arc<Read>>,
+    /// An analysis read or computed before any history was, which the history read next takes
+    /// rather than reading or computing it again.
+    analysis: Option<Arc<Analysis>>,
     /// The last history read with a provisional revision on top of a recorded one.
     live: Option<Arc<History>>,
     /// Whether the log was found replaced, which ends the review for every clone.
@@ -56,7 +72,8 @@ impl Memo {
         self.lock().replayed.clone()
     }
 
-    /// Keeps `replayed` unless a history of more of the log is kept.
+    /// Keeps `replayed` unless a history of more of the log is kept; what was read before any
+    /// history was goes, as the history has it.
     pub(super) fn keep_replayed(&self, replayed: Arc<Replayed>) {
         let mut kept = self.lock();
         if kept
@@ -66,6 +83,23 @@ impl Memo {
         {
             kept.replayed = Some(replayed);
         }
+        kept.read = None;
+        kept.analysis = None;
+    }
+
+    /// Returns what was read of the log before any history was.
+    pub(super) fn read(&self) -> Option<Arc<Read>> {
+        self.lock().read.clone()
+    }
+
+    /// Keeps `read`, the log as read before any history was.
+    pub(super) fn keep_read(&self, read: Arc<Read>) {
+        self.lock().read = Some(read);
+    }
+
+    /// Keeps `analysis`, read or computed before any history was.
+    pub(super) fn keep_analysis(&self, analysis: Arc<Analysis>) {
+        self.lock().analysis = Some(analysis);
     }
 
     /// Returns the last history read with a provisional revision on top.
@@ -91,11 +125,17 @@ impl Memo {
         result
     }
 
-    /// Returns the analysis of `base` against `head` that a kept history has.
+    /// Returns the analysis of `base` against `head` that a kept history has, or that was kept
+    /// before any history was read.
     pub(super) fn analysis(&self, base: &ObjectId, head: &ObjectId) -> Option<Arc<Analysis>> {
         let kept = self.lock().clone();
         kept.histories()
             .find_map(|history| history.analysis_of(base, head))
+            .or_else(|| {
+                kept.analysis
+                    .as_ref()
+                    .filter(|analysis| &analysis.base == base && &analysis.head == head)
+            })
             .map(Arc::clone)
     }
 

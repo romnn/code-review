@@ -217,9 +217,10 @@ fn hunk_header(model: &Model, palette: &Palette, row: &Row, note: &Note) -> Hunk
         .unwrap_or_default();
     let badge = row.hunk.and_then(|hunk| model.hunk_badge(hunk));
     let (badge, glyph) = badges_glyph(badge.as_slice());
-    let folded = model
-        .view()
-        .is_some_and(|view| units.iter().all(|&unit| model.folds.is_folded(&view, unit)));
+    let folded = model.view().is_some_and(|view| {
+        let view = crate::rows::Source::Verified(view);
+        units.iter().all(|&unit| model.folds.is_folded(&view, unit))
+    });
     // Every header is plain, as the file view's code is, and the same whether its hunk is
     // selected or not: the glyph says its state, and the bar along its left edge marks it.
     let background = palette.background;

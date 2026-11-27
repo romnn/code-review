@@ -10,14 +10,12 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use std::time::{Duration, Instant};
-
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir};
-use review_core::{Busy, Capture, LiveCapture, Repo, Review, ReviewTarget, RevisionNumber};
+use review_core::{Repo, Review, ReviewTarget, RevisionNumber};
 
 use crate::config::{self, Config};
 use crate::front_end::FrontEnd;
-use crate::model::{Following, Loaded, PaneLayout, Settings, ZOOM_RANGE};
+use crate::model::{Loaded, PaneLayout, Settings, ZOOM_RANGE};
 use crate::{keymap, look, theme};
 
 /// The command line that names a review and where its data and settings are.
@@ -238,25 +236,13 @@ enum OpenError {
     DemoRevision,
     #[error("cannot find a data directory; pass --data-dir")]
     NoDataDir,
-    #[error("git is busy in this checkout ({0}); open it again once that is done")]
-    Busy(Busy),
-    #[error("git kept changing the checkout while it was captured; open it again")]
-    Moved,
-    #[error("the checkout was replaced by another clone while it opened; open it again")]
-    Replaced,
     #[error(transparent)]
     Core(#[from] review_core::Error),
 }
 
-/// How many times the opening capture is taken again when git moved while it was taken.
-const OPENING_ATTEMPTS: u32 = 5;
-
-/// How long the opening waits for git to finish what it is busy with, when the review has no
-/// revision to show meanwhile.
-const BUSY_WAIT: Duration = Duration::from_secs(10);
-
-/// Opens the review the options name, records its current revision and reads its history, as
-/// the model's opener does.
+/// Opens the review the options name, as the model's opener does: the checkout's alone, whose
+/// history the window reads behind its first view, and any other with its current revision
+/// recorded and its history read.
 ///
 /// In a terminal, no command run for the review's repository, from the first after finding it,
 /// a fetch included, may prompt ([`Repo::forbid_prompts`]): a prompt would draw over the review.
@@ -274,12 +260,8 @@ pub fn open(options: &Options, say: &dyn Fn(&str), front_end: FrontEnd) -> Resul
 }
 
 /// Opens the review of the checkout `repo` is, with data under `data_dir`, as the model's
-/// opener does: starts the session that pins what it shows, and captures the working tree
-/// under it, recording nothing.
-///
-/// While git is busy in the checkout, the review opens on its last recorded revision, or
-/// waits a moment for git without one; while cr's data is at its limit, it opens on its last
-/// recorded revision.
+/// opener does: the review alone, recording nothing; the window shows its last recorded
+/// revision and captures the working tree and reads the history behind it.
 ///
 /// # Errors
 ///
@@ -291,79 +273,11 @@ pub fn open_checkout(data_dir: &Path, repo: Repo) -> Result<Loaded, String> {
 /// See [`open_checkout`]; `found` is how the review was found, for the status line.
 #[tracing::instrument(skip_all)]
 fn checkout(data_dir: &Path, repo: Repo, found: Option<String>) -> Result<Loaded, OpenError> {
-    let review = Review::open_checkout(data_dir, repo)?;
-    let session = review.start_session();
-    let started = Instant::now();
-    let mut moved = 0;
-    loop {
-        // No watch tells the opening of a change made while it captures, so the capture looks
-        // twice.
-        let captured = match review.confirmed_live_history(&session, &[], &[]) {
-            // At its limit, cr's data takes no capture, and the review opens on its last
-            // recorded revision; the window's first capture says why.
-            Err(review_core::Error::StorageFull { .. }) => {
-                return Ok(Loaded {
-                    history: review.history()?,
-                    review,
-                    found,
-                    following: Some(Following {
-                        session,
-                        subject: None,
-                        filtered: Vec::new(),
-                        busy: None,
-                    }),
-                });
-            }
-            captured => captured?,
-        };
-        match captured {
-            Capture::Captured(captured) => {
-                let LiveCapture {
-                    history,
-                    subject,
-                    filtered,
-                } = *captured;
-                return Ok(Loaded {
-                    review,
-                    history,
-                    found,
-                    following: Some(Following {
-                        session,
-                        subject: Some(subject),
-                        filtered,
-                        busy: None,
-                    }),
-                });
-            }
-            Capture::Moved => {
-                moved += 1;
-                if moved >= OPENING_ATTEMPTS {
-                    return Err(OpenError::Moved);
-                }
-            }
-            Capture::Busy(busy) => {
-                let history = review.history()?;
-                if history.current().is_some() {
-                    return Ok(Loaded {
-                        review,
-                        history,
-                        found,
-                        following: Some(Following {
-                            session,
-                            subject: None,
-                            filtered: Vec::new(),
-                            busy: Some(busy),
-                        }),
-                    });
-                }
-                if started.elapsed() >= BUSY_WAIT {
-                    return Err(OpenError::Busy(busy));
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            Capture::Replaced => return Err(OpenError::Replaced),
-        }
-    }
+    Ok(Loaded {
+        review: Review::open_checkout(data_dir, repo)?,
+        history: None,
+        found,
+    })
 }
 
 /// Opens the review the options name: the checkout's (see [`open_checkout`]), saying so, with
@@ -436,9 +350,8 @@ fn loaded(review: Review, found: Option<String>) -> Result<Loaded, OpenError> {
     let history = review.history()?;
     Ok(Loaded {
         review,
-        history,
+        history: Some(history),
         found,
-        following: None,
     })
 }
 

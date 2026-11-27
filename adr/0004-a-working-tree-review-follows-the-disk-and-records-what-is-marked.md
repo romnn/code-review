@@ -1,6 +1,6 @@
 # 4. A working-tree review follows the disk, and records a capture only when it is marked
 
-**Status:** accepted · **Date:** 2026-11-26
+**Status:** accepted · **Date:** 2026-11-27
 
 ## Context
 
@@ -37,9 +37,9 @@ processes left behind.
 ## Decision
 
 - **cr writes nothing into the reviewed repository**: no object, ref, lock, index file or date.
-  Its snapshots, their pins and its sessions live in the review's archive, a bare repository
-  of cr's own under the review's data (`reviews/<key>/archive/`), and the clone's identity in
-  the data directory too
+  Its snapshots and their pins live in the review's archive, a bare repository of cr's own
+  under the review's data (`reviews/<key>/archive/`), and the clone's identity in the data
+  directory too
   ([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)).
   The data directory must resolve outside the checkout and its git directories.
   The one exception is a language server the reviewer trusts, which builds in the checkout as
@@ -81,16 +81,16 @@ processes left behind.
   The watch's ignore queries read such a copy too, one per walk of the tree.
   The subject, the index's date and size and git's busy state are read before and after, and a
   capture is discarded when they moved.
-  A capture pins its base and head under its session before it returns them, deriving no
-  history, so whoever builds on it holds snapshots that stay.
+  A capture derives no history and pins nothing: whoever builds on it holds the review, whose
+  lease keeps its snapshots.
 - **The archive holds every snapshot whole.**
   Each recorded or shown base and head is in it with every tree and blob it reaches, under its
   own object ID; a gitlink keeps its mode and ID only.
   A pack shows as a whole and a tree is written only once what it reaches is there, so a
   snapshot a reader gets is whole; the reviewed repository collecting or losing it afterwards
   changes nothing.
-  Recorded snapshots are pinned by `refs/snap/<id>` and shown captures by their session's
-  `refs/live/` in the archive.
+  Recorded snapshots are pinned by `refs/snap/<id>` in the archive; a capture stays for as long
+  as anything holds the review's lease.
   An object the reviewed repository lacks, as in a partial clone or after it collected one
   during an import, fails the capture or the recording, naming it.
 - **The archive keeps every recorded snapshot until the review is dropped, and nothing else
@@ -108,12 +108,14 @@ processes left behind.
   On a filesystem that tells case apart, two reviews whose keys differ only in case share one
   too, which only keeps a drop or maintenance of one waiting for the other.
   Everything that uses the review holds the lease shared for as long as it does: windows,
-  commands, sessions, probes and blob readers, a window's background jobs among them.
+  commands, probes and blob readers, and every job a window queued, from when it is queued
+  until it ends, so a capture a window showed stays while a job still reads it.
   An open first tries to take it exclusively without waiting.
   When it can, nothing else uses the review, so the open removes, before it lets anything in,
-  the pins of every session, what captures, probes, fetches and compactions left in the
-  archive's `scratch/`, half-written packs, what drops left in `dropped/`, and the read-only
-  copies older versions made; it compacts the archive when it is due, and lets go.
+  the `refs/live/` pins windows of older versions left, what captures, probes, fetches and
+  compactions left in the archive's `scratch/`, half-written packs, what drops left in
+  `dropped/`, and the read-only copies older versions made; it compacts the archive when it is
+  due, and lets go.
   It then starts over as an open that maintained nothing, under the lease held shared like
   any other user, so a drop in between makes it open the review anew, or fail to load it by
   its key.
@@ -216,6 +218,8 @@ processes left behind.
   A review of the working tree watches it and captures it when something a capture records
   changes, and shows each capture in place of the snapshot on screen, keeping the reviewer's
   file, hunk, top row and folds through the correspondence between the two.
+  The checkout's review opens on its last recorded revision and takes its first capture behind
+  it ([ADR 13](0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)).
   `[review] live = false` turns this off.
 - **A capture is provisional until it is marked.**
   It shows as the revision after the last recorded one, but is not recorded: no event, no
@@ -277,17 +281,16 @@ processes left behind.
   checkout of 13,000 files, and its walk, about 0.5 s every 5 minutes; that checkout has 3,500
   watched directories of its 146,000.
 - The log grows with what the reviewer marks, not with what the agent saves.
-- Each shown capture is pinned by refs of its own under `refs/live/<session>/` in the archive;
-  a capture releases the pins of earlier ones its window no longer shows, and a session that
-  died leaves its pins for the next open that has the review to itself.
+- A capture writes no ref: one its window no longer shows stays in the archive, readable by a
+  job still queued on it, until nothing holds the review and an open compacts the archive.
 - The archive holds the recorded snapshots and what windows show, in a pack per import until
   compaction is due: on a generated review of 105 revisions, each a commit editing 120 lines
   among files of 1,500, the archive's 105 packs of 133 MB compacted into one of 18 MB; the
   open that compacted it took 0.86 s, where an open with nothing due takes 22 ms.
   The window that open is for waits for the compaction; quitting never compacts.
   A compaction needs room for the new pack before the old ones go.
-  It drops what windows showed along with what no pin reaches, so the first capture after it
-  imports `HEAD` again.
+  It drops what windows showed along with everything else no `refs/snap/` pin reaches, so the
+  first capture after it imports `HEAD` again.
 - A review that is always open somewhere is not compacted until nothing has it open, and its
   archive grows by a pack per capture meanwhile.
 - A capture imports `HEAD`'s objects once per commit; checking which objects of the index it
@@ -380,6 +383,10 @@ processes left behind.
 - **Admitting additions exactly, with staged objects and counters of what each review
   holds:** a soft check at the point of each addition bounds the data directory as well, with
   no state of its own to repair after a crash.
+- **Pins of each shown capture under a session of its window, `refs/live/<session>/`,** which a
+  capture released once its window no longer showed it: with the lease held by the window and
+  by every job queued on a capture, they protected nothing the lease does not, and every
+  capture paid a ref transaction and a keep-list of what the window still showed.
 - **A write lock that writers hold shared until what they wrote is pinned, and compaction
   exclusively:** every writer, probe, reader and job then needs a guard of its own, and each
   review found one missing; one lease held for as long as anything uses the review, with

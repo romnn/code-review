@@ -528,6 +528,12 @@ impl ListScroll {
         self.request = Some(request);
     }
 
+    /// Whether a request waits for the list's next layout.
+    #[must_use]
+    pub(crate) fn requested(&self) -> bool {
+        self.request.is_some()
+    }
+
     /// A track click toward `toward`: one page that way, keeping `context` rows of the page
     /// before, eased to in the next layout.
     pub(crate) fn page_toward(

@@ -1,17 +1,16 @@
 # 14. Only background work reaches the engine
 
-**Status:** accepted · **Date:** 2026-11-26
+**Status:** accepted · **Date:** 2026-11-27
 
 ## Context
 
 The UI thread of review-tui and review-gui only draws, maps input to model calls and runs
-effects; it never blocks. Until now that held by habit: the model kept the review, the live
-session, the watch on the working tree and the language servers in fields any model code could
-reach, so a blocking call compiled on the UI thread, and several had crept in. Reading trust took
-the log's lock as a capture showed, granting and revoking trust appended to the log in the key
-handler, a new head stopped and waited for the language servers, a review of the working tree
-started its session, and the session, the watch and the servers waited for git, threads and
-processes as they were dropped.
+effects; it never blocks. Until now that held by habit: the model kept the review, the watch on
+the working tree and the language servers in fields any model code could reach, so a blocking
+call compiled on the UI thread, and several had crept in. Reading trust took the log's lock as a
+capture showed, granting and revoking trust appended to the log in the key handler, a new head
+stopped and waited for the language servers, and the watch and the servers waited for git,
+threads and processes as they were dropped.
 
 Trust guards running the reviewed code. A language server reads the workspace's build
 configuration, which can name any program as a `rustc` wrapper, and with its builds on it runs
@@ -35,21 +34,25 @@ state.
 ## Decision
 
 - **One engine handle, private to background work.** `review_ui::model::engine` holds the review,
-  the checkout's review that holds the trust in it, the session, the watch and the language
-  servers. The model can neither look into the handle nor clone it: all it can do is queue a job
-  that runs with the engine's parts, through the existing effects, whose outcome comes back as
-  plain data, or hand the handle to the job that stops it. The wait for the working tree to change
-  holds only the watch's waiter, which holds the watch weakly, so no wait keeps the engine alive.
-  The opening job assembles the handle, splitting the checkout's session off what its opening
-  capture saw. The title and paint read a plain copy of `ReviewMeta`.
+  the checkout's review that holds the trust in it, the watch and the language servers. The
+  model can neither look into the handle nor clone it: all it can do is queue a job that runs
+  with the engine's parts, through the existing effects, whose outcome comes back as plain data,
+  or hand the handle to the job that stops it. The wait for the working tree to change holds only
+  the watch's waiter, which holds the watch weakly, so no wait keeps the engine alive. The
+  opening job assembles the handle. The title and paint read a plain copy of `ReviewMeta`.
+- **Each job holds the review it reads.** A job holds the engine's parts from when it is queued
+  until it ends, and with them the review, whose lease
+  ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)) keeps
+  every snapshot the job reads, such as a capture the window no longer shows, from being
+  compacted away; nothing else pins what a window shows.
 - **A front end can only start a job.** A job is opaque: its one public operation runs it on a
   thread of its own and hands its completion back, so no front end can run it in place on the UI
   thread. Both apps run every job that way, a wait for the working tree included, so there is
   one effect for jobs.
 - **Nothing that blocks is dropped on the UI thread.** As the app quits, the job that stops the
-  engine kills the servers and lets go of the watch and the session, and quitting waits for it
-  as it waits for saves. A capture still running keeps the session and the watch until it ends,
-  so the stop never waits for it. The watch starts outside its slot's lock and is installed
+  engine kills the servers and lets go of the watch, and quitting waits for it as it waits for
+  saves. A job still running keeps the review, and a capture the watch, until it ends, so the
+  stop never waits for it. The watch starts outside its slot's lock and is installed
   under it. The job that ends the review in a window whose log or clone was replaced and the
   job that stops the engine both close the slot for good under the same lock, so a watch that
   finishes starting after that is dropped by the job that started it. Its start, and each
@@ -113,7 +116,9 @@ state.
   its text on disk, and closes it once answered, so the server reads every file from disk again,
   through its own watch on the files, and never keeps text the file no longer has.
 - **Trust shows as one state, `Checking`, `Denied` or `Granted`,** which is `Checking` while a
-  reading or a decision is under way, and then nothing starts.
+  decision is under way, and then nothing starts. While trust is read again, the last reading
+  stays, a grant shown dimmed as no longer current; a lookup meanwhile relies on the owner's
+  admission, which reads the stored grant itself.
 - **One owner decides whether a language server may run.** The engine's `Servers` hold the one
   set of servers running in the checkout. Its one lock serializes the readings of trust, the
   decisions on trust and the admission of lookups. Wherever trust is found denied there, by a
@@ -142,7 +147,7 @@ state.
   revocation that cannot be recorded stops a quit the reviewer waits for, as a failed mark does,
   and the owner keeps trust denied, whatever is stored, until a grant is recorded.
 - **Every snapshot that shows has its trust read again by the owner.** A capture or `R` shows
-  the new diff at once, with trust `Checking` until the reading lands.
+  the new diff at once, with the trust last read until the reading lands.
 - **While a server may run, the owner reads the grant every 30 seconds, whatever shows.** A
   lookup arms the watch, and each reading that finds a server running arms the next. It reads
   the grant and the clone through the checkout's review bound as the window opened, so it covers
@@ -166,7 +171,9 @@ state.
 
 - No code on the UI thread compiles that blocks on the engine or runs a job in place; the module
   boundary and the opaque job are the checks, the latter with a `compile_fail` doctest.
-- Quitting waits for one more job, which stops the servers and the session.
+- Quitting waits for one more job, which stops the servers and the watch.
+- A job queued on a capture keeps the review open until it ends, so another open neither
+  compacts the archive nor drops the review meanwhile.
 - A changed binary file is read once, to learn whether it is a PDF and, if not, to decode it,
   and a PDF's text diff needs no image support, so terminals without graphics show it too. Stepping through pages renders each pair only when it shows; nothing is prefetched or
   cached beyond the last result.
@@ -174,7 +181,9 @@ state.
   background executor; the model bounds how many run at once, highlighting included.
 - A front end changes the model only through `Driver::update`, whose value is `None` once the
   app closes, and hands it completions only through `Driver::complete`.
-- The bottom bar says `checking trust` for the moment a reading takes after every capture.
+- The bottom bar keeps the trust last read for the moment a reading takes after every capture,
+  a grant dimmed, so its width never changes; it says `checking trust` only while a decision is
+  recorded.
 - `Ctrl+T` asks the trust question or answers at once with "Revoking trust…", and says the
   outcome once the job confirms it; `g d` and `Ctrl+T` say trust is being checked while it is.
 - Go to definition is unavailable for pull requests that are not checked out, ranges and older

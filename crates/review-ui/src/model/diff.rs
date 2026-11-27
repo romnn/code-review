@@ -320,7 +320,10 @@ impl Model {
     /// unfolding it records that the reviewer opened it.
     pub(super) fn toggle_fold(&mut self) {
         let units = self.hunk_units();
-        let Some(view) = self.view() else {
+        let Some(laid) = self.laid_out() else {
+            return;
+        };
+        let Some(view) = laid.source() else {
             return;
         };
         let folded = units.iter().all(|&unit| self.folds.is_folded(&view, unit));

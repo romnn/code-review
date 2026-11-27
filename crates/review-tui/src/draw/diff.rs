@@ -9,8 +9,6 @@
 //! The tool's own rows (hunk headers, gaps, notes and moves) sit on their bands without a
 //! gutter.
 
-use std::time::Instant;
-
 use ratatui::layout::Rect;
 use review_ui::color::{Hsla, Rgba};
 use review_ui::frame::List;
@@ -36,13 +34,7 @@ const HEADER_GAP: u16 = 2;
 const GAP_LEAD: u16 = 3;
 
 /// The diff pane: the file header over the rows, or the card of a state without rows.
-pub fn draw(
-    painter: &mut Painter<'_>,
-    model: &Model,
-    palette: &Palette,
-    panes: &Panes,
-    now: Instant,
-) {
+pub fn draw(painter: &mut Painter<'_>, model: &Model, palette: &Palette, panes: &Panes) {
     file_header(painter, model, palette, panes.header);
     let list = panes.list;
     let background = opaque(palette.background);
@@ -62,7 +54,7 @@ pub fn draw(
         };
         draw_row(painter, model, palette, row, at, background);
     }
-    if let Some(card) = header::diff_state(model, palette, now) {
+    if let Some(card) = header::diff_state(model, palette) {
         state_card(painter, palette, list, &card);
     }
 }
@@ -610,18 +602,11 @@ fn file_header(painter: &mut Painter<'_>, model: &Model, palette: &Palette, area
     let surface = opaque(palette.surface);
     let x = area.x + 1;
     let y = area.y;
-    let file = match (file, header::no_file(model)) {
-        (Some(file), _) => file,
-        (None, Some(no_file)) => {
-            painter.fill(area, surface);
-            painter.text(x, y, budget, no_file, Brush::new(palette.faint, surface));
-            return;
-        }
-        // Nothing of the header shows before the review does.
-        (None, None) => {
-            painter.fill(area, opaque(palette.background));
-            return;
-        }
+    let Some(file) = file else {
+        painter.fill(area, surface);
+        let no_file = header::no_file(model);
+        painter.text(x, y, budget, no_file, Brush::new(palette.faint, surface));
+        return;
     };
     painter.fill(area, surface);
     let FileHeader {

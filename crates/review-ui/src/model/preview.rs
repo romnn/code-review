@@ -172,7 +172,7 @@ impl Model {
     /// such folder.
     pub(super) fn lay_out_folder(
         &mut self,
-        view: &review_core::RevisionView<'_>,
+        view: &crate::rows::Source<'_>,
         path: &str,
     ) -> Option<Layout> {
         let files = self.folder_members(path)?;
@@ -187,26 +187,24 @@ impl Model {
         self.folds.single_file = false;
         self.folds.pending.clone_from(&self.pending);
         let mut units: HashMap<&str, Vec<UnitId>> = HashMap::new();
-        if let Some(analysis) = view.analysis() {
-            for file in &analysis.files {
-                let shown = file.display_path();
-                let Some(&shown) = wanted.get(shown) else {
-                    continue;
-                };
-                units
-                    .entry(shown)
-                    .or_default()
-                    .extend(file.units.iter().map(|&index| view.id(index)));
-                if let Some(text) = file
-                    .new
-                    .as_ref()
-                    .and_then(|side| self.blobs.texts.get(&side.oid))
-                {
-                    self.folds.texts.insert(shown.to_owned(), Arc::clone(text));
-                }
-                let syntax = self.blobs.file_syntax(view, file);
-                self.folds.syntax.insert(shown.to_owned(), Arc::new(syntax));
+        for file in &view.analysis().files {
+            let shown = file.display_path();
+            let Some(&shown) = wanted.get(shown) else {
+                continue;
+            };
+            units
+                .entry(shown)
+                .or_default()
+                .extend(file.units.iter().map(|&index| view.id(index)));
+            if let Some(text) = file
+                .new
+                .as_ref()
+                .and_then(|side| self.blobs.texts.get(&side.oid))
+            {
+                self.folds.texts.insert(shown.to_owned(), Arc::clone(text));
             }
+            let syntax = self.blobs.file_syntax(view, file);
+            self.folds.syntax.insert(shown.to_owned(), Arc::new(syntax));
         }
         let units: Vec<UnitId> = files
             .iter()

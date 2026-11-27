@@ -58,7 +58,7 @@ const WHEEL_CELLS: f64 = 6.0;
 /// How soon a second press on the same cell counts as a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
-/// How often the loading card's dots move.
+/// How often the status line's spinner turns while the review opens.
 const LOADING_FRAME: Duration = Duration::from_millis(100);
 
 /// How often the status line's failure tint fades a step.
@@ -866,7 +866,7 @@ impl App {
         if draws && self.model().publishes() {
             return Some(now);
         }
-        let animation = if matches!(self.model().phase, Phase::Loading(_)) {
+        let animation = if matches!(self.model().phase, Phase::Loading) {
             Some(now + LOADING_FRAME)
         } else if bars::flashing(self.model(), now) {
             Some(now + FLASH_FRAME)
@@ -1043,9 +1043,8 @@ mod tests {
             Box::new(move || {
                 Ok(Loaded {
                     review,
-                    history,
+                    history: Some(history),
                     found: None,
-                    following: None,
                 })
             }),
             Rect::new(0, 0, 160, 50),
@@ -1177,8 +1176,9 @@ mod tests {
             .collect()
     }
 
-    /// While the review opens, the screen shows only that it opens and the key that quits: no
-    /// files pane, no file header and no review keys, none of which does anything yet.
+    /// While the review opens, the screen shows the panes empty where the review will fill
+    /// them, the status line saying it opens, and only the key that quits: no card, nothing
+    /// counted and no review keys, none of which does anything yet.
     #[test]
     fn the_loading_view_shows_only_what_works() {
         let dir = tempfile::tempdir().unwrap();
@@ -1186,14 +1186,14 @@ mod tests {
         let (mut app, _receiver) = demo(dir.path());
         let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
         app.render(&mut terminal).unwrap();
-        assert!(matches!(app.model().phase, Phase::Loading(_)));
+        assert!(matches!(app.model().phase, Phase::Loading));
         let screen = screen(&terminal).join("\n");
-        assert!(screen.contains("Opening the review"), "{screen}");
-        assert!(screen.contains("q quit"), "{screen}");
+        for shown in ["files", "hunks", "Opening the review…", "q quit"] {
+            assert!(screen.contains(shown), "{shown:?} does not show: {screen}");
+        }
         for chrome in [
+            "Reading history",
             "No file selected",
-            "files",
-            "hunks",
             "0/0",
             "approve",
             "? keys",
@@ -1215,7 +1215,7 @@ mod tests {
             KeyModifiers::NONE,
         ))));
         app.render(&mut terminal).unwrap();
-        assert!(matches!(app.model().phase, Phase::Loading(_)));
+        assert!(matches!(app.model().phase, Phase::Loading));
         let bar = screen(&terminal).pop().unwrap_or_default();
         assert!(bar.contains("j/k move"), "{bar}");
     }

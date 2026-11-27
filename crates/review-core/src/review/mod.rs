@@ -5,9 +5,9 @@
 //! Analyses and correspondences are content-addressed caches that can be recomputed from the
 //! review's archive at any time.
 //!
-//! The reviewed repository is only read: snapshots, pins and sessions live in the review's
-//! archive, a private repository in its data directory, and the clone's identity in the data
-//! directory too.
+//! The reviewed repository is only read: snapshots and their pins live in the review's archive,
+//! a private repository in its data directory, and the clone's identity in the data directory
+//! too.
 
 mod archive;
 mod cache;
@@ -18,14 +18,12 @@ mod info;
 mod live;
 mod memo;
 mod retention;
-mod session;
 mod trust;
 
 pub use checkout::{BaseRef, Subject, filtered_note};
 pub use info::{Commit, PullRequest, ReviewInfo};
 pub(crate) use info::{LOG_FORMAT, parse_log};
 pub use live::{Capture, LiveCapture};
-pub use session::Session;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,10 +43,10 @@ use crate::store::events::{
 };
 use crate::store::log::{LockGuard, LogTail, LogWriter, Prefix};
 use crate::store::{self, ReviewDir};
-use crate::view::{RevisionView, ShownRun, SinceReviewed};
+use crate::view::{FileStatus, RevisionView, ShownRun, SinceReviewed};
 use crate::walkthrough;
 use checkout::{Looks, Observed};
-use memo::Replayed;
+use memo::{Read, Replayed};
 
 /// What a review covers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,7 +355,8 @@ impl Review {
         let open = move || {
             // Two first opens of colliding targets must not both find no metadata and both
             // write.
-            let lock = LockGuard::acquire(&dir.lock())?;
+            let lock =
+                tracing::info_span!("review_lock").in_scope(|| LockGuard::acquire(&dir.lock()))?;
             let stored = store::read_json::<ReviewMeta>(&dir.meta())?;
             if let Some(stored) = &stored
                 && stored.target != meta.target
@@ -496,8 +495,7 @@ impl Review {
     /// to) and the snapshot pair.
     /// Nothing else tells a capture caught in the middle of a change, such as an editor saving
     /// several files, from a settled one when no watcher follows the working tree.
-    /// The capture is pinned under a session of its own (see [`Self::start_session`]) before
-    /// it is analyzed, and recorded only while the log still ends at the revision it ended at
+    /// The capture is recorded only while the log still ends at the revision it ended at
     /// before the capture, so a capture never lands after a newer one.
     /// A capture that something moved under, that its confirming capture disagreed with, or
     /// that raced another recording, is taken again, a few times at most.
@@ -700,8 +698,8 @@ impl Review {
         store::write_json_atomic(&self.dir.info(), info, "review info")
     }
 
-    /// Records the current state of the target as a revision, pinned under a session of its
-    /// own until it is, and only while the log still ends at the revision it ended at before.
+    /// Records the current state of the target as a revision, only while the log still ends at
+    /// the revision it ended at before.
     fn record_target(
         &self,
         pull_requests: &[github::CheckoutPullRequest],
@@ -720,7 +718,6 @@ impl Review {
             }
             Ok(())
         };
-        let session = self.start_session();
         let remote = self.repo.default_remote()?;
         let deepen_from = remote.as_deref();
         match &self.meta.target {
@@ -732,7 +729,6 @@ impl Review {
                 self.archive
                     .import(&self.repo, std::slice::from_ref(&head))?;
                 let input = snapshot_input(target, head, merge_bases)?;
-                session.pin(&input)?;
                 self.record_revision_reporting(
                     input,
                     RevisionMeta::default(),
@@ -745,7 +741,7 @@ impl Review {
                     input,
                     subject,
                     filtered,
-                } = match self.capture(&session, pull_requests, Looks::Twice, &mut || Ok(()))? {
+                } = match self.capture(pull_requests, Looks::Twice, &mut || Ok(()))? {
                     Observed::Captured(captured) => *captured,
                     Observed::Busy(busy) => return Err(Error::GitBusy(busy)),
                     Observed::Moved => return Err(Error::Raced("working tree")),
@@ -790,7 +786,6 @@ impl Review {
                 self.archive
                     .import(fetched.repo(), &[input.base.clone(), input.head.clone()])?;
                 drop(fetched);
-                session.pin(&input)?;
                 self.record_revision_reporting(
                     input,
                     RevisionMeta::default(),
@@ -807,9 +802,8 @@ impl Review {
         if self.memo.replaced() {
             return Err(self.log_replaced());
         }
-        let replayed = self.memo.replayed();
-        let (mut tail, read) = match &replayed {
-            Some(replayed) => (
+        let (mut tail, read) = match (self.memo.replayed(), self.memo.read()) {
+            (Some(replayed), _) => (
                 replayed.tail.clone(),
                 replayed
                     .history
@@ -817,14 +811,89 @@ impl Review {
                     .last()
                     .map(|&last| last.clone()),
             ),
-            None => (LogTail::new(&self.dir), None),
+            (None, Some(read)) => (read.tail.clone(), last_record(&read.events)),
+            (None, None) => (LogTail::new(&self.dir), None),
         };
         let events = self.memo.note_replaced(tail.poll())?;
-        let appended = events.iter().rev().find_map(|event| match event {
-            Event::Revision(revision) => Some(RevisionRecord::from(revision)),
-            _ => None,
-        });
-        Ok(appended.or(read))
+        Ok(last_record(&events).or(read))
+    }
+
+    /// Returns the last revision the log records, read without deriving anything, or `None`
+    /// before the first.
+    ///
+    /// What it reads, the review keeps: the history it reads next starts from there, taking in
+    /// only the records appended since, and finds the log replaced since, as a history read
+    /// again does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LogReplaced`] once this review or a clone of it found its log is not
+    /// the one it read, and an error when the log cannot be read or is corrupt.
+    #[tracing::instrument(skip_all)]
+    pub fn last_recorded(&self) -> Result<Option<RevisionRecord>, Error> {
+        if self.memo.replayed().is_some() || self.memo.read().is_some() {
+            return self.last_revision();
+        }
+        if self.memo.replaced() {
+            return Err(self.log_replaced());
+        }
+        let mut tail = LogTail::new(&self.dir);
+        let events = self.memo.note_replaced(tail.poll())?;
+        revision_events(&self.dir.events(), &events, 0)?;
+        // The tip comes from the read the history goes on from, which nothing appended since
+        // can be newer than.
+        let last = last_record(&events);
+        self.memo.keep_read(Arc::new(Read { events, tail }));
+        Ok(last)
+    }
+
+    /// Returns the analysis of the recorded revision `record` when the cache holds it in this
+    /// version's format, computing nothing.
+    ///
+    /// The review keeps it for the history it reads next.
+    #[must_use]
+    #[tracing::instrument(skip_all)]
+    pub fn cached_analysis(&self, record: &RevisionRecord) -> Option<Arc<Analysis>> {
+        let analysis = self
+            .memo
+            .analysis(&record.base, &record.head)
+            .or_else(|| cached_analysis(&self.dir, &record.base, &record.head).map(Arc::new))?;
+        self.memo.keep_analysis(Arc::clone(&analysis));
+        Some(analysis)
+    }
+
+    /// Returns the analysis of the recorded revision `record` from the cache, or computes it
+    /// and writes it there.
+    ///
+    /// The review keeps it for the history it reads next, which then neither reads nor
+    /// computes it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the analysis cannot be computed.
+    #[tracing::instrument(skip_all)]
+    pub fn analyze_recorded(&self, record: &RevisionRecord) -> Result<Arc<Analysis>, Error> {
+        let analysis = self.analysis(&record.base, &record.head, Publish::Now, &mut |_| {})?;
+        self.memo.keep_analysis(Arc::clone(&analysis));
+        Ok(analysis)
+    }
+
+    /// Returns the files the recorded revision `record` changes, as one comparison of its trees
+    /// in the archive finds them, without renames and with nothing counted: what shows of it
+    /// before its changes are analyzed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git fails, as when a snapshot is not in the archive.
+    #[tracing::instrument(skip_all)]
+    pub fn changed_files(&self, record: &RevisionRecord) -> Result<Vec<FileStatus>, Error> {
+        Ok(self
+            .archive
+            .repo()
+            .diff_tree_unrenamed(&record.base, &record.head)?
+            .into_iter()
+            .filter_map(FileStatus::unanalyzed)
+            .collect())
     }
 
     /// Every merge base of `target` and `ancestry`, the commit whose history the head has, best
@@ -1069,11 +1138,19 @@ impl Review {
         if self.memo.replaced() {
             return Err(self.log_replaced());
         }
-        let mut replayed = self
-            .memo
-            .replayed()
-            .map_or_else(|| Replayed::start(&self.dir), |kept| Replayed::clone(&kept));
-        let events = self.memo.note_replaced(replayed.tail.poll())?;
+        // A review that read its log before any history starts from what it read.
+        let (mut replayed, mut events) = match (self.memo.replayed(), self.memo.read()) {
+            (Some(kept), _) => (Replayed::clone(&kept), Vec::new()),
+            (None, Some(read)) => (
+                Replayed {
+                    history: History::empty(),
+                    tail: read.tail.clone(),
+                },
+                read.events.clone(),
+            ),
+            (None, None) => (Replayed::start(&self.dir), Vec::new()),
+        };
+        events.extend(self.memo.note_replaced(replayed.tail.poll())?);
         if events.is_empty() {
             return Ok(replayed.history);
         }
@@ -1387,8 +1464,8 @@ impl Review {
     /// Publishes the analysis of `view`'s revision to the cache when it was `recorded` just now,
     /// as a capture a mark, an approval or a note recorded; see [`Self::publish`].
     fn published(&self, view: &RevisionView<'_>, recorded: bool) {
-        if recorded && let Some(analysis) = view.analysis() {
-            self.publish(analysis);
+        if recorded {
+            self.publish(view.analysis());
         }
     }
 
@@ -1443,6 +1520,14 @@ fn cached_analysis(dir: &ReviewDir, base: &ObjectId, head: &ObjectId) -> Option<
     } else {
         Some(cached)
     }
+}
+
+/// The last revision `events` record, if they record one.
+fn last_record(events: &[Event]) -> Option<RevisionRecord> {
+    events.iter().rev().find_map(|event| match event {
+        Event::Revision(revision) => Some(RevisionRecord::from(revision)),
+        _ => None,
+    })
 }
 
 /// The correspondence between `older` and `newer` the cache in `dir` holds, if it holds one

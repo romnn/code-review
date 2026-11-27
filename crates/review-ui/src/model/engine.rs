@@ -1,12 +1,11 @@
-//! The engine handle: the review, the checkout's review that holds the trust in it, the session
-//! that pins what the window shows, the watch on the working tree and the language servers,
-//! which only background work can reach.
+//! The engine handle: the review, the checkout's review that holds the trust in it, the watch
+//! on the working tree and the language servers, which only background work can reach.
 //!
 //! [`Servers`] is the one authority on whether a language server may start or be used: see the
 //! `trust` module.
 //!
-//! Everything it holds can block: the review runs git and reads the event log, the session and
-//! the watch run git and join threads as they end, and the servers are processes.
+//! Everything it holds can block: the review runs git and reads the event log, the watch runs
+//! git and joins threads as it ends, and the servers are processes.
 //! The model holds one [`Engine`], which it can neither look into nor clone: all it can do with
 //! it is queue a job that runs with its [`Parts`] in the background ([`Model::spawn_with`]),
 //! whose outcome comes back as plain data, and hand it to the job that stops it
@@ -15,16 +14,18 @@
 //! can only hand on to the next wait ([`Model::wait_for_changes`]).
 //! So no code on the UI thread compiles that blocks on the engine.
 //!
-//! A job holds the parts while it runs, and a capture the session and the watch, so the last of
-//! them may let go anywhere, on the UI thread too, as when the model is dropped or a job is
-//! dropped unrun: each then hands what blocks to a thread of its own.
+//! A job holds the parts from when it is queued until it ends, and with them the review, whose
+//! lease keeps every snapshot it reads, a capture no longer shown included, from being compacted
+//! away; a capture holds the watch too.
+//! So the last of them may let go anywhere, on the UI thread too, as when the model is dropped or
+//! a job is dropped unrun: each then hands what blocks to a thread of its own.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use review_core::{Review, Session};
+use review_core::Review;
 
 use super::buffer::Unanswered;
 use super::effects::{Because, Completion, Job, Outcome, Subject};
@@ -47,10 +48,6 @@ pub(super) struct Parts {
     /// there when the review opened; `None` for a review whose code is not on disk (see
     /// [`Review::checkout_review`]).
     pub(super) checkout: Option<Review>,
-    /// The session that pins the captures the window shows, for a review that follows the
-    /// working tree, until the engine stops; a capture holds it too while it runs, and it ends
-    /// once the last holder lets go.
-    pub(super) session: Mutex<Option<Arc<Session>>>,
     /// The watch on the working tree; a capture holds it too while it walks the tree again.
     pub(super) watch: Mutex<WatchSlot>,
     /// The running language servers.
@@ -285,15 +282,13 @@ impl Set {
 }
 
 impl Engine {
-    /// The handle on `review`, with the review of its `checkout`, if it has code on disk, and
-    /// the session the window follows the working tree under, if it does; made by the job that
-    /// opens the review.
-    pub(super) fn new(review: Review, checkout: Option<Review>, session: Option<Session>) -> Self {
+    /// The handle on `review`, with the review of its `checkout`, if it has code on disk; made
+    /// by the job that opens the review.
+    pub(super) fn new(review: Review, checkout: Option<Review>) -> Self {
         Self {
             parts: Arc::new(Parts {
                 review,
                 checkout,
-                session: Mutex::new(session.map(Arc::new)),
                 watch: Mutex::default(),
                 servers: Servers::default(),
             }),
@@ -305,14 +300,12 @@ impl Drop for Parts {
     fn drop(&mut self) {
         let servers = std::mem::take(&mut self.servers.0.get_mut().running);
         let watch = self.watch.get_mut().close();
-        let session = self.session.get_mut().take();
-        // Stopping a server waits for its process, the watch for its thread and the session
-        // for git, and the last holder of the parts may be the UI thread.
-        if !servers.is_empty() || watch.is_some() || session.is_some() {
+        // Stopping a server waits for its process and the watch for its thread, and the last
+        // holder of the parts may be the UI thread.
+        if !servers.is_empty() || watch.is_some() {
             std::thread::spawn(move || {
                 drop(servers);
                 drop(watch);
-                drop(session);
             });
         }
     }
@@ -361,11 +354,12 @@ impl Model {
         });
     }
 
-    /// Takes the engine and queues the job that stops it, the language servers, the watch and
-    /// the session, as the app quits; returns whether there was one to stop.
+    /// Takes the engine and queues the job that stops it, the language servers and the watch,
+    /// as the app quits; returns whether there was one to stop.
     ///
     /// The trust epoch moves on, so a lookup still running starts no server after the job
-    /// stopped them; a capture still running keeps the session and the watch until it ends.
+    /// stopped them; a job still running keeps the review, and a capture the watch, until it
+    /// ends.
     pub(super) fn dispose_engine(&mut self) -> bool {
         let Some(Engine { parts }) = self.engine.take() else {
             return false;
@@ -374,7 +368,6 @@ impl Model {
         self.spawn(Subject::Always(Because::Stop), move || {
             parts.servers.stop();
             parts.close_watch();
-            drop(parts.session.lock().take());
             Outcome::Disposed
         });
         true
@@ -416,6 +409,20 @@ impl Model {
     /// The engine's parts, for a test to look into or to stand in for a language server.
     pub(super) fn parts(&self) -> &Parts {
         &self.engine.as_ref().expect("the review is open").parts
+    }
+
+    /// The engine's parts, held weakly, so a test can tell when the last holder let go of them
+    /// and of the review they hold.
+    pub(super) fn weak_parts(&self) -> std::sync::Weak<Parts> {
+        self.engine.as_ref().expect("the review is open").weak()
+    }
+}
+
+#[cfg(test)]
+impl Engine {
+    /// The parts, held weakly; see [`Model::weak_parts`].
+    pub(super) fn weak(&self) -> std::sync::Weak<Parts> {
+        Arc::downgrade(&self.parts)
     }
 }
 

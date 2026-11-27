@@ -1,8 +1,6 @@
 //! The headers over the diff and the buffer, the progress meter, and the diff's loading, empty
 //! and error states.
 
-use std::time::Instant;
-
 use review_core::analysis::FileUnit;
 
 use crate::images::Version;
@@ -157,7 +155,7 @@ pub fn file_header(
     let lead = change.map_or(0.0, |_| cell + gap)
         + text(&section.path).min(cell * PATH_CELLS)
         + text(&innermost);
-    let meter_room = gap + meter_width(units.len(), cell, meter_gap);
+    let meter_room = meter_room(model, units.len(), room, meter_gap);
     let counts_room = gap + text(&added) + gap + text(&removed);
     let show_meter = lead + meter_room <= budget;
     let show_counts = show_meter && lead + meter_room + counts_room <= budget;
@@ -209,8 +207,19 @@ pub fn file_header(
                 Piece::new(removed, palette.removed_sign),
             ]
         }),
-        meter: show_meter.then(|| meter(palette, approved, units.len())),
+        meter: (show_meter && model.view().is_some())
+            .then(|| meter(palette, approved, units.len())),
     })
+}
+
+/// The room the meter of `units` takes: none before the review state is checked, when nothing
+/// counts.
+fn meter_room(model: &Model, units: usize, room: Room, meter_gap: f32) -> f32 {
+    if model.view().is_some() {
+        room.gap + meter_width(units, room.cell, meter_gap)
+    } else {
+        0.0
+    }
 }
 
 /// The header of a folder's diff: the folder's path, how many files it shows, and the line
@@ -252,7 +261,7 @@ fn folder_header(
     let Room { budget, cell, gap } = room;
     let text = |text: &str| float(display_width(text)) * cell;
     let lead = text(folder).min(cell * PATH_CELLS);
-    let meter_room = gap + meter_width(units.len(), cell, meter_gap);
+    let meter_room = meter_room(model, units.len(), room, meter_gap);
     let counts_room = gap + text(&added) + gap + text(&removed);
     let show_meter = lead + meter_room <= budget;
     let show_counts = show_meter && lead + meter_room + counts_room <= budget;
@@ -275,7 +284,8 @@ fn folder_header(
                 Piece::new(removed, palette.removed_sign),
             ]
         }),
-        meter: show_meter.then(|| meter(palette, approved, units.len())),
+        meter: (show_meter && model.view().is_some())
+            .then(|| meter(palette, approved, units.len())),
     }
 }
 
@@ -294,10 +304,16 @@ fn hunk_scope(model: &Model) -> (Vec<String>, Option<String>) {
 }
 
 /// What the file header says with no file selected: that no file is, once the review shows;
-/// `None` before, when the header shows nothing, not even its bar.
+/// nothing before, and while the changes of the last recorded revision are read, when the
+/// header shows empty.
 #[must_use]
-pub fn no_file(model: &Model) -> Option<&'static str> {
-    matches!(model.phase, Phase::Ready).then_some("No file selected")
+pub fn no_file(model: &Model) -> &'static str {
+    let reading = model.checking().is_some_and(|checking| !checking.changes);
+    if matches!(model.phase, Phase::Ready) && !reading {
+        "No file selected"
+    } else {
+        ""
+    }
 }
 
 /// The format of the selected file's versions as images, such as `PNG`, once its comparison
@@ -398,35 +414,31 @@ pub struct StateCard {
     pub detail: Piece,
 }
 
-/// The diff's loading, error or empty state at `now`, when it is in one.
+/// The diff's error or empty state, when it is in one.
+///
+/// Nothing shows while the review opens or the last recorded revision's changes are read: the
+/// panes stay empty until what they show lands, and the status line says what goes on.
 #[must_use]
-pub fn diff_state(model: &Model, palette: &Palette, now: Instant) -> Option<StateCard> {
-    let card = |title: &str, detail: String, color| StateCard {
-        title: Piece::new(title, palette.text).weighted(Weight::Semibold),
-        detail: Piece::new(detail, color),
-    };
+pub fn diff_state(model: &Model, palette: &Palette) -> Option<StateCard> {
     match &model.phase {
-        Phase::Loading(started) => Some(card(
-            "Opening the review",
-            format!("Reading history and analysis{}", dots(*started, now)),
-            palette.dim,
-        )),
-        Phase::Failed(err) => Some(card(
-            "Couldn't open this review",
-            err.clone(),
-            palette.error,
-        )),
-        Phase::Ready if model.rows.rows.is_empty() => Some(empty_card(model, palette)),
-        Phase::Ready => None,
+        Phase::Failed(err) => Some(StateCard {
+            title: Piece::new("Couldn't open this review", palette.text).weighted(Weight::Semibold),
+            detail: Piece::new(err.clone(), palette.error),
+        }),
+        Phase::Ready if model.rows.rows.is_empty() => empty_card(model, palette),
+        Phase::Loading | Phase::Ready => None,
     }
 }
 
 /// The diff's card while it shows no rows: why there is nothing to review in a view without
-/// files, else that a file is to be picked.
-fn empty_card(model: &Model, palette: &Palette) -> StateCard {
-    let card = |title: &str, detail: String| StateCard {
-        title: Piece::new(title, palette.text).weighted(Weight::Semibold),
-        detail: Piece::new(detail, palette.dim),
+/// files, else that a file is to be picked; none while the selected file's changes or text
+/// are read.
+fn empty_card(model: &Model, palette: &Palette) -> Option<StateCard> {
+    let card = |title: &str, detail: String| {
+        Some(StateCard {
+            title: Piece::new(title, palette.text).weighted(Weight::Semibold),
+            detail: Piece::new(detail, palette.dim),
+        })
     };
     match model.replaced() {
         Some(Replaced::Clone) => {
@@ -449,6 +461,11 @@ fn empty_card(model: &Model, palette: &Palette) -> StateCard {
         .iter()
         .any(|node| node.kind == review_core::tree::NodeKind::File);
     if files {
+        // A selected file without rows waits for its changes or its text, which lay out once
+        // they land.
+        if model.selected.is_some() {
+            return None;
+        }
         return card("Nothing to show", "Pick a file on the left.".to_owned());
     }
     let record = model.view().and_then(|view| view.record().cloned());
@@ -459,20 +476,8 @@ fn empty_card(model: &Model, palette: &Palette) -> StateCard {
     card("Nothing to review", detail)
 }
 
-/// Animated dots for a loading state that started at `started`.
-fn dots(started: Instant, now: Instant) -> &'static str {
-    match (now.duration_since(started).as_millis() / 400) % 4 {
-        0 => "",
-        1 => ".",
-        2 => "..",
-        _ => "...",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     /// The meter's counts are padded to the widest they get, so its width never changes as
@@ -481,16 +486,5 @@ mod tests {
     fn meters_keep_their_width() {
         assert_eq!(meter_width(12, 10.0, 8.0), 50.0 + 8.0 + 50.0);
         assert_eq!(meter_width(12, 1.0, 1.0), 5.0 + 1.0 + 5.0);
-    }
-
-    /// The loading dots grow every 400 ms and start over after three.
-    #[test]
-    fn loading_dots_cycle() {
-        let started = Instant::now();
-        let at = |millis| dots(started, started + Duration::from_millis(millis));
-        assert_eq!(at(0), "");
-        assert_eq!(at(400), ".");
-        assert_eq!(at(1200), "...");
-        assert_eq!(at(1600), "");
     }
 }

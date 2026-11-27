@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 
 use review_core::correspond::{Link, LinkKind, correspond};
 use review_core::{
-    Busy, Capture, Commit, History, LiveCapture, ObjectId, ReviewInfo, ReviewTarget,
-    RevisionRecord, RevisionView, Session, ShownRun, UnitId, UnitIndex,
+    Busy, Capture, Commit, History, LiveCapture, ObjectId, ReviewInfo, ReviewTarget, RevisionView,
+    ShownRun, UnitId, UnitIndex,
 };
 
 use super::buffer::Origin;
@@ -53,7 +53,7 @@ use super::guard::Aim;
 use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::pulls::Pulls;
 use super::sync::Tick;
-use super::{Effect, Mode, Model, Phase, Quitting, is_regular};
+use super::{Effect, Mode, Model, Phase, Quitting};
 use crate::frame;
 use crate::rows::{FullText, Layout};
 use crate::state::{self, Snapshot};
@@ -78,7 +78,7 @@ const MOVED_ATTEMPTS: u32 = 3;
 /// only while it still says so.
 const CAPTURING_AGAIN: &str = "Capturing the working tree again…";
 
-/// Following the working tree, under the session the engine holds.
+/// Following the working tree.
 #[derive(Default)]
 pub(crate) struct Live {
     /// Whether the engine watches the working tree; not while the watch starts or when the
@@ -164,23 +164,10 @@ impl Live {
     }
 }
 
-/// How a review that follows the checkout starts: the session its opening capture is pinned
-/// under, and what that capture saw; see [`super::Loaded::following`].
-pub struct Following {
-    /// The session, held for as long as the window shows the review.
-    pub session: Session,
-    /// What the opening capture was of, or `None` when git was busy and the review opened on
-    /// its last recorded revision.
-    pub subject: Option<review_core::Subject>,
-    /// The paths the opening capture kept at their staged version.
-    pub filtered: Vec<String>,
-    /// What git was busy with when the review opened, if it was.
-    pub busy: Option<Busy>,
-}
-
 /// What the background work of opening found out about a review that follows the checkout.
 pub(super) struct Opening {
-    /// What the opening capture was of, or `None` when git was busy.
+    /// What the opening capture was of, or `None` when git was busy or cr's data full, and the
+    /// review opened on its last recorded revision.
     subject: Option<review_core::Subject>,
     /// The paths the opening capture kept at their staged version.
     filtered: Vec<String>,
@@ -192,25 +179,28 @@ pub(super) struct Opening {
 }
 
 impl Opening {
-    /// Reads what the window needs about `following`'s capture, which `history` ends in: its
-    /// tree, the branch and upstream, and the commits; its session goes to the engine.
+    /// Reads what the window needs about the opening capture `history` ends in, of `subject`,
+    /// which kept `filtered` at their staged version, or about its last recorded revision when
+    /// git was `busy` or cr's data full: its tree, the branch and upstream, and the commits.
     #[tracing::instrument(name = "read_opening", skip_all)]
     pub(super) fn read(
         review: &review_core::Review,
         history: &History,
-        following: &Following,
+        subject: Option<review_core::Subject>,
+        filtered: Vec<String>,
+        busy: Option<Busy>,
     ) -> Self {
         let tree = provisional_or_tip_tree(review, history);
         let checkout = matches!(review.target(), ReviewTarget::Checkout { .. });
-        let subject = following.subject.as_ref().filter(|_| checkout);
-        let association = subject
+        let observed = subject.as_ref().filter(|_| checkout);
+        let association = observed
             .and_then(|subject| subject.branch.as_deref())
             .and_then(|branch| review.repo().branch_identity(branch).ok());
-        let commits = subject.and_then(|subject| review.subject_commits(subject).ok());
+        let commits = observed.and_then(|subject| review.subject_commits(subject).ok());
         Self {
-            subject: following.subject.clone(),
-            filtered: following.filtered.clone(),
-            busy: following.busy,
+            subject,
+            filtered,
+            busy,
             tree,
             association,
             commits,
@@ -346,8 +336,8 @@ pub(super) fn replaced_log(err: &review_core::Error) -> bool {
 }
 
 impl Model {
-    /// Starts following the working tree under the session the engine holds, when the review
-    /// `follows` it; `opening` is what the checkout's opening capture saw.
+    /// Starts following the working tree, when the review `follows` it; `opening` is what the
+    /// checkout's opening capture saw.
     pub(super) fn start_live(&mut self, follows: bool, opening: Option<Opening>) {
         if !follows {
             return;
@@ -507,8 +497,8 @@ impl Model {
     /// Captures the working tree in the background and compares it with the snapshot on
     /// screen; with `rewalk`, walks the watched tree again first.
     ///
-    /// One capture runs at a time, which keeps the pins of the captures in use safe from the
-    /// next; a capture asked for meanwhile follows it.
+    /// One capture runs at a time, so captures show in the order they were taken; a capture
+    /// asked for meanwhile follows it.
     pub(super) fn capture(&mut self, rewalk: bool) {
         let Some(snapshot) = self.snapshot.clone() else {
             return;
@@ -529,14 +519,6 @@ impl Model {
             return;
         }
         live.capturing = true;
-        let keep: Vec<RevisionRecord> = [
-            Some(&snapshot.history),
-            live.waiting.as_ref().map(|waiting| &waiting.history),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|history| provisional_record(history))
-        .collect();
         let observed = live.observed;
         let pull_requests = live.pulls.pull_requests();
         live.given = Some(pull_requests.clone());
@@ -549,7 +531,6 @@ impl Model {
                     shown: &snapshot,
                     from,
                     observed,
-                    keep: &keep,
                     known: &known,
                     pull_requests: &pull_requests,
                     listed: listed.as_ref(),
@@ -714,12 +695,13 @@ impl Model {
         }
     }
 
-    /// Shows the opened review, or else the waiting capture, unless the reviewer is in the
-    /// middle of something it would pull the rows from under.
+    /// Shows the opened review, or else, unless the reviewer is in the middle of something
+    /// they would show under or pull the rows from under, the rows of a file whose text landed
+    /// and what a job brought for its pending view or the waiting capture.
     ///
     /// The front end calls it in the turn that draws the next frame, and nowhere else, so a key
-    /// always acts on what the last frame showed: never on a review or a capture that landed
-    /// after it.
+    /// always acts on what the last frame showed: never on a review, its verification or a
+    /// capture that landed after it.
     /// One taken before a change seen since it waited never shows: the capture of that change
     /// is running or follows, and the view on screen is updating until it lands.
     pub fn publish(&mut self) {
@@ -729,6 +711,13 @@ impl Model {
             return;
         }
         if self.live_waits() {
+            return;
+        }
+        if std::mem::take(&mut self.text_waits) {
+            self.rebuild();
+        }
+        if self.arrived() {
+            self.show_arrived();
             return;
         }
         let Some(live) = &mut self.live else {
@@ -748,21 +737,23 @@ impl Model {
         self.show_capture(*waiting);
     }
 
-    /// Whether the opened review or a capture waits to show with the next frame and nothing
-    /// holds it back, so the front end must draw one.
+    /// Whether the opened review, a file's rows that waited for its text, what a job brought
+    /// for its pending view, or a capture waits to show with the next frame and nothing holds
+    /// it back, so the front end must draw one.
     #[must_use]
     pub fn publishes(&self) -> bool {
         let opened = self.opened.is_some() && !self.quitting.over();
-        let captured = self
-            .live
-            .as_ref()
-            .is_some_and(|live| live.waiting.is_some())
-            && !self.live_waits();
-        opened || captured
+        let waiting = self.text_waits
+            || self.arrived()
+            || self
+                .live
+                .as_ref()
+                .is_some_and(|live| live.waiting.is_some());
+        opened || (waiting && !self.live_waits())
     }
 
-    /// Whether the reviewer is in the middle of something a new snapshot would pull the rows
-    /// from under.
+    /// Whether the reviewer is in the middle of something a new snapshot, or what a job brought
+    /// for the pending view, would pull the rows from under.
     fn live_waits(&self) -> bool {
         self.saving
             || !self.saves.is_empty()
@@ -849,7 +840,7 @@ impl Model {
         self.shown += 1;
         self.version = self.version.max(history.version());
         self.blobs.texts.extend(texts);
-        self.blobs.retain_for(&view);
+        self.blobs.retain_for(&crate::rows::Source::Verified(view));
         let carry = |units: &HashSet<UnitId>| -> HashSet<UnitId> {
             units
                 .iter()
@@ -1232,8 +1223,6 @@ struct CaptureInput<'a> {
     shown: &'a Snapshot,
     from: u64,
     observed: u64,
-    /// The provisional revisions whose pins stay.
-    keep: &'a [RevisionRecord],
     known: &'a HashSet<ObjectId>,
     /// What was last found for each branch.
     pull_requests: &'a [review_core::github::CheckoutPullRequest],
@@ -1241,8 +1230,7 @@ struct CaptureInput<'a> {
     listed: Option<&'a (Option<ObjectId>, Option<ObjectId>)>,
 }
 
-/// Captures the working tree under the engine's session and compares it with the snapshot
-/// shown; runs in the background.
+/// Captures the working tree and compares it with the snapshot shown; runs in the background.
 fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Missed> {
     let review = &parts.review;
     let failed = |err: &dyn std::error::Error| Missed::Failed(causes(err));
@@ -1272,13 +1260,12 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
         let shown = input
             .shown
             .view()
-            .and_then(|view| view.analysis())
-            .ok_or_else(|| missing("the review on screen has no analysis"))?;
+            .map(|view| view.analysis())
+            .ok_or_else(|| missing("the review on screen has no revision"))?;
         let captured = history
             .view(tip)
-            .ok()
-            .and_then(|view| view.analysis())
-            .ok_or_else(|| missing("the capture has no analysis"))?;
+            .map(|view| view.analysis())
+            .map_err(|err| failed(&err))?;
         correspond(review.snapshots(), shown, captured)
             .map_err(|err| failed(&err))?
             .links
@@ -1314,28 +1301,21 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
     }))
 }
 
-/// Captures the working tree under the engine's session, looking twice with `confirm`, and
-/// again while git moves under it, a few times at most.
+/// Captures the working tree, looking twice with `confirm`, and again while git moves under
+/// it, a few times at most.
 fn live_capture(
     parts: &Parts,
     input: &CaptureInput<'_>,
     confirm: bool,
 ) -> Result<LiveCapture, Missed> {
     let review = &parts.review;
-    // The capture holds the session until it ends, which keeps its pins should the engine stop
-    // meanwhile.
-    let session = parts
-        .session
-        .lock()
-        .clone()
-        .ok_or_else(|| Missed::Failed("the review follows no working tree".to_owned()))?;
     let mut attempts = 0;
     loop {
         attempts += 1;
         let captured = if confirm {
-            review.confirmed_live_history(&session, input.keep, input.pull_requests)
+            review.confirmed_live_history(input.pull_requests)
         } else {
-            review.live_history(&session, input.keep, input.pull_requests)
+            review.live_history(input.pull_requests)
         }
         .map_err(|err| {
             if replaced_log(&err) {
@@ -1364,42 +1344,24 @@ fn live_capture(
     }
 }
 
-/// The text of revision `tip`'s head files that `known` does not hold, so the capture shows
-/// whole, without its context lines arriving later.
-fn read_new_texts(
+/// The text of revision `tip`'s head files that `known` does not hold, so what shows of it
+/// shows whole, without its context lines arriving later.
+pub(super) fn read_new_texts(
     review: &review_core::Review,
     history: &History,
     tip: review_core::RevisionNumber,
     known: &HashSet<ObjectId>,
 ) -> HashMap<ObjectId, Arc<FullText>> {
-    let mut texts = HashMap::new();
-    let Some(analysis) = history.view(tip).ok().and_then(|view| view.analysis()) else {
-        return texts;
-    };
-    let wanted: Vec<&ObjectId> = analysis
-        .files
-        .iter()
-        .filter_map(|file| file.new.as_ref())
-        .filter(|side| is_regular(side) && !known.contains(&side.oid))
-        .map(|side| &side.oid)
-        .collect();
-    if wanted.is_empty() {
-        return texts;
-    }
-    let Ok(mut reader) = review.snapshots().blob_reader() else {
-        return texts;
-    };
-    for oid in wanted {
-        if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(oid)
-            && !bytes.contains(&0)
-        {
-            texts.insert(
-                oid.clone(),
-                Arc::new(FullText::new(&String::from_utf8_lossy(&bytes))),
-            );
-        }
-    }
-    texts
+    history.view(tip).map_or_else(
+        |_| HashMap::new(),
+        |view| {
+            super::head_texts(review, view.analysis(), |file| {
+                file.new
+                    .as_ref()
+                    .is_some_and(|side| !known.contains(&side.oid))
+            })
+        },
+    )
 }
 
 /// Whether revision `old` of `before` and revision `new` of `after` are the same snapshot:
@@ -1432,15 +1394,6 @@ fn same_code(
     let base =
         |view: Option<RevisionView<'_>>| view.and_then(|view| Some(view.record()?.base.clone()));
     tree.is_some() && tree == old_tree && base(old.view()) == base(history.view(tip).ok())
-}
-
-/// `history`'s provisional revision, if it ends in one.
-fn provisional_record(history: &History) -> Option<RevisionRecord> {
-    let tip = history.current()?;
-    if !history.is_provisional(tip) {
-        return None;
-    }
-    history.view(tip).ok()?.record().cloned()
 }
 
 /// `hunk` of the snapshot `old` as the snapshot `new` has it, `moved` linking their units.

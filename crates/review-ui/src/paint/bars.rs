@@ -51,6 +51,14 @@ pub fn sync_label(
 ) -> Vec<Piece> {
     let mut parts = Vec::new();
     let part = |piece: Piece, rank: u8| SyncPart { piece, rank };
+    if let Some(checking) = model.checking() {
+        parts.push(part(
+            Piece::new(format!("rev {}", checking.record.number), palette.text),
+            0,
+        ));
+        let head = crate::model::abbreviated(&checking.record.head);
+        parts.push(part(Piece::new(head, palette.faint), 3));
+    }
     if let Some(snapshot) = &model.snapshot {
         parts.push(part(
             Piece::new(format!("rev {}", snapshot.revision), palette.text),
@@ -69,7 +77,8 @@ pub fn sync_label(
     }
     let spinner = SPINNER.get(spin_frame(now)).copied().unwrap_or_default();
     let activity = match (&model.phase, model.sync.step()) {
-        (Phase::Loading(_), _) => Some(format!("{spinner} opening…")),
+        (Phase::Loading, _) => Some(format!("{spinner} opening…")),
+        _ if model.checking().is_some() => Some(format!("{spinner} checking…")),
         (_, Some(step)) => Some(format!("{spinner} {}", step_label(model, step))),
         (_, None) => None,
     };
@@ -97,11 +106,17 @@ pub fn sync_label(
             2,
         ));
     }
-    // Whether tools may run in the checkout, which is never trusted by default.
+    // Whether tools may run in the checkout, which is never trusted by default; a grant read
+    // again shows dimmed, as the last one read, at the same width.
     if model.has_checkout() {
+        let granted = if model.trust_rereading() {
+            palette.faint
+        } else {
+            palette.flagged
+        };
         parts.push(part(
             match model.trust {
-                Trust::Granted => Piece::new("trusted", palette.flagged),
+                Trust::Granted => Piece::new("trusted", granted),
                 Trust::Checking => Piece::new("checking trust", palette.faint),
                 Trust::Denied => Piece::new("untrusted", palette.faint),
             },
@@ -187,11 +202,15 @@ pub fn hint_available(model: &Model, action: &str) -> bool {
         "NextFile" => model.adjacent_file(true).is_some() || model.adjacent_file(false).is_some(),
         // It asks for trust when the key is pressed, but runs only on the code on disk.
         "GoToDefinition" => model.shows_checkout(),
-        "ToggleApprove" | "ToggleFlag" => match model.mode {
-            Mode::Buffer => model.buffer_hunk().is_some(),
-            Mode::Diff => !model.rows.hunks.is_empty(),
-            Mode::Tree => true,
-        },
+        // Only a verified review has units to mark.
+        "ToggleApprove" | "ToggleFlag" => {
+            model.view().is_some()
+                && match model.mode {
+                    Mode::Buffer => model.buffer_hunk().is_some(),
+                    Mode::Diff => !model.rows.hunks.is_empty(),
+                    Mode::Tree => true,
+                }
+        }
         "Dismiss" => model.mode == Mode::Buffer,
         "Copy" => model.selected_text().is_some_and(|text| !text.is_empty()),
         "ToggleDiffStyle" => model.mode != Mode::Buffer,

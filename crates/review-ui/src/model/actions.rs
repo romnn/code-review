@@ -309,7 +309,7 @@ impl Model {
             Action::JumpBack => self.jump_back(),
             Action::Dismiss => self.buffer_dismiss(),
             Action::CloseFind => self.close_find(),
-            Action::ToggleOverview => self.open_overlay(Overlay::Overview),
+            Action::ToggleOverview => self.open_overview(),
             Action::ToggleDiffStyle => self.next_diff_style(),
             Action::ScreenNext => self.screen = Screen::Full,
             Action::ScreenPrevious => self.screen_previous(),

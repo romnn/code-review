@@ -192,7 +192,7 @@ fn lockfiles_and_generated_files_are_noise() -> eyre::Result<()> {
     let revision = refresh(&review)?;
     let history = review.history()?;
     let view = history.view(revision)?;
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     let noise: Vec<(&str, Option<NoiseCategory>)> = analysis
         .files
         .iter()
@@ -531,7 +531,7 @@ fn file_to_submodule_shows_removed_content() -> eyre::Result<()> {
     )?;
     let history = review.history()?;
     let view = history.current_view()?;
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert!(
         analysis
             .units
@@ -581,7 +581,7 @@ fn symlink_and_submodule_updates_show_both_values() -> eyre::Result<()> {
             )),
         ]
     );
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     let link = analysis
         .files
         .iter()

@@ -390,7 +390,7 @@ fn show(
 
 /// Draws one frame inside synchronized output; the trace tells the frames that show the review
 /// from those drawn while it opens.
-#[tracing::instrument(skip_all, fields(opening = matches!(app.model().phase, Phase::Loading(_))))]
+#[tracing::instrument(skip_all, fields(opening = matches!(app.model().phase, Phase::Loading)))]
 fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     app.set_cell(cell_size());
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::checkout::{self, Looks, Observed};
 use super::github::CheckoutPullRequest;
-use super::{Review, ReviewTarget, RevisionMeta, Session, Subject, revision_events};
+use super::{Review, ReviewTarget, RevisionMeta, Subject, revision_events};
 use crate::error::Error;
 use crate::git::Busy;
 use crate::history::{History, RevisionRecord};
@@ -54,11 +54,10 @@ impl Review {
     ///
     /// Nothing is recorded: the log, the review's pinned snapshots and the caches stay as they
     /// are, and the reviewed repository is only read.
-    /// The capture's objects go into the review's archive, and its base and head are pinned
-    /// there under `session` before it is analyzed, so they stay while it shows although no
-    /// revision records it; first, `session`'s pins of every capture but those in `keep`, the
-    /// ones the caller still shows or holds for later, go.
-    /// A session captures one at a time, so none of its other pins can be in use.
+    /// The capture's objects go into the review's archive, where they stay for as long as
+    /// anything holds the review, such as a window that shows the capture or a job that reads
+    /// it, although no revision records it: only an open that has the review to itself
+    /// compacts the archive.
     /// [`Self::mark`] records a provisional revision before its marks; see
     /// [`History::is_provisional`].
     ///
@@ -75,17 +74,12 @@ impl Review {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidTarget`] for a review that is not of a working tree or a
-    /// `session` of another review, [`Error::StorageFull`] while the data directory retains
+    /// Returns [`Error::InvalidTarget`] for a review that is not of a working tree,
+    /// [`Error::StorageFull`] while the data directory retains
     /// more than its limit, so nothing is captured, and an error when the capture, git or the
     /// log fails.
-    pub fn live_history(
-        &self,
-        session: &Session,
-        keep: &[RevisionRecord],
-        pull_requests: &[CheckoutPullRequest],
-    ) -> Result<Capture, Error> {
-        self.live_history_with(session, keep, pull_requests, Looks::Once, &mut || Ok(()))
+    pub fn live_history(&self, pull_requests: &[CheckoutPullRequest]) -> Result<Capture, Error> {
+        self.live_history_with(pull_requests, Looks::Once, &mut || Ok(()))
     }
 
     /// Does what [`Self::live_history`] does, capturing the working tree twice and keeping the
@@ -96,11 +90,9 @@ impl Review {
     /// Returns the errors of [`Self::live_history`].
     pub fn confirmed_live_history(
         &self,
-        session: &Session,
-        keep: &[RevisionRecord],
         pull_requests: &[CheckoutPullRequest],
     ) -> Result<Capture, Error> {
-        self.live_history_with(session, keep, pull_requests, Looks::Twice, &mut || Ok(()))
+        self.live_history_with(pull_requests, Looks::Twice, &mut || Ok(()))
     }
 
     /// See [`Self::live_history`]; `captured` runs as [`Self::capture`] says, where a test makes
@@ -108,8 +100,6 @@ impl Review {
     #[tracing::instrument(name = "live_history", skip_all, fields(?looks))]
     fn live_history_with(
         &self,
-        session: &Session,
-        keep: &[RevisionRecord],
         pull_requests: &[CheckoutPullRequest],
         looks: Looks,
         captured: &mut dyn FnMut() -> Result<(), Error>,
@@ -122,12 +112,6 @@ impl Review {
                 "only a review of a working tree follows it".to_owned(),
             ));
         }
-        if !session.pins_in(&self.archive) {
-            return Err(Error::InvalidTarget(
-                "the session belongs to another review".to_owned(),
-            ));
-        }
-        session.release(keep)?;
         // The revision the capture follows is the last one recorded before it was taken, read
         // without deriving anything, so the capture waits on nothing the history needs.
         let expected = self.last_revision()?.map(|last| last.number);
@@ -135,7 +119,7 @@ impl Review {
             input,
             subject,
             filtered,
-        } = match self.capture(session, pull_requests, looks, captured)? {
+        } = match self.capture(pull_requests, looks, captured)? {
             Observed::Captured(captured) => *captured,
             Observed::Busy(busy) => return Ok(Capture::Busy(busy)),
             Observed::Moved => return Ok(Capture::Moved),
@@ -371,14 +355,9 @@ mod tests {
         }
     }
 
-    /// Captures the working tree for `session`, keeping the pins of the captures `keep`
-    /// records, and returns the history.
-    fn capture(
-        review: &Review,
-        session: &Session,
-        keep: &[RevisionRecord],
-    ) -> eyre::Result<History> {
-        match review.live_history(session, keep, &[])? {
+    /// Captures the working tree and returns the history.
+    fn capture(review: &Review) -> eyre::Result<History> {
+        match review.live_history(&[])? {
             Capture::Captured(captured) => Ok(captured.history),
             Capture::Busy(busy) => eyre::bail!("git is busy: {busy}"),
             Capture::Moved => eyre::bail!("the checkout moved during the capture"),
@@ -424,12 +403,10 @@ mod tests {
     #[test]
     fn a_capture_is_discarded_when_a_revision_is_recorded_meanwhile() -> eyre::Result<()> {
         let (_repo, _data, review) = edited_checkout()?;
-        let session = review.start_session();
         // An earlier capture leaves its history in the memo, which the next one starts from.
-        capture(&review, &session, &[])?;
-        let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
-            review.refresh().map(drop)
-        })?;
+        capture(&review)?;
+        let captured =
+            review.live_history_with(&[], Looks::Once, &mut || review.refresh().map(drop))?;
         assert!(matches!(captured, Capture::Moved));
         Ok(())
     }
@@ -438,8 +415,7 @@ mod tests {
     #[test]
     fn a_capture_is_discarded_when_the_clone_is_replaced_meanwhile() -> eyre::Result<()> {
         let (_repo, _data, review) = edited_checkout()?;
-        let session = review.start_session();
-        let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
+        let captured = review.live_history_with(&[], Looks::Once, &mut || {
             let clones = review.dir.data_dir().join("clones");
             std::fs::remove_dir_all(&clones).map_err(|err| Error::io("remove", clones, err))
         })?;
@@ -455,10 +431,9 @@ mod tests {
         let checkout = Checkout::recorded_twice()?;
         let review = &checkout.review;
         let other = checkout.another()?;
-        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
-        let before = capture(review, &session, &[])?;
-        let captured = review.live_history_with(&session, &[], &[], Looks::Once, &mut || {
+        let before = capture(review)?;
+        let captured = review.live_history_with(&[], Looks::Once, &mut || {
             let history = other.history()?;
             let view = history.current_view()?;
             other.mark(&view, &view.unit_ids(), MarkVerdict::Accepted)
@@ -485,10 +460,9 @@ mod tests {
     fn a_capture_of_nothing_new_is_the_last_capture_again() -> eyre::Result<()> {
         let checkout = Checkout::recorded_twice()?;
         let review = &checkout.review;
-        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
-        let first = capture(review, &session, &[])?;
-        let again = capture(review, &session, &[])?;
+        let first = capture(review)?;
+        let again = capture(review)?;
         assert_eq!(again.shared_revisions(&first), [1, 2, 3]);
         assert_eq!(again.shared_links(&first), [2, 3]);
         assert!(again.current_view()?.is_provisional());
@@ -501,11 +475,10 @@ mod tests {
     fn a_new_capture_proves_only_its_own_link() -> eyre::Result<()> {
         let checkout = Checkout::recorded_twice()?;
         let review = &checkout.review;
-        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
-        let first = capture(review, &session, &[])?;
+        let first = capture(review)?;
         checkout.write(&[4; VALUES])?;
-        let second = capture(review, &session, &[])?;
+        let second = capture(review)?;
         assert_eq!(second.shared_revisions(&first), [1, 2]);
         assert_eq!(second.shared_links(&first), [2]);
         assert_eq!(second, cold(review, &second)?);
@@ -557,10 +530,9 @@ mod tests {
         let noted = review.history()?;
         assert!(review.history()?.shares_text(&noted));
 
-        let session = review.start_session();
         checkout.write(&[3; VALUES])?;
-        let first = capture(review, &session, &[])?;
-        let again = capture(review, &session, &[])?;
+        let first = capture(review)?;
+        let again = capture(review)?;
         assert!(first.shares_text(&noted));
         assert!(again.shares_text(&first));
         Ok(())
@@ -652,8 +624,7 @@ mod tests {
 
         std::fs::write(review.dir.events(), log)?;
         assert!(replaced(&review.clone().history()));
-        let session = review.start_session();
-        assert!(replaced(&review.live_history(&session, &[], &[])));
+        assert!(replaced(&review.live_history(&[])));
         Ok(())
     }
 
@@ -762,11 +733,10 @@ mod tests {
         let checkout = Checkout::new()?;
         let review = &checkout.review;
         let other = checkout.another()?;
-        let session = review.start_session();
         let mut choices = Choices(seed);
         let mut values = [1; VALUES];
         checkout.write(&values)?;
-        let mut shown = capture(review, &session, &[])?;
+        let mut shown = capture(review)?;
         for step in 0..STEPS {
             let same = |history: &History| -> eyre::Result<()> {
                 let cold = cold(review, history)?;
@@ -808,7 +778,7 @@ mod tests {
                         values[at] = (values[at] + 1 + u32::try_from(choices.below(2))?) % 3;
                     }
                     checkout.write(&values)?;
-                    shown = capture(review, &session, &kept(&shown))?;
+                    shown = capture(review)?;
                     same(&shown)?;
                     let view = shown.current_view()?;
                     let mut runs = Vec::new();
@@ -846,21 +816,10 @@ mod tests {
             if choices.below(2) == 0 {
                 same(&review.history()?)?;
             }
-            shown = capture(review, &session, &kept(&shown))?;
+            shown = capture(review)?;
             same(&shown)?;
         }
         Ok(())
-    }
-
-    /// The provisional revision `shown` ends in, whose pins the window keeps while it shows.
-    fn kept(shown: &History) -> Vec<RevisionRecord> {
-        shown
-            .current_view()
-            .ok()
-            .filter(RevisionView::is_provisional)
-            .and_then(|view| view.record().cloned())
-            .into_iter()
-            .collect()
     }
 
     /// Takes a refusal of a mark, an approval or a note on a capture the log moved past, or

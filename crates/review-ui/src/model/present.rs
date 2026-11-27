@@ -567,7 +567,10 @@ mod tests {
                 approved,
                 ..Folds::default()
             };
-            present(build(&view, &units, &folds), Presentation::default())
+            present(
+                build(&crate::rows::Source::Verified(view), &units, &folds),
+                Presentation::default(),
+            )
         };
         let shown = lay_out(Approved::Shown);
         let folded = lay_out(Approved::Folded);
