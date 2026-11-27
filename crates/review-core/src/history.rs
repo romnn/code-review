@@ -19,7 +19,7 @@ use crate::ids::{ObjectId, RevisionNumber, UnitId, UnitIndex};
 use crate::standing::ReviewPolicy;
 use crate::store::events::{Event, MarkVerdict, NoteEvent, RevisionEvent, WalkthroughEvent};
 use crate::store::log::Prefix;
-use crate::view::RevisionView;
+use crate::view::{Changes, RevisionView};
 
 /// A verdict that counts as reviewed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -489,10 +489,14 @@ impl History {
         number: RevisionNumber,
         policy: ReviewPolicy,
     ) -> Result<RevisionView<'_>, Error> {
-        if number.index() >= self.revisions.len() {
-            return Err(Error::UnknownRevision(number));
-        }
-        Ok(RevisionView::new(self, number, policy))
+        let data = self
+            .revision(number)
+            .ok_or(Error::UnknownRevision(number))?;
+        Ok(RevisionView::new(
+            self,
+            Changes::of(&data.analysis, number),
+            policy,
+        ))
     }
 
     /// Returns a view of the [current](Self::current) revision that decides by marks alone, as
@@ -771,8 +775,7 @@ mod tests {
             .extended(input(vec![revision(3)?]))?;
 
         for record in history.revisions() {
-            let analysis = history.view(record.number)?.analysis().map(|it| &it.head);
-            assert_eq!(analysis, Some(&record.head));
+            assert_eq!(history.view(record.number)?.analysis().head, record.head);
         }
         let head = |number: u32| ObjectId::parse(&format!("{number:040}"));
         assert_eq!(

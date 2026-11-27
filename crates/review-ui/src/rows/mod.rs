@@ -20,9 +20,9 @@ use crate::syntax::FileSyntax;
 use review_core::analysis::{Chunk, FileUnit, UnitKind};
 use review_core::scope::breadcrumb;
 use review_core::{
-    Collapse, Delta, LineEnding, LineRun, MoveView, NoteAttachment, Reopened, ReviewedBaseline,
-    RevisionView, ShownRun, Side, SideDiff, SinceReviewed, Standing, UnitId, UnitState, Verdict,
-    split_line_ending,
+    Changes, Collapse, Delta, LineEnding, LineRun, MoveView, NoteAttachment, Reopened,
+    ResolvedNote, ReviewedBaseline, RevisionView, ShownRun, Side, SideDiff, SinceReviewed,
+    Standing, UnitId, UnitState, Verdict, split_line_ending,
 };
 
 mod moves;
@@ -32,6 +32,60 @@ mod wrap;
 
 pub use present::{Presentation, present};
 pub use wrap::{ScreenRow, WrapRoom, project};
+
+/// What rows are laid out from: a revision of the review's history, or, before the review is
+/// verified, the changes of its last recorded revision alone, which stand nowhere: nothing in
+/// them shows reviewed, folds by review state, shows what changed since a review or carries a
+/// note.
+#[derive(Clone, Copy)]
+pub enum Source<'h> {
+    /// A revision of the review's history.
+    Verified(RevisionView<'h>),
+    /// The changes alone of a revision whose review state is still being checked.
+    Pending(Changes<'h>),
+}
+
+impl<'h> std::ops::Deref for Source<'h> {
+    type Target = Changes<'h>;
+
+    fn deref(&self) -> &Changes<'h> {
+        match self {
+            Self::Verified(view) => view,
+            Self::Pending(changes) => changes,
+        }
+    }
+}
+
+impl<'h> Source<'h> {
+    /// The revision of the review's history, once it is verified.
+    #[must_use]
+    pub fn review(&self) -> Option<&RevisionView<'h>> {
+        match self {
+            Self::Verified(view) => Some(view),
+            Self::Pending(_) => None,
+        }
+    }
+
+    /// Where `unit` stands with the reviewer, once that is known.
+    fn standing(&self, unit: UnitId) -> Option<Standing> {
+        self.review()?.standing(unit).ok()
+    }
+
+    /// `unit`'s review state, once it is known.
+    fn state(&self, unit: UnitId) -> Option<UnitState> {
+        self.review()?.state(unit).ok()
+    }
+
+    /// What changed since `unit` was reviewed, once that is known.
+    fn since_reviewed(&self, unit: UnitId) -> Option<SinceReviewed<'h>> {
+        self.review()?.since_reviewed(unit).ok().flatten()
+    }
+
+    /// The notes on the revision, once they are read.
+    fn notes(&self) -> Vec<ResolvedNote> {
+        self.review().map(RevisionView::notes).unwrap_or_default()
+    }
+}
 
 /// What a row shows, which decides its color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,7 +598,7 @@ impl Folds {
     /// approved units fold, and the reviewer has not unfolded it. Flagged and unreviewed units
     /// always show.
     #[must_use]
-    pub fn is_folded(&self, view: &RevisionView<'_>, unit: UnitId) -> bool {
+    pub fn is_folded(&self, view: &Source<'_>, unit: UnitId) -> bool {
         if self.units.contains(&unit) {
             return true;
         }
@@ -556,7 +610,7 @@ impl Folds {
                 verdict,
                 review_core::MarkVerdict::Accepted | review_core::MarkVerdict::Seen
             ),
-            None => view.standing(unit).is_ok_and(Standing::is_approved),
+            None => view.standing(unit).is_some_and(Standing::is_approved),
         };
         approved && !self.opened.contains(&unit)
     }
@@ -746,7 +800,7 @@ impl Layout {
 /// them for a presentation, which the unified, compact one leaves as they are.
 #[must_use]
 #[tracing::instrument(skip_all, fields(units = units.len()))]
-pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout {
+pub fn build(view: &Source<'_>, units: &[UnitId], folds: &Folds) -> Layout {
     let mut layout = Layout::default();
     let notes = view.notes();
     let groups = file_groups(view, units);
@@ -837,29 +891,27 @@ pub fn build(view: &RevisionView<'_>, units: &[UnitId], folds: &Folds) -> Layout
 /// Every unit of the files `groups` lay out, by display path, from one pass over the
 /// revision's files: a section's context leaves out the file's changes in other groups, and a
 /// folder's diff has many sections.
-fn file_units(view: &RevisionView<'_>, groups: &[Vec<UnitId>]) -> HashMap<String, Vec<UnitId>> {
+fn file_units(view: &Source<'_>, groups: &[Vec<UnitId>]) -> HashMap<String, Vec<UnitId>> {
     let paths: HashSet<&str> = groups
         .iter()
         .filter_map(|group| view.file(*group.first()?).ok())
         .map(review_core::analysis::FileChange::display_path)
         .collect();
     let mut units: HashMap<String, Vec<UnitId>> = HashMap::new();
-    if let Some(analysis) = view.analysis() {
-        for file in &analysis.files {
-            let path = file.display_path();
-            if paths.contains(path) {
-                units
-                    .entry(path.to_owned())
-                    .or_default()
-                    .extend(file.units.iter().map(|&index| view.id(index)));
-            }
+    for file in &view.analysis().files {
+        let path = file.display_path();
+        if paths.contains(path) {
+            units
+                .entry(path.to_owned())
+                .or_default()
+                .extend(file.units.iter().map(|&index| view.id(index)));
         }
     }
     units
 }
 
 /// Splits `units` into runs of consecutive units of one file.
-fn file_groups(view: &RevisionView<'_>, units: &[UnitId]) -> Vec<Vec<UnitId>> {
+fn file_groups(view: &Source<'_>, units: &[UnitId]) -> Vec<Vec<UnitId>> {
     let mut groups: Vec<Vec<UnitId>> = Vec::new();
     let mut current = None;
     for &unit in units {
@@ -876,7 +928,7 @@ fn file_groups(view: &RevisionView<'_>, units: &[UnitId]) -> Vec<Vec<UnitId>> {
 }
 
 /// Summarizes the file of `group` for its header.
-fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> FileSection {
+fn file_section(view: &Source<'_>, group: &[UnitId], folds: &Folds) -> FileSection {
     let file = group.first().and_then(|&unit| view.file(unit).ok());
     let path = file.map_or_else(String::new, |file| file.display_path().to_owned());
     let old_path = file.and_then(|file| match (&file.old, &file.new) {
@@ -894,12 +946,12 @@ fn file_section(view: &RevisionView<'_>, group: &[UnitId], folds: &Folds) -> Fil
             }
         }
         match view.standing(unit).map(Badge::of) {
-            Ok(Badge::Flagged) => {
+            Some(Badge::Flagged) => {
                 reviewed += 1;
                 flagged += 1;
             }
-            Ok(badge) if badge.is_reviewed() => reviewed += 1,
-            Ok(Badge::Changed) => changed += 1,
+            Some(badge) if badge.is_reviewed() => reviewed += 1,
+            Some(Badge::Changed) => changed += 1,
             _ => {}
         }
     }
@@ -1260,13 +1312,7 @@ fn hunk_header(layout: &mut Layout, file: usize, hunk: usize) {
 
 /// What the header of display hunk `hunk` says: where it is, what kind of change it is, and
 /// the scopes around it.
-fn hunk_note(
-    layout: &Layout,
-    view: &RevisionView<'_>,
-    file: usize,
-    hunk: &Hunk,
-    folds: &Folds,
-) -> Note {
+fn hunk_note(layout: &Layout, view: &Source<'_>, file: usize, hunk: &Hunk, folds: &Folds) -> Note {
     let unit = hunk.unit;
     let scope = layout.files.get(file).and_then(|section| match hunk.at() {
         Some(line) => head_scope(&section.path, line, folds),
@@ -1282,7 +1328,7 @@ fn hunk_note(
         None => {}
     }
     Note {
-        badge: view.standing(unit).ok().map(Badge::of),
+        badge: view.standing(unit).map(Badge::of),
         tag,
         scope,
         folded: folds.is_folded(view, unit),
@@ -1291,7 +1337,7 @@ fn hunk_note(
 }
 
 /// What `unit` shows as a changed PDF's opaque unit, when it is one whose pages were read.
-fn pdf_of<'f>(view: &RevisionView<'_>, unit: UnitId, folds: &'f Folds) -> Option<&'f PdfShows> {
+fn pdf_of<'f>(view: &Source<'_>, unit: UnitId, folds: &'f Folds) -> Option<&'f PdfShows> {
     let pdf = folds.pdf.as_ref()?;
     let opaque = matches!(
         view.unit(unit).map(|record| &record.kind),
@@ -1312,7 +1358,7 @@ fn head_scope(path: &str, line: usize, folds: &Folds) -> Option<String> {
 
 /// The scopes around `unit` of the file at `path`, such as `impl Ledger › fn apply`, once its
 /// syntax is known.
-fn unit_scope(view: &RevisionView<'_>, path: &str, unit: UnitId, folds: &Folds) -> Option<String> {
+fn unit_scope(view: &Source<'_>, path: &str, unit: UnitId, folds: &Folds) -> Option<String> {
     let anchor = view.scope_anchor(unit).ok().flatten()?;
     let syntax = folds.syntax.get(path)?;
     let side = match anchor.side {
@@ -1339,7 +1385,7 @@ const AUTO_APPROVED: &str = "reformatted only · auto-approved";
 /// body, or the one change of it the hunk is, and after the unit's last rows its notes.
 fn hunk_rows(
     layout: &mut Layout,
-    view: &RevisionView<'_>,
+    view: &Source<'_>,
     file: usize,
     index: usize,
     hunk: &Hunk,
@@ -1396,27 +1442,27 @@ fn hunk_rows(
 }
 
 /// The header's label for a change that is not an ordinary edit.
-fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
-    if let Ok(UnitState::ChangedSinceReviewed { reviewed, .. }) = view.state(unit) {
+fn header_tag(view: &Source<'_>, unit: UnitId) -> Option<String> {
+    if let Some(UnitState::ChangedSinceReviewed { reviewed, .. }) = view.state(unit) {
         let since = reviewed.revision();
         return Some(match view.since_reviewed(unit) {
-            Ok(Some(SinceReviewed::Delta(Delta {
+            Some(SinceReviewed::Delta(Delta {
                 baseline: ReviewedBaseline::Partial,
                 ..
-            }))) => format!("partly approved in revision {since}"),
-            Ok(Some(SinceReviewed::Whole(Reopened::TargetMoved))) => {
+            })) => format!("partly approved in revision {since}"),
+            Some(SinceReviewed::Whole(Reopened::TargetMoved)) => {
                 format!("target branch moved since revision {since} · shown whole")
             }
-            Ok(Some(SinceReviewed::Whole(Reopened::OtherBaseLines))) => {
+            Some(SinceReviewed::Whole(Reopened::OtherBaseLines)) => {
                 format!("changes other lines since revision {since} · shown whole")
             }
-            Ok(Some(SinceReviewed::Whole(Reopened::Uncertain))) => {
+            Some(SinceReviewed::Whole(Reopened::Uncertain)) => {
                 format!("changed since revision {since} · shown whole")
             }
-            Ok(Some(SinceReviewed::Whole(Reopened::Flagged))) => {
+            Some(SinceReviewed::Whole(Reopened::Flagged)) => {
                 format!("changed since flagged in revision {since} · shown whole")
             }
-            Ok(Some(SinceReviewed::Whole(Reopened::SameCode))) => {
+            Some(SinceReviewed::Whole(Reopened::SameCode)) => {
                 format!("same as revision {since}, reopened in between")
             }
             _ => format!("changed since revision {since}"),
@@ -1424,7 +1470,7 @@ fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
     }
     match view.collapse(unit) {
         Ok(Some(Collapse::FormattingOnly)) => {
-            let auto = matches!(view.standing(unit), Ok(Standing::AutoApproved));
+            let auto = matches!(view.standing(unit), Some(Standing::AutoApproved));
             return Some(if auto { AUTO_APPROVED } else { REFORMATTED }.to_owned());
         }
         Ok(Some(Collapse::Noise(category))) => return Some(category.name().to_owned()),
@@ -1438,7 +1484,7 @@ fn header_tag(view: &RevisionView<'_>, unit: UnitId) -> Option<String> {
 
 /// A unit's header line: where it is, such as "L27–29", or what a file unit changes; for one
 /// change of a unit that shows what changed since it was reviewed, where that change is.
-fn header(view: &RevisionView<'_>, unit: UnitId, run: Option<&Range<usize>>) -> String {
+fn header(view: &Source<'_>, unit: UnitId, run: Option<&Range<usize>>) -> String {
     if let Some(lines) = run {
         return match lines.len() {
             0 => format!("removed at L{}", lines.start + 1),
@@ -1568,7 +1614,7 @@ fn other_end(found: &MoveView, unit: UnitId) -> UnitId {
     }
 }
 
-fn unit_body(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId, folds: &Folds) {
+fn unit_body(pusher: &mut Pusher<'_>, view: &Source<'_>, unit: UnitId, folds: &Folds) {
     let (Ok(record), Ok(file)) = (view.unit(unit), view.file(unit)) else {
         return;
     };
@@ -1580,7 +1626,7 @@ fn unit_body(pusher: &mut Pusher<'_>, view: &RevisionView<'_>, unit: UnitId, fol
     let collapse = view.collapse(unit);
     let since = match collapse {
         Ok(Some(Collapse::Noise(_))) => None,
-        _ => view.since_reviewed(unit).ok().flatten(),
+        _ => view.since_reviewed(unit),
     };
     if let (Some(_), Some(chunk)) = (since, record.chunk()) {
         // What changed since the review is no reformatting, even where the whole change is.
@@ -1730,7 +1776,7 @@ fn move_notes(pusher: &mut Pusher<'_>, moves: &[MoveView], described: &[review_c
 )]
 fn section_rows(
     layout: &mut Layout,
-    view: &RevisionView<'_>,
+    view: &Source<'_>,
     file: usize,
     group: &[UnitId],
     all_units: &[UnitId],
@@ -1920,7 +1966,7 @@ fn section_rows(
 }
 
 /// The head lines a chunk's display hunk stands at: its change's, or its unit's.
-fn head_span(view: &RevisionView<'_>, hunk: &Hunk) -> Range<usize> {
+fn head_span(view: &Source<'_>, hunk: &Hunk) -> Range<usize> {
     if let Some(lines) = hunk.lines() {
         return lines;
     }
@@ -1985,7 +2031,7 @@ impl Shown<'_> {
 
     /// Pushes the run at head line `at` as a chunk's lines show, its old lines the reviewed
     /// ones.
-    fn push_run(&self, pusher: &mut Pusher<'_>, view: &RevisionView<'_>, at: usize) {
+    fn push_run(&self, pusher: &mut Pusher<'_>, view: &Source<'_>, at: usize) {
         let Some(run) = self.runs.iter().find(|run| run.new.start == at) else {
             return;
         };
@@ -2025,7 +2071,7 @@ struct Extras<'a, 'h> {
 /// Registers display hunk `hunk`, with what its header says, and returns its index.
 fn push_hunk(
     layout: &mut Layout,
-    view: &RevisionView<'_>,
+    view: &Source<'_>,
     file: usize,
     hunk: Hunk,
     folds: &Folds,
@@ -2040,17 +2086,17 @@ fn push_hunk(
 /// unless the reviewer folds it.
 #[must_use]
 pub fn shows_changes_apart(view: &RevisionView<'_>, unit: UnitId) -> bool {
-    shown_delta(view, unit).is_some_and(|delta| !delta.runs().is_empty())
+    shown_delta(&Source::Verified(*view), unit).is_some_and(|delta| !delta.runs().is_empty())
 }
 
 /// What changed since `unit` was reviewed, when it shows only that: a noise unit stays folded
 /// as noise, so it shows whole.
-fn shown_delta<'h>(view: &RevisionView<'h>, unit: UnitId) -> Option<Delta<'h>> {
+fn shown_delta<'h>(view: &Source<'h>, unit: UnitId) -> Option<Delta<'h>> {
     if let Ok(Some(Collapse::Noise(_))) = view.collapse(unit) {
         return None;
     }
     match view.since_reviewed(unit) {
-        Ok(Some(SinceReviewed::Delta(delta))) => Some(delta),
+        Some(SinceReviewed::Delta(delta)) => Some(delta),
         _ => None,
     }
 }
@@ -2068,7 +2114,7 @@ const SHOWN_UNCHANGED: usize = 10;
 /// when only that shows.
 fn whole_file_rows(
     layout: &mut Layout,
-    view: &RevisionView<'_>,
+    view: &Source<'_>,
     emitter: &mut Context<'_>,
     hunks: &[Hunk],
     folds: &Folds,
@@ -2121,7 +2167,7 @@ struct ChunkEnd {
 
 impl BaseLines {
     /// The chunks of a file in `view`, whose units are `units`.
-    fn of(view: &RevisionView<'_>, units: &[UnitId]) -> Self {
+    fn of(view: &Source<'_>, units: &[UnitId]) -> Self {
         let mut ends: Vec<ChunkEnd> = units
             .iter()
             .copied()
@@ -2330,7 +2376,10 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view_under(policy).unwrap();
         let order = review_core::walkthrough::partition(&view).order();
-        let layout = present(build(&view, &order, folds), Presentation::default());
+        let layout = present(
+            build(&crate::rows::Source::Verified(view), &order, folds),
+            Presentation::default(),
+        );
         (dir, layout)
     }
 
@@ -2799,7 +2848,10 @@ mod tests {
             density: crate::config::Density::Normal,
             ..Presentation::default()
         };
-        let layout = present(build(&view, &units, &folds), presentation);
+        let layout = present(
+            build(&crate::rows::Source::Verified(view), &units, &folds),
+            presentation,
+        );
         (dir, layout)
     }
 

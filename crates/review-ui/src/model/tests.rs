@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use indoc::{formatdoc, indoc};
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
 use review_core::tree::NodeKind;
-use review_core::{MarkVerdict, Review};
+use review_core::{MarkVerdict, Review, RevisionNumber};
 
 use super::buffer::{Definition, Lookup};
 use super::effects::{Completion, Job, Outcome, Subject};
@@ -254,9 +254,8 @@ fn loaded(review: Review) -> Loaded {
     let history = review.history().unwrap();
     Loaded {
         review,
-        history,
+        history: Some(history),
         found: None,
-        following: None,
     }
 }
 
@@ -442,8 +441,11 @@ fn a_mark_landing_after_moving_on_keeps_the_next_file_in_place() {
             single_file: true,
             ..rows::Folds::default()
         };
-        let hunks =
-            rows::present(rows::build(&view, &units, &folds), Presentation::default()).hunks;
+        let hunks = rows::present(
+            rows::build(&crate::rows::Source::Verified(view), &units, &folds),
+            Presentation::default(),
+        )
+        .hunks;
         assert!(hunks.len() > 2, "the engine has several hunks");
         review
             .mark(&view, &[hunks[0].unit], MarkVerdict::Accepted)
@@ -3247,10 +3249,11 @@ fn enter_and_p_show_a_folded_hunk() {
     host.update(|model| model.select_hunk(0));
     let folded = |model: &Model| {
         let view = model.view().unwrap();
-        model
-            .hunk_units()
-            .iter()
-            .all(|&unit| model.folds.is_folded(&view, unit))
+        model.hunk_units().iter().all(|&unit| {
+            model
+                .folds
+                .is_folded(&crate::rows::Source::Verified(view), unit)
+        })
     };
     assert!(
         folded(host.model()),
@@ -3329,7 +3332,7 @@ fn review_of<C: AsRef<[u8]>>(dir: &Path, base: &[(&str, C)], head: &[(&str, C)])
 /// The highlights of the version of `path` in the shown revision, head or base.
 fn side_syntax(model: &Model, path: &str, head: bool) -> Option<Arc<SideSyntax>> {
     let view = model.view().unwrap();
-    let analysis = view.analysis().unwrap();
+    let analysis = view.analysis();
     analysis
         .files
         .iter()
@@ -3591,7 +3594,6 @@ fn a_cancelled_highlight_is_highlighted_again() {
 fn head_blob(model: &Model, path: &str) -> ObjectId {
     let view = model.view().unwrap();
     view.analysis()
-        .unwrap()
         .files
         .iter()
         .filter_map(|file| file.new.as_ref())
@@ -3759,18 +3761,28 @@ fn edit_and_capture(host: &mut Host, repo: &Path, top: &str, bottom: &str) {
     host.settle();
 }
 
-/// A job queued on a capture reads it whatever the window shows meanwhile: while it waits to
-/// read a PDF the capture staged, the window moves on two captures that stage another, which
-/// releases the first capture's pins, and another open finds the archive due to be compacted,
-/// yet compacts nothing while the window has the review open, so the job still reads the PDF's
-/// pages.
+/// A job queued on a capture reads it whatever the window shows meanwhile, and holds the review
+/// for as long as it waits: while it waits to read a PDF the capture staged, the window moves on
+/// two captures that stage another and closes, and another open finds the archive due to be
+/// compacted, yet compacts nothing and the review cannot be dropped, so the job still reads the
+/// PDF's pages; once the job let go, the next open compacts the capture away.
+///
+/// The window captures only when asked, so no watch, which a thread of its own drops, holds the
+/// review once the window closes.
 #[cfg(feature = "pdf")]
 #[test]
-fn a_job_reads_its_capture_after_the_window_moved_on() {
+fn a_queued_job_holds_its_capture_until_it_ends() {
     use crate::pdf::testing::pdf;
 
     let dir = tempfile::tempdir().unwrap();
-    let (mut host, repo) = live_host(dir.path());
+    let (loaded, repo) = open_checkout(dir.path());
+    let mut host = Host::open_loaded(
+        loaded,
+        Settings {
+            live: false,
+            ..settings()
+        },
+    );
     // The PDF goes into the index, so the capture takes its blob in a pack from the repository.
     let stage = |pages: &[&str]| {
         std::fs::write(repo.join("doc.pdf"), pdf(pages)).unwrap();
@@ -3790,6 +3802,7 @@ fn a_job_reads_its_capture_after_the_window_moved_on() {
         host.complete(completion);
     }
     host.draw();
+    let capture = host.model().view().unwrap().record().unwrap().head.clone();
     host.update(|model| model.show_file("doc.pdf"));
     let queued = std::mem::take(&mut host.jobs);
 
@@ -3798,13 +3811,22 @@ fn a_job_reads_its_capture_after_the_window_moved_on() {
         host.update(|model| model.capture(false));
         host.settle();
     }
+    let data = dir.path().join("data");
+    let key = host.review.key().clone();
     let archive = host.review.snapshots().git_dir().to_path_buf();
+    drop(host);
     std::fs::remove_file(archive.join("compacted")).unwrap();
-    Review::load(&dir.path().join("data"), host.review.key()).unwrap();
+    let other = Review::load(&data, &key).unwrap();
     assert!(
         !archive.join("compacted").exists(),
-        "an open compacted while the window had the review open"
+        "an open compacted while a job held the review"
     );
+    assert!(other.snapshots().tree_of(&capture).is_ok());
+    drop(other);
+    assert!(matches!(
+        Review::remove(&data, &key),
+        Err(review_core::Error::ReviewInUse(_))
+    ));
 
     let mut read = None;
     for job in queued {
@@ -3812,9 +3834,14 @@ fn a_job_reads_its_capture_after_the_window_moved_on() {
         if let Outcome::PdfRead(pdf) = &*completion.outcome {
             read = Some(matches!(pdf.read, super::pages::Read::Pages(_)));
         }
-        host.complete(completion);
     }
     assert_eq!(read, Some(true), "the job read the pages of its capture");
+    let maintained = Review::load(&data, &key).unwrap();
+    assert!(archive.join("compacted").exists(), "nothing compacted");
+    assert!(
+        maintained.snapshots().tree_of(&capture).is_err(),
+        "the capture outlived every holder"
+    );
 }
 
 /// A capture refused for want of space keeps the view and says so once, however often the
@@ -4049,7 +4076,7 @@ fn a_key_before_the_first_frame_marks_nothing() {
     let opened = host.run_job();
     host.complete(opened);
     assert!(
-        matches!(host.model().phase, Phase::Loading(_)),
+        matches!(host.model().phase, Phase::Loading),
         "the review waits for the next frame"
     );
     assert!(host.model().publishes());
@@ -4460,7 +4487,11 @@ fn a_denial_stops_the_servers_before_it_shows() {
     let captured = host.run_newest_job();
     host.complete(captured);
     host.draw();
-    assert_eq!(host.model().trust, Trust::Checking);
+    assert_eq!(
+        host.model().trust,
+        Trust::Granted,
+        "the grant shows until it is read again"
+    );
     let checked = host.run_newest_job();
     assert!(stopped(before), "the server from before the denial runs");
     host.complete(checked);
@@ -4503,19 +4534,20 @@ fn a_lookup_that_finds_trust_denied_stops_the_servers_first() {
 }
 
 /// A wait for the working tree holds only what waits on the watch, never the engine: a window
-/// dropped without stopping it, as on a panic, still lets go of the engine, which ends the
-/// wait, and the session ends on a thread of its own.
+/// dropped without stopping it, as on a panic, still lets go of the engine and the review,
+/// which ends the wait.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_wait_for_the_working_tree_never_keeps_the_engine() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut host, repo) = live_host(dir.path());
-    assert_eq!(running_sessions(&repo), 1);
+    let (mut host, _repo) = live_host(dir.path());
+    let parts = host.model().weak_parts();
     let wait = host.waits.pop().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || sender.send(wait.run()).ok());
 
     drop(host);
+    assert!(parts.upgrade().is_none(), "the engine outlived the window");
     let waited = receiver
         .recv_timeout(Duration::from_secs(10))
         .expect("the wait ends");
@@ -4523,14 +4555,6 @@ fn a_wait_for_the_working_tree_never_keeps_the_engine() {
         &*waited.outcome,
         Outcome::Waited(waited) if waited.waited == crate::watch::Waited::Closed
     ));
-    let ending = Instant::now();
-    while running_sessions(&repo) > 0 {
-        assert!(
-            ending.elapsed() < Duration::from_secs(10),
-            "the session still runs"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 /// The window over a live review of `a.rs`, as [`live_host`] opens it, with the completion of
@@ -4660,14 +4684,15 @@ fn a_change_that_lands_while_quitting_arms_nothing() {
 
 /// Once everything is saved for quitting and the engine stops, no input acts and no capture
 /// shows, so nothing the reviewer does then goes unsaved; the engine stops without waiting for
-/// a capture still running, which keeps the session until it lets go.
+/// a job still running, which keeps the review until it lets go.
 #[cfg(target_os = "linux")]
 #[test]
 fn closing_takes_no_input_and_waits_for_no_capture() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
-    // A capture still runs with the session, and lands while the engine stops.
-    let running = host.model().parts().session.lock().clone();
+    // A job still runs with the engine's parts, and a capture lands while the engine stops.
+    let parts = host.model().weak_parts();
+    let running = parts.upgrade();
     std::fs::write(repo.join("a.rs"), two_hunks("uno", "two")).unwrap();
     host.update(|model| model.capture(false));
     let captured = host.run_newest_job();
@@ -4691,13 +4716,12 @@ fn closing_takes_no_input_and_waits_for_no_capture() {
 
     host.settle();
     assert_eq!(host.quits, 1);
-    assert_eq!(
-        running_sessions(&repo),
-        1,
-        "the session ended while a capture held it"
+    assert!(
+        parts.upgrade().is_some(),
+        "the review went while a job held it"
     );
     drop(running);
-    assert_eq!(running_sessions(&repo), 0);
+    assert!(parts.upgrade().is_none(), "the review outlived its jobs");
 }
 
 /// Once the engine stops as the app quits, the driver takes no change, a click on a folder
@@ -4764,7 +4788,8 @@ fn a_grant_with_no_definition_waiting_goes_to_none() {
 }
 
 /// A capture that read the trust before a revocation was recorded never shows that reading:
-/// it counts for nothing once the revocation began, and trust is read again for the capture.
+/// it counts for nothing once the revocation began, and trust is read again for the capture,
+/// the revocation showing meanwhile.
 #[test]
 fn a_capture_that_read_trust_before_a_revocation_never_shows_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -4791,7 +4816,7 @@ fn a_capture_that_read_trust_before_a_revocation_never_shows_it() {
         selected_text(host.model()).contains("uno"),
         "the capture shows"
     );
-    assert_eq!(host.model().trust, Trust::Checking, "trust is read again");
+    assert_eq!(host.model().trust, Trust::Denied, "the revocation shows");
     host.settle();
     assert_eq!(host.model().trust, Trust::Denied);
 }
@@ -4860,28 +4885,15 @@ fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
     trust(&mut host);
 }
 
-/// The sessions running for the reviews of the clone at `repo`, each pinning what a window
-/// shows under a directory of its own in `refs/live/` of their archives in the data directory
-/// beside it, which goes with the session's last pin.
-#[cfg(target_os = "linux")]
-fn running_sessions(repo: &Path) -> usize {
-    walk(&repo.with_file_name("data"))
-        .iter()
-        .filter(|path| {
-            path.parent()
-                .is_some_and(|parent| parent.ends_with("archive/refs/live"))
-        })
-        .count()
-}
-
 /// Quitting waits for a decision on trust as for a mark, takes no new decision meanwhile, and
-/// then waits for the engine to stop: the language servers, and the session that pins the
-/// captures the window showed.
+/// then waits for the engine to stop the language servers, after which nothing holds the
+/// review.
 #[cfg(target_os = "linux")]
 #[test]
 fn quitting_waits_for_trust_and_the_engine() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut host, repo) = live_host(dir.path());
+    let (mut host, _repo) = live_host(dir.path());
+    let parts = host.model().weak_parts();
     trust(&mut host);
     let (held, process) = serve(&mut host, "rust", dir.path());
     drop(held);
@@ -4904,11 +4916,14 @@ fn quitting_waits_for_trust_and_the_engine() {
     }
     assert_eq!(host.quits, 0);
     assert_eq!(host.model().status, "Closing the review before quitting…");
-    assert_eq!(running_sessions(&repo), 1);
+    assert!(parts.upgrade().is_some());
     host.settle();
     assert_eq!(host.quits, 1);
     assert!(stopped(process), "the server still runs");
-    assert_eq!(running_sessions(&repo), 0, "the session still runs");
+    assert!(
+        parts.upgrade().is_none(),
+        "the engine still holds the review"
+    );
 
     // A revocation under way is recorded before the app quits.
     let dir = tempfile::tempdir().unwrap();
@@ -5792,30 +5807,28 @@ fn an_edit_made_while_the_review_opens_shows() {
 }
 
 /// Quitting while the review opens quits at once, and the review that opens after it never
-/// shows: its engine stops on a thread of its own, ending the session that pins its opening
-/// capture.
+/// shows: its engine goes as it lands, letting go of the review.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_review_opened_after_quitting_never_shows() {
     let dir = tempfile::tempdir().unwrap();
-    let (loaded, repo) = open_checkout(dir.path());
+    let (loaded, _repo) = open_checkout(dir.path());
     let mut host = Host::opening(loaded, settings());
     host.dispatch(Action::Quit);
     assert_eq!(host.quits, 1, "nothing waits for the opening");
 
     let opened = host.run_job();
+    let Outcome::Opened(Ok(shown)) = &*opened.outcome else {
+        panic!("the review opens");
+    };
+    let parts = shown.engine.weak();
     host.complete(opened);
     let model = host.model();
-    assert!(matches!(model.phase, Phase::Loading(_)), "nothing shows");
+    assert!(matches!(model.phase, Phase::Loading), "nothing shows");
     assert!(!model.publishes(), "nothing waits for a frame");
     assert!(!model.following());
     assert!(host.jobs.is_empty(), "nothing starts");
-    // The session ends on the thread that stops the engine.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while running_sessions(&repo) > 0 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(running_sessions(&repo), 0, "the session ended");
+    assert!(parts.upgrade().is_none(), "the engine outlived the review");
 }
 
 /// The files pane's header, as review-tui shows it.
@@ -5829,7 +5842,7 @@ fn header(model: &Model) -> String {
 
 /// The diff's card, when it shows one.
 fn card(model: &Model) -> Option<(String, String)> {
-    crate::paint::header::diff_state(model, &crate::paint::Palette::of(model), Instant::now())
+    crate::paint::header::diff_state(model, &crate::paint::Palette::of(model))
         .map(|card| (card.title.text, card.detail.text))
 }
 
@@ -9169,4 +9182,645 @@ fn an_image_compared_before_is_not_decoded_again() {
     host.complete(read);
     host.settle();
     assert!(host.model().comparison().is_some());
+}
+
+/// A checkout whose `a.rs` and `b.rs` changed from `main`, recorded twice by its review:
+/// revision 1 with `a.rs` accepted and a note on `b.rs`, revision 2 with both statements of
+/// `a.rs` changed again and the first change approved on its own; and the window over it
+/// opening as the model's opener opens it, whose opening job waits to run.
+/// With `stale`, the cache holds no analysis or correspondence, as after the format changed.
+/// Returns it with the working tree.
+fn recorded_checkout(dir: &Path, stale: bool) -> (Host, std::path::PathBuf) {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "base"]);
+    git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let data = dir.join("data");
+    let review = Review::open_checkout(&data, review_core::Repo::discover(&repo).unwrap()).unwrap();
+    std::fs::write(repo.join("a.rs"), statements(&[10, 40], "1")).unwrap();
+    std::fs::write(repo.join("b.rs"), "fn b() { b(); }\n").unwrap();
+    review.refresh().unwrap();
+    let history = review.history().unwrap();
+    let view = history.current_view().unwrap();
+    review
+        .mark(&view, &view.units_of_file("a.rs"), MarkVerdict::Accepted)
+        .unwrap();
+    review
+        .note(&view, view.units_of_file("b.rs")[0], "why?")
+        .unwrap();
+    std::fs::write(repo.join("a.rs"), statements(&[10, 40], "2")).unwrap();
+    review.refresh().unwrap();
+    let history = review.history().unwrap();
+    let view = history.current_view().unwrap();
+    let unit = view.units_of_file("a.rs")[0];
+    review
+        .approve_run(&view, &shown_change(&review, unit, 0))
+        .unwrap();
+    if stale {
+        std::fs::remove_dir_all(review.dir().root().join("analysis")).unwrap();
+    }
+    drop(review);
+    let loaded =
+        crate::launch::open_checkout(&data, review_core::Repo::discover(&repo).unwrap()).unwrap();
+    (Host::opening(loaded, settings()), repo)
+}
+
+/// Runs the waiting jobs in order, landing each, until one hands back what `wanted` picks,
+/// whose completion it returns unapplied.
+fn run_until(host: &mut Host, wanted: impl Fn(&Outcome) -> bool) -> Completion {
+    loop {
+        let completion = host.run_job();
+        if wanted(&completion.outcome) {
+            return completion;
+        }
+        host.complete(completion);
+    }
+}
+
+/// Opens the review `host` opens and draws the frame that shows it.
+fn show_opened(host: &mut Host) {
+    let opened = run_until(host, |outcome| matches!(outcome, Outcome::Opened(_)));
+    host.complete(opened);
+    host.draw();
+}
+
+/// Every event in the log of `review`.
+fn logged(review: &Review) -> Vec<review_core::store::events::Event> {
+    review_core::store::log::LogTail::new(review.dir())
+        .poll()
+        .unwrap()
+}
+
+/// The checkout's review shows its last recorded revision at once, with its changes from the
+/// cache, or after the format changed, its changed files until their analysis lands; the
+/// reviewer moves between files while the review state is checked, and nothing counts.
+#[test]
+fn the_last_recorded_revision_shows_while_the_review_is_checked() {
+    for stale in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, _repo) = recorded_checkout(dir.path(), stale);
+        // The panes show empty while the review opens, with no card in the diff's place.
+        let model = host.model();
+        assert!(matches!(model.phase, Phase::Loading));
+        assert!(model.sidebar_shown());
+        assert_eq!(card(model), None);
+        assert_eq!(crate::paint::header::no_file(model), "");
+        show_opened(&mut host);
+        let model = host.model();
+        // Until the changes are analyzed, the diff stays empty, with no card either.
+        assert_eq!(card(model), None, "stale: {stale}");
+        let checking = model.checking().expect("the pending view shows");
+        assert_eq!(checking.record.number.get(), 2);
+        assert_eq!(checking.changes, !stale, "stale: {stale}");
+        assert!(model.snapshot.is_none());
+        assert_eq!(file_paths(&model.tree), ["a.rs", "b.rs"]);
+        assert_eq!(model.totals(), (0, 0), "nothing counts");
+        assert!(model.busy(), "the review is checked behind it");
+
+        host.update(|model| model.show_file("b.rs"));
+        assert_eq!(host.model().selected.as_deref(), Some("b.rs"));
+        if stale {
+            assert!(host.model().rows.hunks.is_empty(), "nothing to lay out yet");
+            let analyzed = run_until(&mut host, |outcome| matches!(outcome, Outcome::Analyzed(_)));
+            host.complete(analyzed);
+        }
+        host.draw();
+        // b.rs lays out with the frame after its text, which the pending view did not bring, is
+        // read.
+        let read = run_until(&mut host, |outcome| {
+            matches!(outcome, Outcome::TextsRead(_))
+        });
+        host.complete(read);
+        host.draw();
+        let model = host.model();
+        assert_eq!(model.selected.as_deref(), Some("b.rs"));
+        assert_eq!(model.rows.hunks.len(), 1, "stale: {stale}");
+        assert_eq!(model.hunk_badge(0), None, "no unit stands anywhere");
+        assert!(model.checking().is_some_and(|checking| checking.changes));
+    }
+}
+
+/// The analysis of the last recorded revision shows only with the next frame, keeping the file
+/// the reviewer moved to, so a key handled before that frame acts on the files the last frame
+/// showed.
+#[test]
+fn a_late_analysis_shows_with_the_next_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), true);
+    show_opened(&mut host);
+    let analyzed = run_until(&mut host, |outcome| matches!(outcome, Outcome::Analyzed(_)));
+    host.update(|model| model.show_file("b.rs"));
+    host.complete(analyzed);
+    assert!(host.model().publishes());
+    host.dispatch(Action::FocusDiff);
+    assert!(
+        host.model().rows.hunks.is_empty(),
+        "the changes showed before a frame"
+    );
+
+    host.draw();
+    let model = host.model();
+    assert_eq!(model.selected.as_deref(), Some("b.rs"));
+    // The analysis brought the text of a.rs, selected when it was asked for, so b.rs waits for
+    // its own, with no card meanwhile.
+    assert!(model.rows.rows.is_empty(), "b.rs lays out without its text");
+    assert_eq!(card(model), None);
+    let read = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::TextsRead(_))
+    });
+    host.complete(read);
+    host.draw();
+    let model = host.model();
+    assert_eq!(
+        model.rows.files.first().map(|file| file.path.as_str()),
+        Some("b.rs")
+    );
+    assert_eq!(model.rows.hunks.len(), 1);
+}
+
+/// Whether the diff shows line `line` of the head file.
+fn shows_line(model: &Model, line: usize) -> bool {
+    model.rows.rows.iter().any(|row| {
+        row.cells()
+            .any(|cell| cell.head.as_ref().is_some_and(|head| head.line == line))
+    })
+}
+
+/// A file's diff lays out once, with its context: the file the pending view shows first comes
+/// with its text, and a file selected before its text is read shows nothing, not even a card,
+/// until it is, rather than its changes alone first.
+#[test]
+fn a_diff_lays_out_once_with_its_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(repo.join("a.rs"), statements(&[], "0")).unwrap();
+    std::fs::write(repo.join("b.rs"), statements(&[], "0")).unwrap();
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "base"]);
+    git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let data = dir.path().join("data");
+    let review = Review::open_checkout(&data, review_core::Repo::discover(&repo).unwrap()).unwrap();
+    std::fs::write(repo.join("a.rs"), statements(&[10, 40], "1")).unwrap();
+    std::fs::write(repo.join("b.rs"), statements(&[20], "1")).unwrap();
+    review.refresh().unwrap();
+    drop(review);
+    let loaded =
+        crate::launch::open_checkout(&data, review_core::Repo::discover(&repo).unwrap()).unwrap();
+    let mut host = Host::opening(loaded, settings());
+
+    // a.rs shows line 9, `let v7`, unchanged before its first change, with its first frame.
+    show_opened(&mut host);
+    let model = host.model();
+    assert!(model.checking().is_some(), "the pending view shows");
+    assert_eq!(model.selected.as_deref(), Some("a.rs"));
+    assert!(shows_line(model, 9), "a.rs shows its changes alone");
+
+    // b.rs, whose text is still being read, shows nothing until it is, then the whole file.
+    host.update(|model| model.show_file("b.rs"));
+    let model = host.model();
+    assert!(model.rows.rows.is_empty(), "b.rs shows its changes alone");
+    assert_eq!(card(model), None);
+    let read = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::TextsRead(_))
+    });
+    host.complete(read);
+    host.draw();
+    assert!(shows_line(host.model(), 20), "b.rs shows its changes alone");
+}
+
+/// A file whose rows waited for its text shows them with the next frame that can: not one
+/// drawn under the overview, so Esc and Space handled together after it act on nothing, as no
+/// frame showed the file's diff.
+#[test]
+fn rows_that_waited_for_their_text_show_with_the_next_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    // The review is verified while b.rs's text, asked for by the pending view, is still read.
+    let verified = host.run_newest_job();
+    assert!(matches!(*verified.outcome, Outcome::Verified(_)));
+    host.complete(verified);
+    host.draw();
+    assert!(
+        host.model().checking().is_none(),
+        "the verified review shows"
+    );
+    host.update(|model| model.show_file("b.rs"));
+    assert!(host.model().rows.rows.is_empty(), "b.rs waits for its text");
+    host.dispatch(Action::ToggleOverview);
+    assert_eq!(host.model().overlay, Some(Overlay::Overview));
+    let events = std::fs::read(host.review.dir().events()).unwrap();
+
+    // The text lands, and a frame draws under the overview, which keeps b.rs waiting.
+    let read = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::TextsRead(_))
+    });
+    host.complete(read);
+    assert!(!host.model().publishes(), "the overview holds b.rs back");
+    host.draw();
+    assert!(
+        host.model().rows.rows.is_empty(),
+        "b.rs laid out under the overview"
+    );
+
+    // Esc and Space come together, before the frame that shows b.rs.
+    host.key(Action::CloseOverlay, false);
+    host.key(Action::ToggleApprove, false);
+    assert!(host.model().saves.is_empty() && host.model().pending.is_empty());
+    host.settle();
+    assert_eq!(
+        std::fs::read(host.review.dir().events()).unwrap(),
+        events,
+        "a key marked a diff no frame showed"
+    );
+
+    // Once a frame showed b.rs, Space marks it.
+    assert!(!host.model().rows.rows.is_empty(), "b.rs shows");
+    host.key(Action::ToggleApprove, false);
+    host.settle();
+    assert!(
+        matches!(
+            logged(&host.review).pop(),
+            Some(review_core::store::events::Event::Mark(_))
+        ),
+        "the key marked nothing"
+    );
+}
+
+/// After a format change, the review is verified only once the analysis showed, with the text
+/// it brought and the reads it asked for, so the verification reads no text again.
+#[test]
+fn a_late_analysis_shows_before_the_review_is_verified() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), true);
+    show_opened(&mut host);
+    let analyzed = run_until(&mut host, |outcome| matches!(outcome, Outcome::Analyzed(_)));
+    host.complete(analyzed);
+    while let Some(job) = host.jobs.pop_front() {
+        let completion = job.run();
+        assert!(
+            !matches!(*completion.outcome, Outcome::Verified(_)),
+            "the review is verified before its analysis shows"
+        );
+        host.complete(completion);
+    }
+    host.draw();
+    let verified = run_until(&mut host, |outcome| matches!(outcome, Outcome::Verified(_)));
+    host.complete(verified);
+}
+
+/// A grant read again shows dimmed, at the same width, until the reading lands: it is the last
+/// one read, not one known to apply now.
+#[test]
+fn a_grant_read_again_shows_as_the_last_one_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    host.update(Model::changed);
+    host.settle();
+    trust(&mut host);
+    let label = |model: &Model| {
+        crate::paint::bars::sync_label(
+            model,
+            &crate::paint::Palette::of(model),
+            std::time::SystemTime::now(),
+            f32::MAX,
+            |text| scroll::float(text.chars().count()),
+        )
+        .into_iter()
+        .find(|piece| piece.text == "trusted")
+        .expect("the grant shows")
+        .color
+    };
+    let palette = crate::paint::Palette::of(host.model());
+    assert_eq!(label(host.model()), palette.flagged);
+
+    // A capture of the same code reads trust again.
+    host.update(Model::changed);
+    let captured = host.run_newest_job();
+    host.complete(captured);
+    host.draw();
+    assert!(host.model().trust_rereading());
+    assert_eq!(label(host.model()), palette.faint);
+    host.settle();
+    assert_eq!(label(host.model()), palette.flagged);
+}
+
+/// The trust on the status line never goes unknown while it is read again: not as the pending
+/// view gives way to the verified review, nor as a capture of the same code after it reads it.
+#[test]
+fn the_trust_shown_never_goes_unknown_across_promotion() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    // Every job lands with a frame after it, each of which shows the checkout untrusted.
+    let land_all = |host: &mut Host| {
+        while let Some(job) = host.jobs.pop_front() {
+            let completion = job.run();
+            host.complete(completion);
+            host.draw();
+            let bar = bar(host.model());
+            assert!(bar.ends_with(" · untrusted"), "{bar}");
+        }
+    };
+    land_all(&mut host);
+    assert!(
+        host.model().checking().is_none(),
+        "the verified review shows"
+    );
+    host.update(Model::changed);
+    land_all(&mut host);
+}
+
+/// A review key on the pending view records nothing, also once the verified review waits for a
+/// frame, and is never replayed; once that frame shows the review, the key marks the unit
+/// shown, naming its evidence there.
+#[test]
+fn a_key_on_the_pending_view_records_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    host.update(|model| model.show_file("b.rs"));
+    host.dispatch(Action::FocusDiff);
+    let events = std::fs::read(host.review.dir().events()).unwrap();
+
+    let verified = run_until(&mut host, |outcome| matches!(outcome, Outcome::Verified(_)));
+    host.complete(verified);
+    host.key(Action::ToggleApprove, false);
+    assert_eq!(host.model().status, super::pending::CHECKING);
+    assert!(host.model().saves.is_empty() && host.model().pending.is_empty());
+    host.settle();
+    assert!(
+        host.model().checking().is_none(),
+        "the verified review shows"
+    );
+    assert_eq!(
+        std::fs::read(host.review.dir().events()).unwrap(),
+        events,
+        "a key on the pending view recorded something"
+    );
+    // A repeat of the key held since the pending view acts on nothing the verified review
+    // shows, even on the very unit its press was refused on.
+    host.key(Action::ToggleApprove, true);
+    host.settle();
+    assert_eq!(
+        std::fs::read(host.review.dir().events()).unwrap(),
+        events,
+        "a key held since the pending view marked the verified review"
+    );
+
+    let model = host.model();
+    assert_eq!(model.selected.as_deref(), Some("b.rs"), "the file stays");
+    let unit = model.hunk_units()[0];
+    let evidence = model.view().unwrap().evidence_digest(unit).unwrap();
+    host.key(Action::ToggleApprove, false);
+    host.settle();
+    let Some(review_core::store::events::Event::Mark(mark)) = logged(&host.review).pop() else {
+        panic!("the key marked nothing");
+    };
+    assert_eq!((mark.revision, mark.unit), (unit.revision(), unit.index()));
+    assert_eq!(mark.evidence, evidence);
+}
+
+/// The pending view opens the whole file, where the review keys mark nothing either, and the
+/// overview, which reads the verified review, says it waits for it.
+#[test]
+fn the_pending_view_opens_the_whole_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    host.update(|model| model.show_file("b.rs"));
+    let read = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::TextsRead(_))
+    });
+    host.complete(read);
+    let events = std::fs::read(host.review.dir().events()).unwrap();
+
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(host.model().mode, Mode::Buffer);
+    host.key(Action::ToggleApprove, false);
+    assert_eq!(host.model().status, super::pending::CHECKING);
+    host.dispatch(Action::ToggleOverview);
+    assert_eq!(host.model().status, super::pending::WAITS);
+    assert_eq!(host.model().overlay, None);
+    assert!(host.model().checking().is_some(), "still pending");
+    assert_eq!(std::fs::read(host.review.dir().events()).unwrap(), events);
+}
+
+/// The review verified behind its last recorded revision, after the format changed, derives the
+/// standings, the partial approval and the note a review read from the start derives.
+#[test]
+fn the_verified_review_is_the_one_read_from_the_start() {
+    for stale in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, _repo) = recorded_checkout(dir.path(), stale);
+        show_opened(&mut host);
+        host.settle();
+        let model = host.model();
+        assert!(model.checking().is_none(), "the verified review shows");
+        let shown = &model.snapshot.as_ref().unwrap().history;
+        let fresh = Review::load(&dir.path().join("data"), host.review.key())
+            .unwrap()
+            .history()
+            .unwrap();
+        assert_eq!(**shown, fresh, "stale: {stale}");
+        let view = fresh.current_view().unwrap();
+        assert_eq!(view.notes().len(), 1);
+        assert!(matches!(
+            view.since_reviewed(view.units_of_file("a.rs")[0]),
+            Ok(Some(review_core::SinceReviewed::Delta(_)))
+        ));
+    }
+}
+
+/// A record another window appends while the review opens shows once the review is verified,
+/// since the verification reads on from where the pending view read the log; a log replaced
+/// meanwhile ends the review over the pending view.
+#[test]
+fn the_verification_reads_on_from_the_pending_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    let other = Review::load(&dir.path().join("data"), host.review.key()).unwrap();
+    let history = other.history().unwrap();
+    let view = history.current_view().unwrap();
+    other
+        .mark(&view, &view.units_of_file("b.rs"), MarkVerdict::Accepted)
+        .unwrap();
+    host.settle();
+    assert_eq!(host.model().file_totals(), (1, 2), "b.rs is done");
+
+    // A shorter log, which every platform tells apart from the one read, and where the
+    // platform tells files apart, a copy of the same bytes.
+    let shorter: fn(&[u8]) -> Vec<u8> = |bytes| {
+        let last = bytes[..bytes.len() - 1]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |newline| newline + 1);
+        bytes[..last].to_vec()
+    };
+    #[cfg(unix)]
+    let replacements = [shorter, <[u8]>::to_vec];
+    #[cfg(not(unix))]
+    let replacements = [shorter];
+    for replacement in replacements {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, _repo) = recorded_checkout(dir.path(), false);
+        show_opened(&mut host);
+        let log = host.review.dir().events();
+        let copy = log.with_extension("copy");
+        std::fs::write(&copy, replacement(&std::fs::read(&log).unwrap())).unwrap();
+        std::fs::rename(&copy, &log).unwrap();
+        host.settle();
+        let model = host.model();
+        assert_eq!(model.replaced(), Some(Replaced::Log));
+        assert!(model.checking().is_some(), "the pending view stays");
+        assert!(!model.busy());
+        host.dispatch(Action::ToggleApprove);
+        assert!(host.model().saves.is_empty());
+    }
+}
+
+/// A whole file opened from the pending view opens again from the verified review, which shows
+/// the file as the checkout has it now, or else the diff does: never the pending view's text
+/// under the verified review's markers.
+#[test]
+fn a_whole_file_opened_while_pending_shows_the_verified_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    // The verification captures the checkout as it is now, past the recorded revision.
+    std::fs::write(repo.join("b.rs"), "fn b() { b(); b(); }\n").unwrap();
+    host.update(|model| model.show_file("b.rs"));
+    let read = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::TextsRead(_))
+    });
+    host.complete(read);
+    host.dispatch(Action::ToggleBuffer);
+    assert_eq!(
+        host.model().buffer.as_ref().unwrap().lines.lines,
+        ["fn b() { b(); }"]
+    );
+
+    host.settle();
+    let model = host.model();
+    assert!(model.checking().is_none(), "the verified review shows");
+    match &model.buffer {
+        Some(buffer) => {
+            assert_eq!(model.mode, Mode::Buffer);
+            assert_eq!(buffer.lines.lines, ["fn b() { b(); b(); }"]);
+        }
+        None => assert_eq!(model.mode, Mode::Diff),
+    }
+}
+
+/// A whole file reopened from the verified review shows its cursor where the reviewer left it
+/// with the first verified frame, even a viewport away from the hunk the diff selects there.
+#[test]
+fn a_reopened_whole_file_shows_its_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    // The buffer shows ten rows, fewer than lie between a.rs's two changes, `let v10` and
+    // `let v40`.
+    let window = Geometry {
+        heights: Heights {
+            buffer: Some(10.0),
+            ..fixed_window().heights
+        },
+        ..fixed_window()
+    };
+    let lay_out = |host: &mut Host| host.update(|model| model.layout(window, Instant::now()));
+    lay_out(&mut host);
+    show_opened(&mut host);
+    host.update(|model| model.show_file("a.rs"));
+    let read = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::TextsRead(_))
+    });
+    host.complete(read);
+    host.dispatch(Action::FocusDiff);
+    host.dispatch(Action::ToggleBuffer);
+    lay_out(&mut host);
+    // The cursor goes to `let v10`, whose change the verified review approved in part, so its
+    // diff selects the change at `let v40` instead.
+    let row = 11;
+    host.update(|model| model.set_buffer_cursor(row, 0));
+    lay_out(&mut host);
+
+    host.settle();
+    lay_out(&mut host);
+    let model = host.model();
+    assert!(model.checking().is_none(), "the verified review shows");
+    assert_eq!(model.mode, Mode::Buffer);
+    assert_eq!(model.buffer.as_ref().unwrap().cursor.row, row);
+    let top = model.buffer_scroll.offset();
+    assert!(
+        top <= scroll::rows(row) && scroll::rows(row) < top + 10.0,
+        "the cursor's row {row} shows below row {top}"
+    );
+}
+
+/// A verified review with nothing to review, as after the checkout's changes were reverted,
+/// takes the pending view's rows off the screen, so the empty review shows as one.
+#[test]
+fn a_verified_review_without_changes_clears_the_pending_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    host.dispatch(Action::FocusDiff);
+    assert!(
+        !host.model().rows.hunks.is_empty(),
+        "the pending view shows the recorded changes"
+    );
+    std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+
+    host.settle();
+    let model = host.model();
+    assert!(model.checking().is_none(), "the verified review shows");
+    assert!(model.tree.is_empty(), "nothing is left to review");
+    assert_eq!(model.selected, None);
+    assert!(model.rows.hunks.is_empty() && model.rows.screen.is_empty());
+    assert_eq!(model.mode, Mode::Tree);
+}
+
+/// While git is busy in the checkout, or cr's data is full, the review is verified on its last
+/// recorded revision, which then takes marks.
+#[test]
+fn a_busy_or_full_checkout_verifies_its_last_recorded_revision() {
+    for full in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, repo) = recorded_checkout(dir.path(), false);
+        // An edit the capture would show, were it taken.
+        std::fs::write(repo.join("b.rs"), "fn b() { c(); }\n").unwrap();
+        if full {
+            let big = std::fs::File::create(dir.path().join("data/big")).unwrap();
+            big.set_len(11 << 30).unwrap();
+        } else {
+            std::fs::write(repo.join(".git/MERGE_HEAD"), "").unwrap();
+        }
+        show_opened(&mut host);
+        host.settle();
+        let model = host.model();
+        assert!(model.checking().is_none(), "full: {full}");
+        assert_eq!(model.view().unwrap().number().get(), 2, "full: {full}");
+        assert!(!model.view().unwrap().is_provisional());
+        host.update(|model| model.show_file("b.rs"));
+        host.dispatch(Action::FocusDiff);
+        host.key(Action::ToggleApprove, false);
+        host.settle();
+        assert!(
+            matches!(
+                logged(&host.review).pop(),
+                Some(review_core::store::events::Event::Mark(_))
+            ),
+            "full: {full}: {}",
+            host.model().status
+        );
+    }
 }

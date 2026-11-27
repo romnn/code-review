@@ -245,9 +245,7 @@ pub fn find<'a>(units: &'a [UnitSummary], needle: &str) -> eyre::Result<&'a Unit
 pub fn latest_analysis(review: &Review) -> eyre::Result<Analysis> {
     let history = review.history()?;
     let view = history.current_view()?;
-    view.analysis()
-        .cloned()
-        .ok_or_else(|| eyre::eyre!("no analysis"))
+    Ok(view.analysis().clone())
 }
 
 /// Builds a Rust file of `count` small functions, `f0` to `f{count-1}`, each returning its index.

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use review_core::{RevisionView, UnitId};
+use review_core::{Changes, UnitId};
 
 use super::effects::{Outcome, Subject};
 use super::engine::{Parts, Servers};
@@ -150,7 +150,10 @@ impl Model {
         let Some(path) = self.selected.clone() else {
             return;
         };
-        let Some(view) = self.view() else {
+        let Some(laid) = self.laid_out() else {
+            return;
+        };
+        let Some(view) = laid.source() else {
             return;
         };
         let units = view.units_of_file(&path);
@@ -197,7 +200,7 @@ impl Model {
     /// The change markers of a review buffer of the shown file, `len` lines long: each display
     /// hunk's lines, so a unit that shows its changes since review apart marks only those, as
     /// the review keys act on them.
-    fn buffer_markers(&self, view: &RevisionView<'_>, len: usize) -> Vec<Option<Marker>> {
+    fn buffer_markers(&self, view: &Changes<'_>, len: usize) -> Vec<Option<Marker>> {
         let mut markers = vec![None; len.max(1)];
         let last = markers.len().saturating_sub(1);
         for hunk in &self.rows.hunks {
@@ -227,9 +230,12 @@ impl Model {
     /// such as when one change of a unit was approved.
     pub(super) fn remark_buffer(&mut self) {
         let markers = {
-            let (Some(view), Some(buffer), Some(path)) =
-                (self.view(), &self.buffer, &self.selected)
+            let (Some(laid), Some(buffer), Some(path)) =
+                (self.laid_out(), &self.buffer, &self.selected)
             else {
+                return;
+            };
+            let Some(view) = laid.source() else {
                 return;
             };
             if buffer.origin != Origin::Review(path.clone()) {
@@ -343,8 +349,14 @@ impl Model {
         };
         self.reveal_buffer_column();
         // A list not laid out yet has no height to reveal the cursor in, so it is centered
-        // once it has one, as a newly opened buffer's is.
-        let Some(viewport) = self.grid().viewports.buffer else {
+        // once it has one, as a newly opened buffer's is; and a buffer opened since the last
+        // layout centers where its cursor is now, not where it opened.
+        let viewport = self
+            .grid()
+            .viewports
+            .buffer
+            .filter(|_| !self.buffer_scroll.requested());
+        let Some(viewport) = viewport else {
             self.buffer_scroll.stop();
             self.buffer_scroll.request(Request::Center(row));
             return;
@@ -443,6 +455,10 @@ impl Model {
                 "Go to definition is off: language servers never start while [lsp] enabled = \
                  false in config.toml.",
             );
+            return;
+        }
+        if self.checking.is_some() {
+            self.set_status(super::pending::WAITS);
             return;
         }
         if let Some(why) = self.not_on_disk() {

@@ -31,9 +31,15 @@ impl Model {
     /// here, so a key never acts on something other than what the reviewer sees: the tree's
     /// file must be the file whose diff shows, the diff's rows must be that file's, and the
     /// buffer must be that file's.
+    /// Only a verified review has units to mark: the pending view has none.
     pub(super) fn review_target(&self) -> Result<(Vec<UnitId>, String), String> {
         let nothing = || "Nothing here to review.".to_owned();
-        let view = self.view().ok_or_else(nothing)?;
+        let Some(view) = self.view() else {
+            return Err(self
+                .checking
+                .as_ref()
+                .map_or_else(nothing, super::pending::Pending::refusal));
+        };
         let shown = self.rows.files.first().map(|section| section.path.as_str());
         let selected = self.selected.as_deref();
         match self.mode {
@@ -120,7 +126,8 @@ impl Model {
             return;
         }
         // The selected hunk must be on screen; one scrolled away is shown first, not marked.
-        if self.mode == Mode::Diff && !self.hunk_in_view() {
+        // A diff without rows yet has no hunk to show.
+        if self.mode == Mode::Diff && !self.rows.hunks.is_empty() && !self.hunk_in_view() {
             self.reveal_hunk();
             self.revealed();
             self.set_status(format!(
@@ -525,8 +532,13 @@ impl Model {
     }
 
     /// `R`: switches to a newer revision when there is one, otherwise fetches and records the
-    /// target's latest state in the background.
+    /// target's latest state in the background; nothing before the review is verified, since
+    /// a review of the checkout records its capture only once it follows the working tree.
     pub(super) fn refresh(&mut self) {
+        if let Some(checking) = &self.checking {
+            self.set_status(checking.refusal());
+            return;
+        }
         // A live review shows the newest snapshot as it captures it, keeping the place, and
         // records nothing until something is marked.
         if self.following() {
@@ -625,7 +637,7 @@ impl Model {
         snapshot.revision = revision;
         self.shown += 1;
         if let Some(view) = snapshot.view() {
-            self.blobs.retain_for(&view);
+            self.blobs.retain_for(&rows::Source::Verified(view));
         }
         // Unit IDs and hunks belong to a revision; the reviewer's folds and places do not
         // carry over.

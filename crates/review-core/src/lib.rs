@@ -11,7 +11,7 @@
 //!   notes, walkthrough imports) under the review's lock.
 //! - [`Review::open_checkout`] opens the review of a checkout, which follows whatever its working
 //!   tree holds; [`Review::live_history`] shows a capture of it as a provisional revision, with
-//!   the [`Subject`] it was taken of, under a [`Session`] that pins it while it shows.
+//!   the [`Subject`] it was taken of.
 //! - [`Review::history`] loads a [`History`]: every revision with its [`analysis`], the
 //!   [`correspond`]ences between consecutive revisions, and derived unit states.
 //! - [`History::view`] gives a [`RevisionView`] with unit states, interdiffs, notes, moves and
@@ -76,13 +76,13 @@ pub use ids::{
 };
 pub use review::{
     BaseRef, Capture, Commit, LiveCapture, PullRequest, Recorded, RefreshStep, Review, ReviewInfo,
-    ReviewMeta, ReviewTarget, RevisionInput, Session, Subject, Synced, filtered_note, github,
+    ReviewMeta, ReviewTarget, RevisionInput, Subject, Synced, filtered_note, github,
 };
 pub use standing::{ReviewPolicy, Standing};
 pub use store::events::MarkVerdict;
 pub use view::{
-    ChangeKind, Collapse, Counts, Delta, DiffLine, DiffLineKind, FileChangeSummary, FileStatus,
-    FileTone, Interdiff, LineEnding, LineRun, Location, MoveEnd, MoveView, NoteAttachment,
-    Reopened, ResolvedNote, ReviewedBaseline, ReviewedHead, RevisionView, ScopeAnchor, ShownRun,
-    Side, SideDiff, SinceReviewed, SplitLine, Status, split_line_ending,
+    ChangeKind, Changes, Collapse, Counts, Delta, DiffLine, DiffLineKind, FileChangeSummary,
+    FileStatus, FileTone, Interdiff, LineEnding, LineRun, Location, MoveEnd, MoveView,
+    NoteAttachment, Reopened, ResolvedNote, ReviewedBaseline, ReviewedHead, RevisionView,
+    ScopeAnchor, ShownRun, Side, SideDiff, SinceReviewed, SplitLine, Status, split_line_ending,
 };

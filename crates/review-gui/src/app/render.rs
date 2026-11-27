@@ -776,17 +776,14 @@ impl ReviewApp {
             gap,
         };
         let Some(file) = header::file_header(self, &colors, room, GRID * 2.0) else {
-            let bar = h_flex().h(px(self.sizes().bar())).flex_none();
-            // Nothing of the header shows before the review does, only the room it takes.
-            let Some(no_file) = header::no_file(self) else {
-                return bar;
-            };
-            return bar
+            return h_flex()
+                .h(px(self.sizes().bar()))
+                .flex_none()
                 .px(px(GRID * 3.0))
                 .border_b_1()
                 .border_color(to_gpui(colors.hairline))
                 .text_color(to_gpui(colors.faint))
-                .child(no_file);
+                .child(header::no_file(self));
         };
         h_flex()
             .h(px(self.sizes().bar()))
@@ -855,8 +852,7 @@ impl ReviewApp {
         .track_scroll(&self.lists.handles.diff)
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
         .size_full();
-        let empty =
-            header::diff_state(self, &colors, Instant::now()).map(|card| state_card(card, &colors));
+        let empty = header::diff_state(self, &colors).map(|card| state_card(card, &colors));
         div()
             .id("list-area")
             .relative()
@@ -1526,10 +1522,7 @@ impl Render for ReviewApp {
         self.painted.borrow_mut().clear();
         self.regions.begin_frame();
         let running = self.lay_out_frame(window, cx);
-        if running
-            || matches!(self.phase, Phase::Loading(_))
-            || bars::flashing(self, Instant::now())
-        {
+        if running || matches!(self.phase, Phase::Loading) || bars::flashing(self, Instant::now()) {
             window.request_animation_frame();
         }
         self.note_frame(window, cx);

@@ -9,7 +9,7 @@ use crate::analysis::{
 };
 use crate::correspond::{LinkKind, same_entry};
 use crate::error::Error;
-use crate::git::{Blob, BlobReader, ChangeStatus};
+use crate::git::{Blob, BlobReader, ChangeStatus, RawChange};
 use crate::history::{History, RevisionData, RevisionRecord, UnitState, Verdict};
 use crate::ids::{MoveId, RevisionNumber, UnitId, UnitIndex};
 use crate::scope::{Scope, ScopeMap};
@@ -18,10 +18,22 @@ use crate::text::{diff_lines, split_lines};
 
 /// A view of one revision of a review, deciding under its [`ReviewPolicy`] which units still
 /// need the reviewer.
+///
+/// It is the revision's [`Changes`], which it dereferences to, with their review state.
+#[derive(Clone, Copy)]
 pub struct RevisionView<'h> {
     history: &'h History,
-    number: RevisionNumber,
+    changes: Changes<'h>,
     policy: ReviewPolicy,
+}
+
+/// The changes of one revision as its analysis found them, with no review state: what a front
+/// end shows of a revision before it has read the review's history, which alone says where each
+/// unit stands.
+#[derive(Clone, Copy)]
+pub struct Changes<'h> {
+    analysis: &'h Analysis,
+    number: RevisionNumber,
 }
 
 /// Where a unit is, for display: the path and one-based line numbers in the head file, or in the
@@ -512,6 +524,24 @@ pub struct FileStatus {
     pub change: FileChangeSummary,
 }
 
+impl FileStatus {
+    /// The file git found `change`d before its changes are analyzed: its path and how its entry
+    /// changed, with nothing counted.
+    pub(crate) fn unanalyzed(change: RawChange) -> Option<Self> {
+        let kind = ChangeKind::of(change.status);
+        let path = change.new.or(change.old)?.path;
+        Some(Self {
+            path,
+            counts: Counts::default(),
+            renamed_from: None,
+            change: FileChangeSummary {
+                kind,
+                ..FileChangeSummary::modified()
+            },
+        })
+    }
+}
+
 /// Which version of a file a line number refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -548,6 +578,17 @@ pub enum ChangeKind {
 }
 
 impl ChangeKind {
+    /// How git classified the entry.
+    fn of(status: ChangeStatus) -> Self {
+        match status {
+            ChangeStatus::Added => Self::Added,
+            ChangeStatus::Deleted => Self::Deleted,
+            ChangeStatus::Modified => Self::Modified,
+            ChangeStatus::TypeChanged => Self::TypeChanged,
+            ChangeStatus::Renamed { .. } => Self::Renamed,
+        }
+    }
+
     /// The one-letter code `git status` uses: `A`, `D`, `M`, `R` or `T`.
     #[must_use]
     pub fn letter(self) -> char {
@@ -637,13 +678,7 @@ impl FileChangeSummary {
     }
 
     fn of(analysis: &Analysis, index: usize, file: &FileChange) -> Self {
-        let kind = match file.status {
-            ChangeStatus::Added => ChangeKind::Added,
-            ChangeStatus::Deleted => ChangeKind::Deleted,
-            ChangeStatus::Modified => ChangeKind::Modified,
-            ChangeStatus::TypeChanged => ChangeKind::TypeChanged,
-            ChangeStatus::Renamed { .. } => ChangeKind::Renamed,
-        };
+        let kind = ChangeKind::of(file.status);
         let units: Vec<&Unit> = file
             .units
             .iter()
@@ -693,10 +728,10 @@ pub struct Status {
 }
 
 impl<'h> RevisionView<'h> {
-    pub(crate) fn new(history: &'h History, number: RevisionNumber, policy: ReviewPolicy) -> Self {
+    pub(crate) fn new(history: &'h History, changes: Changes<'h>, policy: ReviewPolicy) -> Self {
         Self {
             history,
-            number,
+            changes,
             policy,
         }
     }
@@ -718,12 +753,6 @@ impl<'h> RevisionView<'h> {
         self.history
     }
 
-    /// Returns the revision's number.
-    #[must_use]
-    pub fn number(&self) -> RevisionNumber {
-        self.number
-    }
-
     /// Returns whether this revision is provisional: the working tree as captured for a live
     /// review, shown but not recorded; see [`History::is_provisional`].
     #[must_use]
@@ -736,18 +765,58 @@ impl<'h> RevisionView<'h> {
     pub fn record(&self) -> Option<&'h RevisionRecord> {
         self.data().map(|data| &data.record)
     }
+}
+
+impl<'h> std::ops::Deref for RevisionView<'h> {
+    type Target = Changes<'h>;
+
+    fn deref(&self) -> &Changes<'h> {
+        &self.changes
+    }
+}
+
+impl<'h> Changes<'h> {
+    /// The changes `analysis` found, as revision `number` has them.
+    #[must_use]
+    pub fn of(analysis: &'h Analysis, number: RevisionNumber) -> Self {
+        Self { analysis, number }
+    }
+
+    /// Returns the revision's number.
+    #[must_use]
+    pub fn number(&self) -> RevisionNumber {
+        self.number
+    }
 
     /// Returns the revision's analysis.
     #[must_use]
-    pub fn analysis(&self) -> Option<&'h Analysis> {
-        self.data().map(|data| data.analysis.as_ref())
+    pub fn analysis(&self) -> &'h Analysis {
+        self.analysis
+    }
+
+    /// Returns each changed file, with nothing counted.
+    #[must_use]
+    pub fn files(&self) -> Vec<FileStatus> {
+        self.analysis
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| FileStatus {
+                path: file.display_path().to_owned(),
+                counts: Counts::default(),
+                renamed_from: match (&file.old, &file.new) {
+                    (Some(old), Some(new)) if old.path != new.path => Some(old.path.clone()),
+                    _ => None,
+                },
+                change: FileChangeSummary::of(self.analysis, index, file),
+            })
+            .collect()
     }
 
     /// Returns the IDs of every unit, in file and position order.
     #[must_use]
     pub fn unit_ids(&self) -> Vec<UnitId> {
-        let count = self.analysis().map_or(0, |analysis| analysis.units.len());
-        (0..count)
+        (0..self.analysis.units.len())
             .map(|index| UnitId::new(self.number, UnitIndex::new(index)))
             .collect()
     }
@@ -776,9 +845,7 @@ impl<'h> RevisionView<'h> {
     /// [`Error::UnknownUnit`] for an index out of range.
     pub fn unit(&self, id: UnitId) -> Result<&'h Unit, Error> {
         let index = self.index(id)?;
-        self.analysis()
-            .and_then(|analysis| analysis.unit(index))
-            .ok_or(Error::UnknownUnit(id))
+        self.analysis.unit(index).ok_or(Error::UnknownUnit(id))
     }
 
     /// Returns the file of unit `id`.
@@ -788,9 +855,7 @@ impl<'h> RevisionView<'h> {
     /// Returns the same errors as [`Self::unit`].
     pub fn file(&self, id: UnitId) -> Result<&'h FileChange, Error> {
         let unit = self.unit(id)?;
-        self.analysis()
-            .and_then(|analysis| analysis.file_of(unit))
-            .ok_or(Error::UnknownUnit(id))
+        self.analysis.file_of(unit).ok_or(Error::UnknownUnit(id))
     }
 
     /// Returns the digest of unit `id`'s full evidence.
@@ -800,16 +865,18 @@ impl<'h> RevisionView<'h> {
     /// Returns the same errors as [`Self::unit`].
     pub fn evidence_digest(&self, id: UnitId) -> Result<String, Error> {
         let index = self.index(id)?;
-        self.analysis()
-            .and_then(|analysis| analysis.evidence_digest(index))
+        self.analysis
+            .evidence_digest(index)
             .ok_or(Error::UnknownUnit(id))
     }
+}
 
+impl RevisionView<'_> {
     /// Returns the review state of unit `id`.
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`Self::unit`].
+    /// Returns the same errors as [`Changes::unit`].
     pub fn state(&self, id: UnitId) -> Result<UnitState, Error> {
         let index = self.index(id)?;
         self.data()
@@ -823,13 +890,15 @@ impl<'h> RevisionView<'h> {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`Self::unit`].
+    /// Returns the same errors as [`Changes::unit`].
     pub fn standing(&self, id: UnitId) -> Result<Standing, Error> {
         let state = self.state(id)?;
         let unit = self.unit(id)?;
         Ok(Standing::of(state, unit.formatting_only, self.policy))
     }
+}
 
+impl Changes<'_> {
     /// Returns whether unit `id` belongs to a noise category, a formatting-only change or a
     /// plain move: the units collapsed by default.
     ///
@@ -858,9 +927,9 @@ impl<'h> RevisionView<'h> {
             return Ok(Some(Collapse::FormattingOnly));
         }
         if unit.moved
-            && let (Some(chunk), Some(analysis)) = (unit.chunk(), self.analysis())
+            && let Some(chunk) = unit.chunk()
         {
-            let covering = analysis.moves.iter().enumerate().find(|(_, found)| {
+            let covering = self.analysis.moves.iter().enumerate().find(|(_, found)| {
                 found.kind == MoveKind::Moved && found.covers(id.index(), chunk)
             });
             if let Some(found) = covering
@@ -1018,14 +1087,16 @@ impl<'h> RevisionView<'h> {
             UnitKind::File(_) => Some((entry(file.old.as_ref()), entry(file.new.as_ref()))),
         })
     }
+}
 
+impl<'h> RevisionView<'h> {
     /// Returns the interdiff of unit `id` against its last reviewed predecessor, if it is
     /// changed since reviewed; the added side compares with the text partial approvals left,
     /// when they were the last review.
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`Self::unit`].
+    /// Returns the same errors as [`Changes::unit`].
     pub fn interdiff(&self, id: UnitId) -> Result<Option<Interdiff>, Error> {
         let UnitState::ChangedSinceReviewed { reviewed, .. } = self.state(id)? else {
             return Ok(None);
@@ -1076,7 +1147,7 @@ impl<'h> RevisionView<'h> {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`Self::unit`].
+    /// Returns the same errors as [`Changes::unit`].
     pub fn since_reviewed(&self, id: UnitId) -> Result<Option<SinceReviewed<'h>>, Error> {
         let UnitState::ChangedSinceReviewed { reviewed, verdict } = self.state(id)? else {
             return Ok(None);
@@ -1198,14 +1269,13 @@ impl<'h> RevisionView<'h> {
         }
         NoteAttachment::Unit { unit: current }
     }
+}
 
+impl Changes<'_> {
     /// Returns every move of this revision.
     #[must_use]
     pub fn moves(&self) -> Vec<MoveView> {
-        let Some(analysis) = self.analysis() else {
-            return Vec::new();
-        };
-        analysis
+        self.analysis
             .moves
             .iter()
             .enumerate()
@@ -1272,10 +1342,7 @@ impl<'h> RevisionView<'h> {
     /// [`Error::MoveHasEdits`] for a move with edits.
     pub fn units_covered_by_move(&self, id: MoveId) -> Result<Vec<UnitId>, Error> {
         let found = (id.revision() == self.number)
-            .then(|| {
-                self.analysis()
-                    .and_then(|analysis| analysis.moves.get(id.index()))
-            })
+            .then(|| self.analysis.moves.get(id.index()))
             .flatten()
             .ok_or(Error::UnknownMove(id))?;
         if found.kind != MoveKind::Moved {
@@ -1302,10 +1369,7 @@ impl<'h> RevisionView<'h> {
     /// resolves through this; folder operations use [`Self::units_under`].
     #[must_use]
     pub fn units_of_file(&self, path: &str) -> Vec<UnitId> {
-        let Some(analysis) = self.analysis() else {
-            return Vec::new();
-        };
-        analysis
+        self.analysis
             .files
             .iter()
             .filter(|file| file.display_path() == path)
@@ -1317,11 +1381,8 @@ impl<'h> RevisionView<'h> {
     /// matching both the head and the base path of renamed files.
     #[must_use]
     pub fn units_under(&self, paths: &[String]) -> Vec<UnitId> {
-        let Some(analysis) = self.analysis() else {
-            return Vec::new();
-        };
         let matches = |path: &str| paths.iter().any(|node| crate::tree::is_under(path, node));
-        analysis
+        self.analysis
             .files
             .iter()
             .filter(|file| {
@@ -1393,44 +1454,36 @@ impl<'h> RevisionView<'h> {
     /// Returns an error when the unit does not exist in this revision.
     pub fn file_change(&self, unit: UnitId) -> Result<FileChangeSummary, Error> {
         let index = self.unit(unit)?.file;
-        let analysis = self.analysis().ok_or(Error::UnknownUnit(unit))?;
-        let file = analysis.files.get(index).ok_or(Error::UnknownUnit(unit))?;
-        Ok(FileChangeSummary::of(analysis, index, file))
+        let file = self
+            .analysis
+            .files
+            .get(index)
+            .ok_or(Error::UnknownUnit(unit))?;
+        Ok(FileChangeSummary::of(self.analysis, index, file))
     }
+}
 
+impl RevisionView<'_> {
     /// Returns progress counts per file and in total, under this view's policy.
     #[must_use]
     pub fn status(&self) -> Status {
-        let mut status = Status {
-            revision: self.number,
-            total: Counts::default(),
-            files: Vec::new(),
-        };
-        let Some(analysis) = self.analysis() else {
-            return status;
-        };
-        for (index, file) in analysis.files.iter().enumerate() {
-            let mut counts = Counts::default();
+        let mut total = Counts::default();
+        let mut files = self.files();
+        for (status, file) in files.iter_mut().zip(&self.analysis.files) {
             for &index in &file.units {
                 let id = self.id(index);
                 let (Ok(unit), Ok(standing)) = (self.unit(id), self.standing(id)) else {
                     continue;
                 };
-                counts.add(standing, unit, Some(file));
-                status.total.add(standing, unit, Some(file));
+                status.counts.add(standing, unit, Some(file));
+                total.add(standing, unit, Some(file));
             }
-            let renamed_from = match (&file.old, &file.new) {
-                (Some(old), Some(new)) if old.path != new.path => Some(old.path.clone()),
-                _ => None,
-            };
-            status.files.push(FileStatus {
-                path: file.display_path().to_owned(),
-                counts,
-                renamed_from,
-                change: FileChangeSummary::of(analysis, index, file),
-            });
         }
-        status
+        Status {
+            revision: self.number,
+            total,
+            files,
+        }
     }
 }
 

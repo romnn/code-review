@@ -5,8 +5,11 @@
 //! The review of its checkout holds the one grant, which covers whatever the checkout holds
 //! after later edits and branch switches until it is revoked
 //! ([`review_core::Review::checkout_review`]).
-//! The window shows one [`Trust`]: [`Trust::Checking`] while a reading or a decision is under
-//! way, during which nothing starts, then denied or granted.
+//! The window shows one [`Trust`]: [`Trust::Checking`] while a decision is under way, during
+//! which nothing starts, then denied or granted.
+//! A reading keeps the trust shown until it lands, so the status line never loses it while a
+//! snapshot's trust is read again: the engine admits a lookup only while the stored grant
+//! still applies, whatever the window shows meanwhile.
 //! A decision goes through the save queue the marks use, and quitting waits for it; once the
 //! app waits to quit, it takes no new one.
 //! One decision at most is under way, since trust is being checked until it is recorded, and
@@ -282,7 +285,7 @@ impl Model {
     }
 
     /// Asks the engine's servers in the background whether tools may run in the checkout,
-    /// which is being checked until the reading lands; see
+    /// keeping the trust shown until the reading lands; see
     /// [`Servers::check`](super::engine::Servers::check).
     pub(super) fn read_trust(&mut self) {
         // Once the engine stopped, as the app quits, nothing is trusted any more.
@@ -290,7 +293,7 @@ impl Model {
             self.take_trust(Trust::Denied);
             return;
         }
-        self.trust = Trust::Checking;
+        self.trust_rereading = true;
         let epoch = self.epoch();
         let on_disk = self.shows_checkout();
         let current = Arc::clone(&self.trust_epoch);
@@ -350,6 +353,7 @@ impl Model {
     /// servers found trust denied for.
     pub(super) fn take_trust(&mut self, trust: Trust) {
         self.trust = trust;
+        self.trust_rereading = false;
         if trust == Trust::Denied {
             self.next_epoch();
         }

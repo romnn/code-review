@@ -23,6 +23,7 @@ use super::buffer::{Definition, Lookup, Unanswered};
 use super::engine::Waiting;
 use super::live::{Captured, Missed, WaitedFor};
 use super::marks::{Marked, Refreshed};
+use super::pending::{Analyzed, Unverified, Verified};
 use super::picker::{Found, PreviewText, Query, Unchanged};
 use super::pulls::Looked;
 use super::remember::ConfigSaved;
@@ -121,7 +122,8 @@ pub(super) enum Subject {
 /// Why an outcome lands whatever changed while its job ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Because {
-    /// It opens the review, before which nothing showed.
+    /// It opens the review, before which nothing showed, or brings what the pending view of
+    /// the opened review waits for, which checks for itself that it still shows.
     Opening,
     /// It reports a save, of a mark, a decision on trust, the folded folders or a setting,
     /// which is always recorded: a failure must reach the reviewer, and quitting waits for it.
@@ -147,6 +149,10 @@ pub(super) enum Because {
 pub(super) enum Outcome {
     /// The review opened, or why it could not.
     Opened(Result<Box<Opened>, String>),
+    /// The analysis of the pending view's revision.
+    Analyzed(Box<Analyzed>),
+    /// The review verified behind the pending view, or why it could not be.
+    Verified(Result<Box<Verified>, Unverified>),
     /// File texts read in the background.
     TextsRead(TextsRead),
     /// One file's highlights, made in the background.
@@ -415,6 +421,8 @@ impl Model {
             // lands, and its landing retires it; a reading of trust that no longer counts leaves
             // the trust to whatever moved the epoch on.
             Outcome::Opened(_)
+            | Outcome::Analyzed(_)
+            | Outcome::Verified(_)
             | Outcome::Highlighted(_)
             | Outcome::TrustRead(_)
             | Outcome::Guarded(_)
@@ -463,6 +471,8 @@ impl Model {
     fn land(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Opened(opened) => self.offer_opened(opened),
+            Outcome::Analyzed(analyzed) => self.analyzed(*analyzed),
+            Outcome::Verified(verified) => self.verified(verified),
             Outcome::TextsRead(read) => self.texts_read(read),
             Outcome::Highlighted(highlighted) => self.highlighted(highlighted),
             Outcome::Compared(compared) => self.compared(*compared),

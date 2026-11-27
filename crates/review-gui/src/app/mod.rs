@@ -406,7 +406,7 @@ impl ReviewApp {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_inputs(window, cx);
         self.sync_focus(window, cx);
-        if self.starting && !matches!(self.phase, Phase::Loading(_)) {
+        if self.starting && !matches!(self.phase, Phase::Loading) {
             self.starting = false;
             self.opened(window, cx);
         }

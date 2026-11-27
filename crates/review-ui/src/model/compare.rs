@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use review_core::analysis::{FileUnit, UnitKind};
 use review_core::git::Blob;
-use review_core::{ObjectId, Review, RevisionView};
+use review_core::{ObjectId, Review};
 
 use super::Model;
 use super::effects::{Because, Outcome, Subject};
@@ -184,7 +184,7 @@ impl Model {
 
     /// Follows the selected file's pair in `view`, as its rows are laid out, and starts
     /// comparing it unless it is compared or another pair is being compared.
-    pub(super) fn follow_comparison(&mut self, view: &RevisionView<'_>) {
+    pub(super) fn follow_comparison(&mut self, view: &review_core::Changes<'_>) {
         let opaque = match (&self.folder, &self.selected) {
             (None, Some(path)) => opaque_pair(view, path),
             _ => None,
@@ -295,7 +295,7 @@ impl Model {
 
 /// The pair `path` shows in `view` when its content changed as one opaque unit and each of
 /// its versions is a regular file.
-fn opaque_pair(view: &RevisionView<'_>, path: &str) -> Option<Pair> {
+fn opaque_pair(view: &review_core::Changes<'_>, path: &str) -> Option<Pair> {
     let units = view.units_of_file(path);
     let file = view.file(*units.first()?).ok()?;
     let opaque = units.iter().any(|&unit| {

@@ -10,8 +10,9 @@
 //!
 //! The model keeps three kinds of state apart:
 //!
-//! - the [`state::Snapshot`] on screen, one revision of one history, and the file text and
-//!   highlights it shows, cached by blob identity;
+//! - the [`state::Snapshot`] on screen, one revision of one history, or before the review is
+//!   verified, the pending view of its last recorded revision (see the `pending` module), and
+//!   the file text and highlights it shows, cached by blob identity;
 //! - the workspace: the selected file, the mode that owns the keyboard, the selected hunk, folds
 //!   and scroll positions;
 //! - the marks waiting for the engine, each with the exact units and the revision they were
@@ -19,8 +20,8 @@
 //!
 //! Everything slow (git, analysis, the event log, highlighting, language servers) runs as a
 //! background [`Job`].
-//! The review, the session, the watch on the working tree and the language servers sit behind
-//! the engine handle, which only such a job reaches, so nothing on the UI thread blocks on them.
+//! The review, the watch on the working tree and the language servers sit behind the engine
+//! handle, which only such a job reaches, so nothing on the UI thread blocks on them.
 //! Its [`Completion`] names what it was computed for, and [`Driver::complete`] checks that
 //! against what shows before it lands, so no outcome can land on the wrong view.
 
@@ -32,9 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use review_core::tree::{NodeKind, TreeNode};
-use review_core::{
-    History, MarkVerdict, ObjectId, Review, ReviewMeta, ReviewTarget, RevisionNumber, UnitId,
-};
+use review_core::{History, MarkVerdict, ObjectId, Review, ReviewMeta, ReviewTarget, UnitId};
 
 use crate::frame::{Geometry, ListScroll, Scale, TextPan};
 use crate::front_end::FrontEnd;
@@ -60,6 +59,7 @@ mod live;
 mod marks;
 pub mod overview;
 mod pages;
+mod pending;
 pub mod picker;
 pub mod present;
 mod preview;
@@ -79,7 +79,8 @@ pub use actions::Action;
 use effects::{Because, Highlighted, Outcome, Subject, TextsRead};
 pub use effects::{Completion, Driver, Effect, Job, SheetStep, Updated};
 pub use fields::{Field, FieldState};
-pub use live::{Following, Replaced, abbreviated, branch_and_base};
+pub use live::{Replaced, abbreviated, branch_and_base};
+pub use pending::Checking;
 pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
 pub use select::{Hit, TextPress, list_of};
@@ -155,19 +156,16 @@ pub struct PaneLayout {
     pub sidebar_visible: bool,
 }
 
-/// An opened review with its history.
+/// An opened review, with its history unless it is the checkout's.
 pub struct Loaded {
     /// The review.
     pub review: Review,
-    /// Its revisions.
-    pub history: History,
+    /// Its revisions; `None` for the checkout's review, whose working tree the window captures
+    /// and whose history it reads behind its last recorded revision.
+    pub history: Option<History>,
     /// How the review was found, such as following the checkout's working tree, which the
     /// status line says when the review opens.
     pub found: Option<String>,
-    /// For a review of the checkout, the session it opened under and what its opening capture
-    /// saw; `None` for any other review, which starts a session of its own when it follows the
-    /// working tree.
-    pub following: Option<Following>,
 }
 
 /// Opens the review and loads its history, off the UI thread.
@@ -211,8 +209,8 @@ pub enum Overlay {
 /// Whether the review is ready to show.
 #[derive(Debug, Clone)]
 pub enum Phase {
-    /// The review is opening; the time it started.
-    Loading(Instant),
+    /// The review is opening.
+    Loading,
     /// The review is open.
     Ready,
     /// The review could not be opened.
@@ -281,7 +279,7 @@ pub(crate) struct Blobs {
 impl Blobs {
     /// Keeps only the blobs `view` shows, so a long review's earlier revisions do not stay in
     /// memory for the session.
-    fn retain_for(&mut self, view: &review_core::RevisionView<'_>) {
+    fn retain_for(&mut self, view: &rows::Source<'_>) {
         let sides: HashSet<state::SideKey> = shown_sides(view).collect();
         let shown: HashSet<&ObjectId> = sides.iter().map(|side| &side.oid).collect();
         self.texts.retain(|oid, _| shown.contains(oid));
@@ -293,7 +291,7 @@ impl Blobs {
     /// heads its chunks that changed since they were reviewed show their reviewed lines from.
     fn file_syntax(
         &self,
-        view: &review_core::RevisionView<'_>,
+        view: &rows::Source<'_>,
         file: &review_core::analysis::FileChange,
     ) -> crate::syntax::FileSyntax {
         let side = |side: Option<&review_core::analysis::EntrySide>| {
@@ -353,19 +351,14 @@ impl Blobs {
 }
 
 /// Every file version `view` shows, by blob and path, reviewed heads included.
-fn shown_sides<'a>(
-    view: &'a review_core::RevisionView<'_>,
-) -> impl Iterator<Item = state::SideKey> + 'a {
-    view.analysis()
-        .into_iter()
-        .flat_map(|analysis| &analysis.files)
-        .flat_map(|file| {
-            [file.old.as_ref(), file.new.as_ref()]
-                .into_iter()
-                .flatten()
-                .map(side_key)
-                .chain(reviewed_heads(view, file))
-        })
+fn shown_sides<'a>(view: &'a rows::Source<'_>) -> impl Iterator<Item = state::SideKey> + 'a {
+    view.analysis().files.iter().flat_map(|file| {
+        [file.old.as_ref(), file.new.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(side_key)
+            .chain(reviewed_heads(view, file))
+    })
 }
 
 fn side_key(side: &review_core::analysis::EntrySide) -> state::SideKey {
@@ -376,12 +369,15 @@ fn side_key(side: &review_core::analysis::EntrySide) -> state::SideKey {
 }
 
 /// The heads that `file`'s chunks that changed since they were reviewed show their reviewed
-/// lines from.
+/// lines from; none before the review is verified.
 fn reviewed_heads(
-    view: &review_core::RevisionView<'_>,
+    view: &rows::Source<'_>,
     file: &review_core::analysis::FileChange,
 ) -> Vec<state::SideKey> {
     let mut heads: Vec<state::SideKey> = Vec::new();
+    let Some(view) = view.review() else {
+        return heads;
+    };
     for &index in &file.units {
         if let Ok(Some(review_core::SinceReviewed::Delta(delta))) =
             view.since_reviewed(view.id(index))
@@ -407,8 +403,11 @@ pub struct Model {
     opened: Option<Result<Box<Opened>, String>>,
     /// What the open review is of: its key, repository and target.
     pub meta: Option<ReviewMeta>,
-    /// The revision on screen.
+    /// The revision on screen, once the review is verified.
     pub snapshot: Option<Snapshot>,
+    /// What shows of the checkout's review while its review state is checked, in place of a
+    /// snapshot; see the `pending` module.
+    checking: Option<pending::Pending>,
     blobs: Blobs,
     /// Blobs whose text is being read right now, so none is requested twice at once; an entry
     /// goes when its read completes, so a blob shown again after pruning is requested again.
@@ -554,6 +553,11 @@ pub struct Model {
     pdfs: pages::Pdfs,
     /// Whether language servers may run in the checkout; see the `trust` module.
     pub trust: Trust,
+    /// Whether trust is being read again, `trust` being the last reading meanwhile.
+    trust_rereading: bool,
+    /// Whether the selected file's rows, blank while its text was read, lay out with the next
+    /// frame, as anything that becomes markable does.
+    text_waits: bool,
     /// The trust epoch, which lookups check as they start a server; see the `trust` module.
     trust_epoch: Arc<AtomicU64>,
     /// Whether the watch on the grant is due, while a language server may run; see the `trust`
@@ -583,11 +587,12 @@ impl Model {
     pub fn new(settings: Settings, scale: Scale, geometry: Geometry) -> Self {
         let presented = present::opening(&settings, &scale, &geometry);
         Self {
-            phase: Phase::Loading(Instant::now()),
+            phase: Phase::Loading,
             engine: None,
             opened: None,
             meta: None,
             snapshot: None,
+            checking: None,
             blobs: Blobs::default(),
             requested: state::Outstanding::default(),
             info: None,
@@ -662,6 +667,8 @@ impl Model {
             pdfs: pages::Pdfs::default(),
             trust: Trust::Denied,
             trust_epoch: Arc::default(),
+            trust_rereading: false,
+            text_waits: false,
             guarding: false,
             trust_resumes: None,
             selection: None,
@@ -693,55 +700,59 @@ impl Model {
         }
     }
 
-    /// Shows the opened review, or why it could not be opened.
+    /// Shows the opened review, or why it could not be opened: the review verified, or the
+    /// checkout's last recorded revision while its review state is checked behind it.
     #[tracing::instrument(skip_all)]
     fn show_opened(&mut self, opened: Result<Box<Opened>, String>) {
-        match opened {
-            Ok(opened) => {
-                let opened = *opened;
-                if let Some(ignored) = opened.ignored {
-                    self.effect(Effect::Log(ignored));
-                }
-                self.info = opened.info;
-                self.sync.synced = opened.synced;
-                self.trust = opened.trust;
-                self.meta = Some(opened.meta);
-                self.engine = Some(opened.engine);
-                self.blobs.texts.extend(opened.texts);
-                self.revisions = overview::summarize(&opened.history, self.settings.policy);
-                self.shown += 1;
-                self.version = opened.history.version();
-                // The policy in use when the review shows, which the settings list may have
-                // changed while it opened.
-                self.snapshot = Some(Snapshot {
-                    history: opened.history,
-                    revision: opened.revision,
-                    policy: self.settings.policy,
-                });
-                self.effect(Effect::Title(self.title()));
-                self.phase = Phase::Ready;
-                self.refresh_tree();
-                self.restore_view_state(opened.view_state);
-                let found = match &opened.following {
-                    Some(following) => following.describe(),
-                    None => opened.found,
-                };
-                let (status, failed) =
-                    opening_status(&self.summary(), found.as_deref(), &self.settings.problems);
-                if failed {
-                    self.fail(status);
-                } else {
-                    self.set_status(status);
-                }
-                self.request_syntax();
-                self.start_clock();
-                self.start_live(opened.follows, opened.following);
-            }
+        let opened = match opened {
+            Ok(opened) => *opened,
             Err(err) => {
                 self.effect(Effect::Log(err.clone()));
                 self.status = "The review could not be opened.".to_owned();
                 self.phase = Phase::Failed(err);
+                return;
             }
+        };
+        let Opened {
+            engine,
+            meta,
+            view_state,
+            ignored,
+            found,
+            trust,
+            info,
+            synced,
+            shows,
+        } = opened;
+        if let Some(ignored) = ignored {
+            self.effect(Effect::Log(ignored));
+        }
+        self.info = info;
+        self.sync.synced = synced;
+        self.trust = trust;
+        self.meta = Some(meta);
+        self.engine = Some(engine);
+        self.effect(Effect::Title(self.title()));
+        self.phase = Phase::Ready;
+        self.start_clock();
+        match shows {
+            pending::Shows::Verified(verified) => {
+                self.show_verified(*verified, Some(view_state), found);
+            }
+            pending::Shows::Pending(first) => {
+                self.show_pending(*first, view_state, found.as_deref());
+            }
+        }
+    }
+
+    /// Says on the status line how the review opened: a configuration problem first, as a
+    /// failure, then how it was `found`, then `summary`.
+    fn say_opened(&mut self, found: Option<&str>, summary: &str) {
+        let (status, failed) = opening_status(summary, found, &self.settings.problems);
+        if failed {
+            self.fail(status);
+        } else {
+            self.set_status(status);
         }
     }
 
@@ -776,7 +787,11 @@ impl Model {
             || self.folders.busy()
             || self.diff_scroll.animating()
             || self.buffer_scroll.animating()
-            || matches!(self.phase, Phase::Loading(_))
+            || matches!(self.phase, Phase::Loading)
+            || self
+                .checking
+                .as_ref()
+                .is_some_and(pending::Pending::verifying)
     }
 
     /// The window title: the pull request or range under review, or for the checkout, its
@@ -950,10 +965,26 @@ impl Model {
         self.look().theme.as_ref()
     }
 
-    /// The shown revision's view.
+    /// Whether trust is being read again, the trust shown meanwhile being the last one read.
+    #[must_use]
+    pub fn trust_rereading(&self) -> bool {
+        self.trust_rereading
+    }
+
+    /// The shown revision's view, once the review is verified: everything that counts, folds
+    /// or approves by review state, or marks, reads it.
     #[must_use]
     pub fn view(&self) -> Option<review_core::RevisionView<'_>> {
         self.snapshot.as_ref()?.view()
+    }
+
+    /// What the tree and the diff lay out: the snapshot on screen, or before the review is
+    /// verified, the changes of its last recorded revision once they are in.
+    fn laid_out(&self) -> Option<pending::Laid> {
+        match &self.snapshot {
+            Some(snapshot) => Some(pending::Laid::Verified(snapshot.clone())),
+            None => self.checking.as_ref()?.laid_out(),
+        }
     }
 
     /// Which units need the reviewer now: the shown revision's policy, a preview's included,
@@ -1022,13 +1053,15 @@ impl Model {
         self.selection = None;
     }
 
-    /// Recomputes the file tree from the shown revision and the pending marks.
+    /// Recomputes the file tree from the shown revision and the pending marks, or before the
+    /// review is verified, from the files of its last recorded revision, which count nothing.
     #[tracing::instrument(skip_all)]
     fn refresh_tree(&mut self) {
-        let Some(view) = self.view() else {
-            return;
+        let files = match (self.view(), &self.checking) {
+            (Some(view), _) => state::statuses(&view, &self.pending),
+            (None, Some(checking)) => checking.files(),
+            (None, None) => return,
         };
-        let files = state::statuses(&view, &self.pending);
         let cursor = self.cursor_identity();
         self.tree = review_core::tree::file_tree(&files);
         self.tree_cells = crate::paint::files::tree_cells(&self.tree, self.settings.shorten_chains);
@@ -1049,10 +1082,12 @@ impl Model {
     /// Lays out the selected file's diff.
     #[tracing::instrument(skip_all)]
     fn build_selected(&mut self) {
-        let Some(snapshot) = self.snapshot.clone() else {
+        let Some(laid) = self.laid_out() else {
+            self.rows = Arc::new(Layout::default());
+            self.hunk_rows.clear();
             return;
         };
-        let Some(view) = snapshot.view() else {
+        let Some(view) = laid.source() else {
             return;
         };
         self.follow_comparison(&view);
@@ -1081,7 +1116,7 @@ impl Model {
 
     /// Builds the layout of `path`'s diff, with its text and highlights from the caches.
     #[tracing::instrument(skip_all, fields(%path))]
-    fn lay_out(&mut self, view: &review_core::RevisionView<'_>, path: &str) -> Layout {
+    fn lay_out(&mut self, view: &rows::Source<'_>, path: &str) -> Layout {
         let path = path.to_owned();
         let units = view.units_of_file(&path);
         let file = units.first().and_then(|&unit| view.file(unit).ok());
@@ -1094,6 +1129,16 @@ impl Model {
         self.folds.single_file = true;
         self.folds.pending.clone_from(&self.pending);
         if let Some(file) = file {
+            // A file whose text is still being read, or landed since the last frame, lays out
+            // nothing yet, rather than its changes alone and then again with their context.
+            if self.text_waits
+                || file
+                    .new
+                    .as_ref()
+                    .is_some_and(|side| self.requested.reading(&side.oid))
+            {
+                return Layout::default();
+            }
             if let Some(text) = file
                 .new
                 .as_ref()
@@ -1134,6 +1179,15 @@ impl Model {
         self.overlay = Some(overlay);
     }
 
+    /// `i`: opens the overview, which reads the verified review.
+    fn open_overview(&mut self) {
+        if self.checking.is_some() {
+            self.set_status(pending::WAITS);
+            return;
+        }
+        self.open_overlay(Overlay::Overview);
+    }
+
     fn close_overlay(&mut self) {
         if self.overlay == Some(Overlay::Settings) {
             self.close_settings();
@@ -1162,13 +1216,11 @@ impl Model {
         self.remember_layout();
     }
 
-    /// Whether the files show beside the diff: as the layout says once the review shows, and
-    /// never before, while there are no files.
+    /// Whether the files show beside the diff, as the layout says: from the first frame on, so
+    /// the panes keep their places as the review opens and fills them.
     #[must_use]
     pub fn sidebar_shown(&self) -> bool {
-        self.screen == Screen::Split
-            && self.layout.sidebar_visible
-            && matches!(self.phase, Phase::Ready)
+        self.screen == Screen::Split && self.layout.sidebar_visible
     }
 
     /// Sets the files pane's width, in the front end's units, as its divider is dragged; see
@@ -1250,13 +1302,14 @@ impl Model {
         if self.engine.is_none() {
             return;
         }
-        let Some(view) = self.view() else {
+        let Some(laid) = self.laid_out() else {
             return;
         };
-        let Some(analysis) = view.analysis() else {
+        let Some(view) = laid.source() else {
             return;
         };
-        let wanted: Vec<ObjectId> = analysis
+        let wanted: Vec<ObjectId> = view
+            .analysis()
             .files
             .iter()
             .filter_map(|file| file.new.as_ref())
@@ -1299,7 +1352,10 @@ impl Model {
             return;
         }
         if self.highlights.indexed_for() != Some(self.shown) {
-            let Some(view) = self.snapshot.as_ref().and_then(Snapshot::view) else {
+            let Some(laid) = self.laid_out() else {
+                return;
+            };
+            let Some(view) = laid.source() else {
                 return;
             };
             let files = highlight_files(&view);
@@ -1328,13 +1384,32 @@ impl Model {
 
     /// Takes in file texts read in the background.
     fn texts_read(&mut self, read: TextsRead) {
+        // The selected file, blank while its text was read, lays out with the next frame, so
+        // no key acts on rows no frame showed.
+        let waited = self.rows.rows.is_empty()
+            && self
+                .selected_head()
+                .is_some_and(|head| read.asked.contains(&head));
         self.blobs.texts.extend(read.texts);
         // A late answer for a revision no longer shown is not kept.
-        if let Some(view) = self.snapshot.as_ref().and_then(state::Snapshot::view) {
+        if let Some(view) = self.laid_out().as_ref().and_then(pending::Laid::source) {
             self.blobs.retain_for(&view);
         }
-        self.rebuild();
+        if waited {
+            self.text_waits = true;
+        } else {
+            self.rebuild();
+        }
         self.refresh_buffer_syntax();
+    }
+
+    /// The blob of the selected file's head, in what the diff lays out.
+    fn selected_head(&self) -> Option<ObjectId> {
+        let path = self.selected.as_deref()?;
+        let laid = self.laid_out()?;
+        let view = laid.source()?;
+        let unit = *view.units_of_file(path).first()?;
+        Some(view.file(unit).ok()?.new.as_ref()?.oid.clone())
     }
 
     /// The versions of the selected file, base and head, each under its own path: a renamed
@@ -1398,10 +1473,10 @@ impl Model {
 }
 
 /// The versions of `view`'s files that can be highlighted, in review order.
-fn highlight_files(view: &review_core::RevisionView<'_>) -> Vec<highlights::FileSides> {
+fn highlight_files(view: &rows::Source<'_>) -> Vec<highlights::FileSides> {
     view.analysis()
-        .into_iter()
-        .flat_map(|analysis| &analysis.files)
+        .files
+        .iter()
         .map(|file| highlights::FileSides {
             old: file
                 .old
@@ -1507,56 +1582,58 @@ pub(super) struct Opened {
     found: Option<String>,
     /// Whether tools may run in the checkout.
     trust: Trust,
-    /// Whether the review follows the working tree, under a session the engine holds.
-    follows: bool,
-    /// For a review of the checkout, what its opening capture saw.
-    following: Option<live::Opening>,
     info: Option<review_core::ReviewInfo>,
     /// When the review last synced with its target.
     synced: Option<review_core::Synced>,
-    history: Arc<History>,
-    /// The revision to show first, the current one.
-    revision: RevisionNumber,
-    texts: HashMap<ObjectId, Arc<rows::FullText>>,
+    /// What shows first.
+    shows: pending::Shows,
 }
 
-/// Opens the review with `opener` and reads what the window shows first, and with `live`, as
-/// `[review] live` sets it, starts the session a review of the working tree follows it under;
-/// runs in the background.
+/// Opens the review with `opener` and reads what the window shows first; with `live`, as
+/// `[review] live` sets it, a review of the working tree follows it; runs in the background.
+///
+/// The checkout's review shows its last recorded revision first, verified behind it; without
+/// one, it is verified here, behind the opening view.
 fn open(opener: Opener, live: bool) -> Result<Opened, String> {
     let Loaded {
         review,
         history,
         found,
-        following,
     } = opener()?;
-    let revision = history.current().ok_or("the review has no revision yet")?;
     let checkout = review.checkout_review().map_err(|err| live::causes(&err))?;
     let trust = tracing::info_span!("read_trust").in_scope(|| trust::trust_of(checkout.as_ref()));
-    let (session, following) = match following {
-        Some(following) => {
-            let opening = live::Opening::read(&review, &history, &following);
-            (Some(following.session), Some(opening))
-        }
-        None => (None, None),
-    };
-    // A checkout's review shows only captures, so it follows the working tree whatever the
-    // configuration says; one of the working tree against a fixed base follows it with
-    // `[review] live`.
-    let wanted = match review.target() {
-        ReviewTarget::Checkout { .. } => true,
-        ReviewTarget::Worktree { .. } => live,
-        ReviewTarget::PullRequest { .. } | ReviewTarget::Range { .. } => false,
-    };
-    let session = session.or_else(|| wanted.then(|| review.start_session()));
-    let info = review.info().ok().flatten();
-    let synced = review.synced().ok().flatten();
-    let history = Arc::new(history);
-    let texts = read_texts(&review, &history, revision);
     let (view_state, ignored) = match crate::folders::load(&review) {
         Ok(view_state) => (view_state, None),
         Err(ignored) => (crate::folders::ViewState::default(), Some(ignored)),
     };
+    let place = view_state.place.as_ref().map(|place| place.path.as_str());
+    let shows = match history {
+        // A checkout's review shows only captures, so it follows the working tree whatever the
+        // configuration says; one of the working tree against a fixed base follows it with
+        // `[review] live`.
+        Some(history) => {
+            let follows = match review.target() {
+                ReviewTarget::Checkout { .. } => true,
+                ReviewTarget::Worktree { .. } => live,
+                ReviewTarget::PullRequest { .. } | ReviewTarget::Range { .. } => false,
+            };
+            pending::Shows::Verified(Box::new(pending::Verified::of(
+                &review,
+                history,
+                follows,
+                None,
+                &HashSet::new(),
+            )?))
+        }
+        None => match pending::Pending::read(&review, place)? {
+            Some(first) => pending::Shows::Pending(Box::new(first)),
+            None => pending::Shows::Verified(Box::new(
+                pending::verify(&review, &HashSet::new()).map_err(pending::Unverified::message)?,
+            )),
+        },
+    };
+    let info = review.info().ok().flatten();
+    let synced = review.synced().ok().flatten();
     let meta = ReviewMeta {
         key: review.key().clone(),
         repo: review
@@ -1566,21 +1643,16 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
             .to_path_buf(),
         target: review.target().clone(),
     };
-    let follows = session.is_some();
     Ok(Opened {
-        engine: engine::Engine::new(review, checkout, session),
+        engine: engine::Engine::new(review, checkout),
         meta,
         view_state,
         ignored,
         found,
         trust,
-        follows,
-        following,
         info,
         synced,
-        history,
-        revision,
-        texts,
+        shows,
     })
 }
 
@@ -1608,30 +1680,29 @@ fn opening_status(summary: &str, found: Option<&str>, problems: &[String]) -> (S
     (parts.join(" · "), !problems.is_empty())
 }
 
-/// Reads the head text of every changed text file of `revision`, by blob, for context lines.
-#[tracing::instrument(skip_all)]
-fn read_texts(
+/// The head text of the regular files of `analysis` that `wanted` picks, by blob, for context
+/// lines, read from `review`'s snapshots; a file whose head is no text has none.
+#[tracing::instrument(name = "read_texts", skip_all)]
+fn head_texts(
     review: &Review,
-    history: &History,
-    revision: RevisionNumber,
+    analysis: &review_core::analysis::Analysis,
+    wanted: impl Fn(&review_core::analysis::FileChange) -> bool,
 ) -> HashMap<ObjectId, Arc<rows::FullText>> {
     let mut texts = HashMap::new();
-    let Some(analysis) = history
-        .view(revision)
-        .ok()
-        .and_then(|view| view.analysis().cloned())
-    else {
+    let sides: Vec<&review_core::analysis::EntrySide> = analysis
+        .files
+        .iter()
+        .filter(|file| wanted(file))
+        .filter_map(|file| file.new.as_ref())
+        .filter(|side| is_regular(side))
+        .collect();
+    if sides.is_empty() {
         return texts;
-    };
+    }
     let Ok(mut reader) = review.snapshots().blob_reader() else {
         return texts;
     };
-    for side in analysis
-        .files
-        .iter()
-        .filter_map(|file| file.new.as_ref())
-        .filter(|side| is_regular(side))
-    {
+    for side in sides {
         if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&side.oid)
             && is_text(&bytes)
         {

@@ -783,7 +783,7 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   refresh that recorded its revision succeeds even when the record cannot be stored, and
   `Recorded::sync_error` says why.
 - `archive/`: the review's archive, a bare git repository with every snapshot the review recorded
-  or shows and all they reach, pinned by `refs/snap/<id>` and the sessions' `refs/live/`, the
+  or shows and all they reach, the recorded ones pinned by `refs/snap/<id>`, the
   private directories captures, probes, fetches and compactions run in under `scratch/`,
   `compacted`, once a compaction of it finished, and `cutover`, once it holds every snapshot
   the log records.
@@ -841,10 +841,9 @@ Rules:
   publishes the analysis to the cache after.
   The appended event is the commit point: a revision number exists only once its event is in the log, so a crash before
   that leaves nothing to clean up but idempotent pins, which the next compaction removes.
-  Recording what a target resolves to now (`Review::refresh`) pins it under a session of its own
-  before analyzing it, and records it only while the log still ends at the revision it ended at
-  before the target was read; otherwise it reads the target again, so an older observation is
-  never recorded after a newer one.
+  Recording what a target resolves to now (`Review::refresh`) records it only while the log
+  still ends at the revision it ended at before the target was read; otherwise it reads the
+  target again, so an older observation is never recorded after a newer one.
   Background work carries the snapshot IDs it was started for, so a stale result can never replace
   a newer one.
 - **Appends are complete or absent.** A writer holds the lock across `write_all` of one
@@ -876,13 +875,13 @@ Retention keeps storage bounded by what review state needs
   record goes once nothing uses it.
 - **Only an open that has the review to itself removes anything.** Each review has a lease,
   `locks/<digest>.lock` in the data directory, named for its encoded key in lowercase, which
-  everything that uses the review holds shared: windows, commands, sessions, probes and blob
-  readers. An open that can take it exclusively without waiting removes every session's
-  pins, the archive's `scratch/`, half-written packs, what `dropped/` holds and read-only
-  `worktrees/` copies older versions made, compacts the archive when it is due, lets go, and
-  starts over as an open that maintained nothing, under the lease held shared. An open that
-  finds the review in use does none of it. Maintenance follows no symbolic link out of the
-  data directory.
+  everything that uses the review holds shared: windows, commands, probes, blob readers and
+  every job a window queued. An open that can take it exclusively without waiting removes the
+  `refs/live/` pins of captures older versions showed, the archive's `scratch/`, half-written
+  packs, what `dropped/` holds and read-only `worktrees/` copies older versions made, compacts
+  the archive when it is due, lets go, and starts over as an open that maintained nothing,
+  under the lease held shared. An open that finds the review in use does none of it.
+  Maintenance follows no symbolic link out of the data directory.
 - **Compaction stages a pack and cr installs it.** `git pack-objects` packs what the recorded
   snapshots reach, without their parents, into a directory under `scratch/`, as exactly one
   pack whatever the clone's configuration; once the snapshots are whole in that pack alone, cr
@@ -1042,16 +1041,12 @@ window's trust epoch on at the key press, as every denial the window takes in do
 lands only in the epoch it was asked in, so none from before a revocation lands
 ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 
-A capture is a synthetic commit no branch reaches, written into the review's archive, so whoever
-shows it pins it there. Each running app is a session (`Review::start_session`) that holds an
-exclusive lock on `sessions/<id>.lock` in the archive, next to the pins it guards, for its
-lifetime, and a capture pins its base and head before it returns them, deriving no history, under
-`refs/live/<session>/<capture>/` in the archive, where `<capture>` is 16 hex digits of a digest
-of the head, base and target, so two captures of one head against different bases keep their
-own pins and the ref paths stay within Windows' path length limit. A session removes only its
-own pins, those of captures it no longer shows and all of them when it ends, and another
-session's only once that session's lock file can be locked, which means it is over; it then
-removes the file too.
+A capture is a synthetic commit no branch reaches, written into the review's archive, and nothing
+pins it: the review's lease keeps it. A window holds the review, and every job it queued holds
+it from when it is queued until it ends, so a capture it shows, or one a job still reads after
+the window moved on, stays until nothing holds the review and an open that has it to itself
+compacts the archive. One capture runs at a time, so captures show in the order they were
+taken.
 
 For PR reviews, poll every 30 seconds (configurable): `git ls-remote` for the PR head and the target
 branch, and `gh pr view` for the target branch name, since a PR can be retargeted. A change of
@@ -1720,17 +1715,17 @@ belongs in `review-core`, so that the engine stays usable on its own.
   changed, and quitting once nothing is left to save) so no change can skip it, and hands it
   what jobs and timers produced through `Driver::complete`. Once the app closes,
   `Driver::update` runs nothing, so no input of any kind acts.
-- **The engine handle.** The review, the session that pins the captures on screen, the watch on
-  the working tree and the language servers sit behind one handle in `model::engine`, which the
-  model can neither look into nor clone: all it can do is queue a background job that runs with
-  them, whose outcome comes back as plain data, so no code on the UI thread compiles that blocks
-  on git, the event log or a server. The opening job assembles it, the title and paint read a
+- **The engine handle.** The review, the watch on the working tree and the language servers
+  sit behind one handle in `model::engine`, which the model can neither look into nor clone:
+  all it can do is queue a background job that runs with them, whose outcome comes back as
+  plain data, so no code on the UI thread compiles that blocks on git, the event log or a
+  server. The opening job assembles it, the title and paint read a
   plain copy of the review's `ReviewMeta`, and wherever the last holder lets go of it, whatever
   blocks to stop goes to a thread of its own
   ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 - **Quitting.** `Model::quit` queues the `Quit` effect only once the marks and decisions on trust
   queued and in flight and the folded folders are saved and then the engine stopped (its
-  language servers, its watch and its session), saying so on the status line meanwhile, and while
+  language servers and its watch), saying so on the status line meanwhile, and while
   it waits it refuses new marks and decisions on trust with a note, so what it waits for only
   shrinks. Once the engine starts to stop, the driver takes no input and no capture shows any
   more. Who asks decides what a failure does. The reviewer (`QuitKind::Interactive`: `Quit` or
@@ -1874,10 +1869,29 @@ tools copy through XWayland with a window that never shows.
   (`SIGTSTP` or `SIGSTOP`) is left to its default action and stops the app as it is; when it
   continues (`SIGCONT`), it takes the terminal again, raw mode included, and redraws it whole.
   A terminal that can no longer be drawn to, and input that ended, quit unattended too.
-- **First frame.** The first frame, the loading view, shows before the review opens: the card
-  saying it opens, the status line and the key that quits, without the files pane, the file
-  header or the review keys, which do nothing yet; an overlay opened meanwhile, such as the
-  settings, shows its own keys. Keys typed meanwhile act on it, and the review shows with the
+- **The review at once.** The checkout's review shows its last recorded revision as soon as it
+  opens, once its lease, maintenance and archive checks are done, and checks its review state
+  behind it ([ADR 13](adr/0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)).
+  This pending view reads nothing derived: the log's last complete revision record
+  (`Review::last_recorded`) and that revision's analysis when the cache holds it in this
+  version's format (`Review::cached_analysis`), or after a format change the files one
+  comparison of its trees without renames finds (`Review::changed_files`), while a job analyzes
+  the revision (`Review::analyze_recorded`). The reviewer moves between the actual files and
+  reads their changes in full, from the selection saved with the review; the files pane says
+  "Last recorded revision · checking review state", nothing counts, folds, approves or shows
+  what changed since a review, and no review key finds a unit to mark, since only a verified
+  `Snapshot` has a view. One job then verifies the review as opening did before: a confirmed
+  capture and the history, read on from what the pending view read of the log, taking the
+  analysis rather than computing it again, and its last recorded revision while git is busy or
+  cr's data is full. The analysis and the verified review each show with the next frame,
+  keeping the selected file. A review with no recorded revision opens as before, its panes
+  empty while its first capture runs, and a verification that fails says why over the pending
+  view, which stays.
+- **First frame.** The first frame shows before the review opens: the files pane and the diff
+  pane with their headers, empty, the status line saying "Opening the review…" and the key
+  that quits, without the review keys, which do nothing yet; an overlay opened meanwhile, such
+  as the settings, shows its own keys. The tree and then the diff fill the panes as they land,
+  with no card in their place. Keys typed meanwhile act on it, and the review shows with the
   frame after it opened
   ([ADR 13](adr/0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)). A review
   that could not be opened shows why, and `cr` exits with an error once the reviewer quits;

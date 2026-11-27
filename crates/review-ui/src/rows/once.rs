@@ -977,13 +977,7 @@ mod tests {
             let (_dir, review) = super::super::tests::demo_review(revision);
             let history = review.history().unwrap();
             let view = history.current_view().unwrap();
-            for chunk in view
-                .analysis()
-                .unwrap()
-                .units
-                .iter()
-                .filter_map(|unit| unit.chunk())
-            {
+            for chunk in view.analysis().units.iter().filter_map(|unit| unit.chunk()) {
                 let (inserted, deleted) = read_back(chunk);
                 inserting += inserted;
                 deleting += deleted;

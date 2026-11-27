@@ -329,15 +329,13 @@ fn assign_steps(
     let mut referenced = Vec::new();
     for (step_index, step) in walkthrough.steps.iter().enumerate() {
         for stored in &step.units {
-            let resolved = analysis.and_then(|analysis| {
-                if analysis.evidence_digest(stored.unit).as_deref()
-                    == Some(stored.evidence.as_str())
-                {
-                    Some(stored.unit)
-                } else {
-                    analysis.find_by_digest(&stored.evidence)
-                }
-            });
+            let resolved = if analysis.evidence_digest(stored.unit).as_deref()
+                == Some(stored.evidence.as_str())
+            {
+                Some(stored.unit)
+            } else {
+                analysis.find_by_digest(&stored.evidence)
+            };
             let origin = resolved.and_then(|unit| origins.get_mut(unit.get()));
             match (resolved, origin) {
                 (Some(unit), Some(origin)) => {

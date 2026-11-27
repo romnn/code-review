@@ -111,8 +111,10 @@ impl Model {
         }
     }
 
-    /// What the review keys act on now.
+    /// What the review keys act on now: nothing before the review is verified, so no repeat of
+    /// a key pressed on the pending view acts once the verified review shows.
     fn aim(&self) -> Option<Aim> {
+        self.snapshot.as_ref()?;
         if let Some(hunk) = self.target_hunk() {
             return Some(match &hunk.change {
                 Some(change) => Aim::Change(change.clone()),

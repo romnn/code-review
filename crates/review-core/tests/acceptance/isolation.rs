@@ -1,6 +1,6 @@
-//! The reviewed repository is only ever read: captures, pins, sessions, fetches and the clone's
-//! identity live in cr's data, and what a review recorded stays readable whatever happens to
-//! the repository afterwards.
+//! The reviewed repository is only ever read: captures, pins, fetches and the clone's identity
+//! live in cr's data, and what a review recorded stays readable whatever happens to the
+//! repository afterwards.
 
 use color_eyre::eyre;
 use googletest::prelude::*;
@@ -88,8 +88,7 @@ fn the_reviewed_repository_is_never_written() -> eyre::Result<()> {
             .collect::<eyre::Result<Vec<String>>>()?;
         expect_that!(paths, each(starts_with("src/")));
         review.mark(&view, &view.unit_ids(), MarkVerdict::Accepted)?;
-        let session = review.start_session();
-        let captured = review.live_history(&session, &[], &[])?;
+        let captured = review.live_history(&[])?;
         expect_true!(matches!(captured, Capture::Captured(_)));
         review.set_trusted(true)?;
         expect_true!(review.trusted()?);

@@ -275,7 +275,7 @@ mod tests {
 
         let history = Review::load(recorded.data.path(), recorded.review.key())?.history()?;
         let view = history.current_view()?;
-        let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+        let analysis = view.analysis();
         for unit in view.unit_ids() {
             let changed_again = analysis
                 .unit(unit.index())

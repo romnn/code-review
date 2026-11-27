@@ -206,7 +206,11 @@ impl Model {
     pub(super) fn open_picker(&mut self, kind: Kind) {
         let (Some(snapshot), Some(record)) = (self.snapshot.as_ref(), self.revision_record())
         else {
-            self.set_status("The review is not open yet.");
+            self.set_status(if self.checking.is_some() {
+                super::pending::WAITS
+            } else {
+                "The review is not open yet."
+            });
             return;
         };
         let revision = snapshot.revision;
@@ -263,14 +267,10 @@ impl Model {
         // Each changed file's head blob by display path, in one pass over the analysis.
         let heads: HashMap<&str, &ObjectId> = view
             .analysis()
-            .map(|analysis| {
-                analysis
-                    .files
-                    .iter()
-                    .filter_map(|file| Some((file.display_path(), &file.new.as_ref()?.oid)))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .files
+            .iter()
+            .filter_map(|file| Some((file.display_path(), &file.new.as_ref()?.oid)))
+            .collect();
         self.tree
             .iter()
             .filter(|node| node.kind == NodeKind::File)

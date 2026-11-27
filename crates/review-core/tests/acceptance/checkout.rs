@@ -9,11 +9,10 @@ use googletest::prelude::*;
 use indoc::formatdoc;
 use review_core::github::{BranchPullRequest, CheckoutPullRequest, PullRequestState, Repository};
 use review_core::{
-    BaseRef, Busy, Capture, Error, LiveCapture, MarkVerdict, ObjectId, Repo, Review, Session,
-    UnitState,
+    BaseRef, Busy, Capture, Error, LiveCapture, MarkVerdict, ObjectId, Repo, Review, UnitState,
 };
 
-use crate::common::{GIT_ENV, TestRepo, find, git_in, summaries};
+use crate::common::{GIT_ENV, TestRepo, find, summaries};
 
 /// Three functions apart from each other, with the bodies given.
 fn three_functions(a: &str, b: &str, c: &str) -> String {
@@ -85,14 +84,9 @@ fn open(test: &TestRepo) -> eyre::Result<Review> {
     )?)
 }
 
-/// Captures the working tree for `session` with the pull requests `found` for branches,
-/// keeping no earlier capture.
-fn capture_with(
-    review: &Review,
-    session: &Session,
-    found: &[CheckoutPullRequest],
-) -> eyre::Result<LiveCapture> {
-    match review.live_history(session, &[], found)? {
+/// Captures the working tree with the pull requests `found` for branches.
+fn capture_with(review: &Review, found: &[CheckoutPullRequest]) -> eyre::Result<LiveCapture> {
+    match review.live_history(found)? {
         Capture::Captured(captured) => Ok(*captured),
         Capture::Busy(busy) => eyre::bail!("git is busy: {busy}"),
         Capture::Moved => eyre::bail!("the repository moved during the capture"),
@@ -100,9 +94,9 @@ fn capture_with(
     }
 }
 
-/// Captures the working tree for `session`, without a pull request.
-fn capture(review: &Review, session: &Session) -> eyre::Result<LiveCapture> {
-    capture_with(review, session, &[])
+/// Captures the working tree, without a pull request.
+fn capture(review: &Review) -> eyre::Result<LiveCapture> {
+    capture_with(review, &[])
 }
 
 /// The state of the one unit of the capture's current revision that adds `needle`.
@@ -133,10 +127,9 @@ fn accept_all(review: &Review, captured: &LiveCapture) -> eyre::Result<()> {
 fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<()> {
     let (test, forge) = with_remote()?;
     let review = open(&test)?;
-    let session = review.start_session();
 
     // A clean default branch level with its remote has nothing to review, and says so.
-    let clean = capture(&review, &session)?;
+    let clean = capture(&review)?;
     expect_that!(unit_count(&clean)?, eq(0));
     expect_that!(clean.subject.branch.as_deref(), some(eq("main")));
     expect_that!(
@@ -149,13 +142,13 @@ fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<
 
     // An edit shows, and marking it records it.
     test.write("lib.rs", &three_functions("one();", "", ""))?;
-    let edited = capture(&review, &session)?;
+    let edited = capture(&review)?;
     expect_that!(state_of(&edited, "one();")?, eq(UnitState::New));
     accept_all(&review, &edited)?;
 
     // Committing it changes the snapshots, not the code: the mark holds.
     test.commit("one")?;
-    let committed = capture(&review, &session)?;
+    let committed = capture(&review)?;
     expect_that!(
         state_of(&committed, "one();")?,
         matches_pattern!(UnitState::Reviewed { .. })
@@ -164,7 +157,7 @@ fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<
     // So does moving the work to a new branch, with the default branch put back.
     test.git(&["checkout", "--quiet", "-b", "feat"])?;
     test.git(&["branch", "--force", "main", "origin/main"])?;
-    let branched = capture(&review, &session)?;
+    let branched = capture(&review)?;
     expect_that!(branched.subject.branch.as_deref(), some(eq("feat")));
     expect_that!(
         state_of(&branched, "one();")?,
@@ -173,7 +166,7 @@ fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<
 
     // And renaming the branch; a mark there records the revision with what it was taken of.
     test.git(&["branch", "--move", "feat", "feature"])?;
-    let renamed = capture(&review, &session)?;
+    let renamed = capture(&review)?;
     expect_that!(renamed.subject.branch.as_deref(), some(eq("feature")));
     expect_that!(
         state_of(&renamed, "one();")?,
@@ -194,7 +187,7 @@ fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<
     // Unrelated work on another branch is new.
     test.git(&["checkout", "--quiet", "-b", "other", "origin/main"])?;
     test.write("other.rs", "fn other() { two(); }\n")?;
-    let other = capture(&review, &session)?;
+    let other = capture(&review)?;
     expect_that!(state_of(&other, "two();")?, eq(UnitState::New));
     expect_that!(unit_count(&other)?, eq(1));
     test.commit("other")?;
@@ -226,7 +219,7 @@ fn one_review_follows_the_checkout_through_a_branch_lifecycle() -> eyre::Result<
     test.git(&["fetch", "--quiet", "origin"])?;
     test.git(&["checkout", "--quiet", "main"])?;
     test.git(&["merge", "--quiet", "--ff-only", "origin/main"])?;
-    let landed = capture(&review, &session)?;
+    let landed = capture(&review)?;
     expect_that!(unit_count(&landed)?, eq(0));
     expect_that!(landed.subject.branch.as_deref(), some(eq("main")));
     Ok(())
@@ -238,8 +231,7 @@ fn an_unborn_branch_is_reviewed_against_the_empty_tree() -> eyre::Result<()> {
     let test = TestRepo::new()?;
     test.write("lib.rs", "fn first() {}\n")?;
     let review = open(&test)?;
-    let session = review.start_session();
-    let captured = capture(&review, &session)?;
+    let captured = capture(&review)?;
     expect_that!(captured.subject.head, none());
     expect_that!(captured.subject.branch.as_deref(), some(eq("main")));
     expect_that!(
@@ -265,8 +257,7 @@ fn no_default_branch_compares_with_the_empty_tree() -> eyre::Result<()> {
     test.commit("first")?;
     test.git(&["branch", "--move", "main", "trunk"])?;
     let review = open(&test)?;
-    let session = review.start_session();
-    let captured = capture(&review, &session)?;
+    let captured = capture(&review)?;
     expect_that!(
         captured.subject.base,
         eq(&BaseRef::Empty { unrelated: None })
@@ -304,8 +295,7 @@ fn a_shallow_clone_says_its_history_is_shallow() -> eyre::Result<()> {
 
     let data = tempfile::tempdir()?;
     let review = Review::open_checkout(data.path(), Repo::discover(&clone)?)?;
-    let session = review.start_session();
-    let captured = capture(&review, &session)?;
+    let captured = capture(&review)?;
     expect_that!(
         captured.subject.base,
         eq(&BaseRef::Shallow {
@@ -329,14 +319,13 @@ fn nothing_is_captured_while_git_is_busy() -> eyre::Result<()> {
     let (test, _forge) = with_remote()?;
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     let review = open(&test)?;
-    let session = review.start_session();
     for (marker, busy) in [
         ("MERGE_HEAD", Busy::Merge),
         ("index.lock", Busy::IndexLocked),
     ] {
         let path = test.path().join(".git").join(marker);
         std::fs::write(&path, "")?;
-        let captured = review.live_history(&session, &[], &[])?;
+        let captured = review.live_history(&[])?;
         expect_true!(matches!(captured, Capture::Busy(found) if found == busy));
         expect_that!(
             review.refresh(),
@@ -345,7 +334,7 @@ fn nothing_is_captured_while_git_is_busy() -> eyre::Result<()> {
         std::fs::remove_file(&path)?;
     }
     expect_that!(review.history()?.revisions().len(), eq(0));
-    expect_that!(unit_count(&capture(&review, &session)?)?, eq(1));
+    expect_that!(unit_count(&capture(&review)?)?, eq(1));
     Ok(())
 }
 
@@ -366,8 +355,7 @@ fn another_clone_at_the_same_path_is_another_review() -> eyre::Result<()> {
     let second = open(&test)?;
     expect_that!(second.key(), not(eq(first.key())));
     expect_false!(first.verify_clone()?);
-    let session = first.start_session();
-    let captured = first.live_history(&session, &[], &[])?;
+    let captured = first.live_history(&[])?;
     expect_true!(matches!(captured, Capture::Replaced));
     expect_that!(first.refresh(), err(matches_pattern!(Error::CloneReplaced)));
     Ok(())
@@ -431,7 +419,7 @@ fn the_tree_on_disk_is_what_a_capture_records() -> eyre::Result<()> {
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     test.write("new.rs", "fn new() {}\n")?;
     let review = open(&test)?;
-    let captured = capture(&review, &review.start_session())?;
+    let captured = capture(&review)?;
     let head = captured
         .history
         .revisions()
@@ -453,61 +441,6 @@ fn the_tree_on_disk_is_what_a_capture_records() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A session removes only its own pins as it ends, and the pins of one that died go with the
-/// next open that has the review to itself, never while anything has it open.
-#[gtest]
-fn sessions_remove_only_their_own_pins() -> eyre::Result<()> {
-    let (test, _forge) = with_remote()?;
-    test.write("lib.rs", &three_functions("one();", "", ""))?;
-    let review = open(&test)?;
-    let live = review.start_session();
-    let captured = capture(&review, &live)?;
-    let head = captured
-        .history
-        .revisions()
-        .last()
-        .ok_or_else(|| eyre::eyre!("no capture"))?
-        .head
-        .clone();
-    let archive = review.snapshots().git_dir().to_path_buf();
-    let pins = |prefix: &str| -> eyre::Result<usize> {
-        Ok(
-            git_in(&archive, &["for-each-ref", "--format=%(refname)", prefix])?
-                .lines()
-                .count(),
-        )
-    };
-    expect_that!(pins(live.pins())?, gt(0));
-
-    // A session that died without removing its pins.
-    let live_root = live
-        .pins()
-        .rsplit_once('/')
-        .map(|(root, _)| root.to_owned())
-        .ok_or_else(|| eyre::eyre!("no live root"))?;
-    let dead = format!("{live_root}/0123456789abcdef");
-    git_in(
-        &archive,
-        &["update-ref", &format!("{dead}/{head}/head"), head.as_str()],
-    )?;
-    open(&test)?;
-    expect_that!(pins(&dead)?, gt(0));
-
-    // An ending session removes its own pins, never another's.
-    let other = review.start_session();
-    capture(&review, &other)?;
-    expect_that!(pins(other.pins())?, gt(0));
-    let other_pins = other.pins().to_owned();
-    drop(other);
-    expect_that!(pins(&other_pins)?, eq(0));
-    expect_that!(pins(live.pins())?, gt(0));
-
-    drop((live, review));
-    open(&test)?;
-    expect_that!(pins(&live_root)?, eq(0));
-    Ok(())
-}
-
 /// An open pull request for the branch decides the base: its base branch on the remote of its
 /// base repository, and while that is not fetched, the default branch, saying so.
 #[gtest]
@@ -516,7 +449,6 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
     test.git(&["checkout", "--quiet", "-b", "feature"])?;
     test.write("lib.rs", &three_functions("one();", "", ""))?;
     let review = open(&test)?;
-    let session = review.start_session();
     let mut found = BranchPullRequest {
         number: 7,
         url: "https://example.invalid/owner/repo/pull/7".to_owned(),
@@ -540,7 +472,7 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
         })
     };
 
-    let missing = capture_with(&review, &session, &[found_for("feature", &found)?])?;
+    let missing = capture_with(&review, &[found_for("feature", &found)?])?;
     expect_that!(
         missing.subject.missing_base.as_deref(),
         some(eq("origin/develop"))
@@ -563,7 +495,6 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
     found.head_branch = "named-otherwise-upstream".to_owned();
     let fetched = capture_with(
         &review,
-        &session,
         &[found_for("other", &other)?, found_for("feature", &found)?],
     )?;
     expect_that!(fetched.subject.missing_base, none());
@@ -594,7 +525,7 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
 
     // A merged pull request no longer decides the base.
     found.state = PullRequestState::Merged;
-    let merged = capture_with(&review, &session, &[found_for("feature", &found)?])?;
+    let merged = capture_with(&review, &[found_for("feature", &found)?])?;
     expect_that!(
         merged.subject.base,
         matches_pattern!(BaseRef::RemoteDefault { .. })
@@ -604,7 +535,7 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
     let before = found_for("feature", &found)?;
     test.git(&["config", "branch.feature.remote", "origin"])?;
     test.git(&["config", "branch.feature.merge", "refs/heads/someone-else"])?;
-    let repointed = capture_with(&review, &session, &[before])?;
+    let repointed = capture_with(&review, &[before])?;
     expect_that!(repointed.subject.pull_request, none());
     Ok(())
 }

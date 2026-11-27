@@ -7,7 +7,7 @@ use review_core::{ChangeKind, ReviewInfo, ReviewTarget};
 use super::display::display_width;
 use super::{Bar, Palette, Piece, Room, Weight};
 use crate::color::Hsla;
-use crate::model::Model;
+use crate::model::{Model, Phase};
 use crate::scroll::float;
 use crate::state::Progress;
 
@@ -75,12 +75,20 @@ pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
     }
 }
 
-/// The header of a review of the checkout, once a capture shows: the branch's pull request's
-/// number, the branch with its base, such as `feat/x → origin/main`, led by the pull request's
-/// state once it is merged or closed, and the branch alone for when that does not fit.
+/// The header of a review of the checkout: before its review state is checked, that it shows
+/// its last recorded revision; once a capture shows, the branch's pull request's number, the
+/// branch with its base, such as `feat/x → origin/main`, led by the pull request's state once
+/// it is merged or closed, and the branch alone for when that does not fit.
 fn checkout_heading(model: &Model) -> Option<(Option<u64>, String, Option<String>)> {
     if !model.is_checkout() {
         return None;
+    }
+    if model.checking().is_some() {
+        return Some((
+            None,
+            "Last recorded revision · checking review state".to_owned(),
+            Some("checking review state".to_owned()),
+        ));
     }
     let live = model.live_state()?;
     let Some(subject) = live.subject else {
@@ -303,8 +311,29 @@ pub struct ProgressLine {
 
 /// The files pane's two progress lines, files then hunks, with the parts that fit `room`; the
 /// hunks approved automatically fill the end of their bar in a quieter color.
+///
+/// Before the review state is checked, nothing counts, so each line says so instead, and
+/// before the review opens, each line is only its label.
 #[must_use]
 pub fn progress_lines(model: &Model, palette: &Palette, room: Room) -> [ProgressLine; 2] {
+    if matches!(model.phase, Phase::Loading) {
+        let line = |label| ProgressLine {
+            label: Some(Piece::new(label, palette.dim)),
+            bar: None,
+            counts: Piece::new("", palette.faint),
+            percent: None,
+        };
+        return [line("files"), line("hunks")];
+    }
+    if model.checking().is_some() {
+        let line = |label| ProgressLine {
+            label: Some(Piece::new(label, palette.dim)),
+            bar: None,
+            counts: Piece::new("checking…", palette.faint),
+            percent: None,
+        };
+        return [line("files"), line("hunks")];
+    }
     let (reviewed, total) = model.totals();
     let (files_done, files) = model.file_totals();
     let counts = count_width(&[(files_done, files), (reviewed, total)]);

@@ -60,13 +60,18 @@ pub fn state(model: &Model, screen: &dyn Screen) -> Value {
     answer.insert("status".to_owned(), json!(model.status));
     answer.insert("comparison".to_owned(), comparison(model));
     answer.insert("pages".to_owned(), json!(model.page_navigator()));
+    // Nothing counts before the review state is checked.
     answer.insert(
         "progress".to_owned(),
-        json!({
-            "files": model.file_totals(),
-            "hunks": model.totals(),
-            "auto_approved": model.auto_approved(),
-        }),
+        if model.checking().is_some() {
+            Value::Null
+        } else {
+            json!({
+                "files": model.file_totals(),
+                "hunks": model.totals(),
+                "auto_approved": model.auto_approved(),
+            })
+        },
     );
     let palette = Palette::of(model);
     let header = files::files_header(model, &palette);
@@ -104,14 +109,21 @@ fn put_review(answer: &mut Map<String, Value>, model: &Model) {
         (
             "phase",
             json!(match &model.phase {
-                Phase::Loading(_) => "loading".to_owned(),
+                Phase::Loading => "loading".to_owned(),
+                // The last recorded revision shows while the review state is checked.
+                Phase::Ready if model.checking().is_some() => "checking".to_owned(),
                 Phase::Ready => "ready".to_owned(),
                 Phase::Failed(err) => format!("failed: {err}"),
             }),
         ),
         (
             "revision",
-            json!(snapshot.map(|snapshot| snapshot.revision.to_string())),
+            json!(
+                snapshot
+                    .map(|snapshot| snapshot.revision)
+                    .or(model.checking().map(|checking| checking.record.number))
+                    .map(|revision| revision.to_string())
+            ),
         ),
         (
             "newer",

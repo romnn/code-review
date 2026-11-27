@@ -707,8 +707,15 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let order = review_core::walkthrough::partition(&view).order();
-        let folds = with_texts(&build(&view, &order, &Folds::default()), "head-2");
-        let unified = build(&view, &order, &folds);
+        let folds = with_texts(
+            &build(
+                &crate::rows::Source::Verified(view),
+                &order,
+                &Folds::default(),
+            ),
+            "head-2",
+        );
+        let unified = build(&crate::rows::Source::Verified(view), &order, &folds);
         // An unchanged line shows on both halves; its left copy counts.
         let lines = |kinds: &[RowKind], rows: &[Row]| -> Vec<String> {
             rows.iter()
@@ -838,7 +845,14 @@ mod tests {
         let history = review.history().unwrap();
         let view = history.current_view().unwrap();
         let order = review_core::walkthrough::partition(&view).order();
-        let shown = present(build(&view, &order, &Folds::default()), SIDE_BY_SIDE);
+        let shown = present(
+            build(
+                &crate::rows::Source::Verified(view),
+                &order,
+                &Folds::default(),
+            ),
+            SIDE_BY_SIDE,
+        );
         let note = shown
             .rows
             .iter()
@@ -905,7 +919,10 @@ mod tests {
             layout: DiffLayout::SideBySide,
             ..Folds::default()
         };
-        let shown = present(build(&view, &order, &folds), SIDE_BY_SIDE);
+        let shown = present(
+            build(&crate::rows::Source::Verified(view), &order, &folds),
+            SIDE_BY_SIDE,
+        );
         let pairs: Vec<&Pair> = shown
             .rows
             .iter()

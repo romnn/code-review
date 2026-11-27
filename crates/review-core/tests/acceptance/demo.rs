@@ -108,7 +108,7 @@ fn demo_covers_every_feature() -> eyre::Result<()> {
     let review = prepare(&paths, &fixture_dir(), DemoRequest::Fresh)?;
     let history = review.history()?;
     let view = history.current_view()?;
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     let path_of = |file: usize| {
         analysis
             .files

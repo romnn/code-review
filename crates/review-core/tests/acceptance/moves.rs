@@ -90,7 +90,7 @@ fn function_moved_to_another_file_is_one_move() -> eyre::Result<()> {
     assert_that!(moves[0].kind, eq(MoveKind::Moved));
     assert_that!(moves[0].source.location.path.as_str(), eq("a.rs"));
     assert_that!(moves[0].target.location.path.as_str(), eq("b.rs"));
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert!(analysis.units.iter().all(|unit| unit.moved));
 
     // Acknowledging the move marks both units, and nothing else.
@@ -154,7 +154,7 @@ fn copied_block_is_one_move_and_one_addition() -> eyre::Result<()> {
     let moves = view.moves();
     assert_that!(moves.len(), eq(1));
     assert_that!(moves[0].kind, eq(MoveKind::Moved));
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     let covered = analysis.units.iter().filter(|unit| unit.moved).count();
     assert_that!(covered, eq(2));
     assert_that!(analysis.units.len(), eq(3));
@@ -208,7 +208,7 @@ fn moved_block_with_edit_is_expanded() -> eyre::Result<()> {
         moves[0].source.location.end_line - moves[0].source.location.line,
         eq(6)
     );
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert!(analysis.units.iter().all(|unit| !unit.moved));
     assert!(matches!(
         review.acknowledge_move(&view, moves[0].id),
@@ -259,7 +259,7 @@ fn renested_yaml_block_is_not_a_plain_move() -> eyre::Result<()> {
     let view = history.current_view()?;
     let kinds: Vec<MoveKind> = view.moves().iter().map(|found| found.kind).collect();
     assert_that!(kinds, elements_are![eq(&MoveKind::MovedWithEdits)]);
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert!(
         analysis
             .units
@@ -450,7 +450,7 @@ fn code_crossing_only_a_closing_line_is_no_move() -> eyre::Result<()> {
     )?;
     let history = review.history()?;
     let view = history.current_view()?;
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert_that!(
         analysis
             .units
@@ -595,7 +595,7 @@ fn a_chunk_two_moves_cover_together_is_not_folded() -> eyre::Result<()> {
     let moves = view.moves();
     assert_that!(moves.len(), eq(2));
     assert!(moves.iter().all(|found| found.kind == MoveKind::Moved));
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     let destination = view
         .units_of_file("b.rs")
         .into_iter()
@@ -692,7 +692,7 @@ fn a_copy_of_reformatted_code_is_no_move() -> eyre::Result<()> {
     )?;
     let history = review.history()?;
     let view = history.current_view()?;
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert!(
         view.units_of_file("a.rs").iter().all(|unit| analysis
             .unit(unit.index())
@@ -846,7 +846,7 @@ fn move_source_uses_old_path_after_rename() -> eyre::Result<()> {
     refresh(&review)?;
     let history = review.history()?;
     let view = history.current_view()?;
-    let analysis = view.analysis().ok_or_else(|| eyre::eyre!("no analysis"))?;
+    let analysis = view.analysis();
     assert!(
         analysis
             .files
