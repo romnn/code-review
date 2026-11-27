@@ -193,6 +193,14 @@ enum Command {
         #[command(subcommand)]
         command: WalkthroughCommand,
     },
+    /// Drop a review: its revisions, marks, notes and snapshots, also once its checkout is
+    /// gone.
+    ///
+    /// Refused while the review is open, in a window or another command.
+    Drop {
+        /// The review's key, as `--review` takes it.
+        review: String,
+    },
     /// Poll for new revisions and print what changed.
     Watch {
         /// Seconds between polls.
@@ -285,6 +293,7 @@ fn main() -> eyre::Result<()> {
                 commands::walkthrough_show(&context, revision.as_ref())
             }
         },
+        Command::Drop { review } => commands::drop_review(&context, &review),
         Command::Watch { interval, count } => commands::watch(&context, interval, count),
     }
 }

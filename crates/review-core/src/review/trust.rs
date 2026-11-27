@@ -89,8 +89,8 @@ impl Review {
     /// Returns the tree the checkout's working tree holds now, as a capture would record it,
     /// with every filter driver off, recording and pinning nothing.
     ///
-    /// It takes the capture's path, writing the tree into the archive, where nothing refers to
-    /// it.
+    /// It takes the capture's path, but what it imports and writes goes with the directory it
+    /// works in, so it adds nothing to the archive.
     ///
     /// # Errors
     ///

@@ -92,11 +92,12 @@ state.
 - **A lookup checks the disk before the question and after the answer.** The lookup job compares
   the tree of the head the last frame showed with a capture of the working tree taken now, with
   every filter off, recording and pinning nothing, refused while git is busy
-  (`Review::tree_on_disk`); the capture takes the path every capture takes, writing its tree into
-  the archive of the checkout's review and nothing into the checkout. Code that is not on disk is
-  refused before any server is asked, and on an untrusted checkout before the trust question, so
-  the reviewer never grants trust for a lookup that cannot run; an answer is dropped when the
-  disk, the view or the trust changed while it ran. The file asked about must hold on disk the
+  (`Review::tree_on_disk`); the capture takes the path every capture takes, writing what it
+  needs into an object database of its own that reads the archive of the checkout's review and
+  goes with it, so it adds nothing to the archive and nothing to the checkout. Code that is not
+  on disk is refused before any server is asked, and on an untrusted checkout before the trust
+  question, so the reviewer never grants trust for a lookup that cannot run; an answer is
+  dropped when the disk, the view or the trust changed while it ran. The file asked about must hold on disk the
   text on screen, so the cursor's line and column name the same bytes, which a file git keeps at
   its staged version under a filter, or one a sparse checkout leaves off disk, need not. A
   definition in a file of the snapshot on screen must hold on disk the text of its blob there, for
@@ -174,7 +175,8 @@ state.
 - Go to definition is unavailable for pull requests that are not checked out, ranges and older
   revisions; their reviews read the code from git objects as before. Nothing is copied: no data
   directory grows by a copy of the sources per snapshot, and the read-only copies older versions
-  left stay until removed, but for the demo, which removes them as it rebuilds.
+  left go when an open has their review to itself, and as the demo rebuilds
+  ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)).
 - rust-analyzer builds in the checkout's target directory, so its builds share the project's
   build state and its lock with the reviewer's own Cargo runs.
 - A lookup reads the working tree's tree twice, each as long as a capture's look at it takes,

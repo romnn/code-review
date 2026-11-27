@@ -15,22 +15,24 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{Review, cached_analysis, cached_correspondence, revision_events};
-use crate::analysis::analyze;
-use crate::correspond::correspond;
+use serde::Deserialize;
+
+use super::{Review, cached_analysis, revision_events};
+use crate::analysis::{ANALYSIS_FORMAT, Analysis, analyze};
+use crate::correspond::{Link, Renames, correspond_with};
 use crate::error::Error;
 use crate::git::{PrivateRepo, Repo};
 use crate::history::{History, HistoryInput, Links};
 use crate::ids::ObjectId;
-use crate::store::ReviewDir;
 use crate::store::events::Event;
 use crate::store::log::{self, LockGuard, Prefix};
+use crate::store::{self, ReviewDir};
 
 /// The file whose presence says the review moved into its archive.
-const CUTOVER: &str = "cutover";
+pub(super) const CUTOVER: &str = "cutover";
 
 impl Review {
-    /// Opens the archive of the review in `dir`, under its `lock`, creating it on first use,
+    /// Opens the archive of the review in `dir` under its `lock`, creating it on first use,
     /// importing from `repo` every snapshot the log records whose commit it lacks, and pinning
     /// every one it does not pin.
     ///
@@ -110,9 +112,10 @@ pub(super) fn pin_ref(oid: &ObjectId) -> String {
     format!("refs/snap/{oid}")
 }
 
-/// Derives the history of `events`, read up to `prefix`, from `repo`'s objects, with the
-/// analyses and correspondences the cache in `cache` holds where there is one, and writing
-/// nothing.
+/// Derives the history of `events`, read up to `prefix`, from `repo`'s objects, writing
+/// nothing: with the cache in `cache`, as versions before the archive derived it, the
+/// analyses and the links it holds read as they wrote them and renames found as git's
+/// configuration has them, and without, as a review derives it from its archive.
 fn replay(
     repo: &Repo,
     cache: Option<&ReviewDir>,
@@ -136,17 +139,45 @@ fn replay(
         links: &|_, older, newer| {
             let span = tracing::info_span!("links", cached = tracing::field::Empty);
             let _entered = span.enter();
-            let cached = cache.and_then(|dir| cached_correspondence(dir, older, newer));
+            let cached = cache.and_then(|dir| legacy_links(dir, older, newer));
             span.record("cached", cached.is_some());
-            let correspondence = match cached {
+            let renames = match cache {
+                Some(_) => Renames::Configured,
+                None => Renames::Fixed,
+            };
+            let links = match cached {
                 Some(cached) => cached,
-                None => correspond(repo, older, newer)?,
+                None => correspond_with(repo, older, newer, renames)?.links,
             };
             Ok(Arc::new(Links::new(
-                &correspondence,
+                &links,
                 older.units.len(),
                 newer.units.len(),
             )))
         },
     })
+}
+
+/// The correspondence format of the versions before the archive.
+const LEGACY_CORRESPONDENCE_FORMAT: u32 = 3;
+
+/// A correspondence as the versions before the archive cached it, naming the format of the
+/// analyses whose units it links.
+#[derive(Deserialize)]
+struct LegacyCorrespondence {
+    format: u32,
+    analysis_format: u32,
+    links: Vec<Link>,
+}
+
+/// The links between `older` and `newer` a version before the archive cached in `dir`, when it
+/// cached them for analyses of this version's format: what the reviewer saw, which the move into
+/// the archive compares with.
+fn legacy_links(dir: &ReviewDir, older: &Analysis, newer: &Analysis) -> Option<Vec<Link>> {
+    let path = dir.correspondence([&older.base, &older.head], [&newer.base, &newer.head]);
+    let legacy = store::read_json::<LegacyCorrespondence>(&path)
+        .ok()
+        .flatten()?;
+    (legacy.format == LEGACY_CORRESPONDENCE_FORMAT && legacy.analysis_format == ANALYSIS_FORMAT)
+        .then_some(legacy.links)
 }

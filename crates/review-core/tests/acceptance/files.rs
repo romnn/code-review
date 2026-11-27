@@ -887,19 +887,15 @@ fn review_state(review: &Review, revisions: &[RevisionNumber]) -> eyre::Result<V
     Ok(state)
 }
 
-/// Rewrites every analysis and correspondence `review` caches as the format before wrote them.
+/// Rewrites every analysis `review` caches as the format before wrote it, and every
+/// correspondence as one of another format, which a correspondence of the analyses before is.
 fn format_before(review: &Review) -> eyre::Result<()> {
     let older = review_core::analysis::ANALYSIS_FORMAT - 1;
     for cached in cached_analyses(review)? {
         let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&cached)?)?;
-        let field = if json.get("analysis_format").is_some() {
-            "analysis_format"
-        } else {
-            "format"
-        };
         *json
-            .get_mut(field)
-            .ok_or_else(|| eyre::eyre!("no {field} in {}", cached.display()))? = older.into();
+            .get_mut("format")
+            .ok_or_else(|| eyre::eyre!("no format in {}", cached.display()))? = older.into();
         std::fs::write(&cached, serde_json::to_vec(&json)?)?;
     }
     Ok(())

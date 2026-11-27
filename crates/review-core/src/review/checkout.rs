@@ -411,9 +411,10 @@ impl Review {
     /// The capture derives no history: the pinned revision and what it was taken of stand on
     /// their own.
     /// Nothing is captured while git is busy in the working tree, when something the capture
-    /// depends on moved while it was taken, and when the checkout is not the review's clone
-    /// before or after; `captured` runs between the looks and that last check, where a test
-    /// makes something happen meanwhile.
+    /// depends on moved while it was taken, when the checkout is not the review's clone
+    /// before or after, and while the data directory retains more than its limit
+    /// ([`Error::StorageFull`]); `captured` runs between the looks and that last check, where a
+    /// test makes something happen meanwhile.
     pub(super) fn capture(
         &self,
         session: &Session,
@@ -424,6 +425,8 @@ impl Review {
         if !self.verify_clone()? {
             return Ok(Observed::Replaced);
         }
+        // A capture writes into the archive, which the data directory's limit may refuse.
+        self.admit()?;
         let observed = match looks {
             Looks::Once => self.look(pull_requests)?,
             Looks::Twice => self.look_twice(pull_requests)?,
@@ -533,7 +536,7 @@ impl Review {
         deepen_from: Option<&str>,
     ) -> Result<Vec<ObjectId>, Error> {
         match &subject.head {
-            Some(ancestry) => self.merge_bases(target, ancestry, deepen_from),
+            Some(ancestry) => self.merge_bases(target, ancestry, deepen_from, &|_| Ok(())),
             None => Err(Error::NoMergeBase {
                 target: target.clone(),
                 head: head.clone(),

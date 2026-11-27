@@ -72,14 +72,16 @@ pub fn analyze(repo: &Repo, base: &ObjectId, head: &ObjectId) -> Result<Analysis
     let moves = moves::detect(&mut units, &regions, |found, units| {
         move_is_formatting_only(found, units, &files, &mut proof)
     });
-    Ok(Analysis {
+    Analysis {
         format: ANALYSIS_FORMAT,
         base: base.clone(),
         head: head.clone(),
         files,
         units,
         moves,
-    })
+        digest: String::new(),
+    }
+    .sealed()
 }
 
 fn display_path(change: &RawChange) -> &str {

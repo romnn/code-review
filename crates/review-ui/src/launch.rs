@@ -278,7 +278,8 @@ pub fn open(options: &Options, say: &dyn Fn(&str), front_end: FrontEnd) -> Resul
 /// under it, recording nothing.
 ///
 /// While git is busy in the checkout, the review opens on its last recorded revision, or
-/// waits a moment for git without one.
+/// waits a moment for git without one; while cr's data is at its limit, it opens on its last
+/// recorded revision.
 ///
 /// # Errors
 ///
@@ -291,13 +292,31 @@ pub fn open_checkout(data_dir: &Path, repo: Repo) -> Result<Loaded, String> {
 #[tracing::instrument(skip_all)]
 fn checkout(data_dir: &Path, repo: Repo, found: Option<String>) -> Result<Loaded, OpenError> {
     let review = Review::open_checkout(data_dir, repo)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let started = Instant::now();
     let mut moved = 0;
     loop {
         // No watch tells the opening of a change made while it captures, so the capture looks
         // twice.
-        match review.confirmed_live_history(&session, &[], &[])? {
+        let captured = match review.confirmed_live_history(&session, &[], &[]) {
+            // At its limit, cr's data takes no capture, and the review opens on its last
+            // recorded revision; the window's first capture says why.
+            Err(review_core::Error::StorageFull { .. }) => {
+                return Ok(Loaded {
+                    history: review.history()?,
+                    review,
+                    found,
+                    following: Some(Following {
+                        session,
+                        subject: None,
+                        filtered: Vec::new(),
+                        busy: None,
+                    }),
+                });
+            }
+            captured => captured?,
+        };
+        match captured {
             Capture::Captured(captured) => {
                 let LiveCapture {
                     history,
@@ -349,7 +368,7 @@ fn checkout(data_dir: &Path, repo: Repo, found: Option<String>) -> Result<Loaded
 
 /// Opens the review the options name: the checkout's (see [`open_checkout`]), saying so, with
 /// neither a target nor a worktree, and otherwise the one named, recording its current
-/// revision; see [`open`] for `front_end`.
+/// revision unless cr's data is at its limit; see [`open`] for `front_end`.
 #[tracing::instrument(skip_all)]
 fn open_review(
     options: &Options,
@@ -401,8 +420,14 @@ fn open_review(
         &repo,
     )?;
     let review = Review::open(&data_dir, repo, target)?;
-    review.refresh()?;
-    loaded(review, None)
+    // At its limit, cr's data takes no new revision, and the review opens on its last recorded
+    // one, saying why.
+    let found = match review.refresh() {
+        Ok(_) => None,
+        Err(err @ review_core::Error::StorageFull { .. }) => Some(err.to_string()),
+        Err(err) => return Err(err.into()),
+    };
+    loaded(review, found)
 }
 
 /// The review with its history, for a review that is not of the checkout.

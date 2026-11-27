@@ -3770,6 +3770,90 @@ fn edit_and_capture(host: &mut Host, repo: &Path, top: &str, bottom: &str) {
     host.settle();
 }
 
+/// A job queued on a capture reads it whatever the window shows meanwhile: while it waits to
+/// read a PDF the capture staged, the window moves on two captures that stage another, which
+/// releases the first capture's pins, and another open finds the archive due to be compacted,
+/// yet compacts nothing while the window has the review open, so the job still reads the PDF's
+/// pages.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_job_reads_its_capture_after_the_window_moved_on() {
+    use crate::pdf::testing::pdf;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    // The PDF goes into the index, so the capture takes its blob in a pack from the repository.
+    let stage = |pages: &[&str]| {
+        std::fs::write(repo.join("doc.pdf"), pdf(pages)).unwrap();
+        let added = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "doc.pdf"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(added.status.success(), "git add: {added:?}");
+    };
+    stage(&["First"]);
+    host.update(|model| model.capture(false));
+    while !host.model().publishes() {
+        let completion = host.run_job();
+        host.complete(completion);
+    }
+    host.draw();
+    host.update(|model| model.show_file("doc.pdf"));
+    let queued = std::mem::take(&mut host.jobs);
+
+    for pages in [["Second"], ["Third"]] {
+        stage(&pages);
+        host.update(|model| model.capture(false));
+        host.settle();
+    }
+    let archive = host.review.snapshots().git_dir().to_path_buf();
+    std::fs::remove_file(archive.join("compacted")).unwrap();
+    Review::load(&dir.path().join("data"), host.review.key()).unwrap();
+    assert!(
+        !archive.join("compacted").exists(),
+        "an open compacted while the window had the review open"
+    );
+
+    let mut read = None;
+    for job in queued {
+        let completion = job.run();
+        if let Outcome::PdfRead(pdf) = &*completion.outcome {
+            read = Some(matches!(pdf.read, super::pages::Read::Pages(_)));
+        }
+        host.complete(completion);
+    }
+    assert_eq!(read, Some(true), "the job read the pages of its capture");
+}
+
+/// A capture refused for want of space keeps the view and says so once, however often the
+/// periodic capture runs into it, and again after a capture showed in between.
+#[test]
+fn a_full_data_directory_says_so_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = live_host(dir.path());
+    let full = || {
+        Err(super::live::Missed::Full(
+            "storage full: run `cr drop`".to_owned(),
+        ))
+    };
+    let shown = host.model().view().map(|view| view.number());
+
+    host.update(|model| model.captured(full()));
+    assert_eq!(host.model().status, "storage full: run `cr drop`");
+    host.update(|model| model.notice("elsewhere"));
+    host.update(|model| model.captured(full()));
+    assert_eq!(host.model().status, "elsewhere", "it said so once");
+    assert_eq!(host.model().view().map(|view| view.number()), shown);
+
+    edit_and_capture(&mut host, &repo, "again", "two");
+    host.update(|model| model.captured(full()));
+    assert_eq!(host.model().status, "storage full: run `cr drop`");
+}
+
 /// The text the selected hunk adds.
 fn selected_text(model: &Model) -> String {
     let view = model.view().unwrap();
@@ -4438,7 +4522,7 @@ fn a_lookup_that_finds_trust_denied_stops_the_servers_first() {
 fn a_wait_for_the_working_tree_never_keeps_the_engine() {
     let dir = tempfile::tempdir().unwrap();
     let (mut host, repo) = live_host(dir.path());
-    assert_eq!(session_locks(&repo), 1);
+    assert_eq!(running_sessions(&repo), 1);
     let wait = host.waits.pop().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || sender.send(wait.run()).ok());
@@ -4452,7 +4536,7 @@ fn a_wait_for_the_working_tree_never_keeps_the_engine() {
         Outcome::Waited(waited) if waited.waited == crate::watch::Waited::Closed
     ));
     let ending = Instant::now();
-    while session_locks(&repo) > 0 {
+    while running_sessions(&repo) > 0 {
         assert!(
             ending.elapsed() < Duration::from_secs(10),
             "the session still runs"
@@ -4495,12 +4579,12 @@ fn closing_takes_no_input_and_waits_for_no_capture() {
     host.settle();
     assert_eq!(host.quits, 1);
     assert_eq!(
-        session_locks(&repo),
+        running_sessions(&repo),
         1,
         "the session ended while a capture held it"
     );
     drop(running);
-    assert_eq!(session_locks(&repo), 0);
+    assert_eq!(running_sessions(&repo), 0);
 }
 
 /// Once the engine stops as the app quits, the driver takes no change, a click on a folder
@@ -4663,18 +4747,16 @@ fn a_revocation_that_fails_stops_the_servers_and_stays_denied() {
     trust(&mut host);
 }
 
-/// The lock files of the sessions running for the reviews of the clone at `repo`, which keep
-/// them in their archives in the data directory beside it, each pinning what a window shows.
+/// The sessions running for the reviews of the clone at `repo`, each pinning what a window
+/// shows under a directory of its own in `refs/live/` of their archives in the data directory
+/// beside it, which goes with the session's last pin.
 #[cfg(target_os = "linux")]
-fn session_locks(repo: &Path) -> usize {
+fn running_sessions(repo: &Path) -> usize {
     walk(&repo.with_file_name("data"))
         .iter()
         .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "lock")
-                && path
-                    .parent()
-                    .is_some_and(|parent| parent.ends_with("archive/sessions"))
+            path.parent()
+                .is_some_and(|parent| parent.ends_with("archive/refs/live"))
         })
         .count()
 }
@@ -4709,11 +4791,11 @@ fn quitting_waits_for_trust_and_the_engine() {
     }
     assert_eq!(host.quits, 0);
     assert_eq!(host.model().status, "Closing the review before quitting…");
-    assert_eq!(session_locks(&repo), 1);
+    assert_eq!(running_sessions(&repo), 1);
     host.settle();
     assert_eq!(host.quits, 1);
     assert!(stopped(process), "the server still runs");
-    assert_eq!(session_locks(&repo), 0, "the session still runs");
+    assert_eq!(running_sessions(&repo), 0, "the session still runs");
 
     // A revocation under way is recorded before the app quits.
     let dir = tempfile::tempdir().unwrap();
@@ -5619,10 +5701,10 @@ fn a_review_opened_after_quitting_never_shows() {
     assert!(host.jobs.is_empty(), "nothing starts");
     // The session ends on the thread that stops the engine.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while session_locks(&repo) > 0 && Instant::now() < deadline {
+    while running_sessions(&repo) > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(session_locks(&repo), 0, "the session ended");
+    assert_eq!(running_sessions(&repo), 0, "the session ended");
 }
 
 /// The files pane's header, as review-tui shows it.

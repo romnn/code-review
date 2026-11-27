@@ -49,7 +49,7 @@ pub struct ReadPdf {
     /// The pair read.
     pair: Pair,
     /// What reading it found.
-    read: Read,
+    pub(super) read: Read,
     /// What decoding its versions as images found, when the front end showed images, neither
     /// was a PDF and the pair was not compared already.
     pub(super) comparison: Option<Comparison>,

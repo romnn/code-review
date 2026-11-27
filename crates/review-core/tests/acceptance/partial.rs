@@ -332,7 +332,7 @@ fn captured_edits(repo: &TestRepo) -> eyre::Result<(Review, History)> {
     let first = refresh(&review)?;
     mark_all(&review, first, MarkVerdict::Accepted)?;
     repo.write("src/lib.rs", &with_block(&[(5, "500"), (25, "2500")])?)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let captured = match review.live_history(&session, &[], &[])? {
         Capture::Captured(captured) => captured.history,
         _ => eyre::bail!("the working tree was not captured"),
@@ -522,7 +522,7 @@ fn an_approval_never_lands_on_another_capture() -> eyre::Result<()> {
     )?;
     let first = refresh(&review)?;
     mark_all(&review, first, MarkVerdict::Accepted)?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let capture = || -> eyre::Result<History> {
         match review.live_history(&session, &[], &[])? {
             Capture::Captured(captured) => Ok(captured.history),

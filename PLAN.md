@@ -772,7 +772,9 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   and walkthrough imports.
 - `analysis/<base>-<head>.json`: the analysis of a revision (units, evidence, classifications,
   moves), content-addressed by its snapshot IDs, written atomically (temporary file and rename) and
-  recomputable from git.
+  recomputable from git, with a digest of itself; and `<base>-<head>--<base>-<head>.json`, the
+  correspondence between two consecutive revisions, which records the digests of the two
+  analyses whose units it links and is used only with those.
 - `review.lock`: serializes state transitions (held exclusively) and log reads (held shared).
 - `synced.json`: when the review last read its target's state and which revision was current
   then, written atomically by every successful refresh (`Review::synced`). Like the view state
@@ -782,8 +784,9 @@ Per review, under `$XDG_DATA_HOME/code-review/reviews/<review-key>/`:
   `Recorded::sync_error` says why.
 - `archive/`: the review's archive, a bare git repository with every snapshot the review recorded
   or shows and all they reach, pinned by `refs/snap/<id>` and the sessions' `refs/live/`, the
-  sessions' lock files under `sessions/`, the private directories captures run in under
-  `scratch/`, and `cutover`, once it holds every snapshot the log records.
+  private directories captures, probes, fetches and compactions run in under `scratch/`,
+  `compacted`, once a compaction of it finished, and `cutover`, once it holds every snapshot
+  the log records.
 - `view/<front-end>.json`: each front end's own view state, through `Review::view_state` and
   `Review::save_view_state`, such as the folded folders. review-gui and review-tui share theirs
   under the name `review-lite`, review-gui's name when it first stored them, so folds made in
@@ -834,10 +837,10 @@ Rules:
 
 - **State transitions are serialized as a whole.** Recording a revision takes `review.lock`,
   rereads the log, compares the snapshot pair with the current revision's, pins both snapshots
-  in the archive, publishes the analysis, appends the event with the next number, and only then
-  releases the lock.
+  in the archive, appends the event with the next number, and only then releases the lock; it
+  publishes the analysis to the cache after.
   The appended event is the commit point: a revision number exists only once its event is in the log, so a crash before
-  that leaves nothing to clean up but idempotent pins and a content-addressed analysis file.
+  that leaves nothing to clean up but idempotent pins, which the next compaction removes.
   Recording what a target resolves to now (`Review::refresh`) pins it under a session of its own
   before analyzing it, and records it only while the log still ends at the revision it ended at
   before the target was read; otherwise it reads the target again, so an older observation is
@@ -865,6 +868,46 @@ Rules:
   writer finds ends the review in the window, as a replaced clone does: it says to reopen, and
   marks not saved yet are dropped
   ([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)).
+
+Retention keeps storage bounded by what review state needs
+([ADR 4](adr/0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)):
+
+- **Every recorded snapshot stays until `cr drop`.** Nothing expires; what the log does not
+  record goes once nothing uses it.
+- **Only an open that has the review to itself removes anything.** Each review has a lease,
+  `locks/<digest>.lock` in the data directory, named for its encoded key in lowercase, which
+  everything that uses the review holds shared: windows, commands, sessions, probes and blob
+  readers. An open that can take it exclusively without waiting removes every session's
+  pins, the archive's `scratch/`, half-written packs, what `dropped/` holds and read-only
+  `worktrees/` copies older versions made, compacts the archive when it is due, lets go, and
+  starts over as an open that maintained nothing, under the lease held shared. An open that
+  finds the review in use does none of it. Maintenance follows no symbolic link out of the
+  data directory.
+- **Compaction stages a pack and cr installs it.** `git pack-objects` packs what the recorded
+  snapshots reach, without their parents, into a directory under `scratch/`, as exactly one
+  pack whatever the clone's configuration; once the snapshots are whole in that pack alone, cr
+  flushes it, moves it beside the old packs over any file with its name, makes the move
+  durable, and removes the old packs and every loose object, so a compaction killed anywhere
+  loses nothing. It is due when no compaction of the archive finished yet, as after a move
+  into it, past 6,700 loose objects or 50 packs, git's own thresholds, and, while the data
+  directory is over its limit, past one pack or any loose object.
+- **The analysis caches of a data directory share 256 MiB.** A file's modification time is
+  when it was last written or read; writing a file and removing the files used least recently
+  until the caches fit are one step under `cache.lock` in the data directory, and every open
+  evicts too. An entry larger than the budget is not written and a file this version cannot
+  read is removed, but a review whose move into its archive is unfinished keeps its cache as
+  it is, the baseline the move compares with. Failures to read, write or evict never fail a
+  mark or a revision; a revision's analysis is published after its record, outside the lock.
+- **A data directory retains at most 10 GiB beside its caches and `scratch/` directories.**
+  A capture, a refresh that imports a new base and head pair, a walkthrough, and a mark, an
+  approval or a note that records its capture first sum the data directory's files, before
+  they write, and are refused over the limit, leaving the archive and the log as they were
+  and saying to open a review with space to reclaim with nothing else having it open, or to
+  `cr drop` one. Marks and notes on recorded revisions are never refused, and windows and
+  `cr show` show the last recorded revision. The limit is soft: one addition can go past it.
+- **`cr drop <review>`** takes the review's lease exclusively, or reports the review in use,
+  and holds it while it moves the review's directory to `dropped/` and removes it, following
+  no symbolic link from `reviews/` on. An open waiting on a drop finds the review gone.
 
 An event log keeps the state human-readable, diffable and easy to sync, and avoids linking SQLite,
 which would conflict with an embedder's own `libsqlite3-sys`.
@@ -1077,6 +1120,7 @@ thiserror, a hash crate, and tree-sitter with its grammars).
 | `cr export [--format md \| json]` | Numbered list of flagged and annotated units with `file:line`, unit ID and excerpt, for an agent. |
 | `cr walkthrough prompt \| import <file> \| show` | Agent-generated walkthroughs. |
 | `cr watch` | Poll for new revisions and print what changed. |
+| `cr drop <review>` | Remove a review by its key, also once its checkout is gone; refused while it is open. |
 
 Every command accepts `--review <key>`, defaulting to this checkout's review, `--json`, and
 `--no-auto-approve`, which counts proven formatting-only units as needing review, whatever the

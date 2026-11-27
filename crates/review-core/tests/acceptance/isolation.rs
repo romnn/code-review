@@ -88,7 +88,7 @@ fn the_reviewed_repository_is_never_written() -> eyre::Result<()> {
             .collect::<eyre::Result<Vec<String>>>()?;
         expect_that!(paths, each(starts_with("src/")));
         review.mark(&view, &view.unit_ids(), MarkVerdict::Accepted)?;
-        let session = review.start_session()?;
+        let session = review.start_session();
         let captured = review.live_history(&session, &[], &[])?;
         expect_true!(matches!(captured, Capture::Captured(_)));
         review.set_trusted(true)?;

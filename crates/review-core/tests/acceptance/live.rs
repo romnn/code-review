@@ -103,7 +103,7 @@ fn walk(dir: &std::path::Path) -> eyre::Result<Vec<String>> {
 #[gtest]
 fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let unchanged = capture(&review, &session, &[])?;
     expect_that!(unchanged.revisions().len(), eq(1));
     expect_false!(unchanged.is_provisional(unchanged.current().unwrap()));
@@ -146,7 +146,7 @@ fn an_edit_shows_as_a_provisional_revision_that_records_nothing() -> eyre::Resul
 #[gtest]
 fn live_pins_go_unless_kept() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     repo.write("a.rs", "fn a() { one(); }\n")?;
     let first = capture(&review, &session, &[])?.revisions()[1].clone();
     repo.write("a.rs", "fn a() { two(); }\n")?;
@@ -176,7 +176,7 @@ fn captures_of_one_head_on_two_bases_are_pinned_apart() -> eyre::Result<()> {
     repo.write("b.rs", "fn b() {}\n")?;
     repo.commit("feature")?;
     repo.write("a.rs", "fn a() { one(); }\n")?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let first = last_revision(&capture(&review, &session, &[])?)?;
 
     // `main` moves to the feature's tip: the capture's head is the same, its base is not.
@@ -203,7 +203,7 @@ fn captures_of_one_head_on_two_bases_are_pinned_apart() -> eyre::Result<()> {
 #[gtest]
 fn marking_a_provisional_revision_records_it_first() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     repo.write("a.rs", &two_functions("first();", "second();"))?;
     let live = capture(&review, &session, &[])?;
     let view = live.current_view()?;
@@ -237,7 +237,7 @@ fn marking_a_provisional_revision_records_it_first() -> eyre::Result<()> {
 #[gtest]
 fn a_provisional_revision_is_not_marked_once_the_log_moved_on() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     repo.write("a.rs", &two_functions("first();", "second();"))?;
     let live = capture(&review, &session, &[])?;
     let view = live.current_view()?;
@@ -264,7 +264,7 @@ fn a_provisional_revision_is_not_marked_once_the_log_moved_on() -> eyre::Result<
 #[gtest]
 fn a_note_records_a_provisional_revision() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     repo.write("a.rs", &two_functions("first();", "second();"))?;
     let live = capture(&review, &session, &[])?;
     let view = live.current_view()?;
@@ -282,7 +282,7 @@ fn a_note_records_a_provisional_revision() -> eyre::Result<()> {
 #[gtest]
 fn marks_carry_to_the_capture_from_the_last_recorded_revision() -> eyre::Result<()> {
     let (repo, review) = worktree_review()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     let recorded = review.history()?;
     let view = recorded.current_view()?;
     review.mark(&view, &view.unit_ids(), MarkVerdict::Accepted)?;
@@ -317,7 +317,7 @@ fn only_a_working_tree_review_is_live() -> eyre::Result<()> {
     repo.commit("more")?;
     let review = repo.review()?;
     review.refresh()?;
-    let session = review.start_session()?;
+    let session = review.start_session();
     expect_that!(
         review.live_history(&session, &[], &[]).err(),
         some(matches_pattern!(Error::InvalidTarget(_)))

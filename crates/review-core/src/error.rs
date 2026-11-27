@@ -127,6 +127,24 @@ pub enum Error {
     /// No review is stored under the given key.
     #[error("no review {0}")]
     UnknownReview(String),
+    /// A review to drop is open: in a window, a command or a background job.
+    #[error("review {0} is in use; close what has it open and try again")]
+    ReviewInUse(String),
+    /// cr's data directory retains more than its limit, so nothing more is added; every
+    /// recorded revision stays readable.
+    #[error(
+        "cr's data holds {} MiB, more than its limit of {} MiB; close every window of a review \
+         with space to reclaim and open it again, or drop a review you are done with with \
+         `cr drop <review>`",
+        used >> 20,
+        limit >> 20
+    )]
+    StorageFull {
+        /// How many bytes the data directory retains, its analysis caches aside.
+        used: u64,
+        /// How many it may retain.
+        limit: u64,
+    },
     /// The review has not recorded any revision yet.
     #[error("the review has no revisions yet")]
     NoRevisions,

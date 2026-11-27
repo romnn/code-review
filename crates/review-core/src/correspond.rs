@@ -36,7 +36,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{
-    ANALYSIS_FORMAT, Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Unit, UnitKind,
+    Analysis, Chunk, EntrySide, FileChange, FileUnit, LineRange, Unit, UnitKind,
 };
 use crate::error::Error;
 use crate::git::{Blob, BlobReader, ChangeStatus, Repo};
@@ -44,7 +44,10 @@ use crate::ids::{ObjectId, UnitIndex};
 use crate::text::{LineMap, split_lines};
 
 /// The version of the correspondence format and algorithm.
-pub const CORRESPONDENCE_FORMAT: u32 = 3;
+///
+/// Version 4 records the digests of the analyses whose units it links, and finds renames with
+/// a fixed limit.
+pub const CORRESPONDENCE_FORMAT: u32 = 4;
 
 /// Renames are ambiguous when more candidates than this would need comparing.
 const MAX_RENAME_CANDIDATES: usize = 64;
@@ -79,8 +82,10 @@ pub struct Link {
 pub struct Correspondence {
     /// The [`CORRESPONDENCE_FORMAT`] this was computed with.
     pub format: u32,
-    /// The [`ANALYSIS_FORMAT`] of the analyses whose unit indices the links use.
-    pub analysis_format: u32,
+    /// The [`Analysis::digest`] of the older analysis, whose units the links' `older` index.
+    pub older: String,
+    /// The [`Analysis::digest`] of the newer analysis, whose units the links' `newer` index.
+    pub newer: String,
     /// Every link, sorted by newer then older unit.
     pub links: Vec<Link>,
 }
@@ -137,6 +142,16 @@ impl Texts {
     }
 }
 
+/// How a correspondence finds the files renamed between revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Renames {
+    /// Within a limit no configuration changes, so links computed again follow the renames
+    /// they followed before.
+    Fixed,
+    /// As git's configuration has it, as versions before the archive found them.
+    Configured,
+}
+
 /// Computes the links from the units of `older` to the units of `newer`.
 ///
 /// # Errors
@@ -147,12 +162,27 @@ pub fn correspond(
     older: &Analysis,
     newer: &Analysis,
 ) -> Result<Correspondence, Error> {
+    correspond_with(repo, older, newer, Renames::Fixed)
+}
+
+/// Computes the links from the units of `older` to the units of `newer`, finding renames as
+/// `renames` says.
+///
+/// # Errors
+///
+/// Returns the errors of [`correspond`].
+pub(crate) fn correspond_with(
+    repo: &Repo,
+    older: &Analysis,
+    newer: &Analysis,
+    renames: Renames,
+) -> Result<Correspondence, Error> {
     let mut texts = Texts {
         reader: repo.blob_reader()?,
         cache: HashMap::new(),
     };
-    let head_map = path_map(repo, &mut texts, &older.head, &newer.head)?;
-    let base_map = path_map(repo, &mut texts, &older.base, &newer.base)?;
+    let head_map = path_map(repo, &mut texts, &older.head, &newer.head, renames)?;
+    let base_map = path_map(repo, &mut texts, &older.base, &newer.base, renames)?;
     let pairs = file_pairs(older, newer, &head_map, &base_map);
 
     // Candidate edges, each with the index of the file pair whose line maps produced it.
@@ -250,7 +280,8 @@ pub fn correspond(
     });
     Ok(Correspondence {
         format: CORRESPONDENCE_FORMAT,
-        analysis_format: ANALYSIS_FORMAT,
+        older: older.digest.clone(),
+        newer: newer.digest.clone(),
         links,
     })
 }
@@ -261,12 +292,16 @@ fn path_map(
     texts: &mut Texts,
     from: &ObjectId,
     to: &ObjectId,
+    renames: Renames,
 ) -> Result<PathMap, Error> {
     let mut map = PathMap::identity();
     if from == to {
         return Ok(map);
     }
-    let changes = repo.diff_tree(from, to)?;
+    let changes = match renames {
+        Renames::Fixed => repo.diff_tree_fixed(from, to)?,
+        Renames::Configured => repo.diff_tree(from, to)?,
+    };
     let sources: Vec<_> = changes
         .iter()
         .filter(|change| {

@@ -156,10 +156,25 @@ fn refs(repo: &Path) -> eyre::Result<String> {
     git_in(repo, &["for-each-ref", "--format=%(refname) %(objectname)"])
 }
 
+/// How many packs the repository whose git directory is `git_dir` holds.
+fn packs(git_dir: &Path) -> eyre::Result<usize> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(git_dir.join("objects/pack"))? {
+        if entry?
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "pack")
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// The first open of a review of 117 revisions an earlier version kept moves it into its
 /// archive without changing a mark, an approval, a note, a walkthrough, the log or the
-/// repository's refs, and the archive alone derives the same history once the repository lost
-/// its objects and no analysis is cached.
+/// repository's refs, and compacts the packs the move filled into one; the archive alone
+/// derives the same history once the repository lost its objects and no analysis is cached.
 #[gtest]
 fn a_long_review_moves_into_its_archive_losing_nothing() -> eyre::Result<()> {
     let (test, review) = long_review()?;
@@ -184,10 +199,16 @@ fn a_long_review_moves_into_its_archive_losing_nothing() -> eyre::Result<()> {
     expect_that!(recorded.revisions().len(), eq(usize::try_from(REVISIONS)?));
     as_left_by_an_earlier_version(&test, &review)?;
     let before = refs(test.path())?;
+    // The first open after the upgrade has the review to itself.
+    let (dir, key) = (review.dir().clone(), review.key().clone());
+    let archive = review.snapshots().git_dir().to_path_buf();
+    drop(review);
 
     expect_that!(test.review()?.history()?, eq(&recorded));
-    expect_true!(review.snapshots().git_dir().join("cutover").exists());
-    expect_that!(std::fs::read(review.dir().events())?, eq(&log));
+    expect_true!(archive.join("cutover").exists());
+    expect_true!(archive.join("compacted").exists());
+    expect_that!(packs(&archive)?, eq(1));
+    expect_that!(std::fs::read(dir.events())?, eq(&log));
     expect_that!(refs(test.path())?, eq(&before));
 
     for entry in std::fs::read_dir(test.path().join(".git/objects"))? {
@@ -196,8 +217,8 @@ fn a_long_review_moves_into_its_archive_losing_nothing() -> eyre::Result<()> {
             std::fs::remove_dir_all(path)?;
         }
     }
-    std::fs::remove_dir_all(review.dir().root().join("analysis"))?;
-    let alone = Review::load(test.data_dir(), review.key())?;
+    std::fs::remove_dir_all(dir.root().join("analysis"))?;
+    let alone = Review::load(test.data_dir(), &key)?;
     expect_that!(alone.history()?, eq(&recorded));
     Ok(())
 }
@@ -269,6 +290,80 @@ fn a_move_cut_short_completes_changing_nothing() -> eyre::Result<()> {
     expect_that!(git_in(&archive, &["rev-parse", &pin])?, eq(head.as_str()));
     expect_that!(std::fs::read(&events)?, eq(&log));
     expect_that!(refs(test.path())?, eq(&before));
+    Ok(())
+}
+
+/// Rewrites every correspondence cached in the review's directory `dir` as the version before
+/// the archive wrote it, with `links` in place of its links when given, and returns the files
+/// with their contents.
+fn as_an_earlier_version_cached(
+    dir: &Path,
+    links: Option<&serde_json::Value>,
+) -> eyre::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let cache = dir.join("analysis");
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&cache)?
+        .map(|entry| Ok(entry?.path()))
+        .collect::<eyre::Result<_>>()?;
+    entries.sort();
+    let analysis_format = entries
+        .iter()
+        .find(|path| !path.to_string_lossy().contains("--"))
+        .map(|path| -> eyre::Result<serde_json::Value> {
+            let analysis: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+            analysis
+                .get("format")
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("an analysis without a format"))
+        })
+        .ok_or_else(|| eyre::eyre!("no analysis cached"))??;
+    let mut written = Vec::new();
+    for path in entries {
+        if !path.to_string_lossy().contains("--") {
+            continue;
+        }
+        let current: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let links = match links {
+            Some(links) => links,
+            None => current
+                .get("links")
+                .ok_or_else(|| eyre::eyre!("a correspondence without links"))?,
+        };
+        let legacy = serde_json::json!({
+            "format": 3,
+            "analysis_format": analysis_format,
+            "links": links,
+        });
+        let bytes = serde_json::to_vec(&legacy)?;
+        std::fs::write(&path, &bytes)?;
+        written.push((path, bytes));
+    }
+    expect_that!(written.len(), gt(0));
+    Ok(written)
+}
+
+/// The move compares the archive with what the reviewer saw, reading the correspondences the
+/// version before the archive cached as that version wrote them and leaving them as they are:
+/// links the archive does not derive stop the move, and once they are those it derives, the
+/// move completes.
+#[gtest]
+fn a_move_compares_with_the_links_an_earlier_version_cached() -> eyre::Result<()> {
+    let (test, review, recorded) = short_review()?;
+    let dir = review.dir().root().to_path_buf();
+    let cutover = review.snapshots().git_dir().join("cutover");
+    let original = as_an_earlier_version_cached(&dir, None)?;
+
+    let unlinked = as_an_earlier_version_cached(&dir, Some(&serde_json::json!([])))?;
+    expect_that!(test.review().map(drop), err(anything()));
+    expect_false!(cutover.exists());
+    for (path, bytes) in &unlinked {
+        expect_that!(&std::fs::read(path)?, eq(bytes), "{}", path.display());
+    }
+
+    for (path, bytes) in &original {
+        std::fs::write(path, bytes)?;
+    }
+    expect_that!(test.review()?.history()?, eq(&recorded));
+    expect_true!(cutover.exists());
     Ok(())
 }
 

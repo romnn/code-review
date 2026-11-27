@@ -28,6 +28,12 @@ it reads an index, dating a split index's shared file anew and writing the trees
 index's directories as it expands them.
 The reviewer expects cr to keep its own review state and never to change their repository.
 
+What cr keeps of its own grows too, unless it decides what to let go.
+A real review of 100 revisions moved into its archive as 233 MB in 3 packs without deltas,
+its analysis cache held another 121 MB, a file per revision and per pair of revisions, and
+older versions left read-only copies of reviewed files, finished reviews and what killed
+processes left behind.
+
 ## Decision
 
 - **cr writes nothing into the reviewed repository**: no object, ref, lock, index file or date.
@@ -87,6 +93,101 @@ The reviewer expects cr to keep its own review state and never to change their r
   `refs/live/` in the archive.
   An object the reviewed repository lacks, as in a partial clone or after it collected one
   during an import, fails the capture or the recording, naming it.
+- **The archive keeps every recorded snapshot until the review is dropped, and nothing else
+  longer than something needs it.**
+  Nothing expires: a recorded revision stays readable, so review state carries along every
+  link of the history.
+  What the log does not record goes once nothing uses it: captures a window showed, `HEAD`
+  imported for a capture, and a `refs/snap/` pin a recording wrote before it died without
+  appending its record.
+- **Only an open that has the review to itself removes anything.**
+  Each review has a lease, `locks/<digest>.lock` in the data directory, named for the name of
+  its directory as the filesystem resolves it, the key encoded in ASCII, in lowercase, so a
+  link to the directory and spellings of a key that a filesystem ignoring case takes for one
+  directory share it; the file is never moved or removed.
+  On a filesystem that tells case apart, two reviews whose keys differ only in case share one
+  too, which only keeps a drop or maintenance of one waiting for the other.
+  Everything that uses the review holds the lease shared for as long as it does: windows,
+  commands, sessions, probes and blob readers, a window's background jobs among them.
+  An open first tries to take it exclusively without waiting.
+  When it can, nothing else uses the review, so the open removes, before it lets anything in,
+  the pins of every session, what captures, probes, fetches and compactions left in the
+  archive's `scratch/`, half-written packs, what drops left in `dropped/`, and the read-only
+  copies older versions made; it compacts the archive when it is due, and lets go.
+  It then starts over as an open that maintained nothing, under the lease held shared like
+  any other user, so a drop in between makes it open the review anew, or fail to load it by
+  its key.
+  An open that finds the review in use leaves all of that for a later one: a review that is
+  always open somewhere is not compacted until it is not.
+  Maintenance follows no symbolic link out of the data directory, and compacts nothing while
+  `scratch/` leads out of it.
+- **Compaction stages a pack, and cr installs it.**
+  `git pack-objects` packs everything the recorded snapshots reach, without their parents,
+  with deltas, into a directory of its own under `scratch/`, as one pack whatever the clone's
+  configuration says; it must print exactly one pack whose pack and index are both there,
+  and the snapshots are checked to be whole in that pack alone.
+  Only then does cr flush the pack and its index to disk, move them beside the packs they
+  replace, over any file with their names, the index last, make the moves durable, through
+  to the disk on Windows and by syncing the directory on Unix, and remove those packs and
+  every loose object.
+  Git deletes nothing in the archive, so a compaction killed at any point leaves every
+  recorded snapshot readable: before the move the old packs hold everything, after it the new
+  one does, and the next open that has the review to itself sweeps what was left.
+  An open compacts an archive that no compaction finished yet, as after a move into it, whose
+  packs have no deltas, and one that holds more loose objects or packs than git's own
+  `gc.auto` and `gc.autoPackLimit` allow; while the data directory is over its limit, any
+  archive with more than one pack or a loose object.
+- **Probes add nothing to the archive.** Asking which tree is on disk, or what git ignores,
+  imports and writes into an object database of the probe's own under `scratch/`, which reads
+  the archive's as an alternate and goes with the probe.
+- **The analysis cache keeps to a budget.**
+  Every review of a data directory shares 256 MiB of analyses and correspondences, files whose
+  modification time is when they were last written or read.
+  Writing an entry and removing the files used least recently until the caches fit are one
+  step under the data directory's `cache.lock`, so no entry escapes the count, and every open
+  evicts too, whatever its maintenance does; an entry larger than the budget is never
+  written.
+  A file this version cannot read is removed when it is read.
+  The cache of a review whose move into its archive is unfinished is the baseline the move
+  compares the archive with, so nothing removes, rewrites or evicts it until the move is done,
+  and the move derives that baseline as the versions before it did: with the links they
+  cached, read as they wrote them, and with renames found as git's configuration has them.
+  It compares that baseline with what the archive derives as a review will from then on,
+  without the cache and with renames found within the fixed limit.
+  A miss computes the entry again from the archive, and a failure to read, write or evict an
+  entry fails nothing: a revision's analysis is published once its record is appended and the
+  log's lock is free.
+  A correspondence records the digests of the two analyses whose units it links and is used
+  only with those very analyses, from the cache and from memory alike, so an analysis computed
+  again with other unit numbers never takes a link of the one before; git finds the renames
+  of a correspondence with a fixed limit, so a configuration edit never makes a cached link
+  disagree with one computed again, while analyses keep git's configured rename detection, so
+  one cached by an earlier version still equals one computed now.
+- **A data directory retains at most 10 GiB beside its caches and transient directories.**
+  Before anything that grows what it retains writes, cr sums the files of the data directory
+  but the analysis caches and the archives' `scratch/`: before a capture imports anything,
+  before a refresh imports a base and head pair that is not the last revision's, before a
+  walkthrough is appended, and, under the log's lock, before a mark, an approval or a note
+  records the capture it was made on.
+  Over the limit, it refuses the addition, leaving the archive and the log as they were, and
+  says to close every window of a review with space to reclaim and open it again, which
+  compacts it, or to drop a review with `cr drop`; a running process never reclaims space
+  itself.
+  A mark, an approval or a note on a recorded revision is never refused, nor one whose capture
+  the log turns out to record already.
+  The check is soft: 10 GiB is where the next addition is refused, and an addition, or
+  several at once, can go past it.
+  Recorded revisions stay readable and markable at the limit: a window opens on its review's
+  last recorded revision, and so does `cr show` on the checkout, saying why; a window whose
+  capture or mark is refused keeps what it shows and says once that cr's data is full.
+- **`cr drop <review>` removes a review by its key**, also once its checkout is gone.
+  It takes the review's lease exclusively, or reports the review in use, and holds it while it
+  moves the directory aside, to `dropped/` in the data directory, and removes it, read-only
+  files included; what a removal cut short leaves, a later open removes.
+  It refuses when a symbolic link leads `reviews/`, the review's directory or `dropped/` out of
+  the data directory, and removes a link inside the review, never following it.
+  An open waiting on a drop finds the review gone: loading it by its key fails, and opening its
+  target makes a new one.
 - **Ancestry comes from the reviewed repository, read only.**
   A synthetic commit's parent is the `HEAD` it was taken on, so merge bases are found among the
   reviewed repository's commits; only the first merge base is imported.
@@ -178,12 +279,35 @@ The reviewer expects cr to keep its own review state and never to change their r
 - The log grows with what the reviewer marks, not with what the agent saves.
 - Each shown capture is pinned by refs of its own under `refs/live/<session>/` in the archive;
   a capture releases the pins of earlier ones its window no longer shows, and a session that
-  ended leaves its pins for the next session to remove once its lock file is free.
-- The archive only grows in this decision; what it keeps and for how long is the retention
-  decision still to come (#31).
-- A capture imports `HEAD`'s objects once per commit, and the archive keeps one pack per
-  import until retention repacks it; checking which objects of the index it lacks costs a few
-  milliseconds on a checkout of 13,000 files.
+  died leaves its pins for the next open that has the review to itself.
+- The archive holds the recorded snapshots and what windows show, in a pack per import until
+  compaction is due: on a generated review of 105 revisions, each a commit editing 120 lines
+  among files of 1,500, the archive's 105 packs of 133 MB compacted into one of 18 MB; the
+  open that compacted it took 0.86 s, where an open with nothing due takes 22 ms.
+  The window that open is for waits for the compaction; quitting never compacts.
+  A compaction needs room for the new pack before the old ones go.
+  It drops what windows showed along with what no pin reaches, so the first capture after it
+  imports `HEAD` again.
+- A review that is always open somewhere is not compacted until nothing has it open, and its
+  archive grows by a pack per capture meanwhile.
+- A capture imports `HEAD`'s objects once per commit; checking which objects of the index it
+  lacks costs a few milliseconds on a checkout of 13,000 files.
+- Each addition walks the data directory first: 9 ms for one of 336 MB in about 30,000 files,
+  under a millisecond for twenty small reviews; on a data directory of 45 MB, a capture of a
+  checkout of 1,500 files takes 114 ms, of which the walk is 0.5 ms.
+  An eviction lists every review's cache, 3 ms for 2,000 entries, and runs after each entry
+  written and on each open.
+- Old correspondences are computed again once, since their format records digests now.
+- A review whose clone sets `diff.renameLimit`, with a change past a thousand candidates for
+  a rename, can find other links within the fixed limit than the version before it found;
+  its move into the archive is then refused, leaving its log and its refs in the reviewed
+  repository as they were.
+- Once the data directory holds 10 GiB, captures, new revisions and walkthroughs are refused
+  until the reviewer opens reviews with space to reclaim with nothing else having them open,
+  or drops reviews; a window opens on its review's last recorded revision, and nothing
+  expires on its own.
+- Each review leaves an empty lease file in `locks/`, also once dropped, so a drop never races
+  an open over which file is the lease.
 - A pull request's refresh fetches both ends' whole history into a transient repository, which
   is removed once the snapshots are imported: a cold fetch each time.
 - The first open after the upgrade replays a review's log from the archive without a cache,
@@ -243,6 +367,27 @@ The reviewer expects cr to keep its own review state and never to change their r
   dates its shared file anew too.
 - **Mirror clones, a cache database or deduplication across reviews:** one archive per review,
   git's packs and refs, the log and the existing locks suffice.
+- **Expiring recorded snapshots older than the earliest one review state refers to.** A
+  history with a gap needs an expired revision in replay, in the views and in every carry,
+  for a saving a delta repack already makes: recorded snapshots share most objects.
+- **`git repack -a -d` and `git prune` in the archive, with every pinned commit made a
+  shallow root:** git then deletes what it replaces itself, so a git that outlives a killed
+  cr races every later user of the archive, a drop and a review made anew at the same path
+  included, and Windows can put a child in a job that ends with cr only once it runs.
+  Staging the pack and installing it in cr leaves git nothing to delete.
+- **Admitting additions exactly, with staged objects and counters of what each review
+  holds:** a soft check at the point of each addition bounds the data directory as well, with
+  no state of its own to repair after a crash.
+- **A write lock that writers hold shared until what they wrote is pinned, and compaction
+  exclusively:** every writer, probe, reader and job then needs a guard of its own, and each
+  review found one missing; one lease held for as long as anything uses the review, with
+  maintenance only when it is held alone, leaves no such gap.
+- **Reclaiming space in a running process when an addition finds the data directory full:**
+  it would compact archives other processes are using; at the limit cr refuses, and the next
+  open that has a review to itself compacts it.
+- **A lease file in the review's directory:** it moves with the directory, so a drop cannot
+  hold it through the removal, and on Windows a held file keeps its directory from being
+  renamed.
 - **Reading a replaced log again from the start.** The window orders the histories it gets by
   the log's length, which compares only within one log: a history of another log as long
   passed for the one on screen, so approvals the log no longer holds stayed, and a slow read
@@ -264,6 +409,10 @@ The reviewer expects cr to keep its own review state and never to change their r
 - `crates/review-core/src/review/checkout.rs` (`Review::capture`)
 - `crates/review-core/src/git/fetch.rs` (`FetchRepo`)
 - `crates/review-core/src/review/archive.rs` (`Review::open_archive`)
+- `crates/review-core/src/review/retention.rs` (`Held`, `maintain`, `Review::admit`,
+  `Review::remove`), `crates/review-core/src/store/mod.rs` (`Lease`, `InUse`),
+  `crates/review-core/src/review/cache.rs`, `crates/review-core/src/git/compact.rs`
+  (`PrivateRepo::compact`)
 - `crates/review-ui/src/watch.rs` (`Watch`, `Waiter`)
 - `crates/review-ui/src/model/live.rs`
 - `crates/review-core/tests/acceptance/live.rs`, `isolation.rs`, `migration.rs`
