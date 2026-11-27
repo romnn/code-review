@@ -1097,14 +1097,20 @@ impl Review {
         lock: &'lock LockGuard,
         shown: Option<&History>,
     ) -> Result<LogWriter<'lock>, Error> {
+        self.guard_log(|path| LogWriter::open(path, lock, shown.map(History::prefix)))
+    }
+
+    /// Opens the log at its path with `open`, a [`LogWriter`] constructor, unless this review
+    /// or a clone of it found the log replaced, and notes a replacement `open` finds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LogReplaced`] when the log was found replaced, and the errors of `open`.
+    fn guard_log<T>(&self, open: impl FnOnce(&Path) -> Result<T, Error>) -> Result<T, Error> {
         if self.memo.replaced() {
             return Err(self.log_replaced());
         }
-        self.memo.note_replaced(LogWriter::open(
-            &self.dir.events(),
-            lock,
-            shown.map(History::prefix),
-        ))
+        self.memo.note_replaced(open(&self.dir.events()))
     }
 
     fn log_replaced(&self) -> Error {
@@ -1256,14 +1262,15 @@ impl Review {
         let changed = || Error::ChangedSinceShown { unit };
         let evidence = view.evidence_digest(unit)?;
         let lock = LockGuard::acquire(&self.dir.lock())?;
-        let mut log = self.open_log(&lock, Some(view.history()))?;
+        let (mut log, opened) = self
+            .guard_log(|path| LogWriter::open_with_prefix(path, &lock, view.history().prefix()))?;
         // The comparison is derived from the log and, for a capture not recorded yet, the
         // capture itself, so a refused approval records nothing, not even the capture.
         let capture = self.unsettled(&log, view, true)?;
         let history = self.extend_history(
             &History::empty(),
             log.events().to_vec(),
-            log.opened(),
+            opened,
             capture.clone(),
         )?;
         let now = history.view(view.number())?;

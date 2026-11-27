@@ -110,8 +110,6 @@ pub(crate) struct LogWriter<'lock> {
     path: PathBuf,
     file: File,
     events: Vec<Event>,
-    /// The log's complete records as it was opened.
-    records: Vec<u8>,
     _lock: &'lock LockGuard,
 }
 
@@ -128,6 +126,32 @@ impl<'lock> LogWriter<'lock> {
         lock: &'lock LockGuard,
         shown: Option<&Prefix>,
     ) -> Result<Self, Error> {
+        let (writer, _) = Self::read(path, lock, shown)?;
+        Ok(writer)
+    }
+
+    /// Opens the log as [`Self::open`] does, and returns as well the prefix of its complete
+    /// records, the one a [`History`](crate::History) read from them has; it digests them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LogReplaced`] when the log no longer starts with `shown`.
+    pub(crate) fn open_with_prefix(
+        path: &Path,
+        lock: &'lock LockGuard,
+        shown: &Prefix,
+    ) -> Result<(Self, Prefix), Error> {
+        let (writer, records) = Self::read(path, lock, Some(shown))?;
+        Ok((writer, Prefix::of(&records)))
+    }
+
+    /// Opens the log as [`Self::open`] does, and returns as well the bytes of its complete
+    /// records, for the caller to digest or drop, so no writer holds them while it writes.
+    fn read(
+        path: &Path,
+        lock: &'lock LockGuard,
+        shown: Option<&Prefix>,
+    ) -> Result<(Self, Vec<u8>), Error> {
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -155,19 +179,13 @@ impl<'lock> LogWriter<'lock> {
                 .map_err(|source| Error::io("sync", path, source))?;
         }
         let events = parse_records(path, &bytes, 0)?;
-        Ok(Self {
+        let writer = Self {
             path: path.to_path_buf(),
             file,
             events,
-            records: bytes,
             _lock: lock,
-        })
-    }
-
-    /// Returns the log's complete records as it was opened, which a
-    /// [`History`](crate::History) read from it then was read from; it digests them.
-    pub(crate) fn opened(&self) -> Prefix {
-        Prefix::of(&self.records)
+        };
+        Ok((writer, bytes))
     }
 
     /// Returns every event in the log.
@@ -402,25 +420,78 @@ mod tests {
         pub(super) static DIGESTS: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// A writer digests the log only to check what a caller shows, once, and to say how the
-    /// log was opened when asked.
+    /// A complete record, spaced as no serializer writes it, so only the bytes on disk digest
+    /// to its prefix.
+    const RECORD: &str = "{ \"event\" : \"trust\", \"trusted\" : true, \"at\" : 1 }\n";
+
+    /// An ordinary writer digests the log only to check what a caller shows, once; one opened
+    /// for an approval digests its complete records as well.
     #[test]
     fn a_writer_digests_only_what_it_is_asked_for() -> eyre::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("events.jsonl");
-        std::fs::write(&path, "{\"event\":\"trust\",\"trusted\":true,\"at\":1}\n")?;
+        std::fs::write(&path, RECORD)?;
         let lock = LockGuard::acquire(&dir.path().join("review.lock"))?;
+        let shown = Prefix::of(RECORD.as_bytes());
         let digests = || DIGESTS.get();
+
         let before = digests();
         LogWriter::open(&path, &lock, None)?;
         assert_eq!(digests(), before, "nothing shown, nothing digested");
 
-        let opened = LogWriter::open(&path, &lock, None)?.opened();
         let before = digests();
-        let writer = LogWriter::open(&path, &lock, Some(&opened))?;
+        LogWriter::open(&path, &lock, Some(&shown))?;
         assert_eq!(digests(), before + 1, "what shows is digested once");
-        writer.opened();
-        assert_eq!(digests(), before + 2);
+
+        let before = digests();
+        LogWriter::open_with_prefix(&path, &lock, &shown)?;
+        assert_eq!(
+            digests(),
+            before + 2,
+            "an approval digests the complete records as well"
+        );
+        Ok(())
+    }
+
+    /// The prefix an approval's writer returns is of the complete records exactly as the log
+    /// holds them, spacing and all, without the unacknowledged record it truncated.
+    #[test]
+    fn an_approval_reads_the_prefix_of_the_complete_records() -> eyre::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, format!("{RECORD}{{\"event\":"))?;
+        let lock = LockGuard::acquire(&dir.path().join("review.lock"))?;
+
+        let (writer, opened) = LogWriter::open_with_prefix(&path, &lock, &Prefix::empty())?;
+        let [event] = writer.events() else {
+            eyre::bail!("one complete record");
+        };
+        let mut canonical = serde_json::to_vec(event)?;
+        canonical.push(b'\n');
+        assert_eq!(opened, Prefix::of(RECORD.as_bytes()));
+        assert_ne!(
+            opened,
+            Prefix::of(&canonical),
+            "the record as written, not as parsed"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, RECORD, "the tail is gone");
+        Ok(())
+    }
+
+    /// A log that no longer starts with what was shown is left as it is: neither its
+    /// unacknowledged record truncated nor anything appended.
+    #[test]
+    fn an_approval_on_a_replaced_log_touches_nothing() -> eyre::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("events.jsonl");
+        let replaced = format!("{RECORD}{{\"event\":");
+        std::fs::write(&path, &replaced)?;
+        let lock = LockGuard::acquire(&dir.path().join("review.lock"))?;
+        let shown = Prefix::of(b"{\"event\":\"trust\",\"trusted\":false,\"at\":1}\n");
+
+        let opened = LogWriter::open_with_prefix(&path, &lock, &shown);
+        assert!(matches!(opened, Err(Error::LogReplaced { .. })));
+        assert_eq!(std::fs::read_to_string(&path)?, replaced);
         Ok(())
     }
 }

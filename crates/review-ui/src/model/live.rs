@@ -382,7 +382,7 @@ impl Model {
         if !self.settings.live {
             return;
         }
-        self.spawn_with(Subject::Always(Because::Live), |parts| {
+        self.spawn_with(Subject::Watch, |parts| {
             Outcome::Watching(parts.watch().map(Box::new).map_err(|err| causes(&err)))
         });
     }
@@ -1248,7 +1248,7 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
     let failed = |err: &dyn std::error::Error| Missed::Failed(causes(err));
     // Without a watch, or with one that could not watch every directory since it started,
     // nothing says a capture overlapped a change, so it looks twice.
-    let watch = parts.watch.lock().clone();
+    let watch = parts.watch.lock().started().cloned();
     let trouble = watch
         .as_ref()
         .filter(|_| input.rewalk)

@@ -49,9 +49,14 @@ state.
 - **Nothing that blocks is dropped on the UI thread.** As the app quits, the job that stops the
   engine kills the servers and lets go of the watch and the session, and quitting waits for it
   as it waits for saves. A capture still running keeps the session and the watch until it ends,
-  so the stop never waits for it. Wherever the last holder of anything that blocks lets go of
-  it, as when the model is dropped, a job never runs or a review opens after the app closed, it
-  is dropped on a thread of its own.
+  so the stop never waits for it. The watch starts outside its slot's lock and is installed
+  under it. The job that ends the review in a window whose log or clone was replaced and the
+  job that stops the engine both close the slot for good under the same lock, so a watch that
+  finishes starting after that is dropped by the job that started it. Its start, and each
+  change it saw, lands only while the review goes on in the window and the engine is not
+  stopping, so a late one arms no wait and no capture. Wherever the last holder of anything
+  that blocks lets go of it, as when the model is dropped, a job never runs or a review opens
+  after the app closed, it is dropped on a thread of its own.
 - **The driver takes no input once the app closes.** From the moment the engine starts to stop,
   `Driver::update`, the one way a front end changes the model, runs nothing and returns nothing,
   so no key, click, scroll or layout acts and nothing it would change goes unsaved; no capture
@@ -234,7 +239,7 @@ state.
 
 ## References
 
-- `crates/review-ui/src/model/engine.rs` (`Engine`, `Parts`, `Servers`, `Waiting`)
+- `crates/review-ui/src/model/engine.rs` (`Engine`, `Parts`, `WatchSlot`, `Servers`, `Waiting`)
 - `crates/review-ui/src/model/effects.rs` (`Job`, `Driver`)
 - `crates/review-ui/src/model/trust.rs`
 - `crates/review-ui/src/model/buffer.rs` (`go_to_definition`, `look_up`, `find_definition`)
