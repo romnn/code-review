@@ -1395,6 +1395,32 @@ fn a_spent_highlighter_budget_leaves_the_file_plain() {
     assert_eq!(host.runs, Vec::new());
 }
 
+/// The standard languages, counting the configurations a highlighter asks for, as it does for
+/// every match it weighs, and setting `cancel` as it asks for the `cancel_at`-th: a point
+/// part of the way through that the same text always reaches at the same place.
+struct Cancelling<'a> {
+    asked: std::cell::Cell<usize>,
+    cancel_at: usize,
+    cancel: &'a std::sync::atomic::AtomicBool,
+}
+
+impl tree_house::LanguageLoader for Cancelling<'_> {
+    fn language_for_marker(
+        &self,
+        marker: tree_house::InjectionLanguageMarker,
+    ) -> Option<tree_house::Language> {
+        Languages::standard().language_for_marker(marker)
+    }
+
+    fn get_config(&self, language: tree_house::Language) -> Option<&tree_house::LanguageConfig> {
+        self.asked.set(self.asked.get() + 1);
+        if self.asked.get() == self.cancel_at {
+            self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Languages::standard().get_config(language)
+    }
+}
+
 /// A highlighter whose budget runs out part of the way through keeps exactly what it had
 /// finished: a prefix of the full highlights, the last run perhaps cut short, and nothing
 /// after it.
@@ -1408,27 +1434,29 @@ fn a_highlighter_out_of_budget_keeps_only_what_it_finished() {
             Ok(())
         }
     "#};
-    let text = unit.repeat(3000);
+    let text = unit.repeat(20);
     let syntax = parsed("rust", &text);
     let source = ropey::RopeSlice::from(text.as_str());
-    let languages = Languages::standard();
-    // The time the whole highlight takes, of which a quarter cannot be enough.
-    let started = std::time::Instant::now();
-    let full = tree::host_runs(
-        &syntax,
-        source,
-        languages,
-        &tree_house::Budget::new(far().remaining(), None),
-    );
-    let whole = started.elapsed();
-    assert!(!full.halted);
-    let budget = tree_house::Budget::new(whole / 4, None);
-    let partial = tree::host_runs(&syntax, source, languages, &budget);
-    assert!(partial.halted, "a quarter of {whole:?} is not enough");
-    assert!(partial.runs.len() < full.runs.len());
-    let Some((last, finished)) = partial.runs.split_last() else {
-        return;
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let highlight = |cancel_at| {
+        let languages = Cancelling {
+            asked: std::cell::Cell::new(0),
+            cancel_at,
+            cancel: &cancel,
+        };
+        let budget = tree_house::Budget::new(far().remaining(), Some(&cancel));
+        let host = tree::host_runs(&syntax, source, &languages, &budget);
+        (host, languages.asked.get())
     };
+    let (full, asked) = highlight(0);
+    assert!(!full.halted);
+    // Cancelled halfway through what the whole highlight asks for.
+    let (partial, _) = highlight(asked / 2);
+    assert!(partial.halted);
+    assert!(!partial.runs.is_empty(), "the cancel came before any run");
+    assert!(partial.runs.len() < full.runs.len());
+    let (finished, last) = partial.runs.split_at(partial.runs.len() - 1);
+    let last = &last[0];
     assert_eq!(finished, &full.runs[..finished.len()]);
     let cut = &full.runs[finished.len()];
     assert_eq!((last.range.start, last.tone), (cut.range.start, cut.tone));

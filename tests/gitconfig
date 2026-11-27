@@ -1,0 +1,9 @@
+# Git's global configuration for the git commands the tests run, in place of the user's.
+#
+# Git starts no maintenance in the background, as cr's own repositories do not: started by a
+# commit, a fetch or a push, it outlives the command and writes the repository while a test
+# copies, compares or watches it.
+[gc]
+	auto = 0
+[maintenance]
+	auto = false

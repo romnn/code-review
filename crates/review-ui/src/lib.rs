@@ -59,3 +59,6 @@ pub mod text;
 pub mod theme;
 pub mod watch;
 pub mod worker;
+
+#[cfg(test)]
+mod testing;

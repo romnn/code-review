@@ -449,7 +449,7 @@ impl Servers {
 mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
 
@@ -520,49 +520,74 @@ mod tests {
         ));
     }
 
+    /// What the handshake test hears first: the server saying it got the handshake, or the
+    /// handshake's end.
+    enum Handshake {
+        Heard,
+        Ended(Result<(), String>),
+    }
+
     /// A revocation while a server is in its handshake, which runs outside the servers' lock,
     /// stops it without waiting for the handshake, once the server, which ignores the request to
     /// exit, is killed after the exit deadline, and the handshake fails.
+    ///
+    /// The server says it got the handshake, then neither answers nor ends until it is killed,
+    /// within ten minutes at the latest, so the handshake fails as stopped only when the
+    /// revocation stops it while it waits.
     #[test]
     fn a_revocation_during_a_slow_handshake_waits_only_for_the_exit_deadline() {
         let dir = tempfile::tempdir().unwrap();
+        let heard = dir.path().join("heard");
+        let made = std::process::Command::new("mkfifo").arg(&heard).status();
+        assert!(made.unwrap().success());
         let servers = Arc::new(Servers::default());
-        let worker = std::thread::spawn({
+        let (event, events) = std::sync::mpsc::channel();
+        std::thread::spawn({
             let servers = Arc::clone(&servers);
             let root = dir.path().to_owned();
+            let heard = heard.to_str().unwrap().to_owned();
+            let event = event.clone();
             move || {
-                // A server that never answers the handshake.
+                let script = r#"head -c 1 >/dev/null; : >"$1"; exec sleep 600"#;
                 let launch = || {
-                    LanguageServer::stand_in("sleep", &["30"], &root).map_err(|err| err.to_string())
+                    LanguageServer::stand_in(
+                        "timeout",
+                        &["600", "sh", "-c", script, "sh", &heard],
+                        &root,
+                    )
+                    .map_err(|err| err.to_string())
                 };
                 let current = AtomicU64::new(0);
-                let server = servers.admit(0, &current, || true, "rust", launch).unwrap();
-                server.lock().initialize(&root)
+                let shaken = servers
+                    .admit(0, &current, || true, "rust", launch)
+                    .map_err(|err| format!("{err:?}"))
+                    .and_then(|server| {
+                        server
+                            .lock()
+                            .initialize(&root)
+                            .map_err(|err| err.to_string())
+                    });
+                event.send(Handshake::Ended(shaken)).ok();
             }
         });
-        // The server is in the set, shaking hands.
-        let waited = Instant::now();
-        while servers.len() == 0 {
-            assert!(
-                waited.elapsed() < Duration::from_secs(10),
-                "no server launched"
-            );
-            std::thread::sleep(Duration::from_millis(10));
+        std::thread::spawn(move || {
+            // The server opens `heard` once it read the start of the handshake, and closes it.
+            let mut heard = std::fs::File::open(heard).unwrap();
+            std::io::Read::read_to_end(&mut heard, &mut Vec::new()).unwrap();
+            event.send(Handshake::Heard).ok();
+        });
+        if let Handshake::Ended(shaken) = events.recv().unwrap() {
+            panic!("the handshake ended before the server got it: {shaken:?}");
         }
-        std::thread::sleep(Duration::from_millis(100));
 
-        let revoking = Instant::now();
         servers.decide(true, || Ok::<_, ()>(Trust::Denied)).unwrap();
+        let Handshake::Ended(shaken) = events.recv().unwrap() else {
+            panic!("the server said it got the handshake twice");
+        };
         assert!(
-            revoking.elapsed() < crate::lsp::EXIT_DEADLINE + Duration::from_secs(1),
-            "the revocation waited for the handshake"
-        );
-        let shaken = worker.join().unwrap();
-        assert!(
-            shaken.is_err_and(|err| err.to_string().contains("stopped")),
+            shaken.is_err_and(|err| err.contains("stopped")),
             "the handshake fails"
         );
-        assert!(waited.elapsed() < Duration::from_secs(10));
         assert_eq!(servers.len(), 0);
     }
 

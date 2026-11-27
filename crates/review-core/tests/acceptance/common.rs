@@ -11,9 +11,14 @@ use review_core::{
 };
 use tempfile::TempDir;
 
-/// Isolates test git commands from the user's configuration and pins the commit identity.
+/// Isolates the tests' git commands from the user's and the system's configuration, with the
+/// workspace's `tests/gitconfig` in place of the user's, pins the commit identity and has git
+/// never prompt.
 pub const GIT_ENV: [(&str, &str); 7] = [
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    (
+        "GIT_CONFIG_GLOBAL",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/gitconfig"),
+    ),
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_AUTHOR_NAME", "Test"),
     ("GIT_AUTHOR_EMAIL", "test@example.com"),

@@ -153,7 +153,9 @@ mod tests {
         let log = Log::held(Some(&log_file));
         log.write("first");
         log.write("second");
-        log_file.flush();
+        // However long the writes take: `flush` gives up early only so a stuck disk cannot
+        // hang exit.
+        log_file.worker.flush(Duration::MAX);
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             text,
