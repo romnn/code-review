@@ -45,7 +45,7 @@ use review_ui::worker;
 use crate::app::{App, Message, Outgoing, next_batch};
 use crate::clipboard;
 use crate::color::Colors;
-use crate::graphics::{Environment, Uploads};
+use crate::graphics::{Environment, Graphics, Uploads};
 use crate::images::CellSize;
 use crate::log::Log;
 
@@ -245,14 +245,26 @@ pub fn run(
 /// Inside tmux, starts reading whether its client's terminal shows images, which takes calls
 /// of tmux, as the app starts and on each ask, when focus or a resize says another client may
 /// have attached; each change goes to the main loop through `sender`, and until the first
-/// reading none show. Returns where to ask, which nothing reads outside tmux.
-fn read_tmux(environment: &Environment, sender: &mpsc::Sender<Message>) -> mpsc::Sender<()> {
+/// reading none show, as none do when tmux cannot be read, which goes to `log`. Returns where
+/// to ask, which nothing reads outside tmux.
+fn read_tmux(
+    environment: &Environment,
+    sender: &mpsc::Sender<Message>,
+    log: &Log,
+) -> mpsc::Sender<()> {
     let (ask, asks) = mpsc::channel();
     if environment.tmux_pane.is_some() {
         let environment = environment.clone();
         let sender = sender.clone();
+        let log = log.clone();
         std::thread::spawn(move || {
             environment.follow_tmux(&asks, |graphics| {
+                if graphics.is_none() {
+                    log.write(
+                        "tmux could not say what its client's terminal shows; images stay off",
+                    );
+                }
+                let graphics = graphics.unwrap_or(Graphics::None);
                 sender.send(Message::Graphics(graphics)).is_ok()
             });
         });
@@ -294,7 +306,7 @@ fn show(
     let signals = signals::watch(sender.clone(), log.clone())?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let size = terminal.size()?;
-    let ask_tmux = read_tmux(environment, &sender);
+    let ask_tmux = read_tmux(environment, &sender, log);
     let mut app = App::new(
         settings,
         opener,

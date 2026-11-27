@@ -817,12 +817,7 @@ mod tests {
                 .arg(self.dir.path())
                 .args(["-c", "core.fsync=all"])
                 .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .envs(crate::testing::GIT_ENV)
                 .status()
                 .unwrap();
             assert!(status.success(), "git {args:?}");

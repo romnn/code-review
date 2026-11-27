@@ -8,13 +8,17 @@ use super::*;
 use crate::git::Git;
 use crate::manifest::ParseError;
 
-/// Runs git in `directory` as a test's own setup, apart from the user's configuration.
+/// Runs git in `directory` as a test's own setup, apart from the user's and the system's
+/// configuration, with the workspace's `tests/gitconfig` in place of the user's.
 fn run_git(directory: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(directory)
         .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/gitconfig"),
+        )
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.com")

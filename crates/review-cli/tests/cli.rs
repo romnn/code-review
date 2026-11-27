@@ -7,8 +7,14 @@ use color_eyre::eyre::{self, WrapErr as _};
 use indoc::{formatdoc, indoc};
 use serde_json::Value;
 
+/// Isolates the tests' git commands, and `cr`'s, from the user's and the system's
+/// configuration, with the workspace's `tests/gitconfig` in place of the user's, and pins the
+/// commit identity.
 const GIT_ENV: [(&str, &str); 6] = [
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    (
+        "GIT_CONFIG_GLOBAL",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/gitconfig"),
+    ),
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_AUTHOR_NAME", "Test"),
     ("GIT_AUTHOR_EMAIL", "test@example.com"),
@@ -542,6 +548,7 @@ fn commands_follow_a_force_push_back() -> eyre::Result<()> {
             .arg("-C")
             .arg(repo)
             .args(["rev-parse", "HEAD"])
+            .envs(GIT_ENV)
             .output()?
             .stdout,
     )?;
@@ -908,6 +915,7 @@ fn cr_run_from_elsewhere_reads_only_the_checkout() -> eyre::Result<()> {
         .arg("-C")
         .arg(&repo)
         .args(["rev-parse", "--absolute-git-dir"])
+        .envs(GIT_ENV)
         .output()?;
     let git_dir = String::from_utf8(output.stdout)?.trim().to_owned();
     git(

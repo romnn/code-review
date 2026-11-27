@@ -654,13 +654,17 @@ mod tests {
 
     use super::*;
 
-    /// Runs git in `dir`, isolated from the user's configuration.
+    /// Runs git in `dir`, isolated from the user's and the system's configuration, with the
+    /// workspace's `tests/gitconfig` in place of the user's, and with a fixed identity.
     fn git(dir: &Path, args: &[&str]) -> eyre::Result<()> {
         let output = Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/gitconfig"),
+            )
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_NAME", "Test")
             .env("GIT_AUTHOR_EMAIL", "test@example.com")

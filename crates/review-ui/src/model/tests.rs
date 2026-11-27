@@ -3282,13 +3282,7 @@ fn review_of<C: AsRef<[u8]>>(dir: &Path, base: &[(&str, C)], head: &[(&str, C)])
             .arg("-C")
             .arg(&repo)
             .args(args)
-            // Isolated from the user's configuration, with a fixed identity.
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .envs(crate::testing::GIT_ENV)
             .output()
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {output:?}");
@@ -3696,12 +3690,7 @@ fn worktree_review_of(
             .arg("-C")
             .arg(&repo)
             .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .envs(crate::testing::GIT_ENV)
             .output()
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {output:?}");
@@ -3789,8 +3778,7 @@ fn a_job_reads_its_capture_after_the_window_moved_on() {
             .arg("-C")
             .arg(&repo)
             .args(["add", "doc.pdf"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(crate::testing::GIT_ENV)
             .output()
             .unwrap();
         assert!(added.status.success(), "git add: {added:?}");
@@ -5352,9 +5340,12 @@ fn a_scroll_on_its_way_selects_nothing_unseen() {
     host.dispatch(Action::FirstHunk);
     settle_scroll(&mut host);
     let first = host.model().hunk_units();
+    // Half a page down shows the next hunk once the scroll arrives.
+    // The frame is laid out at an instant from before the scroll started, so it is still on
+    // its way however long the dispatch took.
+    let before = Instant::now();
     host.dispatch(Action::HalfPageDown);
-    host.dispatch(Action::HalfPageDown);
-    lay_out(&mut host);
+    host.update(|model| model.layout(fixed_window(), before));
     assert_eq!(host.model().hunk_units(), first, "nothing else showed yet");
     host.dispatch(Action::ToggleApprove);
     let marked: Vec<UnitId> = host.model().pending.keys().copied().collect();
@@ -5618,12 +5609,7 @@ fn git_in(repo: &Path, args: &[&str]) {
         .arg("-C")
         .arg(repo)
         .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .envs(crate::testing::GIT_ENV)
         .output()
         .unwrap();
     assert!(output.status.success(), "git {args:?}: {output:?}");

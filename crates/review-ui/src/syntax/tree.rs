@@ -7,7 +7,7 @@ use std::ops::Range;
 use ropey::RopeSlice;
 use syntect::parsing::SyntaxReference;
 use tree_house::highlighter::Highlighter;
-use tree_house::{Budget, OwnedInjectionLanguageMarker, UnresolvedInjection};
+use tree_house::{Budget, LanguageLoader, OwnedInjectionLanguageMarker, UnresolvedInjection};
 
 use super::budget::Deadline;
 use super::languages::{BAT_MARKER, Languages, PLAIN_MARKER};
@@ -77,7 +77,7 @@ pub(super) struct Host {
 pub(super) fn host_runs(
     syntax: &tree_house::Syntax,
     source: RopeSlice<'_>,
-    languages: &Languages,
+    languages: &impl LanguageLoader,
     budget: &Budget<'_>,
 ) -> Host {
     let end = u32::try_from(source.len_bytes()).unwrap_or(u32::MAX);

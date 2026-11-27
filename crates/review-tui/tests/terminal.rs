@@ -16,6 +16,10 @@ use parking_lot::Mutex;
 /// How long the app gets for what a test waits on, however loaded the machine.
 const DEADLINE: Duration = Duration::from_secs(60);
 
+/// Git's global configuration for the tests' git commands and the app's, in place of the
+/// user's: the workspace's `tests/gitconfig`.
+const GIT_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/gitconfig");
+
 /// What a terminal that speaks the kitty keyboard protocol answers its query with: its flags.
 const FLAGS_ANSWER: &[u8] = b"\x1b[?0u";
 
@@ -100,7 +104,7 @@ impl Session {
             .env("CODE_REVIEW_DEMO_DIR", dir.join("demo"))
             .env("CR_DATA_DIR", dir.join("data"))
             .env("XDG_STATE_HOME", dir.join("state"))
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", GIT_CONFIG)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CEILING_DIRECTORIES", dir)
             // Not inside the tmux the tests may run in, unless a test says so.
@@ -195,13 +199,14 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
-/// Runs git in `repo` with `args`, as its own user, without the user's configuration.
+/// Runs git in `repo` with `args`, as its own user, with the configuration [`GIT_CONFIG`]
+/// says.
 fn git(repo: &Path, args: &[&str]) -> eyre::Result<()> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", GIT_CONFIG)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.com")
@@ -442,8 +447,9 @@ fn wezterm_gets_inline_images_without_asking() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A `tmux` under `dir` that logs how it was called and answers with the file it returns,
-/// which a test writes as a client would answer; the `PATH` that finds it first.
+/// A `tmux` under `dir` that logs how it was called in `called`, answers with the file it
+/// returns, which a test writes as a client would answer, and logs each answer it gave in
+/// `answered`; the `PATH` that finds it first.
 fn tmux_stub(dir: &Path) -> eyre::Result<(std::path::PathBuf, String)> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -453,8 +459,14 @@ fn tmux_stub(dir: &Path) -> eyre::Result<(std::path::PathBuf, String)> {
     let script = indoc::formatdoc! {r#"
         #!/bin/sh
         printf '%s\n' "$*" >>'{called}'
-        cat '{answer}'
-    "#, called = dir.join("called").display(), answer = answer.display()};
+        answer=$(cat '{answer}')
+        printf '%s\n' "$answer"
+        printf '%s\n' "$answer" >>'{answered}'
+    "#,
+        called = dir.join("called").display(),
+        answer = answer.display(),
+        answered = dir.join("answered").display(),
+    };
     let tmux = bin.join("tmux");
     std::fs::write(&tmux, script)?;
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755))?;
@@ -485,6 +497,11 @@ fn in_tmux(dir: &Path, repo: &Path, path: &str) -> eyre::Result<Session> {
     )
 }
 
+/// How often the tmux stub in `dir` was called.
+fn readings(dir: &Path) -> usize {
+    std::fs::read_to_string(dir.join("called")).map_or(0, |called| called.lines().count())
+}
+
 /// Every call of tmux is the one reading of the pane and its client.
 fn only_read(dir: &Path) -> eyre::Result<()> {
     let called = std::fs::read_to_string(dir.join("called"))?;
@@ -504,38 +521,65 @@ fn only_read(dir: &Path) -> eyre::Result<()> {
 /// Inside tmux, the app only reads what tmux says about its pane and client, and shows images
 /// through tmux's passthrough only when the client is a terminal that shows them and
 /// passthrough is already on; never does it change a setting of tmux's.
+///
+/// Passthrough turned off retires the images shown: tmux answers the second reading with
+/// passthrough off, the app takes the answer in, draws the change as binary again, and sends
+/// no image after.
 #[test]
 fn tmux_is_only_read() -> eyre::Result<()> {
-    for (passthrough, shown) in [("on", true), ("off", false)] {
-        let dir = tempfile::tempdir()?;
-        let repo = image_repo(dir.path())?;
-        let (answer, path) = tmux_stub(dir.path())?;
-        std::fs::write(&answer, client(100, "xterm-ghostty", passthrough))?;
-        let mut session = in_tmux(dir.path(), &repo, &path)?;
-        session.wait_for("binary content changed")?;
-        if shown {
-            session.wait_for(std::str::from_utf8(TMUX_TRANSMIT)?)?;
-        } else {
-            // Long enough for tmux's answer to land and a frame to follow it.
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        session.send(b"q")?;
-        let Ended { status, written } = session.end()?;
-        assert!(status.success(), "{status}");
-        assert_eq!(asks(&written), None, "the app asked the terminal");
-        only_read(dir.path())?;
-        assert_eq!(
-            contains(&written, TMUX_TRANSMIT),
-            shown,
-            "passthrough {passthrough}"
-        );
-        // Every transmission is the one inside the passthrough.
-        assert_eq!(
-            count(&written, TRANSMIT),
-            count(&written, TMUX_TRANSMIT),
-            "an image went out unwrapped"
-        );
+    let dir = tempfile::tempdir()?;
+    let repo = image_repo(dir.path())?;
+    let (answer, path) = tmux_stub(dir.path())?;
+    std::fs::write(&answer, client(100, "xterm-ghostty", "on"))?;
+    let mut session = in_tmux(dir.path(), &repo, &path)?;
+    let written = |session: &Session, what: &[u8]| count(&session.written.lock(), what);
+    // Both versions of the image show.
+    let deadline = Instant::now() + DEADLINE;
+    while written(&session, TMUX_TRANSMIT) < 2 {
+        eyre::ensure!(Instant::now() < deadline, "the images never showed");
+        std::thread::sleep(Duration::from_millis(10));
     }
+
+    let binary: &[u8] = b"binary content changed";
+    let (sent, shown_binary) = (written(&session, TMUX_TRANSMIT), written(&session, binary));
+    // Focus has tmux read again, now with passthrough off.
+    std::fs::write(&answer, client(100, "xterm-ghostty", "off"))?;
+    session.send(b"\x1b[I")?;
+    while written(&session, binary) == shown_binary {
+        eyre::ensure!(
+            Instant::now() < deadline,
+            "the images never gave way with passthrough off"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.send(b"q")?;
+    let Ended { status, written } = session.end()?;
+    assert!(status.success(), "{status}");
+    assert_eq!(asks(&written), None, "the app asked the terminal");
+    only_read(dir.path())?;
+    // The app took in both answers: one it could not read, as when tmux is too slow, it says
+    // it could not as it quits.
+    assert!(
+        !contains(&written, b"tmux could not say"),
+        "the app could not read tmux"
+    );
+    // tmux answered twice, the second time with passthrough off.
+    let answered = std::fs::read_to_string(dir.path().join("answered"))?;
+    assert_eq!(
+        answered,
+        client(100, "xterm-ghostty", "on") + &client(100, "xterm-ghostty", "off")
+    );
+    assert_eq!(
+        count(&written, TMUX_TRANSMIT),
+        sent,
+        "an image went out with passthrough off"
+    );
+    // Every transmission is the one inside the passthrough.
+    assert_eq!(
+        count(&written, TRANSMIT),
+        count(&written, TMUX_TRANSMIT),
+        "an image went out unwrapped"
+    );
     Ok(())
 }
 
@@ -550,10 +594,7 @@ fn another_tmux_client_gets_the_images_afresh() -> eyre::Result<()> {
     std::fs::write(&answer, client(100, "xterm-ghostty", "on"))?;
     let mut session = in_tmux(dir.path(), &repo, &path)?;
     let sent = |session: &Session| count(&session.written.lock(), TMUX_TRANSMIT);
-    let readings = || {
-        std::fs::read_to_string(dir.path().join("called"))
-            .map_or(0, |called| called.lines().count())
-    };
+    let readings = || readings(dir.path());
     let deadline = Instant::now() + DEADLINE;
     while sent(&session) < 2 {
         eyre::ensure!(

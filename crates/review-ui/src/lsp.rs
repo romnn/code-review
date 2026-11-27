@@ -56,7 +56,7 @@ pub enum LspError {
 const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// How long a server asked to exit may take before it is killed.
-pub(crate) const EXIT_DEADLINE: Duration = Duration::from_secs(2);
+const EXIT_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The id of the `shutdown` request that asks a server to exit, which no other request takes:
 /// theirs start at 1.
@@ -69,6 +69,7 @@ pub struct Stopper {
     child: Arc<Mutex<Option<Child>>>,
     stopped: Arc<AtomicBool>,
     outgoing: mpsc::Sender<Outgoing>,
+    exit_deadline: Duration,
 }
 
 impl Stopper {
@@ -76,7 +77,7 @@ impl Stopper {
     /// whoever still holds it; see [`end`].
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        end(&mut self.child.lock(), &self.outgoing);
+        end(&mut self.child.lock(), &self.outgoing, self.exit_deadline);
     }
 }
 
@@ -92,7 +93,7 @@ enum Outgoing {
 /// which are not this process's children.
 ///
 /// It first asks the server to exit, with a `shutdown` request, an `exit` notification and the
-/// end of its input, and waits up to [`EXIT_DEADLINE`] for it to exit, so it stops the
+/// end of its input, and waits up to `exit_deadline` for it to exit, so it stops the
 /// processes it started outside its process group itself, as rust-analyzer stops the commands
 /// it runs in process groups of their own.
 /// Then it kills the server's process group, whatever is left of it, such as Cargo, build
@@ -102,7 +103,7 @@ enum Outgoing {
 ///
 /// The server leaves `child` only as it is reaped, after its group is killed, so the group's id
 /// stays the server's until then and no other group is ever signalled.
-fn end(child: &mut Option<Child>, outgoing: &mpsc::Sender<Outgoing>) {
+fn end(child: &mut Option<Child>, outgoing: &mpsc::Sender<Outgoing>, exit_deadline: Duration) {
     let Some(mut child) = child.take() else {
         return;
     };
@@ -115,8 +116,9 @@ fn end(child: &mut Option<Child>, outgoing: &mpsc::Sender<Outgoing>) {
     .chain([Outgoing::Close])
     .all(|message| outgoing.send(message).is_ok());
     if asked {
-        let deadline = Instant::now() + EXIT_DEADLINE;
-        while !exited(&mut child) && Instant::now() < deadline {
+        // A deadline further off than an `Instant` reaches, as a test sets, waits for the exit.
+        let deadline = Instant::now().checked_add(exit_deadline);
+        while !exited(&mut child) && deadline.is_none_or(|deadline| Instant::now() < deadline) {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -257,6 +259,9 @@ pub struct LanguageServer {
     messages: mpsc::Receiver<Result<Value, LspError>>,
     next_id: i64,
     language_id: &'static str,
+    /// How long the server may take to exit once asked before it is killed:
+    /// [`EXIT_DEADLINE`], unless a test waits for the exit with [`Duration::MAX`].
+    exit_deadline: Duration,
 }
 
 impl LanguageServer {
@@ -277,6 +282,7 @@ impl LanguageServer {
             child: Arc::clone(&self.child),
             stopped: Arc::clone(&self.stopped),
             outgoing: self.outgoing.clone(),
+            exit_deadline: self.exit_deadline,
         }
     }
 
@@ -349,6 +355,7 @@ impl LanguageServer {
             messages,
             next_id: 1,
             language_id,
+            exit_deadline: EXIT_DEADLINE,
         })
     }
 
@@ -427,7 +434,14 @@ impl LanguageServer {
     fn send(&self, message: &Value) -> Result<(), LspError> {
         self.outgoing
             .send(Outgoing::Message(frame(message)))
-            .map_err(|_| LspError::Protocol("server closed its input".to_owned()))
+            .map_err(|_| {
+                // Stopping closes the server's input after it marks the server stopped.
+                if self.stopped.load(Ordering::SeqCst) {
+                    LspError::Stopped
+                } else {
+                    LspError::Protocol("server closed its input".to_owned())
+                }
+            })
     }
 
     fn notify(&self, method: &str, params: &Value) -> Result<(), LspError> {
@@ -581,7 +595,7 @@ impl LanguageServer {
 impl Drop for LanguageServer {
     fn drop(&mut self) {
         // A server a `Stopper` stopped is gone already.
-        end(&mut self.child.lock(), &self.outgoing);
+        end(&mut self.child.lock(), &self.outgoing, self.exit_deadline);
     }
 }
 
@@ -717,22 +731,20 @@ mod tests {
     use super::*;
 
     /// A server that never reads its input blocks neither a message nor dropping it.
+    ///
+    /// The server never reads, and ends only after ten minutes, so a message or a drop that
+    /// waited for it would not return before the test profile's bound in
+    /// `.config/nextest.toml` fails the test.
     #[test]
     fn a_server_that_stops_reading_never_blocks() {
         let root = std::env::temp_dir();
-        let started = Instant::now();
-        let server = LanguageServer::spawn("sleep", &["30"], &root, "rust").unwrap();
+        let server = LanguageServer::spawn("sleep", &["600"], &root, "rust").unwrap();
         // Far more than a pipe holds: a blocking write would hang here.
         let text = "x".repeat(8 << 20);
         server
             .notify("textDocument/didOpen", &json!({ "text": text }))
             .unwrap();
         drop(server);
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "took {:?}",
-            started.elapsed()
-        );
     }
 
     /// A canonical Windows path loses its `\\?\` prefix and gets `/` separators and a slash
@@ -769,70 +781,91 @@ mod tests {
         assert_eq!(utf16_column("aü𝄞b", "aü𝄞".len()), 4);
     }
 
-    /// The process `child` writes its id to `pid_file` in, once it does.
+    /// A named pipe `name` in `dir`.
     #[cfg(target_os = "linux")]
-    fn started(pid_file: &Path) -> u32 {
-        let started = Instant::now();
-        loop {
-            if let Some(child) = std::fs::read_to_string(pid_file)
-                .ok()
-                .and_then(|text| text.trim().parse::<u32>().ok())
-            {
-                return child;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the server started no child"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    fn fifo(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let made = Command::new("mkfifo").arg(&path).status().unwrap();
+        assert!(made.success());
+        path
     }
 
-    /// Whether the process `id` is gone, or a zombie the system reaps, within ten seconds.
+    /// The named pipe `fifo` opened for writing when `write`, else for reading, once a process
+    /// opens its other end, or `None` when the server, process `server`, ends first, so a
+    /// script that fails before it opens the pipe fails the test instead of leaving it waiting.
     #[cfg(target_os = "linux")]
-    fn ends(id: u32) -> bool {
-        let stopping = Instant::now();
-        while stopping.elapsed() < Duration::from_secs(10) {
-            let stopped =
-                std::fs::read_to_string(format!("/proc/{id}/stat")).map_or(true, |stat| {
-                    stat.rsplit_once(')')
-                        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-                });
-            if stopped {
-                return true;
+    fn open_unless_ended(fifo: &Path, write: bool, server: u32) -> Option<std::fs::File> {
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+
+        let (event, events) = mpsc::channel();
+        std::thread::spawn({
+            let event = event.clone();
+            let fifo = fifo.to_owned();
+            move || {
+                let opened = std::fs::OpenOptions::new()
+                    .read(!write)
+                    .write(write)
+                    .open(fifo);
+                event.send(Some(opened.unwrap())).ok();
             }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
+        });
+        let server = Pid::from_raw(server.cast_signed()).unwrap();
+        std::thread::spawn(move || {
+            // An error says the server was reaped, which it was only once it ended.
+            let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
+            waitid(WaitId::Pid(server), options).ok();
+            event.send(None).ok();
+        });
+        events.recv().unwrap()
     }
 
     /// A server asked to exit stops what it started outside its process group itself, as
     /// rust-analyzer stops the commands it runs in groups of their own, and stopping it waits
-    /// only as long as it takes to exit.
+    /// for it to exit, and no longer.
+    ///
+    /// The server decides when it exits, once the test lets it: its exit deadline is none.
+    /// A stop that never returns fails at the test profile's bound in `.config/nextest.toml`.
+    /// The server, which leads a process group of its own, and its child, in a session of its
+    /// own, are out of reach of the profile's kill of the test's group, so they end on their
+    /// own within ten minutes.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_server_that_exits_on_request_stops_what_it_started_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        // A child in a session of its own, which the server kills once its input ends.
-        let server = LanguageServer::stand_in(
-            "sh",
-            &[
-                "-c",
-                "setsid sh -c 'echo $$ > child.pid; exec sleep 300' & cat > /dev/null; \
-                 kill \"$(cat child.pid)\"",
-            ],
+        let (held, go) = (fifo(dir.path(), "held"), fifo(dir.path(), "go"));
+        // A child in a session of its own holds `held`; once the server's input ends, the
+        // server waits for a line on `go`, then kills the child and exits.
+        let script = r#"setsid sleep 600 3>"$1" & child=$!
+            cat >/dev/null
+            read -r _ <"$2"
+            kill "$child""#;
+        let paths = [held.to_str().unwrap(), go.to_str().unwrap()];
+        let mut server = LanguageServer::stand_in(
+            "timeout",
+            &["600", "sh", "-c", script, "sh", paths[0], paths[1]],
             dir.path(),
         )
         .unwrap();
-        let child = started(&dir.path().join("child.pid"));
+        server.exit_deadline = Duration::MAX;
+        // Taken before the stop, which holds the server until it is gone.
+        let process = server.process_id();
+        let mut left = open_unless_ended(&held, false, process).expect("the server ended");
 
-        let stopping = Instant::now();
-        server.stopper().stop();
+        let stopper = server.stopper();
+        let stopping = std::thread::spawn(move || stopper.stop());
+        // `go` opens once the stop ended the server's input, and the server waits on it.
+        let mut go = open_unless_ended(&go, true, process).expect("the stop killed the server");
         assert!(
-            stopping.elapsed() < EXIT_DEADLINE,
-            "the stop waited for the deadline"
+            !stopping.is_finished(),
+            "the stop did not wait for the exit"
         );
-        assert!(ends(child), "the server's child {child} still runs");
+        go.write_all(b"\n").unwrap();
+        drop(go);
+        stopping.join().unwrap();
+        // The pipe ends once the child is gone.
+        let mut written = String::new();
+        left.read_to_string(&mut written).unwrap();
+        assert_eq!(written, "");
     }
 
     /// A server that ignores the request to exit is killed with its process group once the
@@ -842,16 +875,21 @@ mod tests {
     #[test]
     fn a_server_that_ignores_the_request_to_exit_is_killed_with_its_group() {
         let dir = tempfile::tempdir().unwrap();
-        let server = LanguageServer::stand_in(
-            "sh",
-            &["-c", "sleep 300 & echo $! > child.pid; wait"],
-            dir.path(),
-        )
-        .unwrap();
-        let child = started(&dir.path().join("child.pid"));
+        let held = fifo(dir.path(), "held");
+        // A child in the server's group holds `held`, and writes to it only if it outlives the
+        // `sleep`; the server waits for it.
+        let script = r#"{ sleep 30; echo survived >&3; } 3>"$1" & wait"#;
+        let path = held.to_str().unwrap();
+        let server =
+            LanguageServer::stand_in("sh", &["-c", script, "sh", path], dir.path()).unwrap();
+        let process = server.process_id();
+        let mut left = open_unless_ended(&held, false, process).expect("the server ended");
 
         server.stopper().stop();
-        assert!(ends(child), "the server's child {child} still runs");
+        // The pipe ends once the child is gone, without its having written.
+        let mut written = String::new();
+        left.read_to_string(&mut written).unwrap();
+        assert_eq!(written, "", "the server's child outlived the stop");
         drop(server);
     }
 

@@ -8,6 +8,8 @@ use review_core::analysis::{FileUnit, MoveKind, UnitKind};
 use review_core::demo::{DemoPaths, DemoRequest, fixture_dir, prepare};
 use review_core::{Review, RevisionNumber, UnitState};
 
+use crate::common::GIT_ENV;
+
 /// What the engine made of one revision, in a comparable form.
 #[derive(Debug, PartialEq, Eq)]
 struct Classification {
@@ -60,6 +62,7 @@ fn refs(paths: &DemoPaths) -> eyre::Result<String> {
             "refs/demo",
             "refs/heads",
         ])
+        .envs(GIT_ENV)
         .output()?;
     Ok(String::from_utf8(output.stdout)?)
 }

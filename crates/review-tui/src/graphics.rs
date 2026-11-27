@@ -23,6 +23,7 @@
 use std::io::Read as _;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -84,9 +85,10 @@ impl Environment {
     /// only reads, and hands each change of what tmux says to `changed`, the first reading
     /// included, until `changed` says the app is gone or nothing can ask any more; returns at
     /// once outside tmux.
+    /// `None` says tmux could not be read: it failed or did not answer in time.
     ///
     /// It runs for as long as the app does, so it runs on a thread of its own.
-    pub fn follow_tmux(&self, asks: &Receiver<()>, changed: impl Fn(Graphics) -> bool) {
+    pub fn follow_tmux(&self, asks: &Receiver<()>, changed: impl Fn(Option<Graphics>) -> bool) {
         let Some(pane) = self.tmux_pane.as_deref() else {
             return;
         };
@@ -97,8 +99,7 @@ impl Environment {
                 TMUX_DEADLINE,
             );
             if said.as_ref() != Some(&answer) {
-                let graphics = answer.as_deref().map_or(Graphics::None, tmux_graphics);
-                if !changed(graphics) {
+                if !changed(answer.as_deref().map(tmux_graphics)) {
                     return;
                 }
                 said = Some(answer);
@@ -142,50 +143,79 @@ fn tmux_graphics(answer: &str) -> Graphics {
 /// included; `None` when it fails or takes longer, when it is killed with everything it
 /// started.
 fn run_bounded(command: &mut Command, deadline: Duration) -> Option<String> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    // Its own process group, so a kill reaches whatever it started that holds its output.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(command, 0);
-    let mut child = command.spawn().ok()?;
-    let started = Instant::now();
-    let mut output = child.stdout.take()?;
-    let (sender, receiver) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut answer = String::new();
-        let read = output.read_to_string(&mut answer).map(|_| answer);
-        sender.send(read).ok();
-    });
-    let read = receiver.recv_timeout(deadline);
-    // The child is reaped only once its output is in, so a kill of its group always runs
-    // while the child still holds the group's id, which then cannot belong to another group.
-    let status = match read {
-        Ok(_) => loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if started.elapsed() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
+    Running::start(command)?.finish(deadline)
+}
+
+/// A command [`run_bounded`] started, with the thread that reads its output.
+struct Running {
+    child: Child,
+    started: Instant,
+    output: Receiver<std::io::Result<String>>,
+    reader: JoinHandle<()>,
+}
+
+impl Running {
+    /// Starts `command` without input, its output read on a thread of its own; `None` when it
+    /// cannot start.
+    fn start(command: &mut Command) -> Option<Self> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // Its own process group, so a kill reaches whatever it started that holds its output.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(command, 0);
+        let mut child = command.spawn().ok()?;
+        let started = Instant::now();
+        let mut pipe = child.stdout.take()?;
+        let (sender, output) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut answer = String::new();
+            let read = pipe.read_to_string(&mut answer).map(|_| answer);
+            sender.send(read).ok();
+        });
+        Some(Self {
+            child,
+            started,
+            output,
+            reader,
+        })
+    }
+
+    /// What the command printed, once it ended within `deadline` of its start; `None` when it
+    /// fails or takes longer, when it is killed with everything it started.
+    fn finish(mut self, deadline: Duration) -> Option<String> {
+        let read = self
+            .output
+            .recv_timeout(deadline.saturating_sub(self.started.elapsed()));
+        // The child is reaped only once its output is in, so a kill of its group always runs
+        // while the child still holds the group's id, which then cannot belong to another group.
+        let status = match read {
+            Ok(_) => loop {
+                match self.child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if self.started.elapsed() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    // Too slow, or it cannot be waited for.
+                    _ => break None,
                 }
-                // Too slow, or it cannot be waited for.
-                _ => break None,
-            }
-        },
-        // Its output never came.
-        Err(_) => None,
-    };
-    if status.is_none() {
-        kill(&mut child);
+            },
+            // Its output never came.
+            Err(_) => None,
+        };
+        if status.is_none() {
+            kill(&mut self.child);
+        }
+        // With every process that held the output gone, the reader ends at once and is joined;
+        // one a process outside the group still holds is left to end on its own.
+        let read = read.or_else(|_| self.output.recv_timeout(Duration::from_secs(1)));
+        if read.is_ok() {
+            self.reader.join().ok();
+        }
+        let answer = read.ok()?.ok()?;
+        status?.success().then_some(answer)
     }
-    // With every process that held the output gone, the reader ends at once and is joined;
-    // one a process outside the group still holds is left to end on its own.
-    let read = read.or_else(|_| receiver.recv_timeout(Duration::from_secs(1)));
-    if read.is_ok() {
-        reader.join().ok();
-    }
-    let answer = read.ok()?.ok()?;
-    status?.success().then_some(answer)
 }
 
 /// Kills `child` and, on Unix, the rest of the process group it leads, then reaps it.
@@ -295,6 +325,9 @@ pub fn delete(id: u32, tmux: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use rustix::process::{WaitId, WaitIdOptions};
+
     use super::*;
 
     /// Outside tmux, `TERM` or `TERM_PROGRAM` names the terminals that show images; inside tmux,
@@ -376,40 +409,44 @@ mod tests {
 
     /// A command that outlasts its deadline is killed, and says nothing, as is one that ends
     /// but leaves a process behind holding its output, which is killed with it.
+    ///
+    /// A named pipe orders the steps, so no outcome depends on the clock: reading it ends once
+    /// every process holding it is gone.
+    /// Every process the test starts ends on its own within ten minutes, out of reach as they
+    /// are of the test profile's kill of the test's process group.
     #[test]
     #[cfg(unix)]
     fn a_slow_command_is_given_up() {
-        let started = Instant::now();
-        let answer = run_bounded(Command::new("sleep").arg("10"), Duration::from_millis(100));
+        let answer = run_bounded(Command::new("sleep").arg("600"), Duration::from_millis(100));
         assert_eq!(answer, None);
-        assert!(started.elapsed() < Duration::from_secs(5));
+
         let dir = tempfile::tempdir().unwrap();
-        let pid = dir.path().join("pid");
-        let started = Instant::now();
-        let left = run_bounded(
-            Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep 30 & echo $! >'{}'", pid.display())),
-            Duration::from_millis(100),
-        );
-        assert_eq!(left, None);
-        assert!(started.elapsed() < Duration::from_secs(2));
-        // The process left behind is gone, or a zombie waiting for its new parent to reap it.
-        let stat = format!(
-            "/proc/{}/stat",
-            std::fs::read_to_string(&pid).unwrap().trim()
-        );
-        let alive = || std::fs::read_to_string(&stat).is_ok_and(|stat| !stat.contains(") Z "));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while alive() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            !alive(),
-            "the process holding the output outlived the deadline"
-        );
+        let held = dir.path().join("held");
+        let made = Command::new("mkfifo").arg(&held).status();
+        assert!(made.unwrap().success());
+        // The command opens `held` to read and write, which waits for no other process, and
+        // ends, leaving behind a shell that holds its output and `held`, and writes to it only
+        // if it outlives the `sleep`.
+        let script = r#"exec 3<>"$1"; { sleep 30; echo survived >&3; } &"#;
+        let running =
+            Running::start(Command::new("sh").args(["-c", script, "sh"]).arg(&held)).unwrap();
+        // The command is waited for without being reaped, as `finish` finds it.
+        let command = rustix::process::Pid::from_child(&running.child);
+        let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
+        let ended = rustix::process::waitid(WaitId::Pid(command), options).unwrap();
+        let status = ended.and_then(|ended| ended.exit_status());
+        assert_eq!(status, Some(0), "the command could not open `held`");
+        // The shell left behind holds `held`, so opening it waits for no one.
+        let mut left = std::fs::File::open(&held).unwrap();
+        assert_eq!(running.finish(Duration::ZERO), None);
+        // The shell left behind is gone without having written.
+        let mut written = String::new();
+        left.read_to_string(&mut written).unwrap();
+        assert_eq!(written, "");
+
+        // With no deadline to miss, a command that ends says what it printed.
         assert_eq!(
-            run_bounded(Command::new("echo").arg("on"), TMUX_DEADLINE).as_deref(),
+            run_bounded(Command::new("echo").arg("on"), Duration::MAX).as_deref(),
             Some("on\n")
         );
     }

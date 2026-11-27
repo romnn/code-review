@@ -6,13 +6,13 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre;
+use color_eyre::eyre::{self, WrapErr as _};
 use googletest::prelude::*;
 use review_core::{
     History, MarkVerdict, ObjectId, Repo, Review, ReviewKey, ReviewTarget, SinceReviewed,
 };
 
-use crate::common::{TestRepo, git_in, rust_functions};
+use crate::common::{GIT_ENV, TestRepo, git_in, rust_functions};
 
 /// How many revisions the generated review records, as many as the longest real one.
 const REVISIONS: u32 = 117;
@@ -432,6 +432,7 @@ fn an_archive_that_lost_objects_gets_them_again() -> eyre::Result<()> {
                 .arg("--git-dir")
                 .arg(&archive)
                 .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+                .envs(GIT_ENV)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .spawn()?;
@@ -491,8 +492,8 @@ fn legacy_checkout(test: &TestRepo) -> eyre::Result<(ReviewKey, History)> {
     );
     let archive = review.snapshots().git_dir().display().to_string();
     test.git(&["fetch", "--quiet", "--no-write-fetch-head", &archive, &pins])?;
-    std::fs::remove_dir_all(review.snapshots().git_dir())?;
-    std::fs::remove_dir_all(test.data_dir().join("clones"))?;
+    remove_dir(review.snapshots().git_dir())?;
+    remove_dir(&test.data_dir().join("clones"))?;
     Ok((review.key().clone(), review.history()?))
 }
 
@@ -618,13 +619,13 @@ fn a_clone_restored_at_a_bound_path_starts_afresh() -> eyre::Result<()> {
     copy_dir(&test.path().join(".git"), &saved.path().join(".git"))?;
     expect_that!(open_checkout(&test, test.path())?.key().clone(), eq(&key));
 
-    std::fs::remove_dir_all(test.path().join(".git"))?;
+    remove_dir(&test.path().join(".git"))?;
     test.git(&["init", "--quiet", "--initial-branch=main"])?;
     test.commit("anew")?;
     let anew = open_checkout(&test, test.path())?.key().clone();
     expect_that!(anew, not(eq(&key)));
 
-    std::fs::remove_dir_all(test.path().join(".git"))?;
+    remove_dir(&test.path().join(".git"))?;
     copy_dir(&saved.path().join(".git"), &test.path().join(".git"))?;
     let restored = open_checkout(&test, test.path())?.key().clone();
     expect_that!(restored, not(eq(&key)));
@@ -651,15 +652,32 @@ fn a_linked_worktree_opened_first_takes_its_clone_identity() -> eyre::Result<()>
 
 /// Copies the directory `from`, with everything in it, to `to`.
 fn copy_dir(from: &Path, to: &Path) -> eyre::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
+    std::fs::create_dir_all(to).wrap_err_with(|| format!("failed to create {}", to.display()))?;
+    let entries =
+        std::fs::read_dir(from).wrap_err_with(|| format!("failed to list {}", from.display()))?;
+    for entry in entries {
+        let entry = entry.wrap_err_with(|| format!("failed to list {}", from.display()))?;
+        let source = entry.path();
         let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
+        let kind = entry
+            .file_type()
+            .wrap_err_with(|| format!("failed to read the type of {}", source.display()))?;
+        if kind.is_dir() {
+            copy_dir(&source, &target)?;
         } else {
-            std::fs::copy(entry.path(), target)?;
+            std::fs::copy(&source, &target).wrap_err_with(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
         }
     }
     Ok(())
+}
+
+/// Removes the directory `path` with everything in it.
+fn remove_dir(path: &Path) -> eyre::Result<()> {
+    std::fs::remove_dir_all(path).wrap_err_with(|| format!("failed to remove {}", path.display()))
 }
