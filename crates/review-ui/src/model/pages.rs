@@ -12,8 +12,12 @@
 //!
 //! One job reads at a time, and one result is kept, for the pair read last. A result lands
 //! only while its pair is still the one the selected file shows, and its first changed page
-//! pair shows first. Review state is untouched: the PDF is one opaque unit, approved as a
-//! whole, and its page rows are for reading.
+//! pair shows first.
+//! A job whose pair the selected file no longer shows stops before it reads, between versions
+//! and between pages, and lands nothing, so it lets go of pdfium, which every page render
+//! waits for, as soon as it can.
+//! Review state is untouched: the PDF is one opaque unit, approved as a whole, and its page
+//! rows are for reading.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -22,9 +26,10 @@ use review_core::Review;
 use review_core::analysis::{FileUnit, UnitKind};
 
 use super::Model;
-use super::compare::Compared;
-use super::compare::{Page, Pair, read};
+use super::compare::{Compared, Running};
+use super::compare::{Page, Pair, compare_versions, read};
 use super::effects::{Because, Outcome, Subject};
+use super::pool::Lane;
 use crate::images::{Comparison, Encoded};
 use crate::pdf::{Fallback, Pages, is_pdf, page_texts};
 use crate::rows::{PdfRows, PdfShows};
@@ -62,8 +67,8 @@ pub(super) struct Pdfs {
     wanted: Option<Pair>,
     /// The pair read last, and what reading it found.
     read: Option<(Pair, Read)>,
-    /// The pair a job reads now.
-    reading: Option<Pair>,
+    /// The job that reads a pair now.
+    reading: Option<Running>,
     /// The page pair the navigator selects, by index into the pages read last.
     page: usize,
 }
@@ -116,29 +121,44 @@ impl Model {
             return;
         }
         self.pdfs.wanted = wanted.cloned();
+        if let Some(running) = &self.pdfs.reading {
+            running.follow(wanted);
+        }
         let Some(pair) = wanted.cloned() else {
             return;
         };
         if self.read_pdf(&pair).is_some() || self.pdfs.reading.is_some() {
             return;
         }
-        self.pdfs.reading = Some(pair.clone());
+        let (running, still) = Running::start(&pair);
+        self.pdfs.reading = Some(running);
         // An image compared before, as when the reviewer comes back to it, is not decoded again.
         let decode = self.shows_images() && !self.images.holds(&pair);
         // Keyed by blobs, whose content never changes, so it lands whatever shows meanwhile.
-        self.spawn_with(Subject::Always(Because::Content), move |parts| {
-            let (read, comparison) = read_pages(&parts.review, &pair, decode);
-            Outcome::PdfRead(Box::new(ReadPdf {
-                pair,
-                read,
-                comparison,
-            }))
-        });
+        self.spawn_with(
+            Lane::Selected,
+            Subject::Always(Because::Content),
+            move |parts| {
+                let read = read_pages(&parts.review, &pair, decode, &still);
+                Outcome::PdfRead(read.map(|(read, comparison)| {
+                    Box::new(ReadPdf {
+                        pair,
+                        read,
+                        comparison,
+                    })
+                }))
+            },
+        );
     }
 
-    /// Takes in what a job's reading found: keeps it while its pair is the one shown, showing
-    /// its first changed page pair, and starts the pair shown now.
-    pub(super) fn pdf_read(&mut self, read: ReadPdf) {
+    /// Takes in what a job's reading found, if it ran to its end: keeps it while its pair is the
+    /// one shown, showing its first changed page pair, and starts the pair shown now.
+    pub(super) fn pdf_read(&mut self, read: Option<ReadPdf>) {
+        let Some(read) = read else {
+            let wanted = self.pdfs.wanted.clone();
+            self.follow_pdf(wanted.as_ref());
+            return;
+        };
         let ReadPdf {
             pair,
             read,
@@ -152,7 +172,7 @@ impl Model {
             self.pdfs.read = Some((pair.clone(), read));
         }
         if let Some(comparison) = comparison {
-            self.compared(Compared { pair, comparison });
+            self.compared(Some(Compared { pair, comparison }));
         }
         self.rebuild_in_place();
     }
@@ -307,10 +327,23 @@ impl Model {
 }
 
 /// Reads `pair`'s versions and, when either is a PDF, each one's page text, and otherwise,
-/// when asked to `decode`, compares them as images; runs in the background.
+/// when asked to `decode`, compares them as images; runs in the background, and ends with
+/// nothing before it reads, decodes a version, or reads another page once it is no longer
+/// `wanted`.
 #[tracing::instrument(skip_all)]
-fn read_pages(review: &Review, pair: &Pair, decode: bool) -> (Read, Option<Comparison>) {
+fn read_pages(
+    review: &Review,
+    pair: &Pair,
+    decode: bool,
+    wanted: &dyn Fn() -> bool,
+) -> Option<(Read, Option<Comparison>)> {
+    if !wanted() {
+        return None;
+    }
     let (base, head) = read(review, pair);
+    if !wanted() {
+        return None;
+    }
     let pdf = [&base, &head]
         .iter()
         .any(|version| matches!(version, Encoded::Bytes(bytes) if is_pdf(bytes)));
@@ -321,19 +354,23 @@ fn read_pages(review: &Review, pair: &Pair, decode: bool) -> (Read, Option<Compa
                 Encoded::TooLarge(size) => Some(Fallback::TooLarge(*size).reason(side)),
                 _ => None,
             });
-        let comparison = decode.then(|| Comparison::of(base, head));
-        return (large.map_or(Read::NotPdf, Read::TooLarge), comparison);
+        let comparison = if decode {
+            Some(compare_versions(pair, base, head, wanted)?)
+        } else {
+            None
+        };
+        return Some((large.map_or(Read::NotPdf, Read::TooLarge), comparison));
     }
     let texts = |version: Encoded| match version {
-        Encoded::Absent => Ok(None),
-        Encoded::Bytes(bytes) => page_texts(&bytes).map(Some),
-        Encoded::TooLarge(size) => Err(Fallback::TooLarge(size)),
-        Encoded::Unreadable => Err(Fallback::Unreadable),
+        Encoded::Absent => Some(Ok(None)),
+        Encoded::Bytes(bytes) => page_texts(&bytes, wanted).map(|texts| texts.map(Some)),
+        Encoded::TooLarge(size) => Some(Err(Fallback::TooLarge(size))),
+        Encoded::Unreadable => Some(Err(Fallback::Unreadable)),
     };
-    let read = match (texts(base), texts(head)) {
+    let read = match (texts(base)?, texts(head)?) {
         (Ok(base), Ok(head)) => Read::Pages(Arc::new(Pages::of(base.as_deref(), head.as_deref()))),
         (Err(fallback), _) => Read::Binary(fallback.reason("base")),
         (_, Err(fallback)) => Read::Binary(fallback.reason("head")),
     };
-    (read, None)
+    Some((read, None))
 }

@@ -61,6 +61,7 @@ pub mod overview;
 mod pages;
 mod pending;
 pub mod picker;
+mod pool;
 pub mod present;
 mod preview;
 mod pulls;
@@ -81,6 +82,7 @@ pub use effects::{Completion, Driver, Effect, Job, SheetStep, Updated};
 pub use fields::{Field, FieldState};
 pub use live::{Replaced, abbreviated, branch_and_base};
 pub use pending::Checking;
+use pool::Lane;
 pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
 pub use select::{Hit, TextPress, list_of};
@@ -92,6 +94,10 @@ const GAP_STEP: usize = 20;
 
 /// How long go-to-definition waits for a language server that is still indexing.
 const DEFINITION_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How many files' texts one read of the files other than the selected one takes at most, so
+/// it holds a worker briefly.
+const TEXT_BATCH: usize = 16;
 
 /// The smallest and largest code size zoom and the configuration allow, in the front end's
 /// units: logical pixels in a window.
@@ -265,11 +271,33 @@ pub struct Filter {
     pub editing: bool,
 }
 
+/// The selected file's text, read ahead of every other file's, as a preview is: one read is
+/// outstanding at a time, and it reads the blob the selected file wants as it starts, so a
+/// reviewer who moves on while it waits for a worker retargets it rather than queuing another;
+/// it looks the blob's size up first, so an oversized one holds it only for that lookup.
+#[derive(Default)]
+struct UrgentText {
+    /// The blob the selected file wants read, which the outstanding read takes as it starts.
+    target: Arc<parking_lot::Mutex<Option<ObjectId>>>,
+    /// Whether a read is outstanding.
+    reading: bool,
+}
+
+impl UrgentText {
+    /// Whether the selected file wants `oid`'s text read.
+    fn wants(&self, oid: &ObjectId) -> bool {
+        self.target.lock().as_ref() == Some(oid)
+    }
+}
+
 /// File text and highlights by blob, filled in the background; content never changes under an
 /// object ID, so these never go stale.
 #[derive(Default)]
 pub(crate) struct Blobs {
     texts: HashMap<ObjectId, Arc<rows::FullText>>,
+    /// The blobs read that hold no text, such as a binary or oversized file's, or whose read
+    /// failed, so none is read again while it shows.
+    textless: HashSet<ObjectId>,
     /// The syntax each file version resolved to, from its path and text.
     resolved: HashMap<state::SideKey, crate::syntax::Resolved>,
     /// Highlights by blob, then by syntax, as the same blob may be highlighted as two syntaxes.
@@ -277,12 +305,18 @@ pub(crate) struct Blobs {
 }
 
 impl Blobs {
+    /// Whether `oid` was read: its text is in memory, or it has none.
+    fn holds(&self, oid: &ObjectId) -> bool {
+        self.texts.contains_key(oid) || self.textless.contains(oid)
+    }
+
     /// Keeps only the blobs `view` shows, so a long review's earlier revisions do not stay in
     /// memory for the session.
     fn retain_for(&mut self, view: &rows::Source<'_>) {
         let sides: HashSet<state::SideKey> = shown_sides(view).collect();
         let shown: HashSet<&ObjectId> = sides.iter().map(|side| &side.oid).collect();
         self.texts.retain(|oid, _| shown.contains(oid));
+        self.textless.retain(|oid| shown.contains(oid));
         self.syntax.retain(|oid, _| shown.contains(oid));
         self.resolved.retain(|side, _| sides.contains(side));
     }
@@ -409,8 +443,8 @@ pub struct Model {
     /// snapshot; see the `pending` module.
     checking: Option<pending::Pending>,
     blobs: Blobs,
-    /// Blobs whose text is being read right now, so none is requested twice at once; an entry
-    /// goes when its read completes, so a blob shown again after pruning is requested again.
+    /// Blobs a read of other files' texts is reading, so no two such reads take one; an entry
+    /// goes when its read completes, so a blob shown again after pruning is read again.
     requested: state::Outstanding,
     /// What the review is about.
     pub info: Option<review_core::ReviewInfo>,
@@ -545,6 +579,10 @@ pub struct Model {
     pub(crate) looking_up: bool,
     /// Background reads of file text still running.
     pub(crate) highlighting: usize,
+    /// Whether a read of other files' texts runs; one runs at a time.
+    reading_texts: bool,
+    /// The read of the selected file's text, ahead of the rest.
+    urgent_text: UrgentText,
     /// The shown revision's highlighting in the background.
     highlights: highlights::Highlights,
     /// The selected file's comparison, when its versions are images.
@@ -661,6 +699,8 @@ impl Model {
             about_view: false,
             looking_up: false,
             highlighting: 0,
+            reading_texts: false,
+            urgent_text: UrgentText::default(),
             highlights: highlights::Highlights::new(highlights::Highlights::machine_workers()),
             // A window shows images; a terminal says when it does.
             images: compare::Images::new(settings.front_end == FrontEnd::Window),
@@ -684,9 +724,11 @@ impl Model {
     /// it is ready.
     pub fn open(&mut self, opener: Opener) {
         let live = self.settings.live;
-        self.spawn(Subject::Always(Because::Opening), move || {
-            Outcome::Opened(open(opener, live).map(Box::new))
-        });
+        self.spawn(
+            Lane::Selected,
+            Subject::Always(Because::Opening),
+            move || Outcome::Opened(open(opener, live).map(Box::new)),
+        );
     }
 
     /// Keeps the opened review, or why it could not be opened, to show with the next frame, so
@@ -1079,9 +1121,11 @@ impl Model {
         self.build_selected();
     }
 
-    /// Lays out the selected file's diff.
+    /// Lays out the selected file's diff, its text asked for first, so it never lays out
+    /// without its context before its text lands.
     #[tracing::instrument(skip_all)]
     fn build_selected(&mut self) {
+        self.follow_text();
         let Some(laid) = self.laid_out() else {
             self.rows = Arc::new(Layout::default());
             self.hunk_rows.clear();
@@ -1135,7 +1179,7 @@ impl Model {
                 || file
                     .new
                     .as_ref()
-                    .is_some_and(|side| self.requested.reading(&side.oid))
+                    .is_some_and(|side| self.urgent_text.wants(&side.oid))
             {
                 return Layout::default();
             }
@@ -1296,10 +1340,12 @@ impl Model {
         self.pump_highlights();
     }
 
-    /// Reads the head text of the shown revision's files that are not cached yet, for context
-    /// lines and the file buffer.
+    /// Reads the head text of the shown revision's files that are not cached or being read,
+    /// for context lines and the file buffer, [`TEXT_BATCH`] at a time behind what shows, one
+    /// read after another, so no read holds a worker long; the selected file's is read apart,
+    /// ahead of them, by [`Self::follow_text`].
     fn request_texts(&mut self) {
-        if self.engine.is_none() {
+        if self.engine.is_none() || self.reading_texts {
             return;
         }
         let Some(laid) = self.laid_out() else {
@@ -1308,41 +1354,77 @@ impl Model {
         let Some(view) = laid.source() else {
             return;
         };
-        let wanted: Vec<ObjectId> = view
+        let unread: Vec<ObjectId> = view
             .analysis()
             .files
             .iter()
             .filter_map(|file| file.new.as_ref())
-            .filter(|side| is_regular(side))
-            .filter(|side| !self.blobs.texts.contains_key(&side.oid))
+            .filter(|side| is_regular(side) && !self.blobs.holds(&side.oid))
             .map(|side| side.oid.clone())
             .collect();
-        let wanted: Vec<ObjectId> = wanted
+        let batch: Vec<ObjectId> = unread
             .into_iter()
             .filter(|oid| self.requested.claim(oid))
+            .take(TEXT_BATCH)
             .collect();
-        if wanted.is_empty() {
+        if batch.is_empty() {
             return;
         }
-        let asked = wanted.clone();
+        self.reading_texts = true;
         self.highlighting += 1;
-        self.spawn_with(Subject::Always(Because::Content), move |parts| {
-            let _reading = tracing::info_span!("read_texts", blobs = wanted.len()).entered();
-            let mut texts = HashMap::new();
-            if let Ok(mut reader) = parts.review.snapshots().blob_reader() {
-                for oid in wanted {
-                    if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&oid)
-                        && is_text(&bytes)
-                    {
-                        texts.insert(
-                            oid,
-                            Arc::new(rows::FullText::new(&String::from_utf8_lossy(&bytes))),
-                        );
-                    }
-                }
-            }
-            Outcome::TextsRead(TextsRead { asked, texts })
-        });
+        self.spawn_with(
+            Lane::Shown,
+            Subject::Always(Because::Content),
+            move |parts| {
+                let texts = blob_texts(&parts.review, &batch);
+                Outcome::TextsRead(TextsRead {
+                    asked: batch,
+                    texts,
+                    urgent: false,
+                })
+            },
+        );
+    }
+
+    /// Wants the selected file's text read when it is not in memory, ahead of every other
+    /// file's and whatever read of them has it, and starts the urgent read unless it is
+    /// outstanding; see [`UrgentText`].
+    fn follow_text(&mut self) {
+        let target = self
+            .selected_head()
+            .filter(|oid| self.engine.is_some() && !self.blobs.holds(oid));
+        let wanted = target.is_some();
+        *self.urgent_text.target.lock() = target;
+        if !wanted || self.urgent_text.reading {
+            return;
+        }
+        self.urgent_text.reading = true;
+        self.highlighting += 1;
+        let target = Arc::clone(&self.urgent_text.target);
+        self.spawn_with(
+            Lane::Selected,
+            Subject::Always(Because::Content),
+            move |parts| {
+                // The blob wanted now, which a move since the read was queued retargeted.
+                let asked: Vec<ObjectId> = target.lock().clone().into_iter().collect();
+                // An oversized blob, such as a large asset's, has no text to show, which its
+                // size says without streaming its bytes through git.
+                let fits: Vec<ObjectId> = asked
+                    .iter()
+                    .filter(|oid| {
+                        !matches!(parts.review.snapshots().blob_size(oid),
+                            Ok(size) if size > review_core::git::MAX_TEXT_BLOB_BYTES)
+                    })
+                    .cloned()
+                    .collect();
+                let texts = blob_texts(&parts.review, &fits);
+                Outcome::TextsRead(TextsRead {
+                    asked,
+                    texts,
+                    urgent: true,
+                })
+            },
+        );
     }
 
     /// Starts the highlighting the shown revision needs now, the selected file first; see
@@ -1370,7 +1452,13 @@ impl Model {
         });
         for start in starts {
             let known = self.blobs.known(&start.sides);
-            self.spawn_with(Subject::Always(Because::Content), move |parts| {
+            // Only the selected file's job has a flag that cancels it.
+            let lane = if start.cancel.is_some() {
+                Lane::Selected
+            } else {
+                Lane::Shown
+            };
+            self.spawn_with(lane, Subject::Always(Because::Content), move |parts| {
                 Outcome::Highlighted(highlight_sides(
                     &parts.review,
                     start.id,
@@ -1390,6 +1478,11 @@ impl Model {
             && self
                 .selected_head()
                 .is_some_and(|head| read.asked.contains(&head));
+        let textless = read
+            .asked
+            .iter()
+            .filter(|oid| !read.texts.contains_key(*oid));
+        self.blobs.textless.extend(textless.cloned());
         self.blobs.texts.extend(read.texts);
         // A late answer for a revision no longer shown is not kept.
         if let Some(view) = self.laid_out().as_ref().and_then(pending::Laid::source) {
@@ -1401,15 +1494,19 @@ impl Model {
             self.rebuild();
         }
         self.refresh_buffer_syntax();
+        self.follow_text();
+        self.request_texts();
     }
 
-    /// The blob of the selected file's head, in what the diff lays out.
+    /// The blob of the selected file's head, in what the diff lays out, when it is a regular
+    /// file's.
     fn selected_head(&self) -> Option<ObjectId> {
         let path = self.selected.as_deref()?;
         let laid = self.laid_out()?;
         let view = laid.source()?;
         let unit = *view.units_of_file(path).first()?;
-        Some(view.file(unit).ok()?.new.as_ref()?.oid.clone())
+        let head = view.file(unit).ok()?.new.as_ref()?;
+        is_regular(head).then(|| head.oid.clone())
     }
 
     /// The versions of the selected file, base and head, each under its own path: a renamed
@@ -1627,8 +1724,10 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
         }
         None => match pending::Pending::read(&review, place)? {
             Some(first) => pending::Shows::Pending(Box::new(first)),
+            // Nothing recorded, so nothing is replayed.
             None => pending::Shows::Verified(Box::new(
-                pending::verify(&review, &HashSet::new()).map_err(pending::Unverified::message)?,
+                pending::verify(&review, &HashSet::new(), &|_| {})
+                    .map_err(pending::Unverified::message)?,
             )),
         },
     };
@@ -1682,32 +1781,38 @@ fn opening_status(summary: &str, found: Option<&str>, problems: &[String]) -> (S
 
 /// The head text of the regular files of `analysis` that `wanted` picks, by blob, for context
 /// lines, read from `review`'s snapshots; a file whose head is no text has none.
-#[tracing::instrument(name = "read_texts", skip_all)]
 fn head_texts(
     review: &Review,
     analysis: &review_core::analysis::Analysis,
     wanted: impl Fn(&review_core::analysis::FileChange) -> bool,
 ) -> HashMap<ObjectId, Arc<rows::FullText>> {
-    let mut texts = HashMap::new();
-    let sides: Vec<&review_core::analysis::EntrySide> = analysis
+    let oids: Vec<ObjectId> = analysis
         .files
         .iter()
         .filter(|file| wanted(file))
         .filter_map(|file| file.new.as_ref())
         .filter(|side| is_regular(side))
+        .map(|side| side.oid.clone())
         .collect();
-    if sides.is_empty() {
+    blob_texts(review, &oids)
+}
+
+/// The text of each of the blobs `oids` that holds text, read from `review`'s snapshots.
+#[tracing::instrument(name = "read_texts", skip_all, fields(blobs = oids.len()))]
+fn blob_texts(review: &Review, oids: &[ObjectId]) -> HashMap<ObjectId, Arc<rows::FullText>> {
+    let mut texts = HashMap::new();
+    if oids.is_empty() {
         return texts;
     }
     let Ok(mut reader) = review.snapshots().blob_reader() else {
         return texts;
     };
-    for side in sides {
-        if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(&side.oid)
+    for oid in oids {
+        if let Ok(review_core::git::Blob::Content(bytes)) = reader.read(oid)
             && is_text(&bytes)
         {
             texts.insert(
-                side.oid.clone(),
+                oid.clone(),
                 Arc::new(rows::FullText::new(&String::from_utf8_lossy(&bytes))),
             );
         }

@@ -3763,9 +3763,10 @@ fn edit_and_capture(host: &mut Host, repo: &Path, top: &str, bottom: &str) {
 
 /// A job queued on a capture reads it whatever the window shows meanwhile, and holds the review
 /// for as long as it waits: while it waits to read a PDF the capture staged, the window moves on
-/// two captures that stage another and closes, and another open finds the archive due to be
-/// compacted, yet compacts nothing and the review cannot be dropped, so the job still reads the
-/// PDF's pages; once the job let go, the next open compacts the capture away.
+/// two captures that stage other files, the PDF as it was, and closes, and another open finds
+/// the archive due to be compacted, yet compacts nothing and the review cannot be dropped, so
+/// the job still reads the PDF's pages; once the job let go, the next open compacts the capture
+/// away.
 ///
 /// The window captures only when asked, so no watch, which a thread of its own drops, holds the
 /// review once the window closes.
@@ -3784,18 +3785,18 @@ fn a_queued_job_holds_its_capture_until_it_ends() {
         },
     );
     // The PDF goes into the index, so the capture takes its blob in a pack from the repository.
-    let stage = |pages: &[&str]| {
-        std::fs::write(repo.join("doc.pdf"), pdf(pages)).unwrap();
+    let stage = |path: &str, content: &[u8]| {
+        std::fs::write(repo.join(path), content).unwrap();
         let added = std::process::Command::new("git")
             .arg("-C")
             .arg(&repo)
-            .args(["add", "doc.pdf"])
+            .args(["add", path])
             .envs(crate::testing::GIT_ENV)
             .output()
             .unwrap();
         assert!(added.status.success(), "git add: {added:?}");
     };
-    stage(&["First"]);
+    stage("doc.pdf", &pdf(&["First"]));
     host.update(|model| model.capture(false));
     while !host.model().publishes() {
         let completion = host.run_job();
@@ -3806,8 +3807,9 @@ fn a_queued_job_holds_its_capture_until_it_ends() {
     host.update(|model| model.show_file("doc.pdf"));
     let queued = std::mem::take(&mut host.jobs);
 
-    for pages in [["Second"], ["Third"]] {
-        stage(&pages);
+    // The PDF stays the pair the window shows, so its read is still wanted.
+    for other in ["Second", "Third"] {
+        stage("other.txt", other.as_bytes());
         host.update(|model| model.capture(false));
         host.settle();
     }
@@ -3832,7 +3834,10 @@ fn a_queued_job_holds_its_capture_until_it_ends() {
     for job in queued {
         let completion = job.run();
         if let Outcome::PdfRead(pdf) = &*completion.outcome {
-            read = Some(matches!(pdf.read, super::pages::Read::Pages(_)));
+            read = Some(
+                pdf.as_ref()
+                    .is_some_and(|pdf| matches!(pdf.read, super::pages::Read::Pages(_))),
+            );
         }
     }
     assert_eq!(read, Some(true), "the job read the pages of its capture");
@@ -9175,7 +9180,7 @@ fn an_image_compared_before_is_not_decoded_again() {
     host.settle();
     host.update(|model| model.show_file("a.png"));
     let read = host.run_job();
-    let Outcome::PdfRead(found) = &*read.outcome else {
+    let Outcome::PdfRead(Some(found)) = &*read.outcome else {
         panic!("no read of a.png");
     };
     assert!(found.comparison.is_none(), "a.png was decoded again");
@@ -9823,4 +9828,544 @@ fn a_busy_or_full_checkout_verifies_its_last_recorded_revision() {
             host.model().status
         );
     }
+}
+
+/// How many ticks wait that draw a frame for the count of revisions replayed.
+fn checking_ticks(host: &Host) -> usize {
+    host.timers
+        .iter()
+        .filter(|timer| matches!(*timer.outcome, Outcome::Tick(super::sync::Tick::Checking)))
+        .count()
+}
+
+/// While the review state is checked, the bar counts the revisions the verification replayed
+/// out of all the log recorded, at one width while it counts, the revision making way for it
+/// when room runs out; a tick draws a frame for the count until the verification lands.
+#[test]
+fn the_bar_counts_the_revisions_the_verification_replayed() {
+    use crate::paint::bars::checking_label;
+    use review_core::Replay;
+    let label = |replayed| {
+        checking_label(Replay {
+            replayed,
+            total: 100,
+        })
+    };
+    assert_eq!(label(7), "Checking review state   7/100");
+    assert!(
+        (0..=100).all(|replayed| label(replayed).chars().count() == label(0).chars().count()),
+        "the count changes the label's width"
+    );
+    // The front ends keep thirty cells for the bar's left side, room for a review of up to
+    // 999 revisions.
+    let widest = checking_label(Replay {
+        replayed: 0,
+        total: 999,
+    });
+    assert!(widest.chars().count() <= 30, "{widest}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    // In the room the front ends keep for it, the count shows alone.
+    let narrow = |model: &Model| -> String {
+        crate::paint::bars::sync_label(
+            model,
+            &crate::paint::Palette::of(model),
+            std::time::SystemTime::now(),
+            30.0,
+            |text| scroll::float(text.chars().count()),
+        )
+        .into_iter()
+        .map(|piece| piece.text)
+        .collect()
+    };
+    assert_eq!(narrow(host.model()), "Checking review state 0/2");
+    assert!(
+        bar(host.model()).starts_with("rev 2 · "),
+        "{}",
+        bar(host.model())
+    );
+    assert_eq!(checking_ticks(&host), 1);
+
+    // The verification replays both revisions before its outcome lands; meanwhile each tick
+    // asks for the next.
+    let verified = run_until(&mut host, |outcome| matches!(outcome, Outcome::Verified(_)));
+    assert_eq!(narrow(host.model()), "Checking review state 2/2");
+    let tick = |host: &mut Host| {
+        let index = host
+            .timers
+            .iter()
+            .position(|timer| matches!(*timer.outcome, Outcome::Tick(super::sync::Tick::Checking)))
+            .expect("a tick waits");
+        host.fire(index);
+    };
+    tick(&mut host);
+    assert_eq!(checking_ticks(&host), 1, "the tick stopped while verifying");
+    // Once the verified review waits for its frame, the ticks stop.
+    host.complete(verified);
+    tick(&mut host);
+    assert_eq!(checking_ticks(&host), 0, "the tick runs on");
+    host.draw();
+    let bar = bar(host.model());
+    assert!(!bar.contains("Checking"), "{bar}");
+}
+
+/// The kind of `outcome`, for what a test asserts of the jobs that brought it.
+fn outcome_kind(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Opened(_) => "opened",
+        Outcome::Analyzed(_) => "analyzed",
+        Outcome::Verified(_) => "verified",
+        Outcome::TextsRead(_) => "texts",
+        Outcome::PdfRead(Some(_)) => "pdf",
+        Outcome::PdfRead(None) => "pdf dropped",
+        Outcome::Compared(Some(_)) => "compared",
+        Outcome::Compared(None) => "compared dropped",
+        _ => "other",
+    }
+}
+
+/// Runs every job and timer as [`Host::settle`] does, and returns the lane each job ran in
+/// with the kind of what it brought.
+fn settle_lanes(host: &mut Host) -> Vec<(pool::Lane, &'static str)> {
+    let mut lanes = Vec::new();
+    loop {
+        if let Some(job) = host.jobs.pop_front() {
+            let lane = job.lane();
+            let completion = job.run();
+            lanes.push((lane, outcome_kind(&completion.outcome)));
+            host.complete(completion);
+        } else if !host.timers.is_empty() {
+            host.fire(0);
+        } else if host.model().publishes() {
+            host.draw();
+        } else {
+            return lanes;
+        }
+    }
+}
+
+/// The review's verification waits in the pool's background lane, behind what the reviewer
+/// looks at: the opened review, the analysis of the revision it shows and its files' texts,
+/// so a replay of the whole history never holds them back.
+#[test]
+fn the_verification_runs_behind_what_the_reviewer_looks_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), true);
+    let lanes = settle_lanes(&mut host);
+    let lane_of = |kind: &str| {
+        lanes
+            .iter()
+            .find(|(_, ran)| *ran == kind)
+            .map(|(lane, _)| *lane)
+    };
+    assert_eq!(lane_of("opened"), Some(pool::Lane::Selected));
+    assert_eq!(lane_of("analyzed"), Some(pool::Lane::Selected));
+    let texts: Vec<pool::Lane> = lanes
+        .iter()
+        .filter(|(_, ran)| *ran == "texts")
+        .map(|(lane, _)| *lane)
+        .collect();
+    assert!(
+        texts.contains(&pool::Lane::Shown),
+        "the other files' texts are read"
+    );
+    assert!(!texts.contains(&pool::Lane::Background));
+    assert_eq!(lane_of("verified"), Some(pool::Lane::Background));
+    assert!(
+        host.model().checking().is_none(),
+        "the verified review shows"
+    );
+}
+
+/// A PDF read that waits for a worker while the reviewer moves on reads nothing and lands
+/// nothing, even once its file shows again, and the file shown then is read next; a read that
+/// ran to its end before the reviewer moved on lands under no other file.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_superseded_preview_reads_nothing_and_lands_nothing() {
+    use crate::pdf::testing::pdf;
+    let dir = tempfile::tempdir().unwrap();
+    let text = |text: &str| text.as_bytes().to_vec();
+    let review = review_of(
+        dir.path(),
+        &[
+            ("a.rs", text("fn a() {}\n")),
+            ("b.pdf", pdf(&["One"])),
+            ("c.pdf", pdf(&["Two", "Three"])),
+        ],
+        &[
+            ("a.rs", text("fn a() { a(); }\n")),
+            ("b.pdf", pdf(&["1"])),
+            ("c.pdf", pdf(&["2", "3"])),
+        ],
+    );
+    let mut host = Host::open(review);
+    let navigator = |host: &Host| host.model().page_navigator().unwrap_or_default();
+    // Away to c.pdf and back before the read of b.pdf runs: the one read under way is
+    // superseded and lands nothing, c.pdf is never read, and b.pdf is read again.
+    host.update(|model| model.show_file("b.pdf"));
+    host.update(|model| model.show_file("c.pdf"));
+    host.update(|model| model.show_file("b.pdf"));
+    let reads: Vec<_> = settle_lanes(&mut host)
+        .into_iter()
+        .filter(|(_, kind)| kind.starts_with("pdf"))
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            (pool::Lane::Selected, "pdf dropped"),
+            (pool::Lane::Selected, "pdf")
+        ]
+    );
+    assert!(navigator(&host).contains("1/1"), "{}", navigator(&host));
+
+    // A read of c.pdf that ends after the reviewer went back to b.pdf shows nothing, and c.pdf
+    // is read again once it shows.
+    host.update(|model| model.show_file("c.pdf"));
+    let late = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::PdfRead(Some(_)))
+    });
+    host.update(|model| model.show_file("b.pdf"));
+    host.complete(late);
+    assert!(navigator(&host).contains("1/1"), "{}", navigator(&host));
+    host.update(|model| model.show_file("c.pdf"));
+    assert!(navigator(&host).is_empty(), "{}", navigator(&host));
+    host.settle();
+    assert!(navigator(&host).contains("1/2"), "{}", navigator(&host));
+}
+
+/// Stepping through a PDF's pages faster than they render renders only the page pair that
+/// shows: a render of a page pair stepped past while it waited renders nothing.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_page_stepped_past_renders_nothing() {
+    use crate::pdf::testing::pdf;
+    let dir = tempfile::tempdir().unwrap();
+    let review = review_of(
+        dir.path(),
+        &[("a.pdf", pdf(&["One", "Two", "Three"]))],
+        &[("a.pdf", pdf(&["1", "2", "3"]))],
+    );
+    let mut host = Host::open(review);
+    host.update(|model| model.show_file("a.pdf"));
+    host.settle();
+    assert_eq!(compared_page(&host), Some((Some(1), Some(1))));
+    host.dispatch(Action::NextPage);
+    host.dispatch(Action::NextPage);
+    let renders: Vec<_> = settle_lanes(&mut host)
+        .into_iter()
+        .filter(|(_, kind)| kind.starts_with("compared"))
+        .collect();
+    assert_eq!(
+        renders,
+        [
+            (pool::Lane::Selected, "compared dropped"),
+            (pool::Lane::Selected, "compared")
+        ]
+    );
+    assert_eq!(compared_page(&host), Some((Some(3), Some(3))));
+}
+
+/// The file header's right side keeps its column as the verified review takes the pending
+/// view's place: while the review state is checked, the meter's place is blank but as wide as
+/// the meter that then shows there, so the file's length and its line counts never move.
+#[test]
+fn the_file_header_keeps_its_columns_across_promotion() {
+    use crate::paint::Room;
+    use crate::paint::header::{FileHeader, file_header};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = recorded_checkout(dir.path(), false);
+    show_opened(&mut host);
+    let header = |model: &Model| {
+        let room = Room {
+            budget: 160.0,
+            cell: 1.0,
+            gap: 2.0,
+        };
+        file_header(model, &crate::paint::Palette::of(model), room, 1.0).expect("a file shows")
+    };
+    // Where each part of the right side starts, counted from the right edge, as the front ends
+    // lay them out: the file's length, the line counts, then the meter's bar and its counts.
+    let columns = |header: &FileHeader| {
+        let width = |text: &str| text.chars().count();
+        let meter = header.meter.as_ref().expect("the meter has its place");
+        let meter_width = 5 + 1 + width(&meter.counts.text);
+        let counts = header.counts.as_ref().expect("the line counts show");
+        let counts_width = width(&counts[0].text) + 2 + width(&counts[1].text);
+        let lines = header.lines.as_ref().expect("the file's length shows");
+        [
+            meter_width,
+            meter_width + 2 + counts_width,
+            meter_width + 2 + counts_width + 2 + width(&lines.text),
+        ]
+    };
+    let pending = header(host.model());
+    assert!(host.model().checking().is_some(), "the pending view shows");
+    // Nothing counts yet: the meter's place shows nothing.
+    let blank = pending.meter.as_ref().unwrap();
+    assert!(
+        blank.counts.text.trim().is_empty(),
+        "{:?}",
+        blank.counts.text
+    );
+    assert!(blank.bar.track.a <= 0.0 && blank.bar.fill.a <= 0.0);
+    host.settle();
+    assert!(
+        host.model().checking().is_none(),
+        "the verified review shows"
+    );
+    let verified = header(host.model());
+    let counted = &verified.meter.as_ref().unwrap().counts.text;
+    // The meter counts in the place kept for it: a.rs's one unit, changed since it was marked.
+    assert_eq!(counted.trim(), "0/1");
+    assert_eq!(columns(&pending), columns(&verified));
+}
+
+/// Starts each of `jobs` on `pool`, as a front end starts them in the app's pool, and returns
+/// where their completions arrive, in the order they end.
+fn start_on(pool: &pool::Pool, jobs: Vec<Job>) -> std::sync::mpsc::Receiver<Completion> {
+    let (sender, landed) = std::sync::mpsc::channel();
+    for job in jobs {
+        let sender = sender.clone();
+        job.start_on(pool, move |completion| {
+            sender.send(completion).ok();
+        });
+    }
+    landed
+}
+
+/// The watch on the grant runs apart from the pool: with both workers busy, a lookup of a pull
+/// request holding the one background work may take, it still reads the grant, so a revocation
+/// in another window stops this window's servers on time.
+#[test]
+fn the_guard_on_the_grant_never_waits_for_a_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = checkout_host(dir.path());
+    let pool = pool::Pool::new(2);
+    let lookup = pool.hold(pool::Lane::Background);
+    let preview = pool.hold(pool::Lane::Selected);
+    host.update(Model::guard_due);
+    let guard = host.jobs.pop_back().expect("the guard is queued");
+    let landed = start_on(&pool, vec![guard]);
+    let completion = landed
+        .recv_timeout(pool::PATIENCE)
+        .expect("the guard waited for a worker");
+    assert!(matches!(*completion.outcome, Outcome::Guarded(_)));
+    drop((lookup, preview));
+}
+
+/// A checkout whose one recorded revision changes `files` files and adds `added`, opened as
+/// the model's opener opens it, its last recorded revision showing while it is verified.
+fn checkout_of_files(dir: &Path, files: usize, added: &[(&str, &[u8])]) -> Host {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    // Each file's own text, so each version is a blob of its own.
+    let write = |label: &str| {
+        for file in 0..files {
+            let text = statements(&[10], &format!("{label}{file}"));
+            std::fs::write(repo.join(format!("f{file:02}.rs")), text).unwrap();
+        }
+    };
+    write("0");
+    git_in(&repo, &["add", "--all"]);
+    git_in(&repo, &["commit", "--quiet", "-m", "base"]);
+    git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let data = dir.join("data");
+    let review = Review::open_checkout(&data, review_core::Repo::discover(&repo).unwrap()).unwrap();
+    write("1");
+    for (path, bytes) in added {
+        std::fs::write(repo.join(path), bytes).unwrap();
+    }
+    review.refresh().unwrap();
+    drop(review);
+    let loaded =
+        crate::launch::open_checkout(&data, review_core::Repo::discover(&repo).unwrap()).unwrap();
+    Host::opening(loaded, settings())
+}
+
+/// The head blob of the file at `path` in what `model`'s diff lays out.
+fn head_of(model: &Model, path: &str) -> ObjectId {
+    let laid = model.laid_out().unwrap();
+    let view = laid.source().unwrap();
+    let unit = view.units_of_file(path)[0];
+    view.file(unit).unwrap().new.as_ref().unwrap().oid.clone()
+}
+
+/// The review of 20 changed files opened, its pending view shown, and the jobs it queued but
+/// the verification: the first of them reads the first file's text with its analysis, and a
+/// read of the next 16 files' texts waits.
+fn opened_with_texts_queued(dir: &Path) -> (Host, Vec<Job>) {
+    let mut host = checkout_of_files(dir, 20, &[]);
+    show_opened(&mut host);
+    let queued = host
+        .jobs
+        .drain(..)
+        .filter(|job| job.lane() != pool::Lane::Background)
+        .collect();
+    (host, queued)
+}
+
+/// A file the reviewer selects that a queued read of other files' texts has claimed shows
+/// with its text before that read runs: its own read goes ahead of it, whatever it claimed.
+#[test]
+fn a_file_a_queued_read_claimed_shows_without_waiting_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, queued) = opened_with_texts_queued(dir.path());
+    let head = head_of(host.model(), "f05.rs");
+    assert!(
+        host.model().requested.claims().any(|claim| *claim == head),
+        "the queued read has it"
+    );
+    host.update(|model| model.show_file("f05.rs"));
+    // Held jobs stand in for the verification and for a read that runs.
+    let pool = pool::Pool::new(2);
+    let verification = pool.hold(pool::Lane::Background);
+    let running = pool.hold(pool::Lane::Shown);
+    let landed = start_on(
+        &pool,
+        queued.into_iter().chain(host.jobs.drain(..)).collect(),
+    );
+    drop(running);
+    loop {
+        let completion = landed.recv_timeout(pool::PATIENCE).unwrap();
+        let read = match &*completion.outcome {
+            Outcome::TextsRead(read) => Some(read.urgent),
+            _ => None,
+        };
+        assert_ne!(read, Some(false), "the queued read ran first");
+        host.complete(completion);
+        if read == Some(true) {
+            break;
+        }
+    }
+    host.draw();
+    assert!(!host.model().rows.rows.is_empty(), "the file shows");
+    assert!(host.model().blobs.texts.contains_key(&head));
+    assert!(
+        host.model().requested.claims().any(|claim| *claim == head),
+        "the queued read has not run"
+    );
+    drop(verification);
+}
+
+/// Moving across files whose texts are not read while every worker is busy leaves one read
+/// of the selected file's text outstanding, which reads the file the reviewer stopped at
+/// once a worker frees up, and only that one.
+#[test]
+fn moving_across_unread_files_reads_only_the_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, queued) = opened_with_texts_queued(dir.path());
+    let pool = pool::Pool::new(2);
+    let verification = pool.hold(pool::Lane::Background);
+    let running = pool.hold(pool::Lane::Shown);
+    for path in ["f17.rs", "f18.rs", "f19.rs"] {
+        host.update(|model| model.show_file(path));
+    }
+    let last = head_of(host.model(), "f19.rs");
+    let jobs: Vec<Job> = queued.into_iter().chain(host.jobs.drain(..)).collect();
+    let count = jobs.len();
+    let landed = start_on(&pool, jobs);
+    drop(running);
+    let urgent: Vec<Vec<ObjectId>> = (0..count)
+        .filter_map(
+            |_| match *landed.recv_timeout(pool::PATIENCE).unwrap().outcome {
+                Outcome::TextsRead(read) if read.urgent => Some(read.asked),
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(urgent, [vec![last]]);
+    drop(verification);
+}
+
+/// The selected file's read of an oversized blob, such as a large asset's, looks its size up
+/// and reads none of its bytes, so a move to a file whose text is not read while it runs has
+/// that file read as soon as the lookup ends.
+#[test]
+fn a_move_past_an_oversized_file_reads_the_next_file_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = usize::try_from(review_core::git::MAX_TEXT_BLOB_BYTES).unwrap();
+    let asset = vec![b'a'; ceiling + 1];
+    let mut host = checkout_of_files(dir.path(), 20, &[("asset.txt", &asset)]);
+    show_opened(&mut host);
+    // A held job stands in for the verification, which keeps one worker busy.
+    let pool = pool::Pool::new(2);
+    let verification = pool.hold(pool::Lane::Background);
+    let urgent = |landed: &std::sync::mpsc::Receiver<Completion>| loop {
+        let completion = landed.recv_timeout(pool::PATIENCE).unwrap();
+        if matches!(&*completion.outcome, Outcome::TextsRead(read) if read.urgent) {
+            return completion;
+        }
+    };
+
+    host.update(|model| model.show_file("asset.txt"));
+    let landed = start_on(&pool, host.jobs.drain(..).collect());
+    let asset_read = urgent(&landed);
+    let Outcome::TextsRead(read) = &*asset_read.outcome else {
+        panic!("not a text read");
+    };
+    let head = head_of(host.model(), "asset.txt");
+    assert_eq!(
+        (read.asked.as_slice(), read.texts.len()),
+        ([head.clone()].as_slice(), 0)
+    );
+
+    // The reviewer moves on while, as the model knows, that read is outstanding.
+    host.update(|model| model.show_file("f19.rs"));
+    host.complete(asset_read);
+    assert!(host.model().blobs.textless.contains(&head));
+    let landed = start_on(&pool, host.jobs.drain(..).collect());
+    let next = urgent(&landed);
+    host.complete(next);
+    host.draw();
+    assert!(
+        host.model()
+            .blobs
+            .texts
+            .contains_key(&head_of(host.model(), "f19.rs"))
+    );
+    assert!(!host.model().rows.rows.is_empty(), "the next file shows");
+    drop(verification);
+}
+
+/// A file search a newer query superseded while it waited for a worker lists and matches
+/// nothing; only the newest search lists the whole tree and finds the file.
+#[test]
+fn a_superseded_file_search_lists_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::open(demo(dir.path()));
+    host.dispatch(Action::FindFiles);
+    host.settle();
+    host.dispatch(Action::PickerScope);
+    for query in ["e", "en", "engine"] {
+        host.update(|model| model.edit_field(Field::PickerQuery, query));
+    }
+    let newest = host.model().picker_generation().unwrap();
+    let pool = pool::Pool::new(2);
+    let first = pool.hold(pool::Lane::Selected);
+    let second = pool.hold(pool::Lane::Selected);
+    let jobs: Vec<Job> = host.jobs.drain(..).collect();
+    let count = jobs.len();
+    assert_eq!(count, 4, "the scope's search and one per query wait");
+    let landed = start_on(&pool, jobs);
+    drop(first);
+    for _ in 0..count {
+        let completion = landed.recv_timeout(pool::PATIENCE).unwrap();
+        let Subject::Search(generation) = completion.subject else {
+            panic!("not a search");
+        };
+        let Outcome::Found(found) = *completion.outcome else {
+            panic!("not what a search finds");
+        };
+        if generation == newest {
+            assert!(found.listing.is_some(), "the newest search lists the tree");
+            assert_eq!(found.entries[0].path, "src/engine.rs");
+        } else {
+            assert!(found.listing.is_none() && found.entries.is_empty());
+        }
+    }
+    drop(second);
 }

@@ -43,6 +43,7 @@ use super::effects::{Because, Outcome, Subject};
 use super::engine::Parts;
 use super::live::RECONCILE;
 use super::marks::Save;
+use super::pool::Lane;
 use super::sync::Tick;
 use super::{Effect, Model, Overlay};
 
@@ -238,7 +239,7 @@ impl Model {
 
     /// Queues `decision`'s job, as the save queue's next save.
     pub(super) fn save_decision(&mut self, decision: Decision) {
-        self.spawn_with(Subject::Always(Because::Save), move |parts| {
+        self.spawn_with(Lane::Own, Subject::Always(Because::Save), move |parts| {
             Outcome::Decided(record(parts, decision))
         });
     }
@@ -297,7 +298,7 @@ impl Model {
         let epoch = self.epoch();
         let on_disk = self.shows_checkout();
         let current = Arc::clone(&self.trust_epoch);
-        self.spawn_with(Subject::Trust(epoch), move |parts| {
+        self.spawn_with(Lane::Shown, Subject::Trust(epoch), move |parts| {
             Outcome::TrustRead(parts.servers.check(epoch, &current, on_disk, || {
                 trust_of(parts.checkout.as_ref())
             }))
@@ -324,7 +325,8 @@ impl Model {
         self.guarding = false;
         let epoch = self.epoch();
         let current = Arc::clone(&self.trust_epoch);
-        self.spawn_with(Subject::Always(Because::Guard), move |parts| {
+        // Apart from the pool, so no slow lookup it runs delays a revocation's taking effect.
+        self.spawn_with(Lane::Own, Subject::Always(Because::Guard), move |parts| {
             let trust = parts
                 .servers
                 .guard(&current, || trust_of(parts.checkout.as_ref()));

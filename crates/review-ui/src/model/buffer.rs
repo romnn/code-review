@@ -9,6 +9,7 @@ use review_core::{Changes, UnitId};
 
 use super::effects::{Outcome, Subject};
 use super::engine::{Parts, Servers};
+use super::pool::Lane;
 use super::{DEFINITION_DEADLINE, Mode, Model, Trust};
 use crate::frame::Request;
 use crate::lsp::{self, LanguageServer};
@@ -506,7 +507,7 @@ impl Model {
             // that could not run.
             self.looking_up = true;
             self.set_status("Checking the code on disk…");
-            self.spawn_with(Subject::Lookup(lookup), move |parts| {
+            self.spawn_with(Lane::Own, Subject::Lookup(lookup), move |parts| {
                 let checked = parts
                     .review
                     .snapshots()
@@ -527,7 +528,7 @@ impl Model {
         };
         self.looking_up = true;
         self.set_status("Looking up the definition; the language server may need to index first…");
-        self.spawn_with(Subject::Lookup(lookup), move |parts| {
+        self.spawn_with(Lane::Own, Subject::Lookup(lookup), move |parts| {
             Outcome::Definition(look_up(parts, &asking))
         });
         self.guard_servers();

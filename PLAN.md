@@ -1469,25 +1469,24 @@ it, muted, so it never reads as code.
   takes a pair of encoded versions, not a file, so anything rendered to pixels can feed the same
   comparison. A job decodes the selected file's pair in the background with `image`, one pair
   at a time, keeping one result, failures included, which lands only while its pair is still
-  the one on screen. Every bound holds before what it guards is taken: a blob's size is looked
-  up (`Repo::blob_size`) before it is read, at most the engine's 8 MiB ceiling, and an image's
-  header before it is decoded, at most 4096 × 4096 pixels and 256 MiB of decoding, the same
-  bounded decoder reading the header, the animation and the pixels. The changed pixels are
-  counted and tinted at full size; the rasters kept are at most 2048 pixels on their long side,
-  which review-gui converts for gpui once on a thread of its own, keeping a conversion until it
-  lands and installing it once, and review-tui resizes to its cells off the main loop. From
-  the frame that selects a file that may be an image, its comparison is pending, with its
-  labels, and takes 45% of the window or the list whatever its images, so the rows below never
-  move when it lands (in review-gui, dragging its bottom edge sets another height, between room
-  for its bars and 96 px of images and what leaves the diff three rows under the window's bars
-  and the find bar, remembered as `[layout] comparison` in logical pixels once a drag changes
-  it), or move once when the file turns out not to be an image; it says
-  "decoding…" only after 100 ms, on the model's timer, so a quick decode never flashes. An
-  image draws only for the comparison on screen, never under another file's header. The front
-  end says whether
-  it shows images, and nothing is read or decoded while it
-  does not: review-tui shows them only where the terminal is known to (see review-tui's
-  "Images"), and elsewhere the file keeps the binary line it always had.
+  the one on screen; one whose pair no longer shows stops before it reads and before it
+  decodes each version, and lands nothing. Every bound holds before what it guards is taken:
+  a blob's size is looked up (`Repo::blob_size`) before it is read, at most the engine's 8 MiB
+  ceiling, and an image's header before it is decoded, at most 4096 × 4096 pixels and 256 MiB
+  of decoding, the same bounded decoder reading the header, the animation and the pixels. The
+  changed pixels are counted and tinted at full size; the rasters kept are at most 2048 pixels on
+  their long side, which review-gui converts for gpui once on a thread of its own, keeping a
+  conversion until it lands and installing it once, and review-tui resizes to its cells off the main
+  loop. From the frame that selects a file that may be an image, its comparison is pending, with its
+  labels, and takes 45% of the window or the list whatever its images, so the rows below never move
+  when it lands (in review-gui, dragging its bottom edge sets another height, between room for its
+  bars and 96 px of images and what leaves the diff three rows under the window's bars and the find
+  bar, remembered as `[layout] comparison` in logical pixels once a drag changes it), or move once
+  when the file turns out not to be an image; it says "decoding…" only after 100 ms, on the model's
+  timer, so a quick decode never flashes. An image draws only for the comparison on screen, never
+  under another file's header. The front end says whether it shows images, and nothing is read or
+  decoded while it does not: review-tui shows them only where the terminal is known to (see
+  review-tui's "Images"), and elsewhere the file keeps the binary line it always had.
 - **Changed PDFs.** The engine makes a PDF, known by its `%PDF-` header, that would otherwise be
   text one opaque binary unit, with or without PDF support (analysis format 14); a PDF that was
   already binary or not UTF-8 keeps that unit, so its review state carries. With
@@ -1514,9 +1513,12 @@ it, muted, so it never reads as code.
   reordered; between anchors in order, the pages left pair by position when both versions have
   as many, show as added or removed when only one has any, and as unmatched otherwise. Blank
   pages, such as scanned ones, and duplicated pages never anchor, and every page stays
-  reachable. The first changed pair shows first. Where the front end shows images, the
-  selected pair renders into the image comparison above its text, and `P` hides or shows it
-  again for the rest of the session; nothing renders while it is hidden. A job renders it, keyed by both page
+  reachable. The first changed pair shows first. A read or render whose pair the selected file
+  no longer shows stops before it reads, between versions and before each page, and lands
+  nothing, so stepping past files and pages reads and renders only what shows and lets go of
+  pdfium soon. Where the front end shows images, the selected pair renders into the image
+  comparison above its text, and `P` hides or shows it again for the rest of the session;
+  nothing renders while it is hidden. A job renders it, keyed by both page
   indices next to both blobs, labeled with each page's size in points, with "none: the page is
   new" or "is removed" for a page one version lacks; pixels are compared only between pages of
   one size, compared exactly, never rounded. The read that finds a file is no PDF decodes it
@@ -1762,9 +1764,20 @@ belongs in `review-core`, so that the engine stays usable on its own.
   `Driver::update` and `Driver::complete` hand back for the front end to run: `Spawn` a
   background job, a wait for the working tree included, `After` a
   delay, `Copy` and `CopyPrimary`, the window `Title`, `Fullscreen`, `Quit`, `Log` a diagnostic, and `ScrollSheet` for the overlays each front end lays out itself.
-  A front end can only start a job, which then runs on a thread of its own (`Job::start`), in
-  both apps; the model's tests run them in place. So the model needs no async runtime and no executor of either
-  toolkit.
+  A front end can only start a job (`Job::start`), in both apps; the model's tests run them in
+  place. So the model needs no async runtime and no executor of either toolkit.
+- **One pool for the finite work.** Jobs that run to their end go to the app's one pool of
+  worker threads (`model::pool`), one per core and two at least, started as jobs need them.
+  Each names its lane as it is queued, and a worker takes the oldest job of the most urgent:
+  `Selected`, what the reviewer looks at (the opened review, the analysis of the revision on
+  screen, the selected file's text, read by one outstanding read that takes the file selected
+  as it starts, its highlights and preview, a picker's search), then `Shown` (the other
+  files' texts, a few at a time, and their highlights, captures and the watch's start,
+  readings of trust), then `Background` (the review's verification, fetches, lookups of pull
+  requests), which never takes the last worker. A wait for the working tree or a language
+  server, a save, the jobs that stop the engine or end the review in the window, and the watch
+  on the grant run on threads of their own, which nothing in the pool holds back
+  ([ADR 14](adr/0014-only-background-work-reaches-the-engine.md)).
 - **Completions.** A job (a `Send` closure) or a timer hands back a `Completion`: a typed
   outcome and the subject it was computed for, which the front end gives back to
   `Driver::complete` on the UI thread. `spawn` and `after` take the subject, so no job or timer
@@ -1880,13 +1893,16 @@ tools copy through XWayland with a window that never shows.
   reads their changes in full, from the selection saved with the review; the files pane says
   "Last recorded revision · checking review state", nothing counts, folds, approves or shows
   what changed since a review, and no review key finds a unit to mark, since only a verified
-  `Snapshot` has a view. One job then verifies the review as opening did before: a confirmed
-  capture and the history, read on from what the pending view read of the log, taking the
-  analysis rather than computing it again, and its last recorded revision while git is busy or
-  cr's data is full. The analysis and the verified review each show with the next frame,
-  keeping the selected file. A review with no recorded revision opens as before, its panes
-  empty while its first capture runs, and a verification that fails says why over the pending
-  view, which stays.
+  `Snapshot` has a view. One job then verifies the review as opening did before, in the pool's
+  background lane: the history, read on from what the pending view read of the log, taking the
+  analysis rather than computing it again, then a confirmed capture on top, or its last
+  recorded revision while git is busy or cr's data is full. Meanwhile the bottom bar says
+  `Checking review state 37/100`, the revisions the replay finished out of all it reads
+  (`Review::history_reporting`), the analyses done after a format change, its count padded to
+  one width and drawn with the frames drawn anyway and four times a second. The analysis and
+  the verified review each show with the next frame, keeping the selected file. A review with
+  no recorded revision opens as before, its panes empty while its first capture runs, and a
+  verification that fails says why over the pending view, which stays.
 - **First frame.** The first frame shows before the review opens: the files pane and the diff
   pane with their headers, empty, the status line saying "Opening the review…" and the key
   that quits, without the review keys, which do nothing yet; an overlay opened meanwhile, such

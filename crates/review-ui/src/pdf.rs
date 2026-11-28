@@ -418,44 +418,49 @@ fn rows(text: &str) -> String {
     rows
 }
 
-/// The text of each page of the PDF `bytes` as pdfium extracts it, within the bounds; runs in
-/// the background.
+/// The text of each page of the PDF `bytes` as pdfium extracts it, within the bounds, or why
+/// the PDF shows as a binary file instead; runs in the background.
 ///
-/// # Errors
-///
-/// Returns why the PDF shows as a binary file instead.
+/// Before each page it asks whether its text is still `wanted`, and once it is not, it stops
+/// and returns `None`, letting go of pdfium for the next reader.
 #[cfg(feature = "pdf")]
-pub fn page_texts(bytes: &[u8]) -> Result<Vec<String>, Fallback> {
-    let pdfium =
-        pdfium_embed::Pdfium::instance().map_err(|error| Fallback::NoPdfium(error.to_string()))?;
+pub fn page_texts(
+    bytes: &[u8],
+    wanted: &dyn Fn() -> bool,
+) -> Option<Result<Vec<String>, Fallback>> {
+    let pdfium = match pdfium_embed::Pdfium::instance() {
+        Ok(pdfium) => pdfium,
+        Err(error) => return Some(Err(Fallback::NoPdfium(error.to_string()))),
+    };
     // The document's lock is held only while reading, never while diffing.
-    pdfium.with_document(bytes, |document| {
-        if document.is_encrypted() {
-            return Err(Fallback::Encrypted);
-        }
-        let pages = document.num_pages();
-        if pages > MAX_PAGES {
-            return Err(Fallback::TooManyPages(pages));
-        }
-        let mut left = MAX_CHARS;
-        (0..pages)
-            .map(|page| {
+    pdfium
+        .with_document(bytes, |document| {
+            if document.is_encrypted() {
+                return Err(Fallback::Encrypted);
+            }
+            let pages = document.num_pages();
+            if pages > MAX_PAGES {
+                return Err(Fallback::TooManyPages(pages));
+            }
+            let mut left = MAX_CHARS;
+            let mut texts = Vec::new();
+            for page in 0..pages {
+                if !wanted() {
+                    return Ok(None);
+                }
                 let text = document.page_text_limited(page, MAX_PAGE_CHARS.min(left))?;
                 left = left.saturating_sub(text.chars().count());
-                Ok(text)
-            })
-            .collect()
-    })
+                texts.push(text);
+            }
+            Ok(Some(texts))
+        })
+        .transpose()
 }
 
-/// Without the `pdf` feature, no PDF is read.
-///
-/// # Errors
-///
-/// Always: a PDF shows as a binary file.
+/// Without the `pdf` feature, no PDF is read: a PDF still wanted shows as a binary file.
 #[cfg(not(feature = "pdf"))]
-pub fn page_texts(_: &[u8]) -> Result<Vec<String>, Fallback> {
-    Err(Fallback::NoPdfium("built without PDF support".to_owned()))
+pub fn page_texts(_: &[u8], wanted: &dyn Fn() -> bool) -> Option<Result<Vec<String>, Fallback>> {
+    wanted().then(|| Err(Fallback::NoPdfium("built without PDF support".to_owned())))
 }
 
 #[cfg(feature = "pdf")]
@@ -864,7 +869,9 @@ mod tests {
     #[test]
     fn pdfium_reads_renders_and_refuses() {
         let pdf = testing::pdf(&[&["Hello", "world"].join("\n"), "second page"]);
-        let read: Vec<String> = page_texts(&pdf)
+        let wanted = || true;
+        let read: Vec<String> = page_texts(&pdf, &wanted)
+            .unwrap()
             .unwrap()
             .iter()
             .map(|text| text.replace("\r\n", "\n"))
@@ -874,15 +881,20 @@ mod tests {
             [["Hello", "world"].join("\n"), "second page".to_owned()]
         );
         assert_eq!(
-            page_texts(&testing::encrypted(&["secret"])),
-            Err(Fallback::Encrypted)
+            page_texts(&testing::encrypted(&["secret"]), &wanted),
+            Some(Err(Fallback::Encrypted))
         );
         let many = vec![""; usize::try_from(MAX_PAGES).unwrap() + 1];
         assert_eq!(
-            page_texts(&testing::pdf(&many)),
-            Err(Fallback::TooManyPages(MAX_PAGES + 1))
+            page_texts(&testing::pdf(&many), &wanted),
+            Some(Err(Fallback::TooManyPages(MAX_PAGES + 1)))
         );
-        assert_eq!(page_texts(b"%PDF-1.4 broken"), Err(Fallback::Unreadable));
+        assert_eq!(
+            page_texts(b"%PDF-1.4 broken", &wanted),
+            Some(Err(Fallback::Unreadable))
+        );
+        // A read no longer wanted stops before its first page.
+        assert_eq!(page_texts(&pdf, &|| false), None);
         let rendered = render(&pdf, 1).ok().unwrap();
         let version = crate::images::Comparison::between(Ok(rendered), Err(Version::Absent));
         let crate::images::Version::Image(picture) = version.base else {

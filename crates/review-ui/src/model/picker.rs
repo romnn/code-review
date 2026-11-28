@@ -21,6 +21,7 @@ use review_core::tree::NodeKind;
 use review_core::{FileTone, ObjectId, Review};
 
 use super::effects::{Outcome, Subject};
+use super::pool::Lane;
 use super::{Mode, Model, Overlay, buffer};
 use crate::frame::{ListScroll, Request};
 use crate::rows::FullText;
@@ -113,6 +114,20 @@ pub struct Entry {
 pub(crate) struct Listing {
     pub(crate) paths: Vec<String>,
     pub(crate) oids: HashMap<String, ObjectId>,
+}
+
+impl Listing {
+    /// Lists the files of the tree of `head`.
+    fn of(review: &Review, head: &ObjectId) -> Result<Self, review_core::Error> {
+        let files = review.snapshots().tree_files(head)?;
+        Ok(Self {
+            oids: files
+                .iter()
+                .map(|file| (file.path.clone(), file.oid.clone()))
+                .collect(),
+            paths: files.into_iter().map(|file| file.path).collect(),
+        })
+    }
 }
 
 /// An open picker.
@@ -337,9 +352,11 @@ impl Model {
 
     /// Runs the search `query` in the background; only the newest search's result lands.
     pub(super) fn search_picker(&mut self, query: Query) {
-        self.spawn_with(Subject::Search(query.generation), move |parts| {
-            Outcome::Found(search(&parts.review, &query))
-        });
+        self.spawn_with(
+            Lane::Selected,
+            Subject::Search(query.generation),
+            move |parts| Outcome::Found(search(&parts.review, &query)),
+        );
     }
 
     /// Takes in what the open picker's newest search found.
@@ -391,7 +408,7 @@ impl Model {
         };
         picker.reading = Some(path.clone());
         let id = picker.id;
-        self.spawn_with(Subject::Picker(id), move |parts| {
+        self.spawn_with(Lane::Selected, Subject::Picker(id), move |parts| {
             let text = read_text(&parts.review, &oid);
             Outcome::PreviewText(PreviewText { path, text })
         });
@@ -594,7 +611,7 @@ impl Model {
         }
         self.set_status(format!("Opening {path}…"));
         self.highlighting += 1;
-        self.spawn_with(Subject::Shown(self.shown), move |parts| {
+        self.spawn_with(Lane::Selected, Subject::Shown(self.shown), move |parts| {
             let text = read_text(&parts.review, &oid);
             // A text blob under the size limit, which `read_text` checks, is highlighted
             // whatever its name: detection reads its first line too.
@@ -671,7 +688,8 @@ fn read_text(review: &Review, oid: &ObjectId) -> Option<FullText> {
     }
 }
 
-/// Runs one search.
+/// Runs one search; one a newer query cancelled before it started, or while it listed the
+/// tree, finds nothing, which never lands.
 fn search(review: &Review, query: &Query) -> Found {
     let mut found = Found {
         entries: Vec::new(),
@@ -679,22 +697,20 @@ fn search(review: &Review, query: &Query) -> Found {
         listing: None,
         error: None,
     };
+    let cancelled = || query.cancel.load(Ordering::Relaxed);
     let mut listing = query.listing.clone();
-    if query.scope == Scope::Tree && listing.is_none() {
-        match review.snapshots().tree_files(&query.head) {
-            Ok(files) => {
-                let loaded = Arc::new(Listing {
-                    oids: files
-                        .iter()
-                        .map(|file| (file.path.clone(), file.oid.clone()))
-                        .collect(),
-                    paths: files.into_iter().map(|file| file.path).collect(),
-                });
+    if query.scope == Scope::Tree && listing.is_none() && !cancelled() {
+        match Listing::of(review, &query.head) {
+            Ok(loaded) => {
+                let loaded = Arc::new(loaded);
                 found.listing = Some(Arc::clone(&loaded));
                 listing = Some(loaded);
             }
             Err(err) => found.error = Some(format!("listing the tree failed: {err}")),
         }
+    }
+    if cancelled() {
+        return found;
     }
     let changes: HashMap<&str, Change> = query
         .changed

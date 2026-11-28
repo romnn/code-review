@@ -25,6 +25,7 @@ use super::live::{Captured, Missed, WaitedFor};
 use super::marks::{Marked, Refreshed};
 use super::pending::{Analyzed, Unverified, Verified};
 use super::picker::{Found, PreviewText, Query, Unchanged};
+use super::pool::{Lane, POOL, Pool};
 use super::pulls::Looked;
 use super::remember::ConfigSaved;
 use super::sync::Tick;
@@ -46,7 +47,7 @@ pub struct Completion {
 }
 
 /// Work the model wants done off the UI thread, such as git, analysis or a language server,
-/// which a front end can only start on a thread of its own, never run in place:
+/// which a front end can only start in the background, never run in place:
 ///
 /// ```compile_fail
 /// fn run_in_place(job: review_ui::model::Job) -> review_ui::model::Completion {
@@ -55,35 +56,53 @@ pub struct Completion {
 /// ```
 pub struct Job {
     work: Box<dyn FnOnce() -> Completion + Send>,
+    /// Where it runs, and how soon.
+    lane: Lane,
     /// Whether it waits for something outside the app, which the model's tests run apart.
     #[cfg(test)]
     pub(super) waits: bool,
 }
 
 impl Job {
-    /// `work`, as a job.
-    pub(super) fn new(work: impl FnOnce() -> Completion + Send + 'static) -> Self {
+    /// `work`, as a job that runs in `lane`.
+    pub(super) fn new(lane: Lane, work: impl FnOnce() -> Completion + Send + 'static) -> Self {
         Self {
             work: Box::new(work),
+            lane,
             #[cfg(test)]
             waits: false,
         }
     }
 
     /// `work`, as a job that waits for something outside the app, such as the working tree
-    /// changing, for as long as the app runs.
+    /// changing, for as long as the app runs, on a thread of its own.
     pub(super) fn waiting(work: impl FnOnce() -> Completion + Send + 'static) -> Self {
         Self {
             work: Box::new(work),
+            lane: Lane::Own,
             #[cfg(test)]
             waits: true,
         }
     }
 
-    /// Runs the job on a thread of its own and hands its completion to `deliver` there, which
-    /// passes it on to [`Driver::complete`] on the UI thread.
+    /// Runs the job in the background, in the app's pool or on a thread of its own as its lane
+    /// says, and hands its completion to `deliver` there, which passes it on to
+    /// [`Driver::complete`] on the UI thread.
     pub fn start(self, deliver: impl FnOnce(Completion) + Send + 'static) {
-        std::thread::spawn(move || deliver((self.work)()));
+        self.start_on(&POOL, deliver);
+    }
+
+    /// Runs the job in `pool`, or on a thread of its own as its lane says, as [`Self::start`]
+    /// runs it in the app's pool.
+    pub(super) fn start_on(self, pool: &Pool, deliver: impl FnOnce(Completion) + Send + 'static) {
+        let Self { work, lane, .. } = self;
+        pool.start(lane, move || deliver(work()));
+    }
+
+    /// Where the job runs.
+    #[cfg(test)]
+    pub(super) fn lane(&self) -> Lane {
+        self.lane
     }
 
     /// Runs the job in place, as the model's tests do in the order they pick.
@@ -157,10 +176,12 @@ pub(super) enum Outcome {
     TextsRead(TextsRead),
     /// One file's highlights, made in the background.
     Highlighted(Highlighted),
-    /// A changed file's versions, compared as images.
-    Compared(Box<super::compare::Compared>),
-    /// A changed file's versions, read as PDFs.
-    PdfRead(Box<super::pages::ReadPdf>),
+    /// A changed file's versions, compared as images, or nothing once the selected file
+    /// showed another pair before the job ended.
+    Compared(Option<Box<super::compare::Compared>>),
+    /// A changed file's versions, read as PDFs, or nothing once the selected file showed
+    /// another pair before the job ended.
+    PdfRead(Option<Box<super::pages::ReadPdf>>),
     /// A mark saved or refused.
     Marked(Marked),
     /// A decision on trust recorded, or why it could not be.
@@ -208,6 +229,9 @@ pub(super) struct TextsRead {
     /// The blobs asked for, which are no longer being read.
     pub(super) asked: Vec<ObjectId>,
     pub(super) texts: HashMap<ObjectId, Arc<FullText>>,
+    /// Whether it is the urgent read of the selected file's text, which claims nothing,
+    /// rather than a read of other files'.
+    pub(super) urgent: bool,
 }
 
 /// The versions of one file, highlighted in the background.
@@ -344,17 +368,18 @@ impl Driver {
 }
 
 impl Model {
-    /// Queues `job` to run in the background for `subject`; its outcome lands on the UI thread
-    /// while `subject` still shows.
+    /// Queues `job` to run in the background in `lane`, for `subject`; its outcome lands on
+    /// the UI thread while `subject` still shows.
     pub(super) fn spawn(
         &mut self,
+        lane: Lane,
         subject: Subject,
         job: impl FnOnce() -> Outcome + Send + 'static,
     ) {
-        // From the moment the job is queued, so the trace shows its wait for a thread too.
-        let span = tracing::info_span!("job", ?subject);
+        // From the moment the job is queued, so the trace shows its wait for a worker too.
+        let span = tracing::info_span!("job", ?lane, ?subject);
         self.effects
-            .push(Effect::Spawn(Job::new(move || Completion {
+            .push(Effect::Spawn(Job::new(lane, move || Completion {
                 subject,
                 outcome: Box::new(span.in_scope(job)),
             })));
@@ -397,7 +422,12 @@ impl Model {
         match outcome {
             Outcome::TextsRead(read) => {
                 self.highlighting = self.highlighting.saturating_sub(1);
-                self.requested.finish(&read.asked);
+                if read.urgent {
+                    self.urgent_text.reading = false;
+                } else {
+                    self.requested.finish(&read.asked);
+                    self.reading_texts = false;
+                }
             }
             Outcome::Unchanged(_) => self.highlighting = self.highlighting.saturating_sub(1),
             Outcome::Compared(_) => self.images.ended(),
@@ -475,8 +505,8 @@ impl Model {
             Outcome::Verified(verified) => self.verified(verified),
             Outcome::TextsRead(read) => self.texts_read(read),
             Outcome::Highlighted(highlighted) => self.highlighted(highlighted),
-            Outcome::Compared(compared) => self.compared(*compared),
-            Outcome::PdfRead(read) => self.pdf_read(*read),
+            Outcome::Compared(compared) => self.compared(compared.map(|compared| *compared)),
+            Outcome::PdfRead(read) => self.pdf_read(read.map(|read| *read)),
             Outcome::Marked(marked) => self.marked(marked),
             Outcome::Decided(decided) => self.decided(decided),
             Outcome::TrustRead(trust) => self.take_trust(trust),

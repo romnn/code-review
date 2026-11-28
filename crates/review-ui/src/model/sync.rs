@@ -2,7 +2,8 @@
 //! its target, and what a fetch of the latest changes is doing, for the bottom bar.
 //!
 //! The bar's relative time and its spinner change with the clock alone, so timers redraw them:
-//! one each minute while the review shows, and a quicker one only while a fetch runs.
+//! one each minute while the review shows, and a quicker one only while a fetch runs; another
+//! draws the count of revisions replayed while the review state is checked.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -49,6 +50,9 @@ pub(super) enum Tick {
     /// The end of the grace a comparison has before its place says it is decoding, for the
     /// wait with this number; see the `compare` module.
     Decoding(u64),
+    /// A frame for the count of revisions replayed while the review state is checked; it keeps
+    /// itself going until the verification lands.
+    Checking,
 }
 
 /// The review's freshness.
@@ -176,6 +180,7 @@ impl Model {
             Tick::PullRequest => self.pull_request_due(),
             Tick::Guard => self.guard_due(),
             Tick::Decoding(waits) => self.waited_for_comparison(waits),
+            Tick::Checking => self.checking_ticked(),
             Tick::Spin | Tick::Recovered => {}
         }
     }

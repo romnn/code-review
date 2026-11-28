@@ -1085,7 +1085,7 @@ impl ReviewApp {
         let cells = |text: &str| scroll::float(display_width(text)) * cell;
         // The padding, the target's reserved width and the divider; a little slack covers
         // glyphs a fallback font draws wider.
-        let reserved = GRID * 6.0 + GRID * 4.0 * 2.0 + 1.0 + (cell * 28.0).min(GRID * 120.0);
+        let reserved = GRID * 6.0 + GRID * 4.0 * 2.0 + 1.0 + (cell * 30.0).min(GRID * 120.0);
         let budget = (f32::from(window.viewport_size().width) - reserved) * 0.97;
         bars::bar_hints(
             self,

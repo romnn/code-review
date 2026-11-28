@@ -28,6 +28,7 @@ use review_core::github::{self, BranchPullRequest, CheckoutPullRequest, PullRequ
 use review_core::{BranchIdentity, Error, Repo};
 
 use super::effects::{Because, Outcome, Subject};
+use super::pool::Lane;
 use super::sync::Tick;
 use super::{Effect, Model};
 
@@ -189,13 +190,17 @@ impl Model {
             return;
         }
         pulls.running = Some(association.clone());
-        self.spawn_with(Subject::Always(Because::Live), move |parts| {
-            let result = find(parts.review.repo());
-            Outcome::PullRequest(Box::new(Looked {
-                asked: association,
-                result,
-            }))
-        });
+        self.spawn_with(
+            Lane::Background,
+            Subject::Always(Because::Live),
+            move |parts| {
+                let result = find(parts.review.repo());
+                Outcome::PullRequest(Box::new(Looked {
+                    asked: association,
+                    result,
+                }))
+            },
+        );
     }
 
     /// `r` on a review that follows the checkout: looks up the pull request now, even where

@@ -50,6 +50,7 @@ use super::buffer::Origin;
 use super::effects::{Because, Outcome, Subject};
 use super::engine::{Parts, Waiting};
 use super::guard::Aim;
+use super::pool::Lane;
 use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
 use super::pulls::Pulls;
 use super::sync::Tick;
@@ -372,7 +373,7 @@ impl Model {
         if !self.settings.live {
             return;
         }
-        self.spawn_with(Subject::Watch, |parts| {
+        self.spawn_with(Lane::Shown, Subject::Watch, |parts| {
             Outcome::Watching(parts.watch().map(Box::new).map_err(|err| causes(&err)))
         });
     }
@@ -523,7 +524,7 @@ impl Model {
         let pull_requests = live.pulls.pull_requests();
         live.given = Some(pull_requests.clone());
         let listed = live.listed.clone();
-        self.spawn_with(Subject::Always(Because::Live), move |parts| {
+        self.spawn_with(Lane::Shown, Subject::Always(Because::Live), move |parts| {
             Outcome::Captured(capture(
                 parts,
                 &CaptureInput {

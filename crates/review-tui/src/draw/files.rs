@@ -161,7 +161,8 @@ fn progress_line(
 
 /// A progress bar `cells` wide from `x` on row `y`: its filled share in the fill color, the
 /// part of it approved automatically at its end in the quieter color, and the rest of its
-/// track, as heavy rules.
+/// track, as heavy rules; a part in no color is blank, so no terminal shows it however it
+/// raises contrast.
 pub fn meter_bar(painter: &mut Painter<'_>, x: u16, y: u16, cells: u16, bar: &Bar, bg: Rgba) {
     let filled = filled_cells(bar.fraction, cells);
     let marked = filled_cells(bar.fraction - bar.auto, cells).min(filled);
@@ -173,7 +174,8 @@ pub fn meter_bar(painter: &mut Painter<'_>, x: u16, y: u16, cells: u16, bar: &Ba
         } else {
             bar.track
         };
-        painter.symbol(x + offset, y, "━", Brush::new(color, bg));
+        let rule = if color.a > 0.0 { "━" } else { " " };
+        painter.symbol(x + offset, y, rule, Brush::new(color, bg));
     }
 }
 

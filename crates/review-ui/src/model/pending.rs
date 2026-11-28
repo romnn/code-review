@@ -5,9 +5,11 @@
 //! revision's changes when the cache holds their analysis in this version's format; when it
 //! does not, as after the format changed, the files one comparison of its trees finds, while a
 //! job analyzes the revision.
-//! Behind it, one job captures the working tree and reads the history, starting from what the
-//! view read of the log, so it takes in what was appended since and finds the log replaced; it
-//! starts once the revision's analysis is in, which it takes rather than computing it again.
+//! Behind it, one job reads the history, starting from what the view read of the log, so it
+//! takes in what was appended since and finds the log replaced, then captures the working tree;
+//! it starts once the revision's analysis is in, which it takes rather than computing it again.
+//! The bottom bar counts the revisions it replayed, as it reports them, with the frames that
+//! show anyway and at [`PROGRESS`]'s pace.
 //! The analysis and the verified review each show with the next frame, as an opened review
 //! does, keeping the selected file.
 //!
@@ -18,12 +20,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use review_core::analysis::Analysis;
 use review_core::tree::NodeKind;
 use review_core::{
-    Capture, Changes, FileStatus, History, LiveCapture, ObjectId, Review, RevisionNumber,
+    Capture, Changes, FileStatus, History, LiveCapture, ObjectId, Replay, Review, RevisionNumber,
     RevisionRecord,
 };
 
@@ -31,6 +34,8 @@ use super::buffer::Origin;
 use super::effects::{Because, Outcome, Subject};
 use super::live::read_new_texts;
 use super::live::{Opening, Replaced, causes, replaced_log};
+use super::pool::Lane;
+use super::sync::Tick;
 use super::{Effect, Mode, Model, head_texts};
 use crate::folders::ViewState;
 use crate::rows::{self, FullText};
@@ -51,6 +56,9 @@ const ATTEMPTS: u32 = 5;
 /// How long the opening waits for git to finish what it is busy with, when the review has no
 /// revision to show meanwhile.
 const BUSY_WAIT: Duration = Duration::from_secs(10);
+
+/// How often a frame shows the count of revisions replayed while nothing else draws one.
+const PROGRESS: Duration = Duration::from_millis(250);
 
 /// What shows first of an opened review.
 pub(super) enum Shows {
@@ -75,6 +83,42 @@ pub(super) struct Pending {
     arrived: Option<Arrived>,
     /// Why the review could not be verified, once it could not.
     failed: Option<String>,
+    /// How many revisions the verification replayed, out of how many, as it reported last.
+    progress: Progress,
+}
+
+/// How far the verification's replay of the history got, which its job sets as it replays
+/// and the UI thread reads with each frame.
+///
+/// Both counts share one atomic, the total in its high half, so a frame never reads a count
+/// of one report with the total of another, and the UI thread never waits for the job.
+#[derive(Debug, Clone)]
+struct Progress(Arc<AtomicU64>);
+
+impl Progress {
+    /// None of `total` revisions replayed yet.
+    fn new(total: u32) -> Self {
+        Self(Arc::new(AtomicU64::new(u64::from(total) << 32)))
+    }
+
+    /// Sets how far the replay got.
+    fn set(&self, replay: Replay) {
+        let half = |count: usize| u64::from(u32::try_from(count).unwrap_or(u32::MAX));
+        self.0.store(
+            (half(replay.total) << 32) | half(replay.replayed),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// How far the replay got, as last set.
+    fn get(&self) -> Replay {
+        let packed = self.0.load(Ordering::Relaxed);
+        let half = |half: u64| usize::try_from(half & u64::from(u32::MAX)).unwrap_or(usize::MAX);
+        Replay {
+            replayed: half(packed),
+            total: half(packed >> 32),
+        }
+    }
 }
 
 /// What a job brought for the pending view.
@@ -121,6 +165,9 @@ pub struct Checking<'a> {
     pub record: &'a RevisionRecord,
     /// Whether its changes show, rather than only its changed files.
     pub changes: bool,
+    /// How many revisions the verification replayed so far out of all the log recorded, until
+    /// it fails; `None` once it failed.
+    pub progress: Option<Replay>,
 }
 
 /// A review verified: its history read, with the working tree captured on top for a review of
@@ -205,6 +252,7 @@ impl Pending {
             })
         });
         Ok(Some(Self {
+            progress: Progress::new(record.number.get()),
             record,
             files,
             analysis,
@@ -268,9 +316,9 @@ impl Verified {
     }
 }
 
-/// Verifies the checkout's review: captures its working tree and reads the history with the
-/// capture on top, and the head text of its files that `known` does not hold; runs in the
-/// background.
+/// Verifies the checkout's review: reads the history, telling `progress` how far its replay
+/// got, captures the working tree and puts the capture on top, and reads the head text of its
+/// files that `known` does not hold; runs in the background.
 ///
 /// No watch tells the opening of a change made while it captures, so the capture looks twice.
 /// While git is busy in the checkout or cr's data is full, the review shows its last recorded
@@ -280,7 +328,16 @@ impl Verified {
 ///
 /// Returns why the review cannot be shown.
 #[tracing::instrument(skip_all)]
-pub(super) fn verify(review: &Review, known: &HashSet<ObjectId>) -> Result<Verified, Unverified> {
+pub(super) fn verify(
+    review: &Review,
+    known: &HashSet<ObjectId>,
+    progress: &dyn Fn(Replay),
+) -> Result<Verified, Unverified> {
+    // The capture reads on from this history, and so does the history read when there is
+    // none.
+    review
+        .history_reporting(progress)
+        .map_err(|err| Unverified::of(&err))?;
     let started = Instant::now();
     let mut moved = 0;
     let recorded = |busy| {
@@ -347,8 +404,8 @@ impl Model {
         self.blobs.texts.extend(std::mem::take(&mut first.texts));
         self.checking = Some(first);
         self.shown += 1;
-        // The text of every other file is asked for before any file lays out, so none lays out
-        // without its context before the text lands.
+        // The other files' texts are read from now on; the selected file's is asked for as it
+        // lays out.
         self.request_texts();
         self.refresh_tree();
         self.restore_view_state(view_state);
@@ -362,40 +419,87 @@ impl Model {
             return;
         }
         let selected = self.selected.clone();
-        self.spawn_with(Subject::Always(Because::Opening), move |parts| {
-            let analysis = parts
-                .review
-                .analyze_recorded(&record)
-                .map_err(|err| causes(&err));
-            let texts = analysis.as_ref().map_or_else(
-                |_| HashMap::new(),
-                |analysis| {
-                    head_texts(&parts.review, analysis, |file| {
-                        selected.as_deref() == Some(file.display_path())
-                    })
-                },
-            );
-            Outcome::Analyzed(Box::new(Analyzed {
-                record,
-                analysis,
-                texts,
-            }))
-        });
+        self.spawn_with(
+            Lane::Selected,
+            Subject::Always(Because::Opening),
+            move |parts| {
+                let analysis = parts
+                    .review
+                    .analyze_recorded(&record)
+                    .map_err(|err| causes(&err));
+                let texts = analysis.as_ref().map_or_else(
+                    |_| HashMap::new(),
+                    |analysis| {
+                        head_texts(&parts.review, analysis, |file| {
+                            selected.as_deref() == Some(file.display_path())
+                        })
+                    },
+                );
+                Outcome::Analyzed(Box::new(Analyzed {
+                    record,
+                    analysis,
+                    texts,
+                }))
+            },
+        );
     }
 
     /// Verifies the review behind the pending view, reading the text of no file the window
-    /// holds or is reading already.
+    /// holds or reads itself, as it reads every file the pending view shows.
     fn verify(&mut self) {
+        let Some(checking) = &self.checking else {
+            return;
+        };
+        let progress = checking.progress.clone();
+        let shown = checking
+            .analysis
+            .as_ref()
+            .map_or_else(Vec::new, |analysis| {
+                analysis
+                    .files
+                    .iter()
+                    .filter_map(|file| file.new.as_ref())
+                    .filter(|side| super::is_regular(side))
+                    .map(|side| side.oid.clone())
+                    .collect()
+            });
         let known: HashSet<ObjectId> = self
             .blobs
             .texts
             .keys()
             .chain(self.requested.claims())
             .cloned()
+            .chain(shown)
             .collect();
-        self.spawn_with(Subject::Always(Because::Opening), move |parts| {
-            Outcome::Verified(verify(&parts.review, &known).map(Box::new))
-        });
+        self.spawn_with(
+            Lane::Background,
+            Subject::Always(Because::Opening),
+            move |parts| {
+                let replayed = |replay| progress.set(replay);
+                Outcome::Verified(verify(&parts.review, &known, &replayed).map(Box::new))
+            },
+        );
+        self.after(
+            PROGRESS,
+            Subject::Always(Because::Clock),
+            Outcome::Tick(Tick::Checking),
+        );
+    }
+
+    /// Takes in the tick that draws a frame for the count of revisions replayed, and asks for
+    /// the next while the verification runs.
+    pub(super) fn checking_ticked(&mut self) {
+        let runs = self
+            .checking
+            .as_ref()
+            .is_some_and(|checking| checking.verifying() && checking.arrived.is_none());
+        if runs {
+            self.after(
+                PROGRESS,
+                Subject::Always(Because::Clock),
+                Outcome::Tick(Tick::Checking),
+            );
+        }
     }
 
     /// Takes in the analysis of the pending view's revision, which shows with the next frame
@@ -593,6 +697,7 @@ impl Model {
         Some(Checking {
             record: &checking.record,
             changes: checking.analysis.is_some(),
+            progress: checking.verifying().then(|| checking.progress.get()),
         })
     }
 }
