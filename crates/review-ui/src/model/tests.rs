@@ -6156,15 +6156,7 @@ fn the_pull_request_follows_the_branch() {
     git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
     host.update(Model::changed);
     host.settle();
-    let association = host
-        .model()
-        .live
-        .as_ref()
-        .unwrap()
-        .pulls
-        .association()
-        .cloned()
-        .unwrap();
+    let association = host.model().pulls.association().cloned().unwrap();
     assert_eq!(association.branch, "feat");
     let pull_request = |state| review_core::github::BranchPullRequest {
         number: 12,
@@ -6199,17 +6191,25 @@ fn the_pull_request_follows_the_branch() {
     )));
     assert_eq!(header(host.model()), "feat → origin/main", "dropped");
 
+    let status = host.model().status.clone();
     host.complete(looked(super::pulls::Looked::found(
         association.clone(),
         Some(pull_request(open)),
     )));
-    assert_eq!(host.model().status, "feat has pull request #12 (open).");
+    assert_eq!(host.model().status, status, "said as its capture shows");
     assert!(
         host.model().live.as_ref().unwrap().updating(),
         "a capture with the pull request follows"
     );
     host.settle();
     let model = host.model();
+    assert!(
+        model
+            .status
+            .starts_with("feat has pull request #12 (open). "),
+        "{}",
+        model.status
+    );
     assert!(!model.live.as_ref().unwrap().updating());
     assert_eq!(header(model), "#12 feat → origin/main");
     assert_eq!(model.title(), "repo · feat #12");
@@ -6228,8 +6228,8 @@ fn the_pull_request_follows_the_branch() {
         association,
         Some(pull_request(review_core::github::PullRequestState::Merged)),
     )));
-    assert_eq!(host.model().status, "#12 merged.");
     host.settle();
+    assert_eq!(host.model().status, "#12 merged.");
     assert_eq!(header(host.model()), "#12 merged · feat → origin/main");
 }
 
@@ -6289,15 +6289,7 @@ fn a_capture_takes_the_pull_request_of_the_branch_it_sees() {
     git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
     host.update(Model::changed);
     host.settle();
-    let feat = host
-        .model()
-        .live
-        .as_ref()
-        .unwrap()
-        .pulls
-        .association()
-        .cloned()
-        .unwrap();
+    let feat = host.model().pulls.association().cloned().unwrap();
     let pull_request = review_core::github::BranchPullRequest {
         number: 12,
         url: "https://github.com/owner/repo/pull/12".to_owned(),
@@ -6390,15 +6382,7 @@ fn an_unavailable_lookup_is_tried_again() {
     git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
     host.update(Model::changed);
     host.settle();
-    let feat = host
-        .model()
-        .live
-        .as_ref()
-        .unwrap()
-        .pulls
-        .association()
-        .cloned()
-        .unwrap();
+    let feat = host.model().pulls.association().cloned().unwrap();
     let looked = |looked: super::pulls::Looked| Completion {
         subject: Subject::Always(super::effects::Because::Live),
         outcome: Box::new(Outcome::PullRequest(Box::new(looked))),
@@ -6412,7 +6396,7 @@ fn an_unavailable_lookup_is_tried_again() {
     host.update(Model::look_up_pull_request);
     assert!(!host.model().live_state().unwrap().looking_up);
     // Once due, as after `gh auth login`.
-    host.update(|model| model.live.as_mut().unwrap().pulls.make_due());
+    host.update(|model| model.pulls.make_due());
     host.update(Model::pull_request_due);
     assert!(host.model().live_state().unwrap().looking_up);
     host.settle();
@@ -9234,6 +9218,25 @@ fn recorded_checkout(dir: &Path, stale: bool) -> (Host, std::path::PathBuf) {
     (Host::opening(loaded, settings()), repo)
 }
 
+/// Runs the jobs that verify the review behind its pending view: the replay and the confirmed
+/// capture in the background lane, and the lookup of the pull request on a thread of its own,
+/// landing each while every other job waits, until the verified review waits for its frame.
+fn verify_behind(host: &mut Host) {
+    loop {
+        let position = host
+            .jobs
+            .iter()
+            .position(|job| matches!(job.lane(), pool::Lane::Background | pool::Lane::Own))
+            .expect("the verification waits");
+        let completion = host.jobs.remove(position).unwrap().run();
+        let verified = matches!(*completion.outcome, Outcome::Verified(..));
+        host.complete(completion);
+        if verified {
+            return;
+        }
+    }
+}
+
 /// Runs the waiting jobs in order, landing each, until one hands back what `wanted` picks,
 /// whose completion it returns unapplied.
 fn run_until(host: &mut Host, wanted: impl Fn(&Outcome) -> bool) -> Completion {
@@ -9279,7 +9282,7 @@ fn the_last_recorded_revision_shows_while_the_review_is_checked() {
         // Until the changes are analyzed, the diff stays empty, with no card either.
         assert_eq!(card(model), None, "stale: {stale}");
         let checking = model.checking().expect("the pending view shows");
-        assert_eq!(checking.record.number.get(), 2);
+        assert_eq!(checking.record.unwrap().number.get(), 2);
         assert_eq!(checking.changes, !stale, "stale: {stale}");
         assert!(model.snapshot.is_none());
         assert_eq!(file_paths(&model.tree), ["a.rs", "b.rs"]);
@@ -9408,9 +9411,7 @@ fn rows_that_waited_for_their_text_show_with_the_next_frame() {
     let (mut host, _repo) = recorded_checkout(dir.path(), false);
     show_opened(&mut host);
     // The review is verified while b.rs's text, asked for by the pending view, is still read.
-    let verified = host.run_newest_job();
-    assert!(matches!(*verified.outcome, Outcome::Verified(_)));
-    host.complete(verified);
+    verify_behind(&mut host);
     host.draw();
     assert!(
         host.model().checking().is_none(),
@@ -9470,13 +9471,15 @@ fn a_late_analysis_shows_before_the_review_is_verified() {
     while let Some(job) = host.jobs.pop_front() {
         let completion = job.run();
         assert!(
-            !matches!(*completion.outcome, Outcome::Verified(_)),
+            !matches!(*completion.outcome, Outcome::Verified(..)),
             "the review is verified before its analysis shows"
         );
         host.complete(completion);
     }
     host.draw();
-    let verified = run_until(&mut host, |outcome| matches!(outcome, Outcome::Verified(_)));
+    let verified = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::Verified(..))
+    });
     host.complete(verified);
 }
 
@@ -9555,7 +9558,9 @@ fn a_key_on_the_pending_view_records_nothing() {
     host.dispatch(Action::FocusDiff);
     let events = std::fs::read(host.review.dir().events()).unwrap();
 
-    let verified = run_until(&mut host, |outcome| matches!(outcome, Outcome::Verified(_)));
+    let verified = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::Verified(..))
+    });
     host.complete(verified);
     host.key(Action::ToggleApprove, false);
     assert_eq!(host.model().status, super::pending::CHECKING);
@@ -9840,7 +9845,7 @@ fn checking_ticks(host: &Host) -> usize {
 
 /// While the review state is checked, the bar counts the revisions the verification replayed
 /// out of all the log recorded, at one width while it counts, the revision making way for it
-/// when room runs out; a tick draws a frame for the count until the verification lands.
+/// when room runs out; a tick draws a frame for the count until the replay lands.
 #[test]
 fn the_bar_counts_the_revisions_the_verification_replayed() {
     use crate::paint::bars::checking_label;
@@ -9889,8 +9894,9 @@ fn the_bar_counts_the_revisions_the_verification_replayed() {
     assert_eq!(checking_ticks(&host), 1);
 
     // The verification replays both revisions before its outcome lands; meanwhile each tick
-    // asks for the next.
-    let verified = run_until(&mut host, |outcome| matches!(outcome, Outcome::Verified(_)));
+    // asks for the next. Then the bar says what the confirmed capture waits for, in the same
+    // room.
+    let replayed = run_until(&mut host, |outcome| matches!(outcome, Outcome::Replayed(_)));
     assert_eq!(narrow(host.model()), "Checking review state 2/2");
     let tick = |host: &mut Host| {
         let index = host
@@ -9901,12 +9907,14 @@ fn the_bar_counts_the_revisions_the_verification_replayed() {
         host.fire(index);
     };
     tick(&mut host);
-    assert_eq!(checking_ticks(&host), 1, "the tick stopped while verifying");
-    // Once the verified review waits for its frame, the ticks stop.
-    host.complete(verified);
+    assert_eq!(checking_ticks(&host), 1, "the tick stopped while replaying");
+    // Once the replay lands, the ticks stop: what the bar says next changes as jobs land, which
+    // draws a frame anyway.
+    host.complete(replayed);
+    assert_eq!(narrow(host.model()), "rev 2 · Comparing checkout…");
     tick(&mut host);
     assert_eq!(checking_ticks(&host), 0, "the tick runs on");
-    host.draw();
+    host.settle();
     let bar = bar(host.model());
     assert!(!bar.contains("Checking"), "{bar}");
 }
@@ -9916,7 +9924,7 @@ fn outcome_kind(outcome: &Outcome) -> &'static str {
     match outcome {
         Outcome::Opened(_) => "opened",
         Outcome::Analyzed(_) => "analyzed",
-        Outcome::Verified(_) => "verified",
+        Outcome::Verified(..) => "verified",
         Outcome::TextsRead(_) => "texts",
         Outcome::PdfRead(Some(_)) => "pdf",
         Outcome::PdfRead(None) => "pdf dropped",
@@ -10368,4 +10376,522 @@ fn a_superseded_file_search_lists_nothing() {
         }
     }
     drop(second);
+}
+
+/// The repository at `repo`, whose `gh` is a script that answers for `feat/b` with pull
+/// request 7 of `github.com/owner/repo` and finds none for any other branch; the pull request
+/// merges into the branch [`gh_answers`] names, `feat/a` until then, from `feat/b`.
+#[cfg(unix)]
+fn with_fake_gh(dir: &Path, repo: &Path) -> review_core::Repo {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        indoc! {r#"
+            #!/bin/sh
+            bin=$(dirname "$0")
+            base=$(cat "$bin/gh.base" 2>/dev/null || echo feat/a)
+            head=$(cat "$bin/gh.head" 2>/dev/null || echo feat/b)
+            if [ "$(git symbolic-ref --short HEAD)" = feat/b ]; then
+                printf '{"number":7,"url":"https://github.com/owner/repo/pull/7","state":"OPEN","baseRefName":"%s","headRefName":"%s","headRepository":null,"headRepositoryOwner":null,"author":null}' "$base" "$head"
+            else
+                echo 'no pull requests found for branch' >&2
+                exit 1
+            fi
+        "#},
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = bin.into_os_string();
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let mut checkout = review_core::Repo::discover(repo).unwrap();
+    checkout.set_command_env([("PATH", path)]);
+    checkout
+}
+
+/// Has the fake `gh` of [`with_fake_gh`] in `dir` answer with pull request 7 into `base`, from
+/// `head`.
+#[cfg(unix)]
+fn gh_answers(dir: &Path, base: &str, head: &str) {
+    std::fs::write(dir.join("bin/gh.base"), base).unwrap();
+    std::fs::write(dir.join("bin/gh.head"), head).unwrap();
+}
+
+/// The checkout of #25 in `dir`: `feat/b`, whose pull request 7 targets `feat/a`, branched from
+/// `on`: `main`, as when rebased onto `origin/main` once `feat/a` was squash-merged there, or
+/// `feat/a`, still stacked on it; `main`, which `origin/HEAD` names, gained `m.rs` since
+/// `feat/a` forked. `gh` is the fake of [`with_fake_gh`]. With `recorded`, a revision of it
+/// against `origin/main` is recorded first.
+/// Opened as the model's opener opens it, its opening job waiting to run; returns it with the
+/// working tree.
+#[cfg(unix)]
+fn stacked_checkout(dir: &Path, recorded: bool, on: &str) -> (Host, std::path::PathBuf) {
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| git_in(&repo, args);
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/owner/repo.git",
+    ]);
+    std::fs::write(repo.join("a.rs"), two_hunks("1", "2")).unwrap();
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    std::fs::write(repo.join("m.rs"), "fn m() {}\n").unwrap();
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "-m", "m"]);
+    git(&["checkout", "--quiet", "-b", "feat/a", "HEAD~"]);
+    std::fs::write(repo.join("a.rs"), two_hunks("one", "2")).unwrap();
+    git(&["commit", "--quiet", "-am", "a"]);
+    git(&["update-ref", "refs/remotes/origin/feat/a", "HEAD"]);
+    git(&["checkout", "--quiet", "main"]);
+    git(&["merge", "--quiet", "--squash", "feat/a"]);
+    git(&["commit", "--quiet", "-m", "squash a"]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ]);
+    git(&["checkout", "--quiet", "-b", "feat/b", on]);
+    std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+    git(&["add", "--all"]);
+    git(&["commit", "--quiet", "-m", "b"]);
+    let checkout = with_fake_gh(dir, &repo);
+    let data = dir.join("data");
+    if recorded {
+        let review = Review::open_checkout(&data, checkout.clone()).unwrap();
+        review.refresh().unwrap();
+    }
+    let loaded = crate::launch::open_checkout(&data, checkout).unwrap();
+    (Host::opening(loaded, settings()), repo)
+}
+
+/// Runs the waiting jobs, and those they start, landing each but those whose outcome `held`
+/// picks, which it returns unlanded in the order they ran, until no job waits.
+fn hold_back(host: &mut Host, held: impl Fn(&Outcome) -> bool) -> Vec<Completion> {
+    let mut kept = Vec::new();
+    while let Some(job) = host.jobs.pop_front() {
+        let completion = job.run();
+        if held(&completion.outcome) {
+            kept.push(completion);
+        } else {
+            host.complete(completion);
+        }
+    }
+    kept
+}
+
+/// Whether `outcome` is a lookup of the pull request.
+fn pull_request_lookup(outcome: &Outcome) -> bool {
+    matches!(outcome, Outcome::PullRequest(_))
+}
+
+/// The bottom bar's left side in the thirty cells both front ends keep for it, whatever the
+/// hints beside it take, so it never moves them.
+fn kept_bar(model: &Model) -> String {
+    let label: String = crate::paint::bars::sync_label(
+        model,
+        &crate::paint::Palette::of(model),
+        std::time::SystemTime::now(),
+        30.0,
+        |text| scroll::float(text.chars().count()),
+    )
+    .into_iter()
+    .map(|piece| piece.text)
+    .collect();
+    assert!(label.chars().count() <= 30, "{label}");
+    label
+}
+
+/// The header of #25's checkout once it shows: the branch, on `origin/main`, saying that its
+/// pull request targets `feat/a`.
+const REBASED: &str = "#7 feat/b · against origin/main · PR targets feat/a";
+
+/// Lands `completion`, a lookup the test held back or made up.
+fn looked(host: &mut Host, looked: super::pulls::Looked) {
+    host.complete(Completion {
+        subject: Subject::Always(super::effects::Because::Live),
+        outcome: Box::new(Outcome::PullRequest(Box::new(looked))),
+    });
+}
+
+/// #25 as it opens: whichever of the replay and the first lookup of the pull request ends first,
+/// with a recorded revision or none, the review stays pending until both did, the bar saying
+/// what it waits for in the room kept for it, and the first frame that takes marks compares the
+/// rebased branch with `origin/main`, which it is built on, saying that its pull request targets
+/// `feat/a`. Space on the pending view and its repeat held from there write nothing; a fresh
+/// press marks the snapshot shown.
+#[cfg(unix)]
+#[test]
+fn the_first_markable_frame_compares_with_the_base_the_lookup_decides() {
+    let cases: [(bool, bool, &[&str]); 3] = [
+        (false, true, &["Comparing checkout…"]),
+        (
+            true,
+            true,
+            &["Checking review state 1/1", "rev 1 · Comparing checkout…"],
+        ),
+        (
+            true,
+            false,
+            &["rev 1 · Checking PR base…", "rev 1 · Comparing checkout…"],
+        ),
+    ];
+    for (recorded, lookup_first, steps) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, _repo) = stacked_checkout(dir.path(), recorded, "main");
+        show_opened(&mut host);
+        let events = logged(&host.review).len();
+        let case = format!("recorded: {recorded}, lookup first: {lookup_first}");
+        let mut held = hold_back(&mut host, |outcome| {
+            pull_request_lookup(outcome) || matches!(outcome, Outcome::Replayed(_))
+        });
+        assert_eq!(held.len(), 1 + usize::from(recorded), "{case}");
+        held.sort_by_key(|completion| pull_request_lookup(&completion.outcome) != lookup_first);
+        let mut shown = Vec::new();
+        for completion in held {
+            host.key(Action::ToggleApprove, false);
+            assert!(host.model().saves.is_empty(), "{case}");
+            host.complete(completion);
+            assert!(host.model().checking().is_some(), "{case}");
+            shown.push(kept_bar(host.model()));
+        }
+        assert_eq!(shown, steps, "{case}");
+        verify_behind(&mut host);
+        host.key(Action::ToggleApprove, true);
+        host.draw();
+        host.key(Action::ToggleApprove, true);
+        host.settle();
+        let model = host.model();
+        assert!(model.checking().is_none(), "{case}");
+        assert_eq!(header(model), REBASED, "{case}");
+        assert_eq!(file_paths(&model.tree), ["b.rs"], "{case}");
+        assert_eq!(logged(&host.review).len(), events, "{case}: a key wrote");
+
+        host.update(|model| model.show_file("b.rs"));
+        host.dispatch(Action::FocusDiff);
+        let unit = host.model().hunk_units()[0];
+        host.key(Action::ToggleApprove, false);
+        host.settle();
+        let Some(review_core::store::events::Event::Mark(mark)) = logged(&host.review).pop() else {
+            panic!("{case}: the key marked nothing");
+        };
+        assert_eq!((mark.revision, mark.unit), (unit.revision(), unit.index()));
+    }
+}
+
+/// A stack not rebased opens on its pull request's base, which only the lookup names: a lookup
+/// that finds the pull request retargeted while the review still opens takes the capture
+/// anew, and so does one that finds it back on its first base; only the newest capture shows,
+/// never one taken before, with the lookups as they are now but the working tree as it was.
+#[cfg(unix)]
+#[test]
+fn a_lookup_that_changes_while_the_review_opens_takes_the_capture_anew() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = stacked_checkout(dir.path(), false, "feat/a");
+    show_opened(&mut host);
+    let verified = |outcome: &Outcome| matches!(outcome, Outcome::Verified(..));
+    let first = hold_back(&mut host, verified);
+    assert_eq!(first.len(), 1, "the capture given feat/a ran");
+    std::fs::write(repo.join("c.rs"), "fn c() {}\n").unwrap();
+    let mut held = vec![first];
+    for base in ["main", "feat/a"] {
+        gh_answers(dir.path(), base, "feat/b");
+        host.update(|model| model.pulls.make_due());
+        host.update(Model::pull_request_due);
+        held.push(hold_back(&mut host, verified));
+    }
+    let newest = held.pop().unwrap();
+    for completion in held.into_iter().flatten() {
+        host.complete(completion);
+        host.draw();
+        assert!(host.model().checking().is_some(), "an older capture showed");
+    }
+    for completion in newest {
+        host.complete(completion);
+    }
+    host.settle();
+    let model = host.model();
+    assert_eq!(header(model), "#7 feat/b → origin/feat/a");
+    assert_eq!(file_paths(&model.tree), ["b.rs", "c.rs"]);
+}
+
+/// A checkout found detached by the first lookup is looked up again once it is on a branch
+/// again before its capture: no capture shows on a branch `gh` never answered for.
+#[cfg(unix)]
+#[test]
+fn a_checkout_detached_and_back_while_the_review_opens_is_looked_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = stacked_checkout(dir.path(), false, "main");
+    show_opened(&mut host);
+    git_in(&repo, &["checkout", "--quiet", "--detach"]);
+    let detached = hold_back(&mut host, pull_request_lookup);
+    git_in(&repo, &["checkout", "--quiet", "feat/b"]);
+    for completion in detached {
+        host.complete(completion);
+    }
+    host.settle();
+    assert_eq!(header(host.model()), REBASED);
+}
+
+/// A pull request `gh` resolves elsewhere than the branch pulls, as for a branch that pulls
+/// `main` and pushes `topic`, is no race to take again at once: the review opens on the
+/// default branch, saying the pull request's base is unavailable.
+#[cfg(unix)]
+#[test]
+fn a_pull_request_of_another_head_opens_on_the_default_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = stacked_checkout(dir.path(), false, "main");
+    gh_answers(dir.path(), "feat/a", "topic");
+    show_opened(&mut host);
+    for completion in hold_back(&mut host, pull_request_lookup) {
+        host.complete(completion);
+    }
+    assert!(!host.model().pulls.running(), "looked up again at once");
+    host.settle();
+    assert_eq!(
+        header(host.model()),
+        "feat/b · PR base unavailable · using origin/main"
+    );
+}
+
+/// A lookup `gh` could not answer, here as it timed out, lets the review open on the default
+/// branch, saying the pull request's base is unavailable, and marks work at once; `r` looks it
+/// up again, the bar saying so, and once `gh` answers, the label follows the pull request while
+/// the snapshot stays, and so does the mark on it.
+#[cfg(unix)]
+#[test]
+fn a_failed_lookup_opens_on_the_default_branch_until_one_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = stacked_checkout(dir.path(), false, "main");
+    show_opened(&mut host);
+    // The lookup `gh` held up never ends; its timeout does.
+    drop(hold_back(&mut host, pull_request_lookup));
+    let feat_b = host.model().pulls.association().cloned().unwrap();
+    looked(&mut host, super::pulls::Looked::failed(feat_b));
+    host.settle();
+    assert_eq!(
+        header(host.model()),
+        "feat/b · PR base unavailable · using origin/main"
+    );
+    host.update(|model| model.show_file("b.rs"));
+    host.dispatch(Action::FocusDiff);
+    host.key(Action::ToggleApprove, false);
+    host.settle();
+    assert_eq!(host.model().file_totals(), (1, 1));
+    let shown = host.model().shown;
+
+    host.dispatch(Action::Refresh);
+    assert!(kept_bar(host.model()).contains("Checking PR base…"));
+    host.settle();
+    let model = host.model();
+    assert_eq!(header(model), REBASED);
+    assert_eq!(model.shown, shown, "the same snapshot, labelled anew");
+    assert_eq!(model.file_totals(), (1, 1));
+}
+
+/// A lookup for the branch checked out when the review opened never lets a capture of another
+/// branch show: the checkout switched before the capture ran, so the review stays pending, looks
+/// that branch up and then shows it.
+#[cfg(unix)]
+#[test]
+fn a_branch_switch_before_the_opening_capture_looks_up_the_new_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = stacked_checkout(dir.path(), false, "main");
+    show_opened(&mut host);
+    for completion in hold_back(&mut host, pull_request_lookup) {
+        host.complete(completion);
+    }
+    git_in(&repo, &["checkout", "--quiet", "-b", "other"]);
+    let moved = run_until(&mut host, |outcome| {
+        matches!(outcome, Outcome::Verified(..))
+    });
+    host.complete(moved);
+    let model = host.model();
+    assert!(model.checking().is_some(), "still pending");
+    assert_eq!(
+        model.pulls.association().map(|found| found.branch.as_str()),
+        Some("other")
+    );
+    assert!(kept_bar(model).starts_with("Checking PR base…"));
+    host.settle();
+    assert_eq!(header(host.model()), "other → origin/main");
+}
+
+/// A branch without commits has no pull request, so its review opens without waiting for `gh`,
+/// on the empty tree.
+#[cfg(unix)]
+#[test]
+fn an_unborn_branch_opens_without_a_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    git_in(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+    );
+    std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+    let loaded =
+        crate::launch::open_checkout(&dir.path().join("data"), with_fake_gh(dir.path(), &repo))
+            .unwrap();
+    let mut host = Host::opening(loaded, settings());
+    show_opened(&mut host);
+    assert!(!host.model().pulls.running());
+    assert!(kept_bar(host.model()).starts_with("Comparing checkout…"));
+    host.settle();
+    assert_eq!(header(host.model()), "main → empty tree");
+}
+
+/// A checkout whose branch cannot be read as the review opens, here as git fails to read the
+/// branch's configuration, still shows its last recorded revision, and is verified behind it on
+/// the default branch, saying the pull request's base is unavailable, as nothing could look it
+/// up.
+#[cfg(unix)]
+#[test]
+fn a_branch_that_cannot_be_read_still_opens_on_the_recorded_revision() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = stacked_checkout(dir.path(), true, "feat/a");
+    // A `git` ahead of the real one on the checkout's `PATH`, failing the configuration reads
+    // a branch's identity takes.
+    let git = dir.path().join("bin/git");
+    std::fs::write(
+        &git,
+        indoc! {r#"
+            #!/bin/sh
+            case "$*" in *--get-regexp*) echo 'fatal: bad config' >&2; exit 128;; esac
+            PATH=${PATH#*:} exec git "$@"
+        "#},
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    show_opened(&mut host);
+    assert!(matches!(host.model().phase, Phase::Ready));
+    assert!(
+        host.model()
+            .checking()
+            .is_some_and(|checking| checking.record.is_some())
+    );
+    verify_behind(&mut host);
+    host.draw();
+    assert!(host.model().checking().is_none(), "the review is verified");
+    assert_eq!(
+        header(host.model()),
+        "feat/b · PR base unavailable · using origin/main"
+    );
+    host.settle();
+}
+
+/// What a lookup found shows with the capture it sends, from what that capture was of: a
+/// switch to another branch before that capture shows says only that.
+#[test]
+fn a_lookup_says_nothing_of_a_branch_the_checkout_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    host.update(Model::changed);
+    host.settle();
+    let feat = host.model().pulls.association().cloned().unwrap();
+    looked(
+        &mut host,
+        super::pulls::Looked::found(feat, Some(pull_request_12())),
+    );
+    git_in(&repo, &["checkout", "--quiet", "-b", "other"]);
+    host.update(Model::changed);
+    host.settle();
+    assert_eq!(host.model().status, "Now on other.");
+}
+
+/// A lookup that lands after the review ended in the window, as when its log was replaced,
+/// changes nothing and asks for nothing.
+#[test]
+fn a_lookup_after_the_review_ended_lands_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, repo) = checkout_host(dir.path());
+    git_in(&repo, &["checkout", "--quiet", "-b", "feat"]);
+    host.update(Model::changed);
+    host.settle();
+    let feat = host.model().pulls.association().cloned().unwrap();
+    host.update(|model| model.stop(Replaced::Log, false));
+    let (status, clocks) = (host.model().status.clone(), host.clocks.len());
+    looked(
+        &mut host,
+        super::pulls::Looked::found(feat, Some(pull_request_12())),
+    );
+    assert_eq!(host.model().status, status);
+    assert_eq!(host.clocks.len(), clocks, "a lookup was asked for");
+    assert!(host.model().pulls.current().is_none());
+}
+
+/// Pull request 12 of `github.com/owner/repo`, open, from `feat` into `main`.
+fn pull_request_12() -> review_core::github::BranchPullRequest {
+    review_core::github::BranchPullRequest {
+        number: 12,
+        url: "https://github.com/owner/repo/pull/12".to_owned(),
+        state: review_core::github::PullRequestState::Open,
+        base_branch: "main".to_owned(),
+        base_repository: review_core::github::Repository {
+            host: "github.com".to_owned(),
+            owner: "owner".to_owned(),
+            name: "repo".to_owned(),
+        },
+        head_branch: "feat".to_owned(),
+        head_repository: None,
+        author: None,
+    }
+}
+
+/// With background work's one worker of two held, as by a long replay, the opened review, the
+/// analysis of the revision it shows, the selected file's text and the lookup of the pull
+/// request, on a thread of its own, still run, while the replay waits; once it ends, the review
+/// is verified.
+#[cfg(unix)]
+#[test]
+fn a_held_worker_holds_up_nothing_that_shows_nor_the_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut host, _repo) = stacked_checkout(dir.path(), true, "main");
+    std::fs::remove_dir_all(host.review.dir().root().join("analysis")).unwrap();
+    let pool = pool::Pool::new(2);
+    let held = pool.hold(pool::Lane::Background);
+    let mut waiting = Vec::new();
+    // Runs all but background work on the pool, landing each, until nothing else is left.
+    let show = |host: &mut Host, waiting: &mut Vec<Job>| loop {
+        let (background, rest): (VecDeque<Job>, _) = host
+            .jobs
+            .drain(..)
+            .partition(|job| job.lane() == pool::Lane::Background);
+        waiting.extend(background);
+        if rest.is_empty() {
+            return;
+        }
+        let count = rest.len();
+        let landed = start_on(&pool, rest.into());
+        for _ in 0..count {
+            host.complete(landed.recv_timeout(pool::PATIENCE).unwrap());
+        }
+        host.draw();
+    };
+    show(&mut host, &mut waiting);
+    let model = host.model();
+    assert!(model.checking().is_some_and(|checking| checking.changes));
+    assert!(!model.rows.rows.is_empty(), "b.rs shows");
+    assert!(model.pulls.current().is_some(), "the pull request is found");
+    assert_eq!(waiting.len(), 1, "the replay waits");
+    let landed = start_on(&pool, waiting);
+    drop(held);
+    host.complete(landed.recv_timeout(pool::PATIENCE).unwrap());
+    host.settle();
+    assert_eq!(header(host.model()), REBASED);
 }

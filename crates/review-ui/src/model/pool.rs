@@ -4,8 +4,8 @@
 //!
 //! A worker takes the oldest job of the most urgent [`Lane`] that waits.
 //! Background work never takes the last worker, so neither the history's verification nor a
-//! lookup of a pull request keeps what shows waiting for a worker: at worst it waits for
-//! another job that shows to end.
+//! fetch keeps what shows waiting for a worker: at worst it waits for another job that shows to
+//! end.
 //! A worker starts only when a job finds every worker busy, and stays for the next job.
 //!
 //! The pool cancels nothing: a job that a newer request may supersede, such as a preview of a
@@ -28,12 +28,13 @@ pub(super) enum Lane {
     /// highlights, the captures of the working tree and the watch that asks for them.
     Shown,
     /// In the pool, last and never on its last worker: what checks or fetches behind what
-    /// shows, such as the review's verification, a fetch or a lookup of a pull request.
+    /// shows, such as the review's verification or a fetch.
     Background,
     /// On a thread of its own, which nothing in the pool holds back: a save, which quitting
     /// waits for, the jobs that stop the engine or end the review in the window, the watch on
     /// the grant, which stops language servers once trust is gone, and a wait for something
-    /// outside the app, such as the working tree changing or a language server answering.
+    /// outside the app, such as the working tree changing, a language server answering or `gh`
+    /// looking up a pull request.
     Own,
 }
 

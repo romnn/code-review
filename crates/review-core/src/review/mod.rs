@@ -20,7 +20,7 @@ mod memo;
 mod retention;
 mod trust;
 
-pub use checkout::{BaseRef, Subject, filtered_note};
+pub use checkout::{Ancestry, BaseRef, Subject, filtered_note};
 pub use info::{Commit, PullRequest, ReviewInfo};
 pub(crate) use info::{LOG_FORMAT, parse_log};
 pub use live::{Capture, LiveCapture};
@@ -500,7 +500,7 @@ impl Review {
     /// Resolves the target's current snapshots and records a revision if either changed.
     ///
     /// A review of a working tree captures it, against the base its subject resolves to (see
-    /// [`Self::subject`]), twice, and records the capture only when both observed the same:
+    /// [`Subject`]), twice, and records the capture only when both observed the same:
     /// the clone, the subject (branch, `HEAD`, pull request and the commit the base resolved
     /// to) and the snapshot pair.
     /// Nothing else tells a capture caught in the middle of a change, such as an editor saving
@@ -649,7 +649,7 @@ impl Review {
                 let subject = if let Some(subject) = subject {
                     subject
                 } else {
-                    observed = self.subject(&[])?;
+                    (observed, _) = self.subject(&[])?;
                     &observed
                 };
                 ReviewInfo::Commits {

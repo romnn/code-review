@@ -2,7 +2,7 @@
 //! the commits), its progress and its revisions.
 
 use review_core::github::PullRequestState;
-use review_core::{BaseRef, ReviewInfo};
+use review_core::{Ancestry, BaseRef, ReviewInfo};
 
 use super::header::{Meter, meter};
 use super::{Palette, Piece, Run, Style, Styled, Weight};
@@ -229,7 +229,10 @@ fn commits_about(model: &Model, palette: &Palette, commits: &[review_core::Commi
     About::Commits {
         title: Piece::new(
             match model.live_state().and_then(|live| live.subject) {
-                Some(subject) if model.is_checkout() => crate::model::branch_and_base(subject),
+                Some(subject) if model.is_checkout() => crate::model::branch_and_base(
+                    subject,
+                    model.live_state().is_some_and(|live| live.unknown),
+                ),
                 _ => model
                     .meta
                     .as_ref()
@@ -295,7 +298,7 @@ fn checkout_details(model: &Model, palette: &Palette, no_commits: bool) -> Vec<P
     if subject.branch.is_some() {
         lines.push(plain(pull_request_line(&live)));
     }
-    lines.push(plain(base_line(subject)));
+    lines.push(plain(base_line(subject, live.unknown)));
     if no_commits && subject.head.is_some() {
         lines.push(plain(match subject.base.name() {
             Some(base) => format!("No commits beyond {base}: what shows is uncommitted"),
@@ -361,8 +364,9 @@ fn pull_request_line(live: &crate::model::LiveState<'_>) -> String {
     }
 }
 
-/// What the checkout is compared with, and why.
-fn base_line(subject: &review_core::Subject) -> String {
+/// What the checkout is compared with, and why, `unknown` when `gh` could not look up the
+/// branch's pull request.
+fn base_line(subject: &review_core::Subject, unknown: bool) -> String {
     let compared = match &subject.base {
         BaseRef::PullRequest { name, .. } => {
             format!("Compared with {name}, the pull request's base")
@@ -389,11 +393,26 @@ fn base_line(subject: &review_core::Subject) -> String {
              compare with {name}"
         ),
     };
-    match &subject.missing_base {
-        Some(missing) => {
+    let number = subject.pull_request.as_ref().map(|found| found.number);
+    match (&subject.missing_base, &subject.ancestry, number) {
+        (Some(missing), ..) => {
             format!("{compared}, since the pull request's base {missing} is not available locally")
         }
-        None => compared,
+        (None, Some(Ancestry::Newer { target }), Some(number)) => format!(
+            "{compared}, not {target}, which #{number} targets: the checkout is built on newer \
+             history of {base} than {target} has, which would show as the branch's work \
+             against {target}; cr {number} reviews the pull request as pushed",
+            base = subject.base.name().unwrap_or_default()
+        ),
+        (None, Some(Ancestry::Diverged { default }), _) => format!(
+            "{compared}: the checkout's history diverges from {default}, so the pull \
+             request's base stays"
+        ),
+        _ if unknown => format!(
+            "{compared}, since gh could not look up the pull request, whose base may be \
+             another branch"
+        ),
+        _ => compared,
     }
 }
 

@@ -6,10 +6,16 @@
 //! does not, as after the format changed, the files one comparison of its trees finds, while a
 //! job analyzes the revision.
 //! Behind it, one job reads the history, starting from what the view read of the log, so it
-//! takes in what was appended since and finds the log replaced, then captures the working tree;
-//! it starts once the revision's analysis is in, which it takes rather than computing it again.
-//! The bottom bar counts the revisions it replayed, as it reports them, with the frames that
-//! show anyway and at [`PROGRESS`]'s pace.
+//! takes in what was appended since and finds the log replaced; it starts once the revision's
+//! analysis is in, which it takes rather than computing it again.
+//! The first lookup of the branch's pull request runs meanwhile, and the model, which waits for
+//! both, then queues the one confirmed capture of the working tree, compared with the base that
+//! lookup decides; neither job waits for the other.
+//! A capture of another branch than the lookup was for is taken again once that branch is
+//! looked up.
+//! A checkout with no recorded revision shows empty panes and waits for the lookup alone.
+//! The bottom bar counts the revisions replayed, as the replay reports them, with the frames
+//! that show anyway and at [`PROGRESS`]'s pace, then says what the capture waits for.
 //! The analysis and the verified review each show with the next frame, as an opened review
 //! does, keeping the selected file.
 //!
@@ -26,8 +32,8 @@ use std::time::{Duration, Instant};
 use review_core::analysis::Analysis;
 use review_core::tree::NodeKind;
 use review_core::{
-    Capture, Changes, FileStatus, History, LiveCapture, ObjectId, Replay, Review, RevisionNumber,
-    RevisionRecord,
+    BranchIdentity, Capture, Changes, FileStatus, History, LiveCapture, ObjectId, Replay, Review,
+    RevisionNumber, RevisionRecord,
 };
 
 use super::buffer::Origin;
@@ -35,6 +41,7 @@ use super::effects::{Because, Outcome, Subject};
 use super::live::read_new_texts;
 use super::live::{Opening, Replaced, causes, replaced_log};
 use super::pool::Lane;
+use super::pulls::Given;
 use super::sync::Tick;
 use super::{Effect, Mode, Model, head_texts};
 use crate::folders::ViewState;
@@ -70,8 +77,9 @@ pub(super) enum Shows {
 
 /// What shows of the checkout's review while its review state is checked.
 pub(super) struct Pending {
-    /// The revision, as the log records it.
-    record: RevisionRecord,
+    /// The revision, as the log records it; `None` before the first, when the panes show
+    /// empty.
+    record: Option<RevisionRecord>,
     /// Its changed files, with nothing counted.
     files: Vec<FileStatus>,
     /// Its analysis, once read or made, whose changes then show.
@@ -85,6 +93,17 @@ pub(super) struct Pending {
     failed: Option<String>,
     /// How many revisions the verification replayed, out of how many, as it reported last.
     progress: Progress,
+    /// Whether the history is replayed, or there is none to replay.
+    replayed: bool,
+    /// What the confirmed capture that runs, or ran and waits to show, was given of the
+    /// lookups; one given anything else no longer counts.
+    comparing: Option<Given>,
+    /// The newest confirmed capture asked for, by the count of those asked for so far: only
+    /// its outcome lands.
+    request: u64,
+    /// Where the reviewer was, for a review with no recorded revision to restore it in: it is
+    /// restored once the verified review shows.
+    view_state: Option<ViewState>,
 }
 
 /// How far the verification's replay of the history got, which its job sets as it replays
@@ -161,13 +180,23 @@ impl Laid {
 /// What the pending view shows while the review state is checked; see [`Model::checking`].
 #[derive(Debug, Clone, Copy)]
 pub struct Checking<'a> {
-    /// The revision, as the log records it.
-    pub record: &'a RevisionRecord,
+    /// The revision, as the log records it; `None` before the first.
+    pub record: Option<&'a RevisionRecord>,
     /// Whether its changes show, rather than only its changed files.
     pub changes: bool,
-    /// How many revisions the verification replayed so far out of all the log recorded, until
-    /// it fails; `None` once it failed.
-    pub progress: Option<Replay>,
+    /// What the verification does, until it fails; `None` once it failed.
+    pub step: Option<Step>,
+}
+
+/// What the verification of the checkout's review does, as the bottom bar says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// It replays the history, this far.
+    Replaying(Replay),
+    /// The confirmed capture waits for the branch's pull request to be looked up.
+    LookingUp,
+    /// The confirmed capture runs.
+    Comparing,
 }
 
 /// A review verified: its history read, with the working tree captured on top for a review of
@@ -188,19 +217,14 @@ pub(super) struct Verified {
 pub(super) enum Unverified {
     /// What it was read from was replaced, which ends the review in the window.
     Replaced(Replaced),
+    /// The capture found the checkout on another branch or upstream than the pull request was
+    /// looked up for, this one, so it is taken again once that is looked up.
+    Moved(Option<BranchIdentity>),
     /// It failed, for this reason.
     Failed(String),
 }
 
 impl Unverified {
-    /// What to say about it.
-    pub(super) fn message(self) -> String {
-        match self {
-            Self::Replaced(replaced) => replaced.message().to_owned(),
-            Self::Failed(why) => why,
-        }
-    }
-
     /// `err`, which ends the review when it says the log was replaced.
     fn of(err: &review_core::Error) -> Self {
         if replaced_log(err) {
@@ -222,7 +246,7 @@ pub(super) struct Analyzed {
 
 impl Pending {
     /// Reads the pending view of `review`: its last recorded revision, with its changes when
-    /// the cache holds their analysis, or else its changed files; `None` before the first
+    /// the cache holds their analysis, or else its changed files; empty before the first
     /// revision.
     ///
     /// With its changes come the head text of the file it shows first: the one at `place`,
@@ -232,10 +256,23 @@ impl Pending {
     ///
     /// Returns why the log or git could not be read.
     #[tracing::instrument(name = "read_pending", skip_all)]
-    pub(super) fn read(review: &Review, place: Option<&str>) -> Result<Option<Self>, String> {
+    pub(super) fn read(review: &Review, place: Option<&str>) -> Result<Self, String> {
         let failed = |err: review_core::Error| causes(&err);
         let Some(record) = review.last_recorded().map_err(failed)? else {
-            return Ok(None);
+            return Ok(Self {
+                record: None,
+                files: Vec::new(),
+                analysis: None,
+                texts: HashMap::new(),
+                arrived: None,
+                failed: None,
+                progress: Progress::new(0),
+                // Nothing recorded, so nothing is replayed.
+                replayed: true,
+                comparing: None,
+                request: 0,
+                view_state: None,
+            });
         };
         let analysis = review.cached_analysis(&record);
         let files = match &analysis {
@@ -251,15 +288,19 @@ impl Pending {
                 path == place || path == first
             })
         });
-        Ok(Some(Self {
+        Ok(Self {
             progress: Progress::new(record.number.get()),
-            record,
+            record: Some(record),
             files,
             analysis,
             texts,
             arrived: None,
             failed: None,
-        }))
+            replayed: false,
+            comparing: None,
+            request: 0,
+            view_state: None,
+        })
     }
 
     /// Whether the review is still being verified behind it.
@@ -284,7 +325,17 @@ impl Pending {
     pub(super) fn laid_out(&self) -> Option<Laid> {
         Some(Laid::Pending {
             analysis: Arc::clone(self.analysis.as_ref()?),
-            number: self.record.number,
+            number: self.record.as_ref()?.number,
+        })
+    }
+
+    /// What the verification does, until it fails.
+    fn step(&self) -> Option<Step> {
+        Some(match (self.verifying(), self.replayed, &self.comparing) {
+            (false, ..) => return None,
+            (true, false, _) => Step::Replaying(self.progress.get()),
+            (true, true, None) => Step::LookingUp,
+            (true, true, Some(_)) => Step::Comparing,
         })
     }
 }
@@ -316,9 +367,23 @@ impl Verified {
     }
 }
 
-/// Verifies the checkout's review: reads the history, telling `progress` how far its replay
-/// got, captures the working tree and puts the capture on top, and reads the head text of its
-/// files that `known` does not hold; runs in the background.
+/// Reads the checkout's review's history, telling `progress` how far its replay got, for the
+/// confirmed capture to read on from; runs in the background.
+///
+/// # Errors
+///
+/// Returns why the history cannot be read.
+#[tracing::instrument(skip_all)]
+fn replay(review: &Review, progress: &dyn Fn(Replay)) -> Result<(), Unverified> {
+    review
+        .history_reporting(progress)
+        .map(|_| ())
+        .map_err(|err| Unverified::of(&err))
+}
+
+/// Verifies the checkout's review once its history is replayed: captures the working tree with
+/// what it is `given` of the lookups, puts the capture on top of the history, and reads the head
+/// text of its files that `known` does not hold; runs in the background.
 ///
 /// No watch tells the opening of a change made while it captures, so the capture looks twice.
 /// While git is busy in the checkout or cr's data is full, the review shows its last recorded
@@ -326,27 +391,23 @@ impl Verified {
 ///
 /// # Errors
 ///
-/// Returns why the review cannot be shown.
+/// Returns why the review cannot be shown, and [`Unverified::Moved`] when the capture saw
+/// another branch or upstream than the one looked up.
 #[tracing::instrument(skip_all)]
-pub(super) fn verify(
+fn confirm(
     review: &Review,
     known: &HashSet<ObjectId>,
-    progress: &dyn Fn(Replay),
+    given: &Given,
 ) -> Result<Verified, Unverified> {
-    // The capture reads on from this history, and so does the history read when there is
-    // none.
-    review
-        .history_reporting(progress)
-        .map_err(|err| Unverified::of(&err))?;
     let started = Instant::now();
     let mut moved = 0;
     let recorded = |busy| {
         let history = review.history().map_err(|err| Unverified::of(&err))?;
-        let opening = Opening::read(review, &history, None, Vec::new(), busy);
+        let opening = Opening::read(review, &history, None, Vec::new(), busy, false);
         Ok((history, opening))
     };
     let (history, opening) = loop {
-        let captured = match review.confirmed_live_history(&[]) {
+        let captured = match review.confirmed_live_history(given.pull_requests()) {
             // At its limit, cr's data takes no capture; the window's first capture says why.
             Err(review_core::Error::StorageFull { .. }) => break recorded(None)?,
             captured => captured.map_err(|err| Unverified::of(&err))?,
@@ -358,7 +419,17 @@ pub(super) fn verify(
                     subject,
                     filtered,
                 } = *captured;
-                let opening = Opening::read(review, &history, Some(subject), filtered, None);
+                let opening = Opening::read(
+                    review,
+                    &history,
+                    Some(subject),
+                    filtered,
+                    None,
+                    given.unknown(),
+                );
+                if opening.association.as_ref() != given.asked() {
+                    return Err(Unverified::Moved(opening.association));
+                }
                 break (history, opening);
             }
             Capture::Moved => {
@@ -391,7 +462,8 @@ pub(super) fn verify(
 impl Model {
     /// Shows `first`, the checkout's last recorded revision, restoring the selection saved with
     /// the review, and starts verifying the review behind it, once its changes are analyzed
-    /// when the cache did not hold them.
+    /// when the cache did not hold them; without a recorded revision, shows empty panes and
+    /// restores the selection once the verified review shows.
     #[tracing::instrument(skip_all)]
     pub(super) fn show_pending(
         &mut self,
@@ -402,12 +474,20 @@ impl Model {
         let analyzed = first.analysis.is_some();
         let record = first.record.clone();
         self.blobs.texts.extend(std::mem::take(&mut first.texts));
+        if record.is_none() {
+            first.view_state = Some(view_state.clone());
+        }
         self.checking = Some(first);
         self.shown += 1;
         // The other files' texts are read from now on; the selected file's is asked for as it
         // lays out.
         self.request_texts();
         self.refresh_tree();
+        let Some(record) = record else {
+            self.say_opened(found, "checking the review state…");
+            self.confirm_opening();
+            return;
+        };
         self.restore_view_state(view_state);
         self.say_opened(
             found,
@@ -415,7 +495,7 @@ impl Model {
         );
         self.request_syntax();
         if analyzed {
-            self.verify();
+            self.replay_history();
             return;
         }
         let selected = self.selected.clone();
@@ -444,13 +524,69 @@ impl Model {
         );
     }
 
-    /// Verifies the review behind the pending view, reading the text of no file the window
-    /// holds or reads itself, as it reads every file the pending view shows.
-    fn verify(&mut self) {
+    /// Replays the history behind the pending view, counting the revisions on the bottom bar.
+    fn replay_history(&mut self) {
         let Some(checking) = &self.checking else {
             return;
         };
         let progress = checking.progress.clone();
+        self.spawn_with(
+            Lane::Background,
+            Subject::Always(Because::Opening),
+            move |parts| {
+                let replayed = |replay| progress.set(replay);
+                Outcome::Replayed(replay(&parts.review, &replayed))
+            },
+        );
+        self.after(
+            PROGRESS,
+            Subject::Always(Because::Clock),
+            Outcome::Tick(Tick::Checking),
+        );
+    }
+
+    /// Takes in the replayed history, after which the confirmed capture runs once the pull
+    /// request is looked up, or why it could not be read, which shows with the next frame.
+    pub(super) fn replayed(&mut self, replayed: Result<(), Unverified>) {
+        let Some(checking) = &mut self.checking else {
+            return;
+        };
+        match replayed {
+            Ok(()) => {
+                checking.replayed = true;
+                self.confirm_opening();
+            }
+            Err(unverified) => checking.arrived = Some(Arrived::Verified(Err(unverified))),
+        }
+    }
+
+    /// Takes the confirmed capture behind the pending view once the history is replayed and
+    /// the first lookup of the branch's pull request ended, with what the lookups found, and
+    /// takes it anew when they found something else since, which the one taken before no
+    /// longer shows; the capture reads the text of no file the window holds or reads itself,
+    /// as it reads every file the pending view shows.
+    pub(super) fn confirm_opening(&mut self) {
+        let Some(checking) = &mut self.checking else {
+            return;
+        };
+        let given = Given::of(&self.pulls);
+        if checking
+            .comparing
+            .as_ref()
+            .is_some_and(|comparing| *comparing != given)
+        {
+            checking.comparing = None;
+            if matches!(checking.arrived, Some(Arrived::Verified(_))) {
+                checking.arrived = None;
+            }
+        }
+        let ready = checking.replayed && checking.verifying() && self.pulls.settled();
+        if !ready || checking.comparing.is_some() {
+            return;
+        }
+        checking.comparing = Some(given.clone());
+        checking.request += 1;
+        let request = checking.request;
         let shown = checking
             .analysis
             .as_ref()
@@ -475,24 +611,18 @@ impl Model {
             Lane::Background,
             Subject::Always(Because::Opening),
             move |parts| {
-                let replayed = |replay| progress.set(replay);
-                Outcome::Verified(verify(&parts.review, &known, &replayed).map(Box::new))
+                let verified = confirm(&parts.review, &known, &given);
+                Outcome::Verified(verified.map(Box::new), request)
             },
-        );
-        self.after(
-            PROGRESS,
-            Subject::Always(Because::Clock),
-            Outcome::Tick(Tick::Checking),
         );
     }
 
     /// Takes in the tick that draws a frame for the count of revisions replayed, and asks for
-    /// the next while the verification runs.
+    /// the next while the history is replayed.
     pub(super) fn checking_ticked(&mut self) {
-        let runs = self
-            .checking
-            .as_ref()
-            .is_some_and(|checking| checking.verifying() && checking.arrived.is_none());
+        let runs = self.checking.as_ref().is_some_and(|checking| {
+            checking.verifying() && !checking.replayed && checking.arrived.is_none()
+        });
         if runs {
             self.after(
                 PROGRESS,
@@ -514,7 +644,7 @@ impl Model {
         let Some(checking) = self
             .checking
             .as_mut()
-            .filter(|checking| checking.record == record)
+            .filter(|checking| checking.record.as_ref() == Some(&record))
         else {
             return;
         };
@@ -524,16 +654,30 @@ impl Model {
                 self.effect(Effect::Log(format!(
                     "could not analyze the last recorded revision: {err}"
                 )));
-                self.verify();
+                self.replay_history();
             }
         }
     }
 
     /// Takes in the verified review, or why it could not be verified, which shows with the next
-    /// frame in place of the pending view.
-    pub(super) fn verified(&mut self, verified: Result<Box<Verified>, Unverified>) {
-        if let Some(checking) = &mut self.checking {
-            checking.arrived = Some(Arrived::Verified(verified));
+    /// frame in place of the pending view, when it is of `request`, the newest asked for and
+    /// still given what the lookups found; a capture of a checkout that moved to another branch
+    /// or upstream since its pull request was looked up is taken again once that is looked up.
+    pub(super) fn verified(&mut self, verified: Result<Box<Verified>, Unverified>, request: u64) {
+        let Some(checking) = self
+            .checking
+            .as_mut()
+            .filter(|checking| checking.comparing.is_some() && checking.request == request)
+        else {
+            return;
+        };
+        match verified {
+            Err(Unverified::Moved(association)) => {
+                checking.comparing = None;
+                self.associate(association);
+                self.confirm_opening();
+            }
+            verified => checking.arrived = Some(Arrived::Verified(verified)),
         }
     }
 
@@ -557,7 +701,13 @@ impl Model {
         };
         let unverified = match arrived {
             Arrived::Analysis { analysis, texts } => return self.show_changes(analysis, texts),
-            Arrived::Verified(Ok(verified)) => return self.show_verified(*verified, None, None),
+            Arrived::Verified(Ok(verified)) => {
+                let view_state = self
+                    .checking
+                    .as_mut()
+                    .and_then(|checking| checking.view_state.take());
+                return self.show_verified(*verified, view_state, None);
+            }
             Arrived::Verified(Err(unverified)) => unverified,
         };
         let why = match unverified {
@@ -566,6 +716,8 @@ impl Model {
                 self.stop(replaced, false);
                 replaced.message().to_owned()
             }
+            // Taken again as it lands, never kept to show.
+            Unverified::Moved(_) => return,
             Unverified::Failed(why) => {
                 self.effect(Effect::Log(format!(
                     "could not check the review state: {why}"
@@ -587,7 +739,10 @@ impl Model {
         let Some(checking) = &mut self.checking else {
             return;
         };
-        checking.files = Changes::of(&analysis, checking.record.number).files();
+        let Some(number) = checking.record.as_ref().map(|record| record.number) else {
+            return;
+        };
+        checking.files = Changes::of(&analysis, number).files();
         checking.analysis = Some(analysis);
         self.blobs.texts.extend(texts);
         self.shown += 1;
@@ -595,7 +750,7 @@ impl Model {
         self.refresh_tree();
         self.keep_file();
         self.request_syntax();
-        self.verify();
+        self.replay_history();
     }
 
     /// Shows `verified`, as the review opens with `view_state`, the folded folders and the
@@ -695,9 +850,9 @@ impl Model {
     pub fn checking(&self) -> Option<Checking<'_>> {
         let checking = self.checking.as_ref()?;
         Some(Checking {
-            record: &checking.record,
+            record: checking.record.as_ref(),
             changes: checking.analysis.is_some(),
-            progress: checking.verifying().then(|| checking.progress.get()),
+            step: checking.step(),
         })
     }
 }

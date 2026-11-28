@@ -121,7 +121,9 @@ fn put_review(answer: &mut Map<String, Value>, model: &Model) {
             json!(
                 snapshot
                     .map(|snapshot| snapshot.revision)
-                    .or(model.checking().map(|checking| checking.record.number))
+                    .or(model
+                        .checking()
+                        .and_then(|checking| Some(checking.record?.number)))
                     .map(|revision| revision.to_string())
             ),
         ),
@@ -202,7 +204,9 @@ fn live(model: &Model) -> Value {
         return Value::Null;
     };
     json!({
-        "subject": live.subject.map(crate::model::branch_and_base),
+        "subject": live
+            .subject
+            .map(|subject| crate::model::branch_and_base(subject, live.unknown)),
         "pull_request": live
             .pull_request
             .and_then(|found| found.pull_request.as_ref())

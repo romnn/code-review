@@ -170,8 +170,11 @@ pub(super) enum Outcome {
     Opened(Result<Box<Opened>, String>),
     /// The analysis of the pending view's revision.
     Analyzed(Box<Analyzed>),
-    /// The review verified behind the pending view, or why it could not be.
-    Verified(Result<Box<Verified>, Unverified>),
+    /// The history replayed behind the pending view, or why it could not be read.
+    Replayed(Result<(), Unverified>),
+    /// The review verified behind the pending view, or why it could not be, by the count of
+    /// confirmed captures asked for when it was.
+    Verified(Result<Box<Verified>, Unverified>, u64),
     /// File texts read in the background.
     TextsRead(TextsRead),
     /// One file's highlights, made in the background.
@@ -452,7 +455,8 @@ impl Model {
             // the trust to whatever moved the epoch on.
             Outcome::Opened(_)
             | Outcome::Analyzed(_)
-            | Outcome::Verified(_)
+            | Outcome::Replayed(_)
+            | Outcome::Verified(..)
             | Outcome::Highlighted(_)
             | Outcome::TrustRead(_)
             | Outcome::Guarded(_)
@@ -502,7 +506,8 @@ impl Model {
         match outcome {
             Outcome::Opened(opened) => self.offer_opened(opened),
             Outcome::Analyzed(analyzed) => self.analyzed(*analyzed),
-            Outcome::Verified(verified) => self.verified(verified),
+            Outcome::Replayed(replayed) => self.replayed(replayed),
+            Outcome::Verified(verified, request) => self.verified(verified, request),
             Outcome::TextsRead(read) => self.texts_read(read),
             Outcome::Highlighted(highlighted) => self.highlighted(highlighted),
             Outcome::Compared(compared) => self.compared(compared.map(|compared| *compared)),

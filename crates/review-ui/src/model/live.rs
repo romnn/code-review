@@ -52,7 +52,6 @@ use super::engine::{Parts, Waiting};
 use super::guard::Aim;
 use super::pool::Lane;
 use super::present::{Anchor, DiffAnchor, RowKey, diff_anchor, diff_offset};
-use super::pulls::Pulls;
 use super::sync::Tick;
 use super::{Effect, Mode, Model, Phase, Quitting};
 use crate::frame;
@@ -121,8 +120,9 @@ pub(crate) struct Live {
     listed: Option<(Option<ObjectId>, Option<ObjectId>)>,
     /// Whether the reviewer asked for a capture with `r`, so its landing says so.
     asked: bool,
-    /// The branch's pull request.
-    pub(crate) pulls: Pulls,
+    /// Whether the capture on screen was compared without its branch's pull request, which
+    /// `gh` could not look up.
+    unknown: bool,
     /// What was found of the pull requests when the running capture was taken, which it
     /// resolves its base with.
     given: Option<Vec<review_core::github::CheckoutPullRequest>>,
@@ -163,6 +163,12 @@ impl Live {
     pub(crate) fn filtered(&self) -> &[String] {
         &self.filtered
     }
+
+    /// Whether the capture on screen was compared without its branch's pull request, which
+    /// `gh` could not look up.
+    pub(crate) fn unknown(&self) -> bool {
+        self.unknown
+    }
 }
 
 /// What the background work of opening found out about a review that follows the checkout.
@@ -175,14 +181,19 @@ pub(super) struct Opening {
     /// What git was busy with when the review opened, if it was.
     busy: Option<Busy>,
     tree: Option<ObjectId>,
-    association: Option<review_core::BranchIdentity>,
+    /// The branch and upstream the capture saw.
+    pub(super) association: Option<review_core::BranchIdentity>,
     commits: Option<Vec<Commit>>,
+    /// Whether the capture was compared without the branch's pull request, which `gh` could
+    /// not look up.
+    unknown: bool,
 }
 
 impl Opening {
     /// Reads what the window needs about the opening capture `history` ends in, of `subject`,
-    /// which kept `filtered` at their staged version, or about its last recorded revision when
-    /// git was `busy` or cr's data full: its tree, the branch and upstream, and the commits.
+    /// which kept `filtered` at their staged version and was compared without the branch's
+    /// pull request when it is `unknown`, or about its last recorded revision when git was
+    /// `busy` or cr's data full: its tree, the branch and upstream, and the commits.
     #[tracing::instrument(name = "read_opening", skip_all)]
     pub(super) fn read(
         review: &review_core::Review,
@@ -190,13 +201,13 @@ impl Opening {
         subject: Option<review_core::Subject>,
         filtered: Vec<String>,
         busy: Option<Busy>,
+        unknown: bool,
     ) -> Self {
         let tree = provisional_or_tip_tree(review, history);
         let checkout = matches!(review.target(), ReviewTarget::Checkout { .. });
         let observed = subject.as_ref().filter(|_| checkout);
-        let association = observed
-            .and_then(|subject| subject.branch.as_deref())
-            .and_then(|branch| review.repo().branch_identity(branch).ok());
+        let (association, unreadable) =
+            observed.map_or((None, false), |subject| association_of(review, subject));
         let commits = observed.and_then(|subject| review.subject_commits(subject).ok());
         Self {
             subject,
@@ -205,6 +216,7 @@ impl Opening {
             tree,
             association,
             commits,
+            unknown: unknown || unreadable,
         }
     }
 }
@@ -218,22 +230,66 @@ impl Opening {
             ));
         }
         let subject = self.subject.as_ref()?;
-        Some(format!("following {}", branch_and_base(subject)))
+        Some(format!(
+            "following {}",
+            branch_and_base(subject, self.unknown)
+        ))
     }
 }
 
 /// The branch checked out and what it is compared with, as the header names them:
 /// `feat/x → origin/main`, `detached 1a2b3c4 → origin/main`, `main → empty tree` before the
-/// first commit.
+/// first commit; or the branch and the [`base_note`], when there is one.
 #[must_use]
-pub fn branch_and_base(subject: &review_core::Subject) -> String {
+pub fn branch_and_base(subject: &review_core::Subject, unknown: bool) -> String {
     let head = match (&subject.branch, &subject.head) {
         (Some(branch), _) => branch.clone(),
         (None, Some(commit)) => format!("detached {}", abbreviated(commit)),
         (None, None) => "detached".to_owned(),
     };
-    let base = subject.base.name().unwrap_or("empty tree");
-    format!("{head} → {base}")
+    match base_note(subject, unknown) {
+        Some(note) => format!("{head} · {note}"),
+        None => format!("{head} → {}", subject.base.name().unwrap_or("empty tree")),
+    }
+}
+
+/// What the header says of the base when it is not what the branch's pull request names:
+/// `against origin/main · PR targets feat/a` when the checkout holds newer history of the
+/// default branch than the pull request's base has, or `PR base unavailable · using
+/// origin/main` when the capture was compared without the pull request, `unknown` as `gh`
+/// could not look it up.
+#[must_use]
+pub fn base_note(subject: &review_core::Subject, unknown: bool) -> Option<String> {
+    let base = subject.base.name().unwrap_or("the empty tree");
+    if unknown {
+        return Some(format!("PR base unavailable · using {base}"));
+    }
+    match (&subject.ancestry, &subject.pull_request) {
+        (Some(review_core::Ancestry::Newer { .. }), Some(pull_request)) => Some(format!(
+            "against {base} · PR targets {}",
+            pull_request.base_branch
+        )),
+        _ => None,
+    }
+}
+
+/// The branch and upstream whose pull request a capture of `subject` looks up: none while
+/// `HEAD` is detached or its branch has no commits, which no pull request can have; with
+/// whether they could not be read, which leaves the pull request unknown.
+fn association_of(
+    review: &review_core::Review,
+    subject: &review_core::Subject,
+) -> (Option<review_core::BranchIdentity>, bool) {
+    let Some(branch) = subject.branch.as_deref().filter(|_| subject.head.is_some()) else {
+        return (None, false);
+    };
+    match review.repo().branch_identity(branch) {
+        Ok(identity) => (Some(identity), false),
+        Err(err) => {
+            tracing::warn!("cannot read the branch {branch}: {}", causes(&err));
+            (None, true)
+        }
+    }
 }
 
 /// The first seven digits of `commit`, as git abbreviates it and the bottom bar shows it.
@@ -273,6 +329,9 @@ pub(super) struct Captured {
     association: Option<review_core::BranchIdentity>,
     /// The commits between its base and head, when they are not the ones listed already.
     commits: Option<Vec<Commit>>,
+    /// Whether it was compared without the branch's pull request, which `gh` could not look
+    /// up.
+    unknown: bool,
     /// The history, ending in the capture.
     history: Arc<History>,
     /// The correspondence from the snapshot it was compared with to the capture; empty when
@@ -352,23 +411,29 @@ impl Model {
             tree,
             association: found,
             commits,
+            unknown,
         }) = opening
         {
             live.listed = subject
                 .as_ref()
                 .map(|subject| (subject.base.commit().cloned(), subject.head.clone()));
+            // The last recorded revision, shown while git is busy, says nothing of where the
+            // checkout is: the lookups go on as they were.
+            association = subject.is_some().then_some(found);
             live.subject = subject;
             live.filtered = filtered;
             live.busy = busy;
             live.tree = tree;
-            association = found;
+            live.unknown = unknown;
             if let Some(commits) = commits {
                 self.info = Some(ReviewInfo::Commits { commits });
             }
         }
         self.live = Some(live);
         self.effect(Effect::Title(self.title()));
-        self.associate(association);
+        if let Some(association) = association {
+            self.associate(association);
+        }
         // Without `[review] live`, the checkout's review is captured again on `r` only.
         if !self.settings.live {
             return;
@@ -521,7 +586,8 @@ impl Model {
         }
         live.capturing = true;
         let observed = live.observed;
-        let pull_requests = live.pulls.pull_requests();
+        let pull_requests = self.pulls.pull_requests();
+        let unknown = self.pulls.unknown();
         live.given = Some(pull_requests.clone());
         let listed = live.listed.clone();
         self.spawn_with(Lane::Shown, Subject::Always(Because::Live), move |parts| {
@@ -534,6 +600,7 @@ impl Model {
                     observed,
                     known: &known,
                     pull_requests: &pull_requests,
+                    unknown,
                     listed: listed.as_ref(),
                 },
             ))
@@ -781,6 +848,7 @@ impl Model {
             tree,
             association,
             commits,
+            unknown,
             ..
         } = captured;
         let (Some(old), Some(tip)) = (self.snapshot.clone(), history.current()) else {
@@ -796,6 +864,7 @@ impl Model {
             filtered,
             tree,
             commits,
+            unknown,
         });
         self.associate(association);
         let asked = self
@@ -924,6 +993,7 @@ impl Model {
             filtered,
             tree,
             commits,
+            unknown,
         } = observation;
         let title_before = self.title();
         if let Some(commits) = commits {
@@ -932,6 +1002,7 @@ impl Model {
         let live = self.live.as_mut()?;
         live.updating = false;
         live.tree = tree;
+        live.unknown = unknown;
         let filtered_news = (filtered.len() > live.filtered.len())
             .then(|| review_core::filtered_note(filtered.len()))
             .flatten()
@@ -1180,11 +1251,12 @@ struct Observation {
     filtered: Vec<String>,
     tree: Option<ObjectId>,
     commits: Option<Vec<Commit>>,
+    unknown: bool,
 }
 
 /// What changed from the subject `before` to `now` that the status line says: another branch,
-/// a detached `HEAD`, another base, or a shallow history that keeps the base out of reach;
-/// `None` when only the commits moved.
+/// a detached `HEAD`, or else the branch's pull request, with another base or a shallow
+/// history that keeps the base out of reach; `None` when only the commits moved.
 fn subject_news(before: &review_core::Subject, now: &review_core::Subject) -> Option<String> {
     if before.branch != now.branch {
         return Some(match (&now.branch, &now.head) {
@@ -1193,6 +1265,21 @@ fn subject_news(before: &review_core::Subject, now: &review_core::Subject) -> Op
             (None, None) => "HEAD is detached.".to_owned(),
         });
     }
+    let pull_request = now.branch.as_deref().and_then(|branch| {
+        super::pulls::news(
+            branch,
+            before.pull_request.as_ref(),
+            now.pull_request.as_ref(),
+        )
+    });
+    match (pull_request, base_news(before, now)) {
+        (Some(pull_request), Some(base)) => Some(format!("{pull_request} {base}")),
+        (pull_request, base) => pull_request.or(base),
+    }
+}
+
+/// What changed about the base from the subject `before` to `now` of the same branch.
+fn base_news(before: &review_core::Subject, now: &review_core::Subject) -> Option<String> {
     if before.missing_base != now.missing_base
         && let Some(missing) = &now.missing_base
     {
@@ -1209,9 +1296,13 @@ fn subject_news(before: &review_core::Subject, now: &review_core::Subject) -> Op
         ));
     }
     if before.base.name() != now.base.name() {
-        return Some(match now.base.name() {
-            Some(name) => format!("The base is now {name}."),
-            None => "The base is now the empty tree.".to_owned(),
+        return Some(match (now.base.name(), &now.ancestry) {
+            (Some(name), Some(review_core::Ancestry::Newer { target })) => format!(
+                "The base is now {name}: the branch is built on newer history of it than \
+                 {target}, which its pull request targets."
+            ),
+            (Some(name), _) => format!("The base is now {name}."),
+            (None, _) => "The base is now the empty tree.".to_owned(),
         });
     }
     None
@@ -1227,6 +1318,8 @@ struct CaptureInput<'a> {
     known: &'a HashSet<ObjectId>,
     /// What was last found for each branch.
     pull_requests: &'a [review_core::github::CheckoutPullRequest],
+    /// Whether `gh` could not look up the branch's pull request.
+    unknown: bool,
     /// The base and head the commits were last listed between.
     listed: Option<&'a (Option<ObjectId>, Option<ObjectId>)>,
 }
@@ -1274,18 +1367,15 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
     let texts = read_new_texts(review, &history, tip, input.known);
     let tree = provisional_or_tip_tree(review, &history);
     let checkout = matches!(review.target(), ReviewTarget::Checkout { .. });
-    let (association, commits) = if checkout {
-        let association = subject
-            .branch
-            .as_deref()
-            .and_then(|branch| review.repo().branch_identity(branch).ok());
+    let (association, unreadable, commits) = if checkout {
+        let (association, unreadable) = association_of(review, &subject);
         let pair = (subject.base.commit().cloned(), subject.head.clone());
         let commits = (input.listed != Some(&pair))
             .then(|| review.subject_commits(&subject).ok())
             .flatten();
-        (association, commits)
+        (association, unreadable, commits)
     } else {
-        (None, None)
+        (None, false, None)
     };
     Ok(Box::new(Captured {
         from: input.from,
@@ -1295,6 +1385,7 @@ fn capture(parts: &Parts, input: &CaptureInput<'_>) -> Result<Box<Captured>, Mis
         tree,
         association,
         commits,
+        unknown: input.unknown || unreadable,
         history: Arc::new(history),
         links,
         texts,

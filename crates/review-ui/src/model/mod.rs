@@ -80,8 +80,8 @@ pub use actions::Action;
 use effects::{Because, Highlighted, Outcome, Subject, TextsRead};
 pub use effects::{Completion, Driver, Effect, Job, SheetStep, Updated};
 pub use fields::{Field, FieldState};
-pub use live::{Replaced, abbreviated, branch_and_base};
-pub use pending::Checking;
+pub use live::{Replaced, abbreviated, base_note, branch_and_base};
+pub use pending::{Checking, Step};
 use pool::Lane;
 pub use pulls::Found;
 pub use quit::{QuitKind, Quitting};
@@ -533,6 +533,9 @@ pub struct Model {
     version: u64,
     /// Following the working tree, for a live review of it.
     live: Option<live::Live>,
+    /// The lookups of the checked-out branch's pull request, which start as the checkout's
+    /// review opens.
+    pulls: pulls::Pulls,
     /// What took the place of what the review was read from, which ends the review here.
     replaced: Option<Replaced>,
     /// Marks and decisions on trust waiting for the engine, saved one at a time in order.
@@ -678,6 +681,7 @@ impl Model {
             shown: 0,
             version: 0,
             live: None,
+            pulls: pulls::Pulls::default(),
             replaced: None,
             saves: VecDeque::new(),
             saving: false,
@@ -765,6 +769,7 @@ impl Model {
             info,
             synced,
             shows,
+            association,
         } = opened;
         if let Some(ignored) = ignored {
             self.effect(Effect::Log(ignored));
@@ -777,6 +782,7 @@ impl Model {
         self.effect(Effect::Title(self.title()));
         self.phase = Phase::Ready;
         self.start_clock();
+        self.associate(association);
         match shows {
             pending::Shows::Verified(verified) => {
                 self.show_verified(*verified, Some(view_state), found);
@@ -880,7 +886,11 @@ impl Model {
             .map_or_else(String::new, |pull_request| {
                 format!(" #{}", pull_request.number)
             });
-        Some(format!("{directory} · {head}{number}"))
+        let unknown = self.live.as_ref().is_some_and(live::Live::unknown);
+        Some(match live::base_note(subject, unknown) {
+            Some(note) => format!("{directory} · {head}{number} · {note}"),
+            None => format!("{directory} · {head}{number}"),
+        })
     }
 
     /// Whether the review is of the checkout, whatever it holds.
@@ -898,10 +908,11 @@ impl Model {
         let live = self.live.as_ref()?;
         Some(LiveState {
             subject: live.subject(),
-            pull_request: live.pulls.current(),
-            lookup: live.pulls.unavailable(),
-            looking_up: live.pulls.running(),
-            lookup_failed: live.pulls.failed(),
+            pull_request: self.pulls.current(),
+            lookup: self.pulls.unavailable(),
+            looking_up: self.pulls.running(),
+            lookup_failed: self.pulls.failed(),
+            unknown: live.unknown(),
             filtered: live.filtered(),
             updating: live.updating(),
             busy: live.busy(),
@@ -1660,6 +1671,9 @@ pub struct LiveState<'a> {
     pub looking_up: bool,
     /// Why the last lookup of the pull request failed, if it did.
     pub lookup_failed: Option<&'a str>,
+    /// Whether the capture on screen was compared without the branch's pull request, which
+    /// `gh` could not look up.
+    pub unknown: bool,
     /// The paths the capture kept at their staged version, under a filter driver.
     pub filtered: &'a [String],
     /// Whether the view may miss a change, until it is captured again.
@@ -1684,13 +1698,16 @@ pub(super) struct Opened {
     synced: Option<review_core::Synced>,
     /// What shows first.
     shows: pending::Shows,
+    /// The checked-out branch and its upstream, whose pull request is looked up at once, for
+    /// the checkout's review on a branch.
+    association: Option<review_core::BranchIdentity>,
 }
 
 /// Opens the review with `opener` and reads what the window shows first; with `live`, as
 /// `[review] live` sets it, a review of the working tree follows it; runs in the background.
 ///
-/// The checkout's review shows its last recorded revision first, verified behind it; without
-/// one, it is verified here, behind the opening view.
+/// The checkout's review shows its last recorded revision first, or empty panes without one,
+/// verified behind it, and reads the branch whose pull request is looked up meanwhile.
 fn open(opener: Opener, live: bool) -> Result<Opened, String> {
     let Loaded {
         review,
@@ -1722,14 +1739,15 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
                 &HashSet::new(),
             )?))
         }
-        None => match pending::Pending::read(&review, place)? {
-            Some(first) => pending::Shows::Pending(Box::new(first)),
-            // Nothing recorded, so nothing is replayed.
-            None => pending::Shows::Verified(Box::new(
-                pending::verify(&review, &HashSet::new(), &|_| {})
-                    .map_err(pending::Unverified::message)?,
-            )),
-        },
+        None => pending::Shows::Pending(Box::new(pending::Pending::read(&review, place)?)),
+    };
+    let association = match review.target() {
+        // The opening's capture finds the branch again, and looks it up when it differs.
+        ReviewTarget::Checkout { .. } => association(review.repo()).unwrap_or_else(|err| {
+            tracing::warn!("cannot read the checked-out branch: {}", live::causes(&err));
+            None
+        }),
+        _ => None,
     };
     let info = review.info().ok().flatten();
     let synced = review.synced().ok().flatten();
@@ -1752,7 +1770,22 @@ fn open(opener: Opener, live: bool) -> Result<Opened, String> {
         info,
         synced,
         shows,
+        association,
     })
+}
+
+/// The checked-out branch and its upstream, whose pull request is looked up: none while `HEAD`
+/// is detached or its branch has no commits, which no pull request can have.
+fn association(
+    repo: &review_core::Repo,
+) -> Result<Option<review_core::BranchIdentity>, review_core::Error> {
+    match repo.head()? {
+        review_core::Head {
+            branch: Some(branch),
+            commit: Some(_),
+        } => Ok(Some(repo.branch_identity(&branch)?)),
+        _ => Ok(None),
+    }
 }
 
 /// The status line when a review opens, and whether it reports a failure: a configuration
