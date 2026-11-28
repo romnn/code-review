@@ -15,8 +15,10 @@ use super::opaque;
 use super::painter::{Brush, Painter, ellipsize_end, width};
 use crate::color::over;
 
-/// The cells the sync label keeps before hints make way, as review-gui keeps 28 cells.
-const LABEL_CELLS: u16 = 28;
+/// The cells the sync label keeps before hints make way, as review-gui keeps 30 cells: room for
+/// the count of a review of up to 999 revisions as its state is checked, such as
+/// `Checking review state  37/100`.
+const LABEL_CELLS: u16 = 30;
 
 /// The cells between two hints.
 const HINT_GAP: u16 = 2;

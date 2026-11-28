@@ -236,7 +236,7 @@ impl Decoded {
 /// before any pixel is decoded.
 /// An animation shows its first frame, an APNG's first animation frame rather than its default
 /// image, and a still image as its orientation says it shows.
-fn decode(encoded: Encoded) -> Result<Decoded, Version> {
+pub(crate) fn decode(encoded: Encoded) -> Result<Decoded, Version> {
     let bytes = match encoded {
         Encoded::Absent => return Err(Version::Absent),
         Encoded::TooLarge(bytes) => return Err(Version::TooLarge(bytes)),

@@ -8,8 +8,8 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-use review_core::RefreshStep;
 use review_core::tree::NodeKind;
+use review_core::{RefreshStep, Replay};
 
 use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
@@ -37,10 +37,12 @@ struct SyncPart {
 /// The bottom bar's left side at `now`, with the parts that fit `budget` when `width` measures
 /// a text, and ` · ` between them: the revision on screen and its head commit, a newer
 /// revision waiting, and when the review last synced, or `live` for a review that follows the
-/// working tree, or what a running fetch is doing, or for a moment that it failed.
+/// working tree, or what a running fetch is doing, or for a moment that it failed; while the
+/// review state is checked, how far that got.
 ///
 /// When room runs out, the commit makes way first, then the time since the sync, then the
-/// newer revision; the revision and what a fetch is doing stay.
+/// newer revision; the revision and what a fetch is doing stay, and while the review state is
+/// checked, the revision makes way for how far that got.
 #[must_use]
 pub fn sync_label(
     model: &Model,
@@ -54,7 +56,7 @@ pub fn sync_label(
     if let Some(checking) = model.checking() {
         parts.push(part(
             Piece::new(format!("rev {}", checking.record.number), palette.text),
-            0,
+            1,
         ));
         let head = crate::model::abbreviated(&checking.record.head);
         parts.push(part(Piece::new(head, palette.faint), 3));
@@ -76,9 +78,10 @@ pub fn sync_label(
         }
     }
     let spinner = SPINNER.get(spin_frame(now)).copied().unwrap_or_default();
+    let checked = model.checking().and_then(|checking| checking.progress);
     let activity = match (&model.phase, model.sync.step()) {
         (Phase::Loading, _) => Some(format!("{spinner} opening…")),
-        _ if model.checking().is_some() => Some(format!("{spinner} checking…")),
+        _ if let Some(replay) = checked => Some(checking_label(replay)),
         (_, Some(step)) => Some(format!("{spinner} {}", step_label(model, step))),
         (_, None) => None,
     };
@@ -151,6 +154,16 @@ pub fn sync_label(
         pieces.push(piece);
     }
     pieces
+}
+
+/// What the bar says while the review state is checked: how many revisions its verification
+/// replayed out of all of them, such as `Checking review state  37/100`, the count padded to the
+/// total's width so the text keeps its width while it counts.
+#[must_use]
+pub fn checking_label(replay: Replay) -> String {
+    let Replay { replayed, total } = replay;
+    let width = total.to_string().len();
+    format!("Checking review state {replayed:>width$}/{total}")
 }
 
 /// What git is busy with, short enough for the bar: `git: rebasing`.

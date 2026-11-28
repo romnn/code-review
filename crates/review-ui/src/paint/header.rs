@@ -31,6 +31,23 @@ pub struct Meter {
     pub counts: Piece,
 }
 
+/// The place of a meter of `total` while the review state is checked, when nothing counts: a
+/// bar in no color and counts of spaces, as wide as the meter that takes its place, so nothing
+/// beside it moves when the review is verified.
+fn checking_meter(palette: &Palette, total: usize) -> Meter {
+    let none = palette.surface.alpha(0.0);
+    Meter {
+        bar: Bar {
+            fraction: 0.0,
+            fill: none,
+            auto: 0.0,
+            auto_fill: none,
+            track: none,
+        },
+        counts: Piece::new(" ".repeat(format!("{total}/{total}").len()), palette.dim),
+    }
+}
+
 /// The meter of `reviewed` of `total`.
 #[must_use]
 pub fn meter(palette: &Palette, reviewed: usize, total: usize) -> Meter {
@@ -89,7 +106,8 @@ pub struct FileHeader {
     pub lines: Option<Piece>,
     /// The added and removed line counts, `+12` and `−3`, when they fit.
     pub counts: Option<[Piece; 2]>,
-    /// The hunks approved of the file's, when it fits.
+    /// The hunks approved of the file's, when it fits; blank while the review state is
+    /// checked, so the parts beside it keep their place once it counts.
     pub meter: Option<Meter>,
 }
 
@@ -155,7 +173,7 @@ pub fn file_header(
     let lead = change.map_or(0.0, |_| cell + gap)
         + text(&section.path).min(cell * PATH_CELLS)
         + text(&innermost);
-    let meter_room = meter_room(model, units.len(), room, meter_gap);
+    let meter_room = meter_room(units.len(), room, meter_gap);
     let counts_room = gap + text(&added) + gap + text(&removed);
     let show_meter = lead + meter_room <= budget;
     let show_counts = show_meter && lead + meter_room + counts_room <= budget;
@@ -207,19 +225,23 @@ pub fn file_header(
                 Piece::new(removed, palette.removed_sign),
             ]
         }),
-        meter: (show_meter && model.view().is_some())
-            .then(|| meter(palette, approved, units.len())),
+        meter: show_meter.then(|| header_meter(model, palette, approved, units.len())),
     })
 }
 
-/// The room the meter of `units` takes: none before the review state is checked, when nothing
-/// counts.
-fn meter_room(model: &Model, units: usize, room: Room, meter_gap: f32) -> f32 {
+/// The meter of a header over `units` units, `approved` of them approved, or its place while
+/// the review state is checked.
+fn header_meter(model: &Model, palette: &Palette, approved: usize, units: usize) -> Meter {
     if model.view().is_some() {
-        room.gap + meter_width(units, room.cell, meter_gap)
+        meter(palette, approved, units)
     } else {
-        0.0
+        checking_meter(palette, units)
     }
+}
+
+/// The room the meter of `units` takes, its place while the review state is checked included.
+fn meter_room(units: usize, room: Room, meter_gap: f32) -> f32 {
+    room.gap + meter_width(units, room.cell, meter_gap)
 }
 
 /// The header of a folder's diff: the folder's path, how many files it shows, and the line
@@ -261,7 +283,7 @@ fn folder_header(
     let Room { budget, cell, gap } = room;
     let text = |text: &str| float(display_width(text)) * cell;
     let lead = text(folder).min(cell * PATH_CELLS);
-    let meter_room = meter_room(model, units.len(), room, meter_gap);
+    let meter_room = meter_room(units.len(), room, meter_gap);
     let counts_room = gap + text(&added) + gap + text(&removed);
     let show_meter = lead + meter_room <= budget;
     let show_counts = show_meter && lead + meter_room + counts_room <= budget;
@@ -284,8 +306,7 @@ fn folder_header(
                 Piece::new(removed, palette.removed_sign),
             ]
         }),
-        meter: (show_meter && model.view().is_some())
-            .then(|| meter(palette, approved, units.len())),
+        meter: show_meter.then(|| header_meter(model, palette, approved, units.len())),
     }
 }
 

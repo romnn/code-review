@@ -128,12 +128,6 @@ impl Outstanding {
         }
     }
 
-    /// Whether `oid`'s text is being read.
-    #[must_use]
-    pub fn reading(&self, oid: &ObjectId) -> bool {
-        self.0.contains(oid)
-    }
-
     /// The blobs whose text is being read.
     pub fn claims(&self) -> impl Iterator<Item = &ObjectId> {
         self.0.iter()

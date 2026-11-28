@@ -175,7 +175,13 @@ impl Review {
         {
             return Ok(History::clone(&kept));
         }
-        let history = self.extend_history(recorded, Vec::new(), *recorded.prefix(), Some(live))?;
+        let history = self.extend_history(
+            recorded,
+            Vec::new(),
+            *recorded.prefix(),
+            Some(live),
+            &|_| {},
+        )?;
         self.memo.keep_live(Arc::new(history.clone()));
         Ok(history)
     }
@@ -280,6 +286,7 @@ mod tests {
     use super::*;
     use crate::git::Repo;
     use crate::ids::{RevisionNumber, UnitId};
+    use crate::review::Replay;
     use crate::review::memo::Memo;
     use crate::store::events::MarkVerdict;
     use crate::store::log::LogTail;
@@ -384,7 +391,7 @@ mod tests {
             .ok()
             .filter(RevisionView::is_provisional)
             .and_then(|view| view.record().map(RevisionEvent::from));
-        Ok(fresh.extend_history(&History::empty(), events, tail.prefix(), live)?)
+        Ok(fresh.extend_history(&History::empty(), events, tail.prefix(), live, &|_| {})?)
     }
 
     /// A checkout of one commit on `main` with `a.rs` edited, and the review of it, with the
@@ -720,6 +727,34 @@ mod tests {
         for seed in [1, 2, 3] {
             replay(seed)?;
         }
+        Ok(())
+    }
+
+    /// A history read with its progress reported counts every revision it replays once, in
+    /// order, out of all the log recorded, and is the history read without it; a history read
+    /// again replays only what the log recorded since.
+    #[test]
+    fn a_replay_reports_each_revision_it_replays() -> eyre::Result<()> {
+        let checkout = Checkout::recorded_twice()?;
+        checkout.write(&[3; VALUES])?;
+        checkout.review.refresh()?;
+        let fresh = checkout.another()?;
+        let reported = std::cell::RefCell::new(Vec::new());
+        let history = fresh.history_reporting(&|replay| reported.borrow_mut().push(replay))?;
+        // Three revisions, each counted before it is replayed, then all of them.
+        let counts = |replayed: &[usize], total| {
+            replayed
+                .iter()
+                .map(|&replayed| Replay { replayed, total })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(reported.take(), counts(&[0, 1, 2, 3], 3));
+        assert_eq!(history, checkout.another()?.history()?);
+        // Only the revision recorded since is replayed again.
+        checkout.write(&[4; VALUES])?;
+        checkout.review.refresh()?;
+        fresh.history_reporting(&|replay| reported.borrow_mut().push(replay))?;
+        assert_eq!(reported.take(), counts(&[0, 1], 1));
         Ok(())
     }
 

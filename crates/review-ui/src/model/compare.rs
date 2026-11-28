@@ -20,7 +20,12 @@
 //! A comparison lands only while its pair is still the one the selected file shows, so a late
 //! one never shows under another file, and the pair shown now starts once the job before it
 //! ends.
+//! A job whose pair the selected file no longer shows stops before it reads, and before it
+//! decodes or renders what it read, and lands nothing, so it holds back the pair shown now as
+//! little as it can.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use review_core::analysis::{FileUnit, UnitKind};
@@ -30,6 +35,7 @@ use review_core::{ObjectId, Review};
 use super::Model;
 use super::effects::{Because, Outcome, Subject};
 use super::pages::Read;
+use super::pool::Lane;
 use super::sync::Tick;
 use crate::images::{Changes, Comparison, Encoded, MAX_BYTES, Version};
 
@@ -83,8 +89,8 @@ pub(super) struct Images {
     wanted: Option<Pair>,
     /// The pair compared last.
     compared: Option<Compared>,
-    /// The pair a job compares now.
-    comparing: Option<Pair>,
+    /// The job that compares a pair now.
+    comparing: Option<Running>,
     /// Whether the changed pixels show over the head.
     changes: bool,
     /// Whether a PDF's selected page pair renders and shows, as the reviewer chose for the
@@ -126,6 +132,39 @@ impl Images {
     /// Notes that the job comparing a pair ended, whether or not what it found lands.
     pub(super) fn ended(&mut self) {
         self.comparing = None;
+    }
+}
+
+/// A job that reads or compares a pair of the selected file, with the flag that tells it the
+/// selected file shows another pair now, which ends it at its next boundary with nothing to
+/// land.
+#[derive(Debug)]
+pub(super) struct Running {
+    pair: Pair,
+    superseded: Arc<AtomicBool>,
+}
+
+impl Running {
+    /// A job for `pair`, with what it asks at its boundaries: whether it is still wanted.
+    pub(super) fn start(pair: &Pair) -> (Self, impl Fn() -> bool + Send + use<>) {
+        let superseded = Arc::new(AtomicBool::new(false));
+        let wanted = {
+            let superseded = Arc::clone(&superseded);
+            move || !superseded.load(Ordering::Relaxed)
+        };
+        let running = Self {
+            pair: pair.clone(),
+            superseded,
+        };
+        (running, wanted)
+    }
+
+    /// Tells the job it is superseded unless `wanted`, the pair the selected file shows now,
+    /// is its own; once told, it stays superseded, even if its pair shows again before it ends.
+    pub(super) fn follow(&self, wanted: Option<&Pair>) {
+        if wanted != Some(&self.pair) {
+            self.superseded.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -203,6 +242,9 @@ impl Model {
         if wanted != self.images.wanted {
             self.images.wanted = wanted;
             self.wait();
+            if let Some(running) = &self.images.comparing {
+                running.follow(self.images.wanted.as_ref());
+            }
         }
         self.compare_wanted();
     }
@@ -245,18 +287,23 @@ impl Model {
         if done || unread || self.images.comparing.is_some() {
             return;
         }
-        self.images.comparing = Some(pair.clone());
+        let (running, wanted) = Running::start(&pair);
+        self.images.comparing = Some(running);
         // Keyed by blobs, whose content never changes, so it lands whatever shows meanwhile and
         // `compared` decides whether it still applies.
-        self.spawn_with(Subject::Always(Because::Content), move |parts| {
-            Outcome::Compared(Box::new(compare(&parts.review, pair)))
-        });
+        self.spawn_with(
+            Lane::Selected,
+            Subject::Always(Because::Content),
+            move |parts| Outcome::Compared(compare(&parts.review, pair, &wanted).map(Box::new)),
+        );
     }
 
-    /// Takes in what a job's comparison found: keeps it while its pair is the one shown, and
-    /// starts the pair shown now.
-    pub(super) fn compared(&mut self, compared: Compared) {
-        if self.images.wanted.as_ref() == Some(&compared.pair) {
+    /// Takes in what a job's comparison found, if it ran to its end: keeps it while its pair is
+    /// the one shown, and starts the pair shown now.
+    pub(super) fn compared(&mut self, compared: Option<Compared>) {
+        if let Some(compared) = compared
+            && self.images.wanted.as_ref() == Some(&compared.pair)
+        {
             self.images.compared = Some(compared);
         }
         self.compare_wanted();
@@ -318,26 +365,48 @@ fn opaque_pair(view: &review_core::Changes<'_>, path: &str) -> Option<Pair> {
 }
 
 /// Reads and compares `pair`'s versions, or renders and compares a PDF's pages; runs in the
-/// background.
+/// background, and ends with nothing before it reads, decodes or renders once it is no longer
+/// `wanted`.
 #[tracing::instrument(skip_all)]
-fn compare(review: &Review, pair: Pair) -> Compared {
+fn compare(review: &Review, pair: Pair, wanted: &dyn Fn() -> bool) -> Option<Compared> {
+    if !wanted() {
+        return None;
+    }
     let (base, head) = read(review, &pair);
-    let comparison = match pair.page {
-        None => Comparison::of(base, head),
+    if !wanted() {
+        return None;
+    }
+    let comparison = compare_versions(&pair, base, head, wanted)?;
+    Some(Compared { pair, comparison })
+}
+
+/// Decodes `pair`'s versions read as `base` and `head`, or renders their pages of it, and
+/// compares them; once the pair is no longer `wanted` after the base, it ends with nothing
+/// before the head.
+pub(super) fn compare_versions(
+    pair: &Pair,
+    base: Encoded,
+    head: Encoded,
+    wanted: &dyn Fn() -> bool,
+) -> Option<Comparison> {
+    let version = |encoded: Encoded, page: Option<Option<u32>>| match page {
+        None => crate::images::decode(encoded),
         Some(page) => {
-            let render = |encoded: Encoded, page: Option<u32>| {
-                let page = page.ok_or(Version::Absent)?;
-                match encoded {
-                    Encoded::Bytes(bytes) => crate::pdf::render(&bytes, page),
-                    Encoded::TooLarge(size) => Err(Version::TooLarge(size)),
-                    Encoded::Unreadable => Err(Version::Unreadable(None)),
-                    Encoded::Absent => Err(Version::Absent),
-                }
-            };
-            Comparison::between(render(base, page.base), render(head, page.head))
+            let page = page.ok_or(Version::Absent)?;
+            match encoded {
+                Encoded::Bytes(bytes) => crate::pdf::render(&bytes, page),
+                Encoded::TooLarge(size) => Err(Version::TooLarge(size)),
+                Encoded::Unreadable => Err(Version::Unreadable(None)),
+                Encoded::Absent => Err(Version::Absent),
+            }
         }
     };
-    Compared { pair, comparison }
+    let (base_page, head_page) = pair.page.map(|page| (page.base, page.head)).unzip();
+    let base = version(base, base_page);
+    if !wanted() {
+        return None;
+    }
+    Some(Comparison::between(base, version(head, head_page)))
 }
 
 /// Reads `pair`'s versions within the comparison's bounds; runs in the background.
@@ -362,4 +431,49 @@ pub(super) fn read(review: &Review, pair: &Pair) -> (Encoded, Encoded) {
         }
     };
     (read(pair.base.as_ref()), read(pair.head.as_ref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A comparison the reviewer moves past while it decodes or renders the base stops before
+    /// the head, for an image's versions and a PDF's pages alike.
+    #[test]
+    fn a_comparison_superseded_between_its_versions_stops() {
+        let mut png = Vec::new();
+        image::RgbaImage::new(1, 1)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let cases = [
+            (
+                Pair {
+                    base: None,
+                    head: None,
+                    page: None,
+                },
+                png,
+            ),
+            #[cfg(feature = "pdf")]
+            (
+                Pair {
+                    base: None,
+                    head: None,
+                    page: Some(Page {
+                        base: Some(0),
+                        head: Some(0),
+                    }),
+                },
+                crate::pdf::testing::pdf(&["One"]),
+            ),
+        ];
+        for (pair, bytes) in cases {
+            let compared = |wanted: bool| {
+                let version = || Encoded::Bytes(bytes.clone());
+                compare_versions(&pair, version(), version(), &|| wanted)
+            };
+            assert!(compared(true).is_some_and(|comparison| comparison.has_image()));
+            assert_eq!(compared(false), None, "{pair:?} went on to the head");
+        }
+    }
 }

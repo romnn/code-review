@@ -12,6 +12,7 @@ use std::sync::Arc;
 use review_core::{History, MarkVerdict, Recorded, ShownRun, UnitId};
 
 use super::effects::{Because, Outcome, Subject};
+use super::pool::Lane;
 use super::trust::Decision;
 use super::{Effect, Mode, Model, Quitting, SyncStep, live, overview, plural};
 use crate::rows;
@@ -384,7 +385,7 @@ impl Model {
                     Mark::Run(run) => Some(run.clone()),
                     Mark::Units { .. } => None,
                 };
-                self.spawn_with(Subject::Always(Because::Save), move |parts| {
+                self.spawn_with(Lane::Own, Subject::Always(Because::Save), move |parts| {
                     let saved = job.save(&parts.review);
                     let history = parts.review.history();
                     Outcome::Marked(Marked {
@@ -557,19 +558,23 @@ impl Model {
         self.set_status("Fetching the latest changes…");
         let step = self.sync.step.clone();
         step.set(Some(SyncStep::Refresh(review_core::RefreshStep::Fetching)));
-        self.spawn_with(Subject::Always(Because::Refresh), move |parts| {
-            let review = &parts.review;
-            let recorded =
-                review.refresh_reporting(&mut |done| step.set(Some(SyncStep::Refresh(done))));
-            step.set(Some(SyncStep::Carrying));
-            let history = review.history();
-            let synced = review.synced();
-            Outcome::Refreshed(Refreshed {
-                recorded,
-                history,
-                synced,
-            })
-        });
+        self.spawn_with(
+            Lane::Background,
+            Subject::Always(Because::Refresh),
+            move |parts| {
+                let review = &parts.review;
+                let recorded =
+                    review.refresh_reporting(&mut |done| step.set(Some(SyncStep::Refresh(done))));
+                step.set(Some(SyncStep::Carrying));
+                let history = review.history();
+                let synced = review.synced();
+                Outcome::Refreshed(Refreshed {
+                    recorded,
+                    history,
+                    synced,
+                })
+            },
+        );
         self.spin();
     }
 

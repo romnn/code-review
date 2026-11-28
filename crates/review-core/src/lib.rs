@@ -75,8 +75,8 @@ pub use ids::{
     MoveId, ObjectId, ParseIdError, ReviewKey, ReviewTag, RevisionNumber, Tagged, UnitId, UnitIndex,
 };
 pub use review::{
-    BaseRef, Capture, Commit, LiveCapture, PullRequest, Recorded, RefreshStep, Review, ReviewInfo,
-    ReviewMeta, ReviewTarget, RevisionInput, Subject, Synced, filtered_note, github,
+    BaseRef, Capture, Commit, LiveCapture, PullRequest, Recorded, RefreshStep, Replay, Review,
+    ReviewInfo, ReviewMeta, ReviewTarget, RevisionInput, Subject, Synced, filtered_note, github,
 };
 pub use standing::{ReviewPolicy, Standing};
 pub use store::events::MarkVerdict;

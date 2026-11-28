@@ -25,6 +25,14 @@ has each version's page text extracted and diffed and one page pair rendered, th
 C++ library that is not thread-safe and is loaded only when needed. Each takes far longer than a
 frame on a large file, and the reviewer keeps moving between files and pages meanwhile.
 
+Background work is finite or it waits. The finite kind, such as opening and verifying the
+review, analyses, texts, highlights, previews, captures and lookups of pull requests, runs
+until it is done and competes for the machine's cores; after a change of the analysis format,
+verifying a 100-revision review replays its history for a minute. The kind that waits, for the
+working tree to change or a language server to answer, holds a thread for as long as that
+takes. Saves and the engine's stop must never wait behind anything, since quitting waits for
+them.
+
 Where a server runs decides what it can do and what a grant means. It needs the code on disk.
 The reviewer reviews the checkout, a branch's working tree against its base, with their own and
 agents' edits arriving through the live sync; pull requests that are not checked out are not
@@ -45,10 +53,31 @@ state.
   ([ADR 4](0004-a-working-tree-review-follows-the-disk-and-records-what-is-marked.md)) keeps
   every snapshot the job reads, such as a capture the window no longer shows, from being
   compacted away; nothing else pins what a window shows.
-- **A front end can only start a job.** A job is opaque: its one public operation runs it on a
-  thread of its own and hands its completion back, so no front end can run it in place on the UI
+- **A front end can only start a job.** A job is opaque: its one public operation runs it in the
+  background and hands its completion back, so no front end can run it in place on the UI
   thread. Both apps run every job that way, a wait for the working tree included, so there is
   one effect for jobs.
+- **One pool runs the finite work, what the reviewer looks at first.** The app has one pool of
+  worker threads, one per core and two at least, which starts a worker only when a job finds
+  every worker busy. Each job names its lane as it is queued, and a worker takes the oldest job
+  of the most urgent lane: `Selected`, what the reviewer looks at (the opened review, the
+  analysis of the revision on screen, the selected file's text, highlights and preview, a
+  picker's search); then `Shown`, the rest of what shows (the other files' texts, a few at a
+  time and one read after another, their highlights, captures of the working tree and the
+  watch's start, readings of trust); then `Background`, what checks or fetches behind it (the
+  review's verification, fetches, lookups of pull requests), which never takes the last
+  worker. So neither a replay of the whole history nor a slow `gh` keeps what shows waiting
+  for a worker: at worst it waits for another job that shows to end. A job that waits outside the app (for
+  the working tree or a language server), a save, the jobs that stop the engine or end the
+  review in the window, and the watch on the grant, which must stop the servers within its
+  interval, each run on a thread of their own, which nothing in the pool holds back.
+  The pool cancels nothing; a job that a newer request may supersede checks for itself whether
+  it is still wanted, as a picker's search does before it lists the tree and again before it
+  matches. The selected file's text, as a preview, has one read outstanding at a time, which
+  reads the blob the selected file wants as it starts, whatever a read of the other files'
+  claimed: moving across files while it waits retargets it, and the selected file never waits
+  for a read of others. It looks the blob's size up first, so an oversized one, such as a
+  large asset's, holds it only for that lookup, never while git streams its bytes.
 - **Nothing that blocks is dropped on the UI thread.** As the app quits, the job that stops the
   engine kills the servers and lets go of the watch, and quitting waits for it as it waits for
   saves. A job still running keeps the review, and a capture the watch, until it ends, so the
@@ -72,12 +101,16 @@ state.
   pages. Each is keyed by both blobs, a render by both page indices as well, and lands only
   while its key is still what the selected file shows, so a late result never shows under
   another file or page. One job of each kind runs at a time and one result of each is kept; the
-  key shown when a job ends starts next. Every bound holds before the memory it guards is taken:
-  a blob's size before it is read, a PDF's page count before any page and each page's characters
-  before its text is copied. pdfium is loaded by the first PDF job, never at startup, and holds
-  its one lock only while it reads or renders, never while the job diffs. A PDF the job cannot
-  read, too large, encrypted or broken, or pdfium failing to load, shows as a binary file whose
-  header says why.
+  key shown when a job ends starts next. A job whose key the selected file no longer shows, as
+  once the reviewer moved on while it waited for a worker, stops at its next boundary (before
+  it reads, before it decodes or renders each version, and before each page's text) and lands
+  nothing, so it lets go of pdfium, which every render waits for, as soon as it can; once
+  told, it stays stopped even if its key shows again, which starts it anew. Every bound holds
+  before the memory it guards is taken: a blob's size before it is read, a PDF's page count
+  before any page and each page's characters before its text is copied. pdfium is loaded by
+  the first PDF job, never at startup, and holds its one lock only while it reads or renders,
+  never while the job diffs. A PDF the job cannot read, too large, encrypted or broken, or
+  pdfium failing to load, shows as a binary file whose header says why.
 - **Language servers run only in the checkout, on the code on disk.** A server runs in the
   checkout's working tree, its current directory and workspace root, with rust-analyzer's builds
   on and the project's own target directory. It is the one exception to cr writing nothing into
@@ -177,8 +210,15 @@ state.
 - A changed binary file is read once, to learn whether it is a PDF and, if not, to decode it,
   and a PDF's text diff needs no image support, so terminals without graphics show it too. Stepping through pages renders each pair only when it shows; nothing is prefetched or
   cached beyond the last result.
-- review-gui runs jobs on threads of their own as review-tui does, rather than on gpui's
-  background executor; the model bounds how many run at once, highlighting included.
+- review-gui runs jobs in the model's pool as review-tui does, rather than on gpui's background
+  executor; the pool bounds how many finite jobs run at once to the cores, and highlighting
+  bounds its own share of them.
+- On a machine with fewer cores than the work, the selected file's text, preview and
+  highlights run before queued texts of other files, captures and the review's verification,
+  and one worker is always left for them; on one with more, the pool changes nothing, since
+  every job finds a worker at once.
+- Stepping past PDFs or pages faster than they read or render reads and renders only what
+  shows, at the cost of reading again a file left and come back to before its read ended.
 - A front end changes the model only through `Driver::update`, whose value is `None` once the
   app closes, and hands it completions only through `Driver::complete`.
 - The bottom bar keeps the trust last read for the moment a reading takes after every capture,
@@ -239,6 +279,13 @@ state.
   that reuse rewrites drew a race in two review rounds running: a process from before a denial
   survived it once a lookup reused it, and a late retirement stopped a server started after a new
   grant. Stopping the servers in the operation that finds the denial leaves nothing to run late.
+- **A scheduler of dependent jobs, or an async runtime.** Each job is one closure that runs to
+  its end; the few that follow another, such as the verification after the analysis it takes,
+  are queued by the outcome of the first, so the pool needs no graph, and review-core stays
+  synchronous.
+- **Cancelling the history's verification between revisions.** Nothing supersedes it while
+  the window shows the review: it runs once per opening, and quitting ends the process, so a
+  check between revisions would never stop anything.
 - **Prefetching the pages around the one shown, or caching renders across files.** Each render
   takes a moment the reviewer barely notices, while memory for every page of a large PDF would
   not be bounded by the one comparison shown.
@@ -249,7 +296,8 @@ state.
 ## References
 
 - `crates/review-ui/src/model/engine.rs` (`Engine`, `Parts`, `WatchSlot`, `Servers`, `Waiting`)
-- `crates/review-ui/src/model/effects.rs` (`Job`, `Driver`)
+- `crates/review-ui/src/model/effects.rs` (`Job`, `Driver`), `crates/review-ui/src/model/pool.rs`
+  (`Pool`, `Lane`)
 - `crates/review-ui/src/model/trust.rs`
 - `crates/review-ui/src/model/buffer.rs` (`go_to_definition`, `look_up`, `find_definition`)
 - `crates/review-ui/src/lsp.rs` (`LanguageServer`, `Stopper`)
@@ -257,5 +305,5 @@ state.
   `Review::tree_on_disk`)
 - `crates/review-ui/src/model/quit.rs`
 - `crates/review-ui/src/model/marks.rs` (`Save`)
-- `crates/review-ui/src/model/compare.rs`, `crates/review-ui/src/model/pages.rs`,
+- `crates/review-ui/src/model/compare.rs` (`Running`), `crates/review-ui/src/model/pages.rs`,
   `crates/review-ui/src/images/mod.rs`, `crates/review-ui/src/pdf.rs`

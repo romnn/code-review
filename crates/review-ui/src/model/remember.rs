@@ -8,6 +8,7 @@
 use crate::config::{RememberError, Remembered};
 
 use super::effects::{Because, Outcome, Subject};
+use super::pool::Lane;
 use super::settings::error_chain;
 use super::{Effect, Model};
 
@@ -52,7 +53,7 @@ impl Model {
             return;
         };
         self.config_saving = true;
-        self.spawn(Subject::Always(Because::Save), move || {
+        self.spawn(Lane::Own, Subject::Always(Because::Save), move || {
             let ConfigEdit { values, failure } = edit;
             let saved = crate::config::remember(&path, &values);
             Outcome::ConfigSaved(ConfigSaved { failure, saved })

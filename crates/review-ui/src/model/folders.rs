@@ -5,6 +5,7 @@
 use crate::folders::{FRONT_END, Place, ViewState, restored};
 
 use super::effects::{Because, Outcome, Subject};
+use super::pool::Lane;
 use super::{Effect, Model};
 
 /// The saving of the view state.
@@ -120,7 +121,7 @@ impl Model {
         }
         self.folders.saved = state.clone();
         self.folders.saving = true;
-        self.spawn_with(Subject::Always(Because::Save), move |parts| {
+        self.spawn_with(Lane::Own, Subject::Always(Because::Save), move |parts| {
             Outcome::FoldersSaved(parts.review.save_view_state(FRONT_END, &state))
         });
     }

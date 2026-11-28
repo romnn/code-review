@@ -243,6 +243,16 @@ pub struct Synced {
     pub revision: RevisionNumber,
 }
 
+/// How far [`Review::history_reporting`] has got: how many of the revisions it reads it has
+/// replayed, each with its analysis and its links to the revision before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Replay {
+    /// The revisions replayed.
+    pub replayed: usize,
+    /// The revisions to replay: those the log recorded since the review last read its history.
+    pub total: usize,
+}
+
 /// A step of [`Review::refresh_reporting`], for a front end to show while it waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1135,6 +1145,18 @@ impl Review {
     /// Returns [`Error::LogReplaced`] once this review or a clone of it found its log is not
     /// the one it read, and an error when the log is corrupt or an analysis cannot be computed.
     pub fn history(&self) -> Result<History, Error> {
+        self.history_reporting(&|_| {})
+    }
+
+    /// Does what [`Self::history`] does, calling `progress` on the calling thread with how far
+    /// it has got: before each revision it replays, and once every one is.
+    ///
+    /// A history that reads nothing new from the log replays nothing and calls nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::history`].
+    pub fn history_reporting(&self, progress: &dyn Fn(Replay)) -> Result<History, Error> {
         if self.memo.replaced() {
             return Err(self.log_replaced());
         }
@@ -1154,8 +1176,13 @@ impl Review {
         if events.is_empty() {
             return Ok(replayed.history);
         }
-        replayed.history =
-            self.extend_history(&replayed.history, events, replayed.tail.prefix(), None)?;
+        replayed.history = self.extend_history(
+            &replayed.history,
+            events,
+            replayed.tail.prefix(),
+            None,
+            progress,
+        )?;
         let history = replayed.history.clone();
         self.memo.keep_replayed(Arc::new(replayed));
         Ok(history)
@@ -1197,7 +1224,8 @@ impl Review {
     }
 
     /// Extends `history` by the log's `events`, read since it was until the log was `prefix`,
-    /// followed by the provisional revision `live` when there is one.
+    /// followed by the provisional revision `live` when there is one, telling `progress` how
+    /// many of their revisions it replayed as [`Self::history_reporting`] says.
     ///
     /// Analyses and the links between consecutive revisions come from the memo when a history
     /// it keeps has them, then from the cache; a provisional revision's are computed but never
@@ -1209,10 +1237,11 @@ impl Review {
         mut events: Vec<Event>,
         prefix: Prefix,
         live: Option<RevisionEvent>,
+        progress: &dyn Fn(Replay),
     ) -> Result<History, Error> {
         let provisional = live.as_ref().map(|live| live.number);
         events.extend(live.map(Event::Revision));
-        revision_events(&self.dir.events(), &events, history.revisions().len())?;
+        let total = revision_events(&self.dir.events(), &events, history.revisions().len())?.len();
         let publish = |revision: &RevisionEvent| {
             if Some(revision.number) == provisional {
                 Publish::Recorded
@@ -1220,11 +1249,19 @@ impl Review {
                 Publish::Now
             }
         };
-        history.extended(HistoryInput {
+        // A revision's analysis is asked for once the revision before it is linked, so each
+        // ask counts every revision before it as replayed.
+        let replayed = std::cell::Cell::new(0);
+        let extended = history.extended(HistoryInput {
             events,
             prefix,
             provisional: provisional.is_some(),
             analysis: &|revision| {
+                progress(Replay {
+                    replayed: replayed.get(),
+                    total,
+                });
+                replayed.set(replayed.get() + 1);
                 tracing::info_span!("analysis").in_scope(|| {
                     self.analysis(
                         &revision.base,
@@ -1238,7 +1275,12 @@ impl Review {
                 tracing::info_span!("links")
                     .in_scope(|| self.links(older, newer, publish(revision)))
             },
-        })
+        })?;
+        progress(Replay {
+            replayed: total,
+            total,
+        });
+        Ok(extended)
     }
 
     /// Returns the links between consecutive revisions analyzed as `older` and `newer`, from
@@ -1349,6 +1391,7 @@ impl Review {
             log.events().to_vec(),
             opened,
             capture.clone(),
+            &|_| {},
         )?;
         let now = history.view(view.number())?;
         if now.evidence_digest(unit)? != evidence {

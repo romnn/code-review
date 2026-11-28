@@ -30,6 +30,7 @@ use review_core::Review;
 use super::buffer::Unanswered;
 use super::effects::{Because, Completion, Job, Outcome, Subject};
 use super::live::WaitedFor;
+use super::pool::Lane;
 use super::trust::Trust;
 use super::{Effect, Model};
 use crate::lsp::{LanguageServer, Stopper};
@@ -312,10 +313,11 @@ impl Drop for Parts {
 }
 
 impl Model {
-    /// Queues `job` to run in the background with the engine's parts, for `subject`, as
-    /// [`Self::spawn`] does; nothing runs before the review opens or once the engine stopped.
+    /// Queues `job` to run in the background in `lane` with the engine's parts, for `subject`,
+    /// as [`Self::spawn`] does; nothing runs before the review opens or once the engine stopped.
     pub(super) fn spawn_with(
         &mut self,
+        lane: Lane,
         subject: Subject,
         job: impl FnOnce(&Parts) -> Outcome + Send + 'static,
     ) {
@@ -323,7 +325,7 @@ impl Model {
             return;
         };
         let parts = Arc::clone(&engine.parts);
-        self.spawn(subject, move || job(&parts));
+        self.spawn(lane, subject, move || job(&parts));
     }
 
     /// Waits in the background for the working tree to change, with `waiting` alone, and hands
@@ -347,7 +349,7 @@ impl Model {
     /// stops the language servers, as the review ends in this window and no lookup runs any
     /// more.
     pub(super) fn unwatch(&mut self) {
-        self.spawn_with(Subject::Always(Because::Live), |parts| {
+        self.spawn_with(Lane::Own, Subject::Always(Because::Live), |parts| {
             parts.close_watch();
             parts.servers.stop();
             Outcome::Unwatched
@@ -365,7 +367,7 @@ impl Model {
             return false;
         };
         self.next_epoch();
-        self.spawn(Subject::Always(Because::Stop), move || {
+        self.spawn(Lane::Own, Subject::Always(Because::Stop), move || {
             parts.servers.stop();
             parts.close_watch();
             Outcome::Disposed
