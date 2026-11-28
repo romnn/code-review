@@ -156,10 +156,11 @@ pub struct CheckoutPullRequest {
 /// # Errors
 ///
 /// Returns [`Error::Raced`] when the branch, where it pulls from or pushes to, or its upstream's
-/// commit changed while `gh` ran, or the pull request is not the one the branch pulls, so the
-/// answer may be for another; [`Error::TimedOut`] when
-/// `gh` takes longer than `timeout`, which kills it; and an error when `gh` cannot run, fails
-/// other than by finding nothing, or reports something else.
+/// commit changed while `gh` ran, so the answer may be for another; [`Error::UnexpectedOutput`]
+/// when the pull request is not the one the branch pulls, which a branch switched away and back
+/// while `gh` ran and one that `gh` resolves elsewhere, as by where it pushes, both give;
+/// [`Error::TimedOut`] when `gh` takes longer than `timeout`, which kills it; and an error when
+/// `gh` cannot run, fails other than by finding nothing, or reports something else.
 pub fn for_checkout(repo: &Repo, timeout: Duration) -> Result<Option<CheckoutPullRequest>, Error> {
     let identity = |repo: &Repo| -> Result<Option<BranchIdentity>, Error> {
         match repo.head()?.branch {
@@ -171,12 +172,18 @@ pub fn for_checkout(repo: &Repo, timeout: Duration) -> Result<Option<CheckoutPul
         return Ok(None);
     };
     let found = pull_request_of_checkout(repo, timeout)?;
-    if identity(repo)?.as_ref() != Some(&before)
-        || found
-            .as_ref()
-            .is_some_and(|found| !belongs_to(found, &before))
-    {
+    if identity(repo)?.as_ref() != Some(&before) {
         return Err(Error::Raced("branch"));
+    }
+    if let Some(found) = found.as_ref().filter(|found| !belongs_to(found, &before)) {
+        return Err(Error::UnexpectedOutput {
+            program: "gh",
+            command: "pr view".to_owned(),
+            detail: format!(
+                "pull request #{} is of {}, not of the branch {} pulls",
+                found.number, found.head_branch, before.branch
+            ),
+        });
     }
     Ok(Some(CheckoutPullRequest {
         branch: before,

@@ -1,6 +1,6 @@
 # 5. Bare `cr` reviews the checkout, whatever is checked out
 
-**Status:** accepted · **Date:** 2026-11-26
+**Status:** accepted · **Date:** 2026-11-28
 
 ## Context
 
@@ -56,10 +56,24 @@ the work has landed.
   under `review.lock`.
 - **The subject is observed on every capture, never stored as identity**: the branch, the real
   `HEAD`, the branch's pull request from a bounded background lookup, and the base.
-  The base is the remote-tracking ref of an open pull request's base branch; else the remote
-  default branch; else the local default branch; else, on an unborn or unrelated `HEAD`, the
-  empty tree. The snapshot base is its merge base with the capture.
   Revisions record the branch, `HEAD` and pull request number as labels.
+- **The base is what the checkout is built on.** While the branch's pull request is open, it is
+  the pull request's base branch on the remote of its base repository, unless the checkout
+  holds newer history of that remote's default branch, as its `<remote>/HEAD` names it, never
+  one guessed by name: `HEAD`'s merge base with each is unique
+  and the default branch's strictly descends from the other's, as once the branch was rebased
+  onto the default branch after its own base was squash-merged there. Then the base is the
+  default branch, and the header, the title, the overview and `cr`'s output say so
+  (`#7 feat/b · against origin/main · PR targets feat/a`). On equal or diverged histories, or
+  where ancestry cannot tell, the pull request's base branch stays, and the overview says when
+  the histories diverged. Both branches' tips are read before and after the capture, which is
+  discarded when either moved, appeared or went, and the choice is made from those pinned
+  commits.
+  Without an open pull request, or while its base branch is not available locally, which the
+  subject says, the base is the remote default branch; else the local default branch; else,
+  on an unborn or unrelated `HEAD`, the empty tree. The snapshot base is its merge base with
+  the capture, so a retarget that leaves that pair as it was changes the label, not the
+  revision.
 - **History stays linear.**
   Marks carry from each revision to the next along correspondences, so committing, `checkout -b`,
   renaming, pushing and opening a pull request keep every approval.
@@ -97,7 +111,13 @@ the work has landed.
 - Approvals of earlier reviews are not imported: the checkout review starts without marks, and
   earlier reviews stay openable with `--review`.
 - A file renamed or edited in the base reopens its units with the reason, even when the edit
-  itself is the same.
+  itself is the same. So does a switch of base, as when the pull request is found after a
+  comparison without it: marks carry only where a file's base entry and the correspondence
+  still hold, units the new base holds leave the diff, and the marks made before stay in the
+  history.
+- A pull request into a long-lived branch, such as `release/1.2`, cut from older history of
+  the default branch than the checkout has, is compared with the default branch, labeled; the
+  pull request's own diff is `cr <number>`'s.
 - A changed file under a filter, such as LFS, shows only once staged.
 - A collision-proof key format would make `KeyConflict` impossible by construction, but needs a
   migration of stored keys; the runtime check is enough for a branch literally named `WORKTREE`.
@@ -112,6 +132,15 @@ the work has landed.
   reviewer removes it.
 
 ## Rejected alternatives
+
+- **The open pull request's base branch always wins.** It matches what GitHub shows, but a
+  branch rebased onto the default branch while its pull request still targeted its old,
+  squash-merged base was compared with where that base forked, so every commit the default
+  branch gained since showed as the branch's work, with nothing to say why (#25).
+- **The nearer base by commit count or diff size, or `git merge-base HEAD <pull request base>
+  <default branch>`.** Counts rank histories that diverged, a smaller diff can hide work, and
+  the three-way merge base loses which branch it came from, so the choice could not be
+  explained.
 
 - **The clone id as a ref in the clone**, `refs/code-review/clone-id`, created once: every
   worktree saw it and a new clone lacked it, but making it wrote a blob and a ref into the
@@ -129,8 +158,9 @@ the work has landed.
 
 ## References
 
-- `crates/review-core/src/review/mod.rs` (`Review::open_checkout`, `Review::open`,
-  `Review::subject`)
+- `crates/review-core/src/review/mod.rs` (`Review::open`),
+  `crates/review-core/src/review/checkout.rs` (`Review::open_checkout`, `Review::subject`,
+  `Review::choose_base`, `Ancestry`)
 - `crates/review-core/src/review/live.rs` (`Review::live_history`, `Capture`, sessions)
 - `crates/review-core/src/correspond.rs` (the carry rules)
 - `crates/review-core/src/review/clone.rs` (the clone id)

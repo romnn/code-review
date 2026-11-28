@@ -1,6 +1,6 @@
 # 13. The opened review and each capture show with the next frame, and a key acts on what the last frame showed
 
-**Status:** accepted · **Date:** 2026-11-27
+**Status:** accepted · **Date:** 2026-11-28
 
 ## Context
 
@@ -36,30 +36,51 @@ read no unit may show as reviewed.
   totals, automatic approval, folds by review state and what changed since a review. The file
   header keeps the place of the meter it withholds, blank and as wide as the meter that shows
   there once the review is verified, so nothing in the header moves then. A review without a
-  recorded revision opens as before, its panes empty while its first capture runs.
+  recorded revision shows its panes empty, with no card, until it is verified.
 - **Only the verified review takes marks.** The pending view is a display of its own, never a
   `Snapshot`, and only a snapshot has a view of the review's history, which the review keys'
   target lookup needs, so keys, clicks and the buffer alike find nothing to mark there and say
   the review state is still being checked; `R` records nothing either. A key on the pending view
   records nothing and is never replayed once the review shows, and a key held down from it acts
   on nothing the verified review shows until it is pressed again.
-- **One job verifies the review behind it.** It reads the history, as opening did before, and
-  then takes the confirmed capture on top of it; the history reads on from what the pending
-  view read of the log, so records appended meanwhile show and a log replaced meanwhile ends
-  the review over the pending view. After a cache miss it starts once the revision's analysis
-  landed, which the history takes rather than reading or computing it again. While git is busy
-  in the checkout or cr's data is full, it verifies the last recorded revision, which then
-  takes marks. One that fails says why over the pending view, which stays. It runs behind what
-  the reviewer looks at, in the background lane of the app's pool
-  ([ADR 14](0014-only-background-work-reaches-the-engine.md)).
-- **The bottom bar counts the revisions the verification replayed.** While it runs, the bar's
-  left side says `Checking review state 37/100`: the revisions the history's replay finished out
-  of all it reads, the log's last revision number until the replay first reports. Each
-  revision's analysis counts as it is replayed, so after a change of the analysis format the
-  count is the analyses done. It reports only what the replay measured, as plain text whose
-  count is padded to the total's width, so its width never changes while it counts, and the
-  revision before it makes way when room runs out. It shows with the frames drawn anyway and
-  with a tick four times a second while the verification runs, never a frame per revision.
+- **The model waits for two jobs, and then the confirmed capture runs.** One job reads the
+  history, as opening did before, reading on from what the pending view read of the log, so
+  records appended meanwhile show and a log replaced meanwhile ends the review over the
+  pending view; after a cache miss it starts once the revision's analysis landed, which the
+  history takes rather than reading or computing it again. The first lookup of the branch's
+  pull request ([ADR 5](0005-bare-cr-reviews-the-checkout-whatever-is-checked-out.md)) starts as
+  the opened checkout reaches the model, for the branch the opener read. Neither job waits for
+  the other; once both ended, the model queues one confirmed capture on top of the history,
+  compared with the base that lookup decides, so the first view that takes marks is on that
+  base and no view jumps from one base to another. A capture that finds the checkout on
+  another branch or upstream than the lookup was for is dropped, that branch is looked up, and
+  the capture is taken again. While git is busy in the checkout or cr's data is full, the
+  capture verifies the last recorded revision, which then takes marks. A failure says why over
+  the pending view, which stays. The replay and the capture run behind what the reviewer looks
+  at, in the background lane of the app's pool
+  ([ADR 14](0014-only-background-work-reaches-the-engine.md)), and the lookup, which waits for
+  `gh`, on a thread of its own. A lookup that lands with other news before that capture shows,
+  as a retarget, has the capture taken again, and only the newest capture asked for shows; one that
+  finds the checkout detached looks up the branch the capture finds.
+- **A slow, missing or failing `gh` delays only the first view that takes marks.** The
+  pending view stays navigable until the lookup's 10-second timeout. One that `gh` could not
+  answer, missing, not logged in, failing, timed out or naming a pull request the branch does
+  not pull, and a branch git cannot read to look up, let the capture compare with the default
+  branch, which the header says: `PR base unavailable · using origin/main`. A repository without a GitHub remote, or a branch without
+  a pull request or commits, needs no word and no lookup. A later lookup says
+  `Checking PR base…` in the bar's slot while it runs; one that finds the pull request
+  captures again, the view on screen marked `updating…` and still taking marks, and what
+  changed is said as that capture shows, from what it and the one before were of.
+- **The bottom bar says what the verification does.** While the history is replayed, the
+  bar's left side says `Checking review state 37/100`: the revisions the replay finished out of
+  all it reads, the log's last revision number until the replay first reports. Each revision's
+  analysis counts as it is replayed, so after a change of the analysis format the count is the
+  analyses done. It reports only what the replay measured, as plain text whose count is padded
+  to the total's width, so its width never changes while it counts, and the revision before it
+  makes way when room runs out. Then it says `Checking PR base…` while the lookup is
+  outstanding and `Comparing checkout…` while the capture runs, each within the room kept for
+  the count. It shows with the frames drawn anyway and with a tick four times a second while
+  the replay runs, never a frame per revision.
 - **The opened review and each capture show only in the turn that draws the next frame,** and so
   do the pending view's analysis and the verified review, each keeping the selected file. The
   opened review, or why it could not be opened, waits in the model, what a job brought for the
@@ -84,9 +105,10 @@ read no unit may show as reviewed.
   neither while the review opens nor while the pending view waits for its analysis, since
   opening is quick enough that a card only flashes. What goes on is on the status line,
   "Opening the review…" and then the pending view's "checking the review state…", and on the
-  bottom bar in text of one width, "opening…" beside a spinner and then the count of the
-  revisions replayed. Only the key that quits shows before the review does, as review
-  keys do nothing yet; an overlay opened meanwhile, such as the settings, shows its own keys.
+  bottom bar in text of one width, "opening…" beside a spinner, then the count of the
+  revisions replayed and what the confirmed capture waits for. Only the key that quits shows
+  before the review does, as review keys do nothing yet; an overlay opened meanwhile, such as
+  the settings, shows its own keys.
   The cards that say something stay: a review that could not be opened, a checkout or log
   replaced, nothing to review and a file to pick. review-tui exits with an error once the
   reviewer quits a review that could not be opened; quitting while the review still opens is
@@ -110,8 +132,9 @@ read no unit may show as reviewed.
 
 - Saves, watch events and timers land as soon as they finish; only the opened review, what the
   pending view waits for and a capture wait for a frame.
-- The capture is taken once the history is read, so the verified review shows the working tree
-  as it is then rather than as it was when the replay began.
+- The capture is taken once the history is read and the pull request looked up, so the
+  verified review shows the working tree as it is then rather than as it was when the replay
+  began.
 - Both front ends keep 30 cells for the bar's left side, room for the count of a review of up
   to 999 revisions, so a narrow window drops a key hint two cells sooner.
 - On a scratch review of 100 revisions over 200 files and 3,313 units, the first frame that can
@@ -136,6 +159,11 @@ read no unit may show as reviewed.
 
 ## Rejected alternatives
 
+- **The opening job waiting for the pull request's lookup, or the verification job waiting for
+  it in the background.** The first delays the first frame by a `gh` round trip; the second
+  holds a worker while it waits, and on a pool of two, where background work takes one worker,
+  would wait for a lookup queued behind it.
+
 - **A history of the last recorded revision alone, its units new, as the pending view.** It
   gave pending units real-looking states that counted and folded as review state does, and a
   `Snapshot` whose view reached the writer: its empty log prefix matched every log, and
@@ -156,8 +184,9 @@ read no unit may show as reviewed.
 - `crates/review-ui/src/model/live.rs` (`offer`, `publish`, `publishes`, `live_refusal`)
 - `crates/review-ui/src/model/mod.rs` (`Model::offer_opened`, `Model::show_opened`,
   `Model::sidebar_shown`)
-- `crates/review-ui/src/model/pending.rs` (`Pending`, `Progress`, `verify`,
-  `Model::show_arrived`),
+- `crates/review-ui/src/model/pending.rs` (`Pending`, `Progress`, `replay`, `confirm`,
+  `Model::confirm_opening`, `Model::show_arrived`), `crates/review-ui/src/model/pulls.rs`
+  (`Pulls::settled`, `Pulls::unknown`),
   `crates/review-ui/src/model/marks.rs` (`review_target`), `crates/review-ui/src/rows/mod.rs`
   (`Source`)
 - `crates/review-core/src/review/mod.rs` (`Review::last_recorded`, `Review::cached_analysis`,

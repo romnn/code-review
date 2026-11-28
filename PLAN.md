@@ -957,7 +957,15 @@ its merge ref names, the pull request of a `refs/pull/<n>/head` merge ref, or wi
 head of the branch's own name); and the base, the first of:
 
 1. while that pull request is open, its base branch on the remote whose URL is its base
-   repository; when that is not available locally, the subject says so and the next rule applies;
+   repository, unless the checkout holds newer history of that remote's default branch, as
+   its `<remote>/HEAD` names it: `HEAD`'s merge base with each is unique and the default
+   branch's strictly descends from the other's, as after a rebase onto it once the branch's own
+   base was squash-merged there. Then
+   the base is that default branch, and the subject says why (`Subject::ancestry`); on equal or
+   diverged histories, or where ancestry cannot tell, the pull request's base branch stays.
+   Both tips are read before and after the capture, which the choice is made from. When the
+   pull request's base branch is not available locally, the subject says so and the next rule
+   applies;
 2. the default remote's default branch (`<remote>/HEAD`, `<remote>/main`, `<remote>/master`,
    where the default remote is `origin`, or else the first remote);
 3. the local default branch (`main`, `master`), where committing lands the work;
@@ -988,7 +996,11 @@ The window shows the subject of the capture on screen, not of the revision recor
 header names the branch and its base (`feat/x → origin/main`, `#12 feat/x → origin/main`,
 `#12 merged · feat/x → origin/main`), the title the directory, branch and pull request
 (`code-review · feat/x #12`), and the overview the branch, the pull request with its address, the
-base and why it is that one, filtered files and the trust. A change of branch or base, and of
+base and why it is that one, filtered files and the trust. A base other than the one the pull
+request names says so in the header and the title too: `#7 feat/b · against origin/main · PR
+targets feat/a` when the checkout holds newer history of the default branch, and `feat/b · PR
+base unavailable · using origin/main` when `gh` could not look the pull request up. A change
+of branch or base, and of
 the pull request, says so once on the status line (`Now on feat/y.`, `Pull request #12 opened.`,
 `#12 merged.`, `The base is now origin/develop.`); the file list moves only when the code did. A
 view without files says why, in the words `cr show` uses (`Subject::nothing_to_review`). The watch
@@ -1003,7 +1015,8 @@ is another clone, it refuses marks and ends the following with "reopen cr". `r` 
 recording nothing.
 
 The window looks the branch's pull request up in the background (`review_ui::model::pulls`): one
-lookup at a time with a 10-second timeout, when the review opens, when the branch or the commit
+lookup at a time with a 10-second timeout, as soon as the opened checkout reaches the window,
+for the branch the opener read, when the branch or the commit
 its upstream is at changes (a switch, a rename, a push such as `gh pr create`'s), on `r`, and
 every 2 minutes while on a branch, doubling the wait after each failure up to 15 minutes; a
 push that finds none looks again 15 seconds later, as `gh pr create` pushes first. A lookup
@@ -1011,7 +1024,22 @@ during which the branch moved is taken again, and an answer for another branch t
 follows, as when the checkout switched before its capture shows, is kept for that branch. A failure keeps the pull request
 last found for the branch, shown as stale in the overview; a repository without a remote, without
 `gh`, without a GitHub remote or without a `gh` login is asked about again only after 15
-minutes, when the branch or its upstream moves, or on `r`, and the overview says why meanwhile. A changed pull request captures again, since the base may follow it.
+minutes, when the branch or its upstream moves, or on `r`, and the overview says why meanwhile.
+A pull request `gh` answers that the branch does not pull counts as a failed lookup, not a
+race to take again at once. The bar says `Checking PR base…` while a lookup runs. A changed
+pull request captures again, since the base may follow it, and what changed is said as that
+capture shows; meanwhile the view, its label and the status line stay, the view
+marked `updating…`.
+
+While the review opens, the replay of its history and that first lookup run as two jobs, and
+the model, which waits for both, then queues the one confirmed capture, compared with the base
+the lookup decides, so the first view that takes marks is on that base
+([ADR 13](adr/0013-a-capture-shows-with-the-next-frame-and-keys-act-on-the-last.md)). The bottom
+bar counts the revisions replayed, then says `Checking PR base…` and `Comparing checkout…`. A
+capture that finds another branch or upstream than the lookup was for is taken again once that
+is looked up, and so is one a later lookup's news, such as a retarget, overtook. A slow `gh`
+keeps the pending view up to the timeout; a lookup `gh` could not answer lets the capture
+compare with the default branch, labeled as above.
 
 The checkout's code is never trusted by default. The first tool that needs trust, go to
 definition, asks once whether to trust this checkout, saying that its language server builds in

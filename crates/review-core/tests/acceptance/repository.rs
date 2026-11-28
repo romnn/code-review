@@ -326,7 +326,9 @@ mod pull_requests {
     }
 
     /// An answer during which the branch was pointed elsewhere may be for another, so it is
-    /// refused; while `HEAD` is detached, `gh` is not asked at all.
+    /// refused as raced; one that is not the branch's own pull request is refused as such,
+    /// since asking again gets the same answer from a branch that `gh` resolves elsewhere;
+    /// while `HEAD` is detached, `gh` is not asked at all.
     #[gtest]
     fn a_lookup_during_which_the_branch_moved_is_refused() -> eyre::Result<()> {
         let test = feature_repo()?;
@@ -355,19 +357,19 @@ mod pull_requests {
         answering_gh(&mut repo, scratch.path(), "elsewhere")?;
         expect_that!(
             github::for_checkout(&repo, Duration::from_secs(30)),
-            err(matches_pattern!(Error::Raced(_)))
+            err(matches_pattern!(Error::UnexpectedOutput { .. }))
         );
         test.git(&["config", "branch.feature.merge", "refs/pull/8/head"])?;
         answering_gh(&mut repo, scratch.path(), "feature")?;
         expect_that!(
             github::for_checkout(&repo, Duration::from_secs(30)),
-            err(matches_pattern!(Error::Raced(_)))
+            err(matches_pattern!(Error::UnexpectedOutput { .. }))
         );
         test.git(&["config", "--unset", "branch.feature.merge"])?;
         answering_gh(&mut repo, scratch.path(), "other-name")?;
         expect_that!(
             github::for_checkout(&repo, Duration::from_secs(30)),
-            err(matches_pattern!(Error::Raced(_)))
+            err(matches_pattern!(Error::UnexpectedOutput { .. }))
         );
 
         std::fs::remove_file(scratch.path().join("gh-cwd"))?;

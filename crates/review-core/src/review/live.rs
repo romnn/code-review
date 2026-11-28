@@ -50,7 +50,7 @@ impl Review {
     /// Captures the working tree and returns the history, ending in a provisional revision of
     /// the capture when it differs from the last recorded revision, with what the capture was
     /// taken of; `pull_requests` are what the caller last found for the branches it looked up
-    /// (see [`Self::subject`]).
+    /// (see [`Subject::pull_request`]).
     ///
     /// Nothing is recorded: the log, the review's pinned snapshots and the caches stay as they
     /// are, and the reviewed repository is only read.

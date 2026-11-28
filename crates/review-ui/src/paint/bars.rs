@@ -15,7 +15,7 @@ use super::{Palette, Piece, Weight};
 use crate::color::Hsla;
 use crate::keymap::{self, Area, Section};
 use crate::model::sync::ago;
-use crate::model::{Field, Mode, Model, Phase, Replaced, SyncStep, Trust, plural};
+use crate::model::{Field, Mode, Model, Phase, Replaced, Step, SyncStep, Trust, plural};
 use crate::scroll::{self, ease_out};
 use crate::state;
 
@@ -53,12 +53,12 @@ pub fn sync_label(
 ) -> Vec<Piece> {
     let mut parts = Vec::new();
     let part = |piece: Piece, rank: u8| SyncPart { piece, rank };
-    if let Some(checking) = model.checking() {
+    if let Some(record) = model.checking().and_then(|checking| checking.record) {
         parts.push(part(
-            Piece::new(format!("rev {}", checking.record.number), palette.text),
+            Piece::new(format!("rev {}", record.number), palette.text),
             1,
         ));
-        let head = crate::model::abbreviated(&checking.record.head);
+        let head = crate::model::abbreviated(&record.head);
         parts.push(part(Piece::new(head, palette.faint), 3));
     }
     if let Some(snapshot) = &model.snapshot {
@@ -78,10 +78,10 @@ pub fn sync_label(
         }
     }
     let spinner = SPINNER.get(spin_frame(now)).copied().unwrap_or_default();
-    let checked = model.checking().and_then(|checking| checking.progress);
+    let checked = model.checking().and_then(|checking| checking.step);
     let activity = match (&model.phase, model.sync.step()) {
         (Phase::Loading, _) => Some(format!("{spinner} opening…")),
-        _ if let Some(replay) = checked => Some(checking_label(replay)),
+        _ if let Some(step) = checked => Some(step_text(step)),
         (_, Some(step)) => Some(format!("{spinner} {}", step_label(model, step))),
         (_, None) => None,
     };
@@ -97,11 +97,12 @@ pub fn sync_label(
         parts.push(part(Piece::new("sync failed", palette.error), 0));
     } else if let Some(live) = model.live_state() {
         // A review that follows the working tree is as fresh as the disk, unless something
-        // keeps it from updating.
-        parts.push(match (live.busy, live.updating) {
-            (Some(busy), _) => part(Piece::new(busy_label(busy), palette.flagged), 0),
-            (None, true) => part(Piece::new("updating…", palette.accent), 0),
-            (None, false) => part(Piece::new("live", palette.faint), 2),
+        // keeps it from updating or its pull request, which may move the base, is looked up.
+        parts.push(match (live.busy, live.updating, live.looking_up) {
+            (Some(busy), ..) => part(Piece::new(busy_label(busy), palette.flagged), 0),
+            (None, true, _) => part(Piece::new("updating…", palette.accent), 0),
+            (None, false, true) => part(Piece::new(step_text(Step::LookingUp), palette.dim), 0),
+            (None, false, false) => part(Piece::new("live", palette.faint), 2),
         });
     } else if let Some(synced) = &model.sync.synced {
         parts.push(part(
@@ -164,6 +165,16 @@ pub fn checking_label(replay: Replay) -> String {
     let Replay { replayed, total } = replay;
     let width = total.to_string().len();
     format!("Checking review state {replayed:>width$}/{total}")
+}
+
+/// What the bar says while the review state is checked: the count of revisions replayed, then
+/// what the confirmed capture waits for, each at most as wide as the widest count.
+fn step_text(step: Step) -> String {
+    match step {
+        Step::Replaying(replay) => checking_label(replay),
+        Step::LookingUp => "Checking PR base…".to_owned(),
+        Step::Comparing => "Comparing checkout…".to_owned(),
+    }
 }
 
 /// What git is busy with, short enough for the bar: `git: rebasing`.

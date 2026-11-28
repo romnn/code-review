@@ -26,10 +26,10 @@ C++ library that is not thread-safe and is loaded only when needed. Each takes f
 frame on a large file, and the reviewer keeps moving between files and pages meanwhile.
 
 Background work is finite or it waits. The finite kind, such as opening and verifying the
-review, analyses, texts, highlights, previews, captures and lookups of pull requests, runs
-until it is done and competes for the machine's cores; after a change of the analysis format,
-verifying a 100-revision review replays its history for a minute. The kind that waits, for the
-working tree to change or a language server to answer, holds a thread for as long as that
+review, analyses, texts, highlights, previews and captures, runs until it is done and
+competes for the machine's cores; after a change of the analysis format, verifying a
+100-revision review replays its history for a minute. The kind that waits, for the working
+tree to change, a language server or `gh` to answer, holds a thread for as long as that
 takes. Saves and the engine's stop must never wait behind anything, since quitting waits for
 them.
 
@@ -65,12 +65,13 @@ state.
   picker's search); then `Shown`, the rest of what shows (the other files' texts, a few at a
   time and one read after another, their highlights, captures of the working tree and the
   watch's start, readings of trust); then `Background`, what checks or fetches behind it (the
-  review's verification, fetches, lookups of pull requests), which never takes the last
-  worker. So neither a replay of the whole history nor a slow `gh` keeps what shows waiting
-  for a worker: at worst it waits for another job that shows to end. A job that waits outside the app (for
-  the working tree or a language server), a save, the jobs that stop the engine or end the
-  review in the window, and the watch on the grant, which must stop the servers within its
-  interval, each run on a thread of their own, which nothing in the pool holds back.
+  review's verification, fetches), which never takes the last worker. So a replay of the
+  whole history never keeps what shows waiting for a worker: at worst it waits for another
+  job that shows to end. A job that waits outside the app (for the working tree, a language
+  server, or `gh` looking up a pull request, one at a time), a save, the jobs that stop the
+  engine or end the review in the window, and the watch on the grant, which must stop the
+  servers within its interval, each run on a thread of their own, which nothing in the pool
+  holds back.
   The pool cancels nothing; a job that a newer request may supersede checks for itself whether
   it is still wanted, as a picker's search does before it lists the tree and again before it
   matches. The selected file's text, as a preview, has one read outstanding at a time, which

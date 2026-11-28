@@ -32,12 +32,40 @@ pub struct Subject {
     /// The base the open pull request names, such as `origin/develop`, when it is not
     /// available locally, so the base is the default branch instead.
     pub missing_base: Option<String>,
+    /// How the checkout's history stands between the open pull request's base branch and the
+    /// default branch of the same remote, when those are two branches and the choice between
+    /// them says something; `None` when the pull request's base holds all the default branch's
+    /// history the checkout has.
+    pub ancestry: Option<Ancestry>,
+}
+
+/// Why a checkout whose open pull request targets another branch than the default branch is
+/// compared with the base it is: see [`Subject::ancestry`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Ancestry {
+    /// The base is the default branch: the checkout's merge base with it strictly descends
+    /// from its merge base with the pull request's base branch, so the checkout holds newer
+    /// history of the default branch than that branch has, as after a rebase onto it once the
+    /// branch's own base merged.
+    Newer {
+        /// The pull request's base branch, such as `origin/feat/a`.
+        target: String,
+    },
+    /// The base stays the pull request's base branch, though neither merge base descends from
+    /// the other, or one is not unique.
+    Diverged {
+        /// The default branch, such as `origin/main`.
+        default: String,
+    },
 }
 
 impl Subject {
     /// Describes what was captured against what, as a one-line header: `feat/x → origin/main`,
     /// `#12 feat/x → origin/main` while its pull request is open, `detached 1a2b3c4d →
-    /// origin/main`, or `main → empty tree` before the first commit.
+    /// origin/main`, or `main → empty tree` before the first commit; `#12 feat/b → origin/main
+    /// · PR targets feat/a` when the checkout holds newer history of the default branch than
+    /// the pull request's base branch has.
     #[must_use]
     pub fn summary(&self) -> String {
         let mut head = match (&self.branch, &self.head) {
@@ -63,11 +91,15 @@ impl Subject {
             }
             base => base.name().unwrap_or_default().to_owned(),
         };
-        match &self.missing_base {
-            Some(missing) => {
+        let target = self.pull_request.as_ref().map(|found| &found.base_branch);
+        match (&self.missing_base, &self.ancestry, target) {
+            (Some(missing), ..) => {
                 format!("{head} → {base} (pull request base {missing} not available locally)")
             }
-            None => format!("{head} → {base}"),
+            (None, Some(Ancestry::Newer { .. }), Some(target)) => {
+                format!("{head} → {base} · PR targets {target}")
+            }
+            _ => format!("{head} → {base}"),
         }
     }
 }
@@ -230,8 +262,22 @@ pub(super) struct Captured {
 /// What a capture reads before and after itself.
 #[derive(PartialEq, Eq)]
 struct Observation {
+    /// What the capture is taken of, compared with the open pull request's base branch when it
+    /// has one available locally.
     subject: Subject,
+    /// The default branch of that pull request's remote, when it is another branch: the other
+    /// base the capture may be compared with, read with the subject so that both tips are
+    /// pinned.
+    default: Option<Candidate>,
     index: Option<IndexStamp>,
+}
+
+/// A branch a capture may be compared with, and the commit it is at.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Candidate {
+    /// The remote-tracking branch, such as `origin/main`.
+    name: String,
+    commit: ObjectId,
 }
 
 impl Review {
@@ -281,7 +327,8 @@ impl Review {
         }
     }
 
-    /// Reads what a capture of the working tree would be taken of now and compared with.
+    /// Reads what a capture of the working tree would be taken of now, and the default branch
+    /// it may be compared with instead of the open pull request's base branch.
     ///
     /// `pull_requests` are what the caller last found for the branches it looked up (see
     /// [`github::for_checkout`]); the branch's pull request is the one found for the branch
@@ -290,8 +337,9 @@ impl Review {
     /// For a review of a checkout, the base is, in order:
     ///
     /// 1. while the branch's pull request is open, its base branch on the remote whose URL is
-    ///    its base repository; when that is not available locally, [`Subject::missing_base`]
-    ///    says so and the next rule applies;
+    ///    its base repository, unless [`Self::choose_base`] finds the checkout holds newer
+    ///    history of that remote's default branch; when the pull request's base branch is not
+    ///    available locally, [`Subject::missing_base`] says so and the next rule applies;
     /// 2. the remote's default branch, as [`Repo::default_branch_ref`] finds it;
     /// 3. the local default branch;
     /// 4. the empty tree, when `HEAD` is unborn or there is no default branch.
@@ -302,7 +350,10 @@ impl Review {
     ///
     /// Returns [`Error::InvalidTarget`] for a review that is not of a working tree, and an
     /// error when git fails or a fixed ref does not resolve.
-    pub fn subject(&self, pull_requests: &[CheckoutPullRequest]) -> Result<Subject, Error> {
+    pub(super) fn subject(
+        &self,
+        pull_requests: &[CheckoutPullRequest],
+    ) -> Result<(Subject, Option<Candidate>), Error> {
         let Head { branch, commit } = self.repo.head()?;
         let identity = match &branch {
             Some(branch) if !pull_requests.is_empty() => Some(self.repo.branch_identity(branch)?),
@@ -317,6 +368,7 @@ impl Review {
             })
             .and_then(|found| found.pull_request.as_ref());
         let mut missing_base = None;
+        let mut default = None;
         let base = match &self.meta.target {
             ReviewTarget::Worktree { base } => BaseRef::Given {
                 name: base.clone(),
@@ -328,7 +380,10 @@ impl Review {
                     .filter(|pull_request| pull_request.state == PullRequestState::Open);
                 let from_pull_request = match open {
                     Some(open) => match self.pull_request_base(open)? {
-                        Ok(base) => Some(base),
+                        Ok((base, other)) => {
+                            default = other;
+                            Some(base)
+                        }
                         Err(missing) => {
                             missing_base = Some(missing);
                             None
@@ -347,21 +402,24 @@ impl Review {
                 ));
             }
         };
-        Ok(Subject {
+        let subject = Subject {
             branch,
             head: commit,
             base,
             pull_request: pull_request.cloned(),
             missing_base,
-        })
+            ancestry: None,
+        };
+        Ok((subject, default))
     }
 
-    /// The open `pull_request`'s base branch on the remote of its base repository, or the name
-    /// it would have when it is not available locally.
+    /// The open `pull_request`'s base branch on the remote of its base repository, with that
+    /// remote's default branch when it is another branch; or the name the base branch would
+    /// have when it is not available locally.
     fn pull_request_base(
         &self,
         pull_request: &BranchPullRequest,
-    ) -> Result<Result<BaseRef, String>, Error> {
+    ) -> Result<Result<(BaseRef, Option<Candidate>), String>, Error> {
         let repository = &pull_request.base_repository;
         let branch = &pull_request.base_branch;
         let Some(remote) = github::matching_remote(
@@ -377,13 +435,73 @@ impl Review {
             )));
         };
         let name = format!("{remote}/{branch}");
-        match self
+        let Some(commit) = self
             .repo
             .ref_target(&format!("refs/remotes/{name}^{{commit}}"))?
-        {
-            Some(commit) => Ok(Ok(BaseRef::PullRequest { name, commit })),
-            None => Ok(Err(name)),
+        else {
+            return Ok(Err(name));
+        };
+        // Only the default branch the remote named may override what the pull request names,
+        // never one guessed by its name.
+        let default = match self.repo.remote_head(&remote)? {
+            Some(full) if full != format!("refs/remotes/{name}") => Some(Candidate {
+                commit: self.repo.resolve_commit(&full)?,
+                name: full
+                    .strip_prefix("refs/remotes/")
+                    .unwrap_or(&full)
+                    .to_owned(),
+            }),
+            _ => None,
+        };
+        Ok(Ok((BaseRef::PullRequest { name, commit }, default)))
+    }
+
+    /// Compares the capture of `subject`, whose base is its open pull request's base branch,
+    /// with the default branch `default` instead when the checkout holds newer history of it:
+    /// when `HEAD`'s merge base with each is unique and the default branch's strictly
+    /// descends from the other's, the default branch has history the checkout is built on
+    /// that the pull request's base lacks. On equal histories, or with the pull request's base
+    /// the newer, the base stays; when ancestry cannot tell, it stays too, and
+    /// [`Subject::ancestry`] says so.
+    ///
+    /// Both tips are the ones the capture read before and after itself. Returns the merge base
+    /// of the base it kept or chose, when it found it unique, which the capture compares with.
+    fn choose_base(
+        &self,
+        subject: &mut Subject,
+        default: Candidate,
+    ) -> Result<Option<Vec<ObjectId>>, Error> {
+        let (Some(head), Some(target)) = (&subject.head, subject.base.commit()) else {
+            return Ok(None);
+        };
+        let unique = |tip: &ObjectId| match self.repo.merge_bases(tip, head) {
+            Ok(bases) if bases.len() == 1 => Ok(bases.into_iter().next()),
+            Ok(_) | Err(Error::NoMergeBase { .. }) => Ok(None),
+            Err(err) => Err(err),
+        };
+        let (ours, theirs) = (unique(target)?, unique(&default.commit)?);
+        let (Some(ours), Some(theirs)) = (ours.clone(), theirs) else {
+            subject.ancestry = Some(Ancestry::Diverged {
+                default: default.name,
+            });
+            return Ok(ours.map(|ours| vec![ours]));
+        };
+        if ours == theirs || self.repo.is_ancestor(&theirs, ours.as_str())? {
+            return Ok(Some(vec![ours]));
         }
+        if !self.repo.is_ancestor(&ours, theirs.as_str())? {
+            subject.ancestry = Some(Ancestry::Diverged {
+                default: default.name,
+            });
+            return Ok(Some(vec![ours]));
+        }
+        let target = subject.base.name().unwrap_or_default().to_owned();
+        subject.base = BaseRef::RemoteDefault {
+            name: default.name,
+            commit: default.commit,
+        };
+        subject.ancestry = Some(Ancestry::Newer { target });
+        Ok(Some(vec![theirs]))
     }
 
     /// The default branch, the remote's before the local one, or the empty tree without one.
@@ -464,7 +582,15 @@ impl Review {
         if after != before {
             return Ok(Observed::Moved);
         }
-        let Observation { mut subject, .. } = after;
+        let Observation {
+            mut subject,
+            default,
+            ..
+        } = after;
+        let chosen = match default {
+            Some(default) => self.choose_base(&mut subject, default)?,
+            None => None,
+        };
         let head = capture.commit;
         let checkout = matches!(self.meta.target, ReviewTarget::Checkout { .. });
         // The checkout's review never fetches while it captures: a fetch has no deadline, and
@@ -477,7 +603,13 @@ impl Review {
         };
         let compared = match subject.base.commit() {
             Some(target) => {
-                match self.capture_merge_bases(target, &subject, &head, deepen_from.as_deref()) {
+                let merge_bases = match chosen {
+                    Some(merge_bases) => self.import_best(merge_bases),
+                    None => {
+                        self.capture_merge_bases(target, &subject, &head, deepen_from.as_deref())
+                    }
+                };
+                match merge_bases {
                     Ok(merge_bases) => Some((target.clone(), merge_bases)),
                     Err(Error::NoMergeBase { .. }) if checkout => {
                         let name = subject.base.name().map(str::to_owned);
@@ -543,6 +675,16 @@ impl Review {
         }
     }
 
+    /// Imports the best of `merge_bases`, which [`Self::choose_base`] found, into the archive,
+    /// as [`Self::merge_bases`] does with those it finds.
+    fn import_best(&self, merge_bases: Vec<ObjectId>) -> Result<Vec<ObjectId>, Error> {
+        if let Some(best) = merge_bases.first() {
+            self.archive
+                .import(&self.repo, std::slice::from_ref(best))?;
+        }
+        Ok(merge_bases)
+    }
+
     /// Looks at the working tree twice and returns the second look when both observed the
     /// same: the subject (branch, `HEAD`, pull request and the commit the base resolved to),
     /// the snapshot pair and the filtered paths; when they differ, the capture was
@@ -581,7 +723,11 @@ impl Review {
             return Ok(Err(busy));
         }
         let index = self.repo.index_stamp()?;
-        let subject = self.subject(pull_requests)?;
-        Ok(Ok(Observation { subject, index }))
+        let (subject, default) = self.subject(pull_requests)?;
+        Ok(Ok(Observation {
+            subject,
+            default,
+            index,
+        }))
     }
 }

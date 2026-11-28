@@ -476,6 +476,10 @@ fn empty_card(model: &Model, palette: &Palette) -> Option<StateCard> {
         }
         None => {}
     }
+    // Until the review state is checked, nothing says there is nothing to review.
+    if model.checking().is_some() {
+        return None;
+    }
     let live = model.live_state();
     let files = model
         .tree

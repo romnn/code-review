@@ -539,3 +539,269 @@ fn an_open_pull_request_decides_the_base() -> eyre::Result<()> {
     expect_that!(repointed.subject.pull_request, none());
     Ok(())
 }
+
+/// What `gh` finds for `branch` of `review`'s checkout: open pull request 7 into `base`.
+fn pull_request_into(
+    review: &Review,
+    branch: &str,
+    base: &str,
+) -> eyre::Result<Vec<CheckoutPullRequest>> {
+    Ok(vec![CheckoutPullRequest {
+        branch: review.repo().branch_identity(branch)?,
+        pull_request: Some(BranchPullRequest {
+            number: 7,
+            url: "https://example.invalid/owner/repo/pull/7".to_owned(),
+            state: PullRequestState::Open,
+            base_branch: base.to_owned(),
+            base_repository: Repository {
+                host: "example.invalid".to_owned(),
+                owner: "owner".to_owned(),
+                name: "repo".to_owned(),
+            },
+            head_branch: branch.to_owned(),
+            head_repository: None,
+            author: None,
+        }),
+    }])
+}
+
+/// A checkout of `feat/b` stacked on `feat/a`, which `origin/feat/a` is level with: `feat/a`
+/// adds `one()` to `a()`, and `feat/b` adds `three()` to `c()` and `b.rs`; `origin/main`, which
+/// `origin/HEAD` names as a clone records it, gained `m.rs` since `feat/a` forked from it.
+fn stacked() -> eyre::Result<(TestRepo, tempfile::TempDir)> {
+    let (test, forge) = with_remote()?;
+    test.git(&["checkout", "--quiet", "-b", "feat/a"])?;
+    test.write("lib.rs", &three_functions("one();", "", ""))?;
+    test.commit("a")?;
+    test.git(&["update-ref", "refs/remotes/origin/feat/a", "HEAD"])?;
+    test.git(&["checkout", "--quiet", "-b", "feat/b"])?;
+    test.write("lib.rs", &three_functions("one();", "", "three();"))?;
+    test.write("b.rs", "fn b() { two(); }\n")?;
+    test.commit("b")?;
+    on_main(&test, &|| {
+        test.write("m.rs", "fn m() {}\n")?;
+        test.commit("m")?;
+        Ok(())
+    })?;
+    test.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    Ok((test, forge))
+}
+
+/// Runs `change` on `main`, which `origin/main` is then level with, and switches back to
+/// `feat/b`.
+fn on_main(test: &TestRepo, change: &dyn Fn() -> eyre::Result<()>) -> eyre::Result<()> {
+    test.git(&["checkout", "--quiet", "main"])?;
+    change()?;
+    test.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+    test.git(&["checkout", "--quiet", "feat/b"])?;
+    Ok(())
+}
+
+/// The text each unit of the capture's current revision adds, sorted.
+fn added(captured: &LiveCapture) -> eyre::Result<Vec<String>> {
+    let history = &captured.history;
+    let current = history
+        .current()
+        .ok_or_else(|| eyre::eyre!("no revision"))?;
+    let mut added: Vec<String> = summaries(history, current)?
+        .into_iter()
+        .map(|unit| unit.added.trim().to_owned())
+        .collect();
+    added.sort();
+    Ok(added)
+}
+
+/// A stacked branch is compared with what it is built on: its pull request's base while it is
+/// stacked on it, even once that base was squash-merged, and the default branch once it is
+/// rebased onto it while the pull request still targets the old base, which the subject says;
+/// a pull request retargeted to the default branch needs no word.
+#[gtest]
+fn a_stacked_branch_is_compared_with_what_it_is_built_on() -> eyre::Result<()> {
+    let (test, _forge) = stacked()?;
+    let review = open(&test)?;
+    let into_a = pull_request_into(&review, "feat/b", "feat/a")?;
+    let only_b = ["fn b() { two(); }", "fn c() { three(); }"];
+
+    let open_parent = capture_with(&review, &into_a)?;
+    expect_that!(
+        open_parent.subject.base,
+        matches_pattern!(BaseRef::PullRequest {
+            name: eq("origin/feat/a"),
+            ..
+        })
+    );
+    expect_that!(open_parent.subject.ancestry, none());
+    expect_that!(
+        added(&open_parent)?,
+        elements_are![eq(only_b[0]), eq(only_b[1])]
+    );
+
+    on_main(&test, &|| {
+        test.git(&["merge", "--quiet", "--squash", "feat/a"])?;
+        test.commit("squash a")?;
+        Ok(())
+    })?;
+    let squashed = capture_with(&review, &into_a)?;
+    expect_that!(
+        squashed.subject.base,
+        matches_pattern!(BaseRef::PullRequest { .. })
+    );
+    expect_that!(squashed.subject.ancestry, none());
+    expect_that!(
+        added(&squashed)?,
+        elements_are![eq(only_b[0]), eq(only_b[1])]
+    );
+
+    // #25: rebased onto main, whose squash holds feat/a's work, while #7 still targets feat/a.
+    // A default branch only guessed by its name, as in a fork's remote that names none, never
+    // overrides the pull request's base.
+    test.git(&["rebase", "--quiet", "--onto", "origin/main", "feat/a"])?;
+    test.git(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"])?;
+    let guessed = capture_with(&review, &into_a)?;
+    expect_that!(
+        guessed.subject.base,
+        matches_pattern!(BaseRef::PullRequest {
+            name: eq("origin/feat/a"),
+            ..
+        })
+    );
+    expect_that!(guessed.subject.ancestry, none());
+    test.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    let rebased = capture_with(&review, &into_a)?;
+    expect_that!(
+        rebased.subject.base,
+        matches_pattern!(BaseRef::RemoteDefault {
+            name: eq("origin/main"),
+            ..
+        })
+    );
+    expect_that!(
+        rebased.subject.ancestry,
+        some(matches_pattern!(review_core::Ancestry::Newer {
+            target: eq("origin/feat/a")
+        }))
+    );
+    expect_that!(
+        added(&rebased)?,
+        elements_are![eq(only_b[0]), eq(only_b[1])]
+    );
+    expect_that!(
+        rebased.subject.summary(),
+        eq("#7 feat/b → origin/main · PR targets feat/a")
+    );
+
+    let retargeted = capture_with(&review, &pull_request_into(&review, "feat/b", "main")?)?;
+    expect_that!(
+        retargeted.subject.base,
+        matches_pattern!(BaseRef::PullRequest {
+            name: eq("origin/main"),
+            ..
+        })
+    );
+    expect_that!(retargeted.subject.ancestry, none());
+    expect_that!(retargeted.subject.summary(), eq("#7 feat/b → origin/main"));
+    Ok(())
+}
+
+/// A branch that merged the default branch while its pull request's base did not shares
+/// history with both that neither holds of the other: the pull request's base stays, and the
+/// subject says the histories diverged. A parent merged with a merge commit gives both the
+/// same merge base, which keeps the pull request's base too, until the branch merges the
+/// default branch since.
+#[gtest]
+fn merged_histories_keep_the_pull_request_base_until_the_default_branch_is_newer()
+-> eyre::Result<()> {
+    let (test, _forge) = stacked()?;
+    let review = open(&test)?;
+    let into_a = pull_request_into(&review, "feat/b", "feat/a")?;
+    test.git(&["merge", "--quiet", "--no-edit", "origin/main"])?;
+    let diverged = capture_with(&review, &into_a)?;
+    expect_that!(
+        diverged.subject.base,
+        matches_pattern!(BaseRef::PullRequest {
+            name: eq("origin/feat/a"),
+            ..
+        })
+    );
+    expect_that!(
+        diverged.subject.ancestry,
+        some(matches_pattern!(review_core::Ancestry::Diverged {
+            default: eq("origin/main")
+        }))
+    );
+
+    let (test, _forge) = stacked()?;
+    let review = open(&test)?;
+    let into_a = pull_request_into(&review, "feat/b", "feat/a")?;
+    on_main(&test, &|| {
+        test.git(&["merge", "--quiet", "--no-ff", "--no-edit", "feat/a"])?;
+        Ok(())
+    })?;
+    let merged = capture_with(&review, &into_a)?;
+    expect_that!(
+        merged.subject.base,
+        matches_pattern!(BaseRef::PullRequest { .. })
+    );
+    expect_that!(merged.subject.ancestry, none());
+    test.git(&["merge", "--quiet", "--no-edit", "origin/main"])?;
+    let caught_up = capture_with(&review, &into_a)?;
+    expect_that!(
+        caught_up.subject.base,
+        matches_pattern!(BaseRef::RemoteDefault { .. })
+    );
+    expect_that!(
+        caught_up.subject.ancestry,
+        some(matches_pattern!(review_core::Ancestry::Newer { .. }))
+    );
+    Ok(())
+}
+
+/// A switch of base while the checkout stays as it is, as when the pull request is found after
+/// a comparison with the default branch, keeps a mark only where the file's base entry and the
+/// correspondence still hold: a unit whose file the new base changed reopens, one the new base
+/// holds leaves the diff, and the marks made before stay in the history.
+#[gtest]
+fn a_base_switch_carries_marks_only_where_the_base_entry_holds() -> eyre::Result<()> {
+    let (test, _forge) = stacked()?;
+    let review = open(&test)?;
+    let fallback = capture(&review)?;
+    expect_that!(
+        added(&fallback)?,
+        elements_are![
+            eq("fn a() { one(); }"),
+            eq("fn b() { two(); }"),
+            eq("fn c() { three(); }")
+        ]
+    );
+    accept_all(&review, &fallback)?;
+
+    let switched = capture_with(&review, &pull_request_into(&review, "feat/b", "feat/a")?)?;
+    expect_that!(
+        state_of(&switched, "two();")?,
+        matches_pattern!(UnitState::Reviewed { .. })
+    );
+    expect_that!(
+        state_of(&switched, "three();")?,
+        not(matches_pattern!(UnitState::Reviewed { .. }))
+    );
+    expect_that!(state_of(&switched, "one();"), err(anything()));
+    let recorded = review.history()?;
+    let first = recorded
+        .revisions()
+        .first()
+        .map(|revision| revision.number)
+        .ok_or_else(|| eyre::eyre!("nothing recorded"))?;
+    expect_that!(
+        find(&summaries(&recorded, first)?, "one();")?.state,
+        matches_pattern!(UnitState::Reviewed { .. })
+    );
+    Ok(())
+}

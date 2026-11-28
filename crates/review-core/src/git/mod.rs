@@ -1231,31 +1231,60 @@ impl Repo {
         let remote = self
             .default_remote()?
             .unwrap_or_else(|| "origin".to_owned());
-        let remote_head = match self.run_text([
-            "symbolic-ref",
-            "--quiet",
-            &format!("refs/remotes/{remote}/HEAD"),
-        ]) {
-            Ok(target) => Some(target),
-            // Not set, or not a symbolic ref.
-            Err(Error::CommandFailed { .. }) => None,
-            Err(err) => return Err(err),
-        };
-        let candidates = remote_head.into_iter().chain(
-            [
-                format!("refs/remotes/{remote}/main"),
-                format!("refs/remotes/{remote}/master"),
-            ]
-            .into_iter()
-            .chain(["refs/heads/main", "refs/heads/master"].map(str::to_owned)),
-        );
-        for name in candidates {
-            // A dangling `<remote>/HEAD` falls through to the fixed names.
+        if let Some(name) = self.remote_default_branch(&remote)? {
+            return Ok(Some(name));
+        }
+        for name in ["refs/heads/main", "refs/heads/master"] {
+            if self.ref_target(&format!("{name}^{{commit}}"))?.is_some() {
+                return Ok(Some(name.to_owned()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Returns the full ref of `remote`'s default branch, such as `refs/remotes/origin/main`:
+    /// the branch `<remote>/HEAD` points to, or else the first of `<remote>/main` and
+    /// `<remote>/master` that exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run or prints output the engine cannot parse.
+    pub fn remote_default_branch(&self, remote: &str) -> Result<Option<String>, Error> {
+        if let Some(name) = self.remote_head(remote)? {
+            return Ok(Some(name));
+        }
+        for name in [
+            format!("refs/remotes/{remote}/main"),
+            format!("refs/remotes/{remote}/master"),
+        ] {
             if self.ref_target(&format!("{name}^{{commit}}"))?.is_some() {
                 return Ok(Some(name));
             }
         }
         Ok(None)
+    }
+
+    /// Returns the full ref `<remote>/HEAD` points to, such as `refs/remotes/origin/main`, when it
+    /// is set and resolves to a commit: the default branch the remote itself named, as a clone
+    /// or `git remote set-head` records it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot run or prints output the engine cannot parse.
+    pub fn remote_head(&self, remote: &str) -> Result<Option<String>, Error> {
+        let target = match self.run_text([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ]) {
+            Ok(target) => target,
+            // Not set, or not a symbolic ref.
+            Err(Error::CommandFailed { .. }) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(self
+            .ref_target(&format!("{target}^{{commit}}"))?
+            .map(|_| target))
     }
 }
 

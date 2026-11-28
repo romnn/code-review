@@ -76,26 +76,40 @@ pub fn files_header(model: &Model, palette: &Palette) -> FilesHeader {
 }
 
 /// The header of a review of the checkout: before its review state is checked, that it shows
-/// its last recorded revision; once a capture shows, the branch's pull request's number, the
-/// branch with its base, such as `feat/x → origin/main`, led by the pull request's state once
-/// it is merged or closed, and the branch alone for when that does not fit.
+/// its last recorded revision, or nothing without one; once a capture shows, the branch's pull
+/// request's number, the branch with its base, such as `feat/x → origin/main`, led by the pull
+/// request's state once it is merged or closed, and for when that does not fit, the branch
+/// alone, or that the base is not the one the pull request names.
 fn checkout_heading(model: &Model) -> Option<(Option<u64>, String, Option<String>)> {
     if !model.is_checkout() {
         return None;
     }
-    if model.checking().is_some() {
-        return Some((
-            None,
-            "Last recorded revision · checking review state".to_owned(),
-            Some("checking review state".to_owned()),
-        ));
+    if let Some(checking) = model.checking() {
+        return Some(match checking.record {
+            Some(_) => (
+                None,
+                "Last recorded revision · checking review state".to_owned(),
+                Some("checking review state".to_owned()),
+            ),
+            None => (None, String::new(), None),
+        });
     }
     let live = model.live_state()?;
     let Some(subject) = live.subject else {
         return Some((None, "working tree".to_owned(), None));
     };
-    let label = crate::model::branch_and_base(subject);
-    let short = subject.branch.clone();
+    let label = crate::model::branch_and_base(subject, live.unknown);
+    // Narrow, a base the pull request does not name says so before the branch: `→ main, not
+    // feat/a`, or `PR base unavailable`.
+    let base = subject.base.name().unwrap_or_default();
+    let base = base.split_once('/').map_or(base, |(_, branch)| branch);
+    let short = match (&subject.ancestry, &subject.pull_request) {
+        _ if live.unknown => Some("PR base unavailable".to_owned()),
+        (Some(review_core::Ancestry::Newer { .. }), Some(pull_request)) => {
+            Some(format!("→ {base}, not {}", pull_request.base_branch))
+        }
+        _ => subject.branch.clone(),
+    };
     // The pull request the capture resolved its base with, never one looked up since that it
     // has not seen.
     Some(match &subject.pull_request {
